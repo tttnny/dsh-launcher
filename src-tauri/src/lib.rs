@@ -4,11 +4,14 @@ mod commands;
 mod config;
 mod doctor;
 mod icons;
+mod launch;
 mod plugins;
 mod process;
+mod profile;
 mod proxy;
 mod runtime;
 mod tasks;
+mod toolchain;
 mod traffic;
 mod tray;
 mod update;
@@ -153,18 +156,14 @@ pub fn run() {
             commands::fetch_available_versions,
             commands::remove_version,
             tasks::start_install_version_task,
-            tasks::start_create_instance_task,
             tasks::list_tasks,
             tasks::remove_task,
             tasks::cancel_task,
             runtime::get_runtime_status,
             runtime::start_install_node_task,
             commands::list_instances,
-            commands::create_instance,
             commands::update_instance,
             commands::set_instance_port,
-            commands::delete_instance,
-            commands::copy_instance,
             commands::list_profiles,
             commands::create_profile,
             commands::copy_profile,
@@ -172,6 +171,7 @@ pub fn run() {
             commands::delete_profile,
             commands::start_instance,
             commands::stop_instance,
+            commands::restart_instance,
             commands::check_instance_health,
             commands::list_instance_status,
             commands::open_instance_window,

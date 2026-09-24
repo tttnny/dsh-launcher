@@ -1,6 +1,6 @@
 use crate::config::{
-    new_id, sanitize_name, DshHome, DshInstance, DshVersion, LauncherSettings, NewInstanceInput,
-    RemoteVersion, SettingsPatch,
+    new_id, sanitize_name, DshHome, DshInstance, DshVersion, LauncherSettings, RemoteVersion,
+    SettingsPatch,
 };
 use crate::{process, AppState};
 use std::collections::BTreeMap;
@@ -159,7 +159,7 @@ pub(crate) const DSH_REPO: &str = "deepseek-ai/deepseek-harness";
 /// later published to npm — dedup happens at the caller).
 async fn fetch_github_tag_versions() -> Result<Vec<RemoteVersion>, String> {
     let url = crate::plugins::github_api_url(&format!("/repos/{DSH_REPO}/releases?per_page=100"));
-    let doc = crate::plugins::fetch_json_pub(&url, 8 * 1024 * 1024).await?;
+    let doc = crate::plugins::fetch_json(&url, 8 * 1024 * 1024).await?;
     let mut out = Vec::new();
     let Some(arr) = doc.as_array() else {
         return Ok(out);
@@ -201,11 +201,8 @@ async fn run_npm_view(pkg: &str, field: &str) -> Result<String, String> {
     // versa when the mirror lags).
     crate::proxy::apply_to_command(&mut cmd);
     cmd.args(["view", pkg, field, "--json"]);
-    if let Ok(registry) = std::env::var("DSH_NPM_REGISTRY") {
-        let registry = registry.trim().to_string();
-        if !registry.is_empty() {
-            cmd.args(["--registry", &registry]);
-        }
+    if let Some(registry) = crate::toolchain::registry_mirror() {
+        cmd.args(["--registry", &registry]);
     }
     let output = crate::process::hide_console(&mut cmd)
         .output()
@@ -274,42 +271,6 @@ pub fn list_instances(state: State<'_, AppState>) -> Result<Vec<DshInstance>, St
 }
 
 #[tauri::command]
-pub fn create_instance(
-    state: State<'_, AppState>,
-    input: NewInstanceInput,
-) -> Result<DshInstance, String> {
-    let name = input.name.trim().to_string();
-    if name.is_empty() {
-        return Err("实例名称不能为空".to_string());
-    }
-    let mut cfg = state.config.lock().unwrap();
-    if cfg.instances.iter().any(|i| i.name == name) {
-        return Err("同名实例已存在".to_string());
-    }
-    if !cfg.versions.iter().any(|v| v.id == input.version_id) {
-        return Err("DSH 版本不存在".to_string());
-    }
-    if !cfg.homes.iter().any(|h| h.id == input.home_id) {
-        return Err("DSH_HOME 不存在".to_string());
-    }
-    let inst = DshInstance {
-        id: new_id("i"),
-        name,
-        version_id: input.version_id,
-        home_id: input.home_id,
-        env_overrides: input.env_overrides,
-        default_profile: input.default_profile,
-        last_profile: None,
-        icon: None,
-
-        port: None,
-    };
-    cfg.instances.push(inst.clone());
-    save_state(&state, &cfg)?;
-    Ok(inst)
-}
-
-#[tauri::command]
 pub fn update_instance(
     state: State<'_, AppState>,
     input: DshInstance,
@@ -370,138 +331,6 @@ pub fn set_instance_port(
     Ok(updated)
 }
 
-#[tauri::command]
-pub async fn delete_instance(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
-    // Stop it first if running.
-    if state.running.lock().await.contains_key(&id) {
-        let _ = process::stop_instance_process(&app, &state, &id).await;
-    }
-    let mut cfg = state.config.lock().unwrap();
-    cfg.instances.retain(|i| i.id != id);
-    if cfg.settings.last_instance_id.as_deref() == Some(id.as_str()) {
-        cfg.settings.last_instance_id = None;
-    }
-    save_state(&state, &cfg)
-}
-
-/// Input for duplicating an instance.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct CopyInstanceInput {
-    /// The source instance id (the "母本").
-    pub source_id: String,
-    /// Name for the copied instance.
-    pub name: String,
-    /// When true, create a fresh dedicated DSH_HOME for the copy instead of
-    /// reusing the source instance's DSH_HOME.
-    pub new_home: bool,
-}
-
-/// Copies an instance: creates a new instance record with a new id/name. The
-/// copy either reuses the source instance's DSH_HOME (sharing sessions and
-/// profiles) or gets a brand-new dedicated DSH_HOME. The DSH version is
-/// always reused (the same binary can serve many instances).
-#[tauri::command(rename_all = "snake_case")]
-pub fn copy_instance(
-    state: State<'_, AppState>,
-    input: CopyInstanceInput,
-) -> Result<DshInstance, String> {
-    let name = input.name.trim().to_string();
-    if name.is_empty() {
-        return Err("实例名称不能为空".to_string());
-    }
-
-    let mut cfg = state.config.lock().unwrap();
-    if cfg.instances.iter().any(|i| i.name == name) {
-        return Err("同名实例已存在".to_string());
-    }
-    let source = cfg
-        .instances
-        .iter()
-        .find(|i| i.id == input.source_id)
-        .cloned()
-        .ok_or_else(|| "源实例不存在".to_string())?;
-    if !cfg.versions.iter().any(|v| v.id == source.version_id) {
-        return Err("DSH 版本不存在".to_string());
-    }
-
-    // Resolve the DSH_HOME: reuse the source's, or create a dedicated one.
-    let home_id = if input.new_home {
-        let path = state
-            .data_dir
-            .join("homes")
-            .join(sanitize_name(&name))
-            .to_string_lossy()
-            .to_string();
-        let path_buf = std::path::PathBuf::from(&path);
-        // Reuse an existing HOME with the same path (path-based reuse).
-        if let Some(existing) = cfg
-            .homes
-            .iter()
-            .find(|h| crate::config::paths_equal(&h.path, &path_buf))
-        {
-            existing.id.clone()
-        } else {
-            std::fs::create_dir_all(&path_buf).map_err(|e| format!("创建目录失败: {e}"))?;
-            let home = DshHome {
-                id: new_id("h"),
-                name: name.clone(),
-                path: path_buf,
-            };
-            cfg.homes.push(home.clone());
-            home.id
-        }
-    } else {
-        source.home_id.clone()
-    };
-
-    let mut inst = DshInstance {
-        id: new_id("i"),
-        name,
-        version_id: source.version_id,
-        home_id,
-        env_overrides: source.env_overrides.clone(),
-        default_profile: source.default_profile.clone(),
-        last_profile: None,
-        icon: source.icon.clone(),
-        port: source.port,
-    };
-    // A local icon is stored per instance id; copy the file for the clone,
-    // falling back to the launcher default when it cannot be carried over.
-    if source.icon.as_deref() == Some("local") {
-        let src_home = cfg
-            .homes
-            .iter()
-            .find(|h| h.id == source.home_id)
-            .map(|h| h.path.clone());
-        let dst_home = cfg
-            .homes
-            .iter()
-            .find(|h| h.id == inst.home_id)
-            .map(|h| h.path.clone());
-        let copied = match (src_home, dst_home) {
-            (Some(src_home), Some(dst_home)) => {
-                let src_icon = crate::icons::local_icon_path(&src_home, &source.id);
-                let dst_icon = crate::icons::local_icon_path(&dst_home, &inst.id);
-                if let Some(parent) = dst_icon.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                src_icon.exists() && std::fs::copy(&src_icon, &dst_icon).is_ok()
-            }
-            _ => false,
-        };
-        if !copied {
-            inst.icon = None;
-        }
-    }
-    cfg.instances.push(inst.clone());
-    save_state(&state, &cfg)?;
-    Ok(inst)
-}
-
 #[tauri::command(rename_all = "snake_case")]
 pub fn list_profiles(state: State<'_, AppState>, home_id: String) -> Result<Vec<String>, String> {
     let cfg = state.config.lock().unwrap();
@@ -510,7 +339,7 @@ pub fn list_profiles(state: State<'_, AppState>, home_id: String) -> Result<Vec<
         .iter()
         .find(|h| h.id == home_id)
         .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-    let profiles_dir = home.path.join("profiles");
+    let profiles_dir = crate::profile::profiles_dir(&home.path);
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
         for entry in entries.flatten() {
@@ -537,7 +366,7 @@ pub fn create_profile(
     name: String,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
-    validate_profile_name(&name)?;
+    crate::profile::validate_profile_name(&name)?;
 
     let (home_path, is_user_default) = {
         let cfg = state.config.lock().unwrap();
@@ -552,7 +381,7 @@ pub fn create_profile(
                 .unwrap_or(false);
         (home.path.clone(), is_user_default)
     };
-    let profiles_dir = home_path.join("profiles");
+    let profiles_dir = crate::profile::profiles_dir(&home_path);
 
     let target = profiles_dir.join(&name);
     if target.exists() {
@@ -567,7 +396,7 @@ pub fn create_profile(
         let temp_dir = profiles_dir.join("__temp__");
         copy_dir_recursive(&profiles_dir.join("web"), &temp_dir)
             .map_err(|e| format!("初始化模板失败: {e}"))?;
-        crate::tasks::scrub_profile_port_pin(&temp_dir);
+        crate::profile::scrub_profile_port_pin(&temp_dir);
         temp_dir
     } else {
         // Look in launcher's dedicated homes (<data_dir>/homes/*/profiles/__temp__):
@@ -604,7 +433,7 @@ pub fn copy_profile(
     name: String,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
-    validate_profile_name(&name)?;
+    crate::profile::validate_profile_name(&name)?;
 
     let profiles_dir = {
         let cfg = state.config.lock().unwrap();
@@ -613,7 +442,7 @@ pub fn copy_profile(
             .iter()
             .find(|h| h.id == home_id)
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        home.path.join("profiles")
+        crate::profile::profiles_dir(&home.path)
     };
 
     let from = profiles_dir.join(&source);
@@ -629,24 +458,6 @@ pub fn copy_profile(
     Ok(name)
 }
 
-/// Validates a profile name (shared by create/rename).
-fn validate_profile_name(name: &str) -> Result<(), String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("Profile 名称不能为空".to_string());
-    }
-    if name == "__temp__" || name == "node_modules" {
-        return Err(format!("「{name}」为保留名称，不能使用"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return Err("Profile 名称只能包含字母、数字、-、_、.".to_string());
-    }
-    Ok(())
-}
-
 /// Renames a profile directory inside the given HOME.
 #[tauri::command(rename_all = "snake_case")]
 pub fn rename_profile(
@@ -655,7 +466,7 @@ pub fn rename_profile(
     old_name: String,
     new_name: String,
 ) -> Result<String, String> {
-    validate_profile_name(&new_name)?;
+    crate::profile::validate_profile_name(&new_name)?;
     let new_name = new_name.trim().to_string();
 
     let profiles_dir = {
@@ -665,7 +476,7 @@ pub fn rename_profile(
             .iter()
             .find(|h| h.id == home_id)
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        home.path.join("profiles")
+        crate::profile::profiles_dir(&home.path)
     };
 
     let from = profiles_dir.join(&old_name);
@@ -714,7 +525,7 @@ pub fn delete_profile(
             .iter()
             .find(|h| h.id == home_id)
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        home.path.join("profiles")
+        crate::profile::profiles_dir(&home.path)
     };
 
     let target = profiles_dir.join(&name);
@@ -803,7 +614,7 @@ pub fn check_instance_health(
     profile: String,
 ) -> Result<crate::doctor::DoctorReport, String> {
     let (home_path, version_dir, version) = resolve_instance_paths(&state, &instance_id)?;
-    let profile_dir = home_path.join("profiles").join(&profile);
+    let profile_dir = crate::profile::profile_dir(&home_path, &profile)?;
     let report =
         crate::doctor::inspect(&instance_id, &profile, &version_dir, &version, &profile_dir);
     crate::doctor::log_report(&report);
@@ -827,7 +638,7 @@ pub async fn start_instance(
             &profile,
             &version_dir,
             &version,
-            &home_path.join("profiles").join(&profile),
+            &crate::profile::profile_dir(&home_path, &profile)?,
         );
         crate::doctor::log_report(&report);
         if !report.findings.is_empty() {
@@ -852,6 +663,18 @@ pub async fn stop_instance(
     id: String,
 ) -> Result<(), String> {
     process::stop_instance_process(&app, &state, &id).await
+}
+
+/// Restarts a running instance on the profile it was running. One lifecycle
+/// transition backend-side; the frontend used to compose stop + start itself,
+/// which raced the stop's reap window against the start's preflight.
+#[tauri::command]
+pub async fn restart_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    process::restart_instance_process(&app, &state, &id).await
 }
 
 #[tauri::command]
@@ -1017,53 +840,12 @@ pub fn open_instance_terminal(
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 
-    let mut env_pairs: Vec<(String, String)> = vec![
-        ("DSH_HOME".to_string(), home_str.clone()),
-        ("DSH_LAUNCHER_INSTANCE".to_string(), cfg_inst.name.clone()),
-    ];
-
-    // Prepend the instance's DSH version bin directory to PATH so `dsh` is immediately available.
-    let mut path_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(ref ver) = cfg_ver {
-        let ver_dir = std::path::PathBuf::from(&ver.dir);
-        let bin_dir = ver_dir.join("node_modules").join(".bin");
-        let dsh_bin = bin_dir.join("dsh");
-        // Rewrite a wrapper an earlier launcher build generated, so its Node
-        // flags cannot go stale; never touch a real pnpm-provided `dsh`.
-        let wrapper_is_ours = std::fs::read_to_string(&dsh_bin)
-            .map(|existing| existing.starts_with("#!/bin/sh\nexec node "))
-            .unwrap_or(false);
-        if !dsh_bin.exists() || wrapper_is_ours {
-            let target_bin = crate::process::version_bin(&ver_dir);
-            if target_bin.exists() {
-                let _ = std::fs::create_dir_all(&bin_dir);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    // A bare `dsh` typed in this terminal boots the same
-                    // profiles as the launcher, so it carries the same Node
-                    // runtime flags (see NODE_RUNTIME_FLAGS).
-                    let flags = crate::process::NODE_RUNTIME_FLAGS.join(" ");
-                    let content = format!(
-                        "#!/bin/sh\nexec node {} \"{}\" \"$@\"\n",
-                        flags,
-                        target_bin.to_string_lossy()
-                    );
-                    if std::fs::write(&dsh_bin, content).is_ok() {
-                        let _ = std::fs::set_permissions(&dsh_bin, std::fs::Permissions::from_mode(0o755));
-                    }
-                }
-            }
-        }
-        if bin_dir.exists() {
-            path_dirs.push(bin_dir);
-        }
-    }
-
-    let managed_node_bin = state.data_dir.join("tools").join("node").join("bin");
-    if managed_node_bin.exists() {
-        path_dirs.push(managed_node_bin);
-    }
+    // Prepend the instance's DSH version bin directory to PATH so `dsh` is
+    // immediately available; the launch module owns the wrapper + PATH policy.
+    let version_dir: Option<std::path::PathBuf> = cfg_ver
+        .as_ref()
+        .map(|v| std::path::PathBuf::from(&v.dir));
+    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref(), &state.data_dir);
 
     let path_prefix = if !path_dirs.is_empty() {
         let joined = path_dirs
@@ -1076,11 +858,11 @@ pub fn open_instance_terminal(
         String::new()
     };
 
-    for (k, v) in &cfg_inst.env_overrides {
-        if k != "DSH_HOME" && k != "PATH" {
-            env_pairs.push((k.clone(), v.clone()));
-        }
-    }
+    let env_pairs = crate::launch::terminal_env_pairs(
+        &cfg_home.path,
+        &cfg_inst.name,
+        &cfg_inst.env_overrides,
+    );
     let exports = env_pairs
         .iter()
         .map(|(k, v)| format!("export {}={}\n", k, shell_quote(v)))

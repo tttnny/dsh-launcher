@@ -15,9 +15,6 @@ const MAX_LOG_LINES: usize = 1000;
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
-    /// Waiting for a serialized resource (currently: another plugin operation
-    /// on the same profile). Not yet doing any work.
-    Queued,
     Running,
     Done,
     Error,
@@ -61,7 +58,7 @@ pub struct TaskLog {
     pub line: String,
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -83,7 +80,7 @@ pub(crate) fn valid_version_string(v: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
 }
 
-/// Whether the task is still allowed to do work (Running or Queued). Checked
+/// Whether the task is still allowed to do work. Checked
 /// at stage boundaries so a task cancelled during a phase without a
 /// registered child (npm probing, pnpm bootstrap, profile boot) stops instead
 /// of silently creating the HOME/instance records afterwards.
@@ -94,7 +91,7 @@ pub(crate) async fn task_is_running(
     let tasks = state.tasks.lock().await;
     tasks
         .get(task_id)
-        .map(|t| matches!(t.state, TaskState::Running | TaskState::Queued))
+        .map(|t| t.state == TaskState::Running)
         .unwrap_or(false)
 }
 
@@ -116,8 +113,9 @@ pub async fn start_install_version_task(
 
 /// Enqueues a background task that installs the given DSH version (if not
 /// installed yet) and then creates the instance. Returns the task id.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn start_create_instance_task(
+/// Internal: only reachable through `start_install_version_task` — installing
+/// a version IS creating its 1:1 instance (see ADR-0001).
+async fn start_create_instance_task(
     app: AppHandle,
     state: State<'_, AppState>,
     name: String,
@@ -180,7 +178,7 @@ pub async fn start_create_instance_task(
     let task_id = {
         let mut tasks = state.tasks.lock().await;
         for task in tasks.values() {
-            if task.state == TaskState::Running || task.state == TaskState::Queued {
+            if task.state == TaskState::Running {
                 if task.instance_name.as_deref() == Some(name.as_str()) {
                     return Err("同名实例的下载任务已在进行中".to_string());
                 }
@@ -233,6 +231,49 @@ pub async fn start_create_instance_task(
     Ok(task_id)
 }
 
+// ---------------------------------------------------------------------------
+// Task runner — completion bookkeeping shared by every background task kind
+// (create-instance, install-node). A task body runs to `Ok(payload)` /
+// `Err(message)`; [`finish_task`] encodes the completion invariants once:
+// a cancelled task stays cancelled (the worker finishing anyway must not
+// flip it back), logs cap at MAX_LOG_LINES, and terminal progress always
+// reaches the frontend.
+// ---------------------------------------------------------------------------
+
+/// Writes a task body's result into the task record and emits the terminal
+/// progress. `on_done` maps the success payload to extra bookkeeping (e.g.
+/// the created instance id, HOME reservation release).
+pub(crate) async fn finish_task<T>(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    task_id: &str,
+    result: Result<T, String>,
+    on_done: impl FnOnce(&mut TaskInfo, T),
+) {
+    let mut tasks = state.tasks.lock().await;
+    let Some(task) = tasks.get_mut(task_id) else {
+        return;
+    };
+    if task.state == TaskState::Cancelled {
+        return;
+    }
+    match result {
+        Ok(payload) => {
+            task.state = TaskState::Done;
+            task.percent = 100;
+            on_done(task, payload);
+            emit_progress(app, task_id, TaskState::Done, 100, None, task.instance_id.clone());
+        }
+        Err(msg) => {
+            task.state = TaskState::Error;
+            task.message = Some(msg.clone());
+            push_log_locked(task, &format!("error: {msg}"));
+            let pct = task.percent;
+            emit_progress(app, task_id, TaskState::Error, pct, Some(msg), None);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskInfo>, String> {
     let tasks = state.tasks.lock().await;
@@ -247,8 +288,8 @@ pub async fn remove_task(state: State<'_, AppState>, id: String) -> Result<(), S
     let Some(task) = tasks.get(&id) else {
         return Err("任务不存在".to_string());
     };
-    if task.state == TaskState::Running || task.state == TaskState::Queued {
-        return Err("任务仍在运行或排队中，请先取消".to_string());
+    if task.state == TaskState::Running {
+        return Err("任务仍在运行中，请先取消".to_string());
     }
     tasks.remove(&id);
     Ok(())
@@ -319,37 +360,18 @@ async fn run_create_instance_task(
     )
     .await;
 
-    let mut tasks = state.tasks.lock().await;
-    if let Some(task) = tasks.get_mut(task_id) {
-        if task.state == TaskState::Cancelled {
-            return;
-        }
-        match result {
-            Ok(instance_id) => {
-                task.state = TaskState::Done;
-                task.percent = 100;
-                task.instance_id = Some(instance_id.clone());
-                crate::log_info!("任务 {task_id} 完成，实例 {instance_id} 已创建");
-                // The dedicated HOME now exists for real; release the placeholder.
-                task.reserved_home_path = None;
-                emit_progress(app, task_id, TaskState::Done, 100, None, Some(instance_id));
-            }
-            Err(msg) => {
-                task.state = TaskState::Error;
-                task.message = Some(msg.clone());
-                crate::log_error!("任务 {task_id} 失败：{msg}");
-                push_log_locked(task, &format!("error: {msg}"));
-                emit_progress(
-                    app,
-                    task_id,
-                    TaskState::Error,
-                    task.percent,
-                    Some(msg),
-                    None,
-                );
-            }
-        }
+    if let Ok(instance_id) = &result {
+        crate::log_info!("任务 {task_id} 完成，实例 {instance_id} 已创建");
     }
+    if let Err(msg) = &result {
+        crate::log_error!("任务 {task_id} 失败：{msg}");
+    }
+    finish_task(app, state, task_id, result, |task, instance_id| {
+        task.instance_id = Some(instance_id);
+        // The dedicated HOME now exists for real; release the placeholder.
+        task.reserved_home_path = None;
+    })
+    .await;
 }
 
 async fn do_create_instance(
@@ -456,7 +478,7 @@ async fn ensure_web_profile_template(
     home_path: &std::path::Path,
     version: &DshVersion,
 ) -> Result<(), String> {
-    let profiles = home_path.join("profiles");
+    let profiles = crate::profile::profiles_dir(home_path);
     let temp_dir = profiles.join("__temp__");
     if temp_dir.exists() {
         return Ok(());
@@ -475,13 +497,13 @@ async fn ensure_web_profile_template(
     if web_populated {
         push_task_log(app, state, task_id, "web profile 已存在，直接复制为 __temp__ 模板").await;
         copy_dir(&web_dir, &temp_dir).map_err(|e| format!("复制 __temp__ profile 失败: {e}"))?;
-        scrub_profile_port_pin(&temp_dir);
+        crate::profile::scrub_profile_port_pin(&temp_dir);
         push_task_log(app, state, task_id, "web profile 模板 __temp__ 已创建").await;
         return Ok(());
     }
 
-    let bin = crate::process::version_bin(&version.dir);
-    if !crate::process::version_bin_ready(&version.dir) {
+    let bin = crate::launch::version_bin(&version.dir);
+    if !crate::launch::version_bin_ready(&version.dir) {
         return Err(format!(
             "版本 {} 安装不完整（缺少 {}）",
             version.version,
@@ -493,22 +515,13 @@ async fn ensure_web_profile_template(
     let msg = format!("正在初始化 web profile（端口 {port}）…");
     push_task_log(app, state, task_id, &msg).await;
 
-    let mut child = crate::process::hide_console(
-        tokio::process::Command::new(crate::process::node())
-            .args(crate::process::NODE_RUNTIME_FLAGS)
-            .arg(&bin)
-            .arg("--profile")
-            .arg("web")
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .env("DSH_HOME", home_path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .spawn()
-    .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?;
+    // The launch spec module owns this argv: the template boot is the ONE
+    // DSH invocation allowed to pass --host (a throwaway bind whose host is
+    // the launcher's own decision).
+    let mut child = crate::launch::template_boot_command(&version.dir, home_path, port)
+        .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?
+        .spawn()
+        .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?;
 
     // Drain stderr concurrently: DSH reports boot failures (missing native
     // addons, plugin load errors) on stderr, and an undrained pipe could also
@@ -607,103 +620,9 @@ async fn ensure_web_profile_template(
         return Err("web profile 目录未生成".to_string());
     }
     copy_dir(&web_dir, &temp_dir).map_err(|e| format!("复制 __temp__ profile 失败: {e}"))?;
-    scrub_profile_port_pin(&temp_dir);
+    crate::profile::scrub_profile_port_pin(&temp_dir);
     push_task_log(app, state, task_id, "web profile 模板 __temp__ 已创建").await;
     Ok(())
-}
-
-/// Rewrites the webserver port pin inside a copied profile's
-/// `cordis.patch.yml` to `0` (OS-assigned random port). DSH persists the first
-/// web bind into the profile patch ("lan-bind" block) and honors it over the
-/// CLI `--port`, so a template carrying a concrete port would make every
-/// instance derived from it fight over that port (EADDRINUSE) and ignore the
-/// launcher's per-instance `--port`.
-pub(crate) fn scrub_profile_port_pin(profile_dir: &std::path::Path) {
-    let patch = profile_dir.join("cordis.patch.yml");
-    let Ok(raw) = std::fs::read_to_string(&patch) else {
-        return;
-    };
-    let mut in_webserver = false;
-    let mut changed = false;
-    let lines: Vec<String> = raw
-        .lines()
-        .map(|l| {
-            let trimmed = l.trim_start();
-            if trimmed.starts_with("- id:") {
-                in_webserver = trimmed.starts_with("- id: webserver");
-            } else if in_webserver && trimmed.starts_with("port:") {
-                let indent = " ".repeat(l.len() - trimmed.len());
-                let new = format!("{indent}port: 0");
-                if new != l {
-                    changed = true;
-                }
-                return new;
-            }
-            l.to_string()
-        })
-        .collect();
-    if changed {
-        let mut out = lines.join("\n");
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        let _ = std::fs::write(&patch, out);
-    }
-}
-
-/// Marker lines the `@linxin666/dsh-remote-web-ui` plugin wraps its managed
-/// lan-bind block in (must match that plugin's `lan-bind.ts`).
-const LAN_BIND_BLOCK_BEGIN: &str = "# --- remote-web-ui lan-bind block (managed - do not edit) ---";
-const LAN_BIND_BLOCK_END: &str = "# --- end remote-web-ui lan-bind block ---";
-
-/// Rewrites the port pinned by the managed lan-bind block in a profile's
-/// `cordis.patch.yml` so the launcher's `--port` takes effect on the very next
-/// start.
-///
-/// That block is a top-level patch row and outranks the CLI `--port`, while
-/// the plugin only re-asserts it at boot — after the web server has already
-/// bound. Without this nudge the first start after a port change comes up on
-/// the old port and only the following start uses the new one. An absent block
-/// is left untouched: an unmanaged profile carries no port override, so the
-/// CLI flag already wins there.
-pub(crate) fn assert_profile_lan_bind_port(home: &std::path::Path, profile: &str, port: u16) {
-    // A profile name reaches this from the UI/config; keep it one path segment
-    // so the patch write can never escape the profiles directory.
-    if profile.is_empty() || profile.starts_with('.') || profile.contains(['/', '\\']) {
-        return;
-    }
-    let patch = home.join("profiles").join(profile).join("cordis.patch.yml");
-    let Ok(raw) = std::fs::read_to_string(&patch) else {
-        return;
-    };
-    let mut in_block = false;
-    let mut changed = false;
-    let lines: Vec<String> = raw
-        .lines()
-        .map(|l| {
-            let trimmed = l.trim_start();
-            if trimmed.starts_with(LAN_BIND_BLOCK_BEGIN) {
-                in_block = true;
-            } else if trimmed.starts_with(LAN_BIND_BLOCK_END) {
-                in_block = false;
-            } else if in_block && trimmed.starts_with("port:") {
-                let indent = " ".repeat(l.len() - trimmed.len());
-                let new = format!("{indent}port: {port}");
-                if new != l {
-                    changed = true;
-                }
-                return new;
-            }
-            l.to_string()
-        })
-        .collect();
-    if changed {
-        let mut out = lines.join("\n");
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        let _ = std::fs::write(&patch, out);
-    }
 }
 
 /// Simple deterministic-ish port offset so multiple homes don't collide often.
@@ -716,7 +635,7 @@ fn rand_port_offset() -> u16 {
     (nanos % 30000) as u16
 }
 
-async fn push_task_log(app: &AppHandle, state: &State<'_, AppState>, task_id: &str, line: &str) {
+pub(crate) async fn push_task_log(app: &AppHandle, state: &State<'_, AppState>, task_id: &str, line: &str) {
     let mut tasks = state.tasks.lock().await;
     if let Some(task) = tasks.get_mut(task_id) {
         // Cap the retained log (mirrors stream_pipe's MAX_LOG_LINES).
@@ -775,7 +694,7 @@ async fn install_version_streamed(
 
     let dir = state.data_dir.join("versions").join(version);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建版本目录失败: {e}"))?;
-    let store_dir = state.data_dir.join(".pnpm-store");
+    let store_dir = crate::toolchain::store_dir(&state.data_dir);
 
     // pnpm (>=10) ignores dependency build scripts by default, which would
     // skip native modules like node-pty / koffi. A workspace manifest inside
@@ -787,7 +706,7 @@ async fn install_version_streamed(
     // Make sure a pnpm executable is available before installing: use the
     // system one if present, otherwise bootstrap the latest pnpm into the
     // launcher's data dir via npm.
-    let pnpm_prog = ensure_pnpm(app, state, task_id).await?;
+    let pnpm_prog = crate::toolchain::ensure_pnpm_for_task(app, state, task_id).await?;
 
     let install_result = install_via_pnpm(app, state, task_id, &dir, &store_dir, &pnpm_prog, version).await;
     if install_result.is_err() {
@@ -838,22 +757,10 @@ async fn install_via_pnpm(
             .arg("--store-dir")
             .arg(store_dir)
             .args(["--loglevel=http"])
-            .args([
-                "--fetch-timeout",
-                "300000", // 5 min per request
-                "--fetch-retries",
-                "5",
-                "--fetch-retry-maxtimeout",
-                "120000",
-                "--network-concurrency",
-                "4",
-            ]);
+            .args(crate::toolchain::pnpm_fetch_flags());
         // Optional npm registry mirror (e.g. npmmirror) via DSH_NPM_REGISTRY.
-        if let Ok(registry) = std::env::var("DSH_NPM_REGISTRY") {
-            let registry = registry.trim().to_string();
-            if !registry.is_empty() {
-                cmd.args(["--registry", &registry]);
-            }
+        if let Some(registry) = crate::toolchain::registry_mirror() {
+            cmd.args(["--registry", &registry]);
         }
         cmd.arg(format!("@deepseek-ai/dsh@{version}"));
         // No TTY under the launcher: keep pnpm non-interactive so a modules
@@ -993,11 +900,8 @@ async fn npm_has_version(version: &str) -> bool {
     crate::process::hide_console(&mut cmd);
     crate::proxy::apply_to_command(&mut cmd);
     cmd.args(["view", &format!("@deepseek-ai/dsh@{version}"), "version"]);
-    if let Ok(registry) = std::env::var("DSH_NPM_REGISTRY") {
-        let registry = registry.trim().to_string();
-        if !registry.is_empty() {
-            cmd.args(["--registry", &registry]);
-        }
+    if let Some(registry) = crate::toolchain::registry_mirror() {
+        cmd.args(["--registry", &registry]);
     }
     // An unknown version exits 0 with empty output.
     match cmd.output().await {
@@ -1013,7 +917,7 @@ async fn github_tag_exists(version: &str) -> Result<bool, String> {
         "/repos/{}/git/ref/tags/dsh-v{version}",
         crate::commands::DSH_REPO
     ));
-    match crate::plugins::fetch_json_pub(&url, 256 * 1024).await {
+    match crate::plugins::fetch_json(&url, 256 * 1024).await {
         Ok(_) => Ok(true),
         Err(e) if e.contains("HTTP 404") => Ok(false),
         // Anonymous GitHub API quota is small; a 403/429 here is rate
@@ -1040,7 +944,7 @@ async fn install_version_from_repo(
     let dir = state.data_dir.join("versions").join(version);
     let tag = format!("dsh-v{version}");
     let repo_url = format!("https://github.com/{}.git", crate::commands::DSH_REPO);
-    let store_dir = state.data_dir.join(".pnpm-store");
+    let store_dir = crate::toolchain::store_dir(&state.data_dir);
 
     // 1. Clone the tag. A kept checkout is reused as-is (tags are immutable);
     //    any other leftover directory is a failed attempt and gets cleared.
@@ -1075,11 +979,11 @@ async fn install_version_from_repo(
         push_task_log(app, state, task_id, "复用已克隆的源码目录").await;
     }
 
-    let pnpm_prog = ensure_pnpm(app, state, task_id).await?;
+    let pnpm_prog = crate::toolchain::ensure_pnpm_for_task(app, state, task_id).await?;
 
     // 2. Dependencies. The checkout manages its own workspace manifest
-    //    (including build-script policy), so the launcher's allowBuilds
-    //    workaround does not apply here.
+    // (including build-script policy), so the launcher's allowBuilds
+    // workaround does not apply here.
     push_task_log(
         app,
         state,
@@ -1094,21 +998,9 @@ async fn install_version_from_repo(
         .arg("--store-dir")
         .arg(&store_dir)
         .args(["--loglevel=http"])
-        .args([
-            "--fetch-timeout",
-            "300000",
-            "--fetch-retries",
-            "5",
-            "--fetch-retry-maxtimeout",
-            "120000",
-            "--network-concurrency",
-            "4",
-        ]);
-    if let Ok(registry) = std::env::var("DSH_NPM_REGISTRY") {
-        let registry = registry.trim().to_string();
-        if !registry.is_empty() {
-            cmd.args(["--registry", &registry]);
-        }
+        .args(crate::toolchain::pnpm_fetch_flags());
+    if let Some(registry) = crate::toolchain::registry_mirror() {
+        cmd.args(["--registry", &registry]);
     }
     cmd.env("CI", "true");
     run_streamed_command(app, state, task_id, cmd, "pnpm install（源码）").await?;
@@ -1125,10 +1017,10 @@ async fn install_version_from_repo(
     run_streamed_command(app, state, task_id, cmd, "pnpm run build").await?;
 
     // 4. Verify and register.
-    if !crate::process::version_bin_ready(&dir) {
+    if !crate::launch::version_bin_ready(&dir) {
         return Err(format!(
             "构建完成后未找到 CLI 入口 {}，请查看任务日志中的构建输出",
-            crate::process::version_bin(&dir).display()
+            crate::launch::version_bin(&dir).display()
         ));
     }
     register_version(state, version, dir)
@@ -1171,132 +1063,6 @@ fn task_log_mentions_ignored_builds(state: &State<'_, AppState>, task_id: &str) 
             })
         })
         .unwrap_or(false)
-}
-
-/// DSH profiles are initialized by pnpm 11, and `dsh plugin` shells out to
-/// whatever pnpm is on PATH. A different pnpm major produces trees the CLI
-/// does not expect and fails in ways that look unrelated, so the launcher
-/// pins the major it drives every install with.
-pub(crate) const REQUIRED_PNPM_MAJOR: u32 = 11;
-
-/// Parses the major version out of `pnpm --version` output ("11.17.0\n").
-/// `pub(crate)` so the synchronous plugin-uninstall path can probe pnpm
-/// without a background task.
-pub(crate) fn pnpm_major_pub(version_output: &str) -> Option<u32> {
-    pnpm_major(version_output)
-}
-
-fn pnpm_major(version_output: &str) -> Option<u32> {
-    version_output
-        .trim()
-        .split('.')
-        .next()?
-        .trim()
-        .parse::<u32>()
-        .ok()
-}
-
-/// Returns a pnpm executable whose major version is [`REQUIRED_PNPM_MAJOR`].
-/// Prefers the system pnpm when its major matches; otherwise falls back to a
-/// pinned pnpm bootstrapped into the launcher data dir (`tools/`), installing
-/// or reinstalling it when missing or on the wrong major.
-async fn ensure_pnpm(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    task_id: &str,
-) -> Result<std::path::PathBuf, String> {
-    // 1. System pnpm available AND on the required major?
-    let mut sys_cmd = tokio::process::Command::new(crate::process::pnpm());
-    crate::process::hide_console(&mut sys_cmd);
-    let sys = sys_cmd.arg("--version").output().await;
-    if let Ok(out) = sys {
-        if out.status.success() {
-            let raw = String::from_utf8_lossy(&out.stdout).to_string();
-            match pnpm_major(&raw) {
-                Some(REQUIRED_PNPM_MAJOR) => {
-                    return Ok(std::path::PathBuf::from(crate::process::pnpm()))
-                }
-                other => {
-                    let shown = raw.trim().to_string();
-                    crate::log_warn!(
-                        "系统 pnpm 版本为 {shown}（主版本 {other:?}），DSH profile 需要 pnpm {REQUIRED_PNPM_MAJOR}，改用启动器内置 pnpm"
-                    );
-                    let msg = format!(
-                        "系统 pnpm {shown} 与所需的 pnpm {REQUIRED_PNPM_MAJOR} 不符，使用启动器内置 pnpm"
-                    );
-                    push_task_log(app, state, task_id, &msg).await;
-                }
-            }
-        }
-    }
-
-    // 2. Local pnpm already bootstrapped on the required major?
-    let tools_dir = state.data_dir.join("tools");
-    let local = local_pnpm_path(&tools_dir);
-    if local.exists() {
-        let mut probe_cmd = tokio::process::Command::new(&local);
-        crate::process::hide_console(&mut probe_cmd);
-        let probe = probe_cmd.arg("--version").output().await;
-        if let Ok(out) = probe {
-            if out.status.success()
-                && pnpm_major(&String::from_utf8_lossy(&out.stdout)) == Some(REQUIRED_PNPM_MAJOR)
-            {
-                return Ok(local);
-            }
-        }
-    }
-
-    // 3. Bootstrap the pinned pnpm major inside the data dir via npm.
-    std::fs::create_dir_all(&tools_dir).map_err(|e| format!("创建工具目录失败: {e}"))?;
-    let spec = format!("pnpm@{REQUIRED_PNPM_MAJOR}");
-    let msg = format!("正在安装 DSH profile 所需的 {spec}…");
-    {
-        let mut tasks = state.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.percent = 5;
-            push_log_locked(task, &msg);
-        }
-    }
-    emit_progress(app, task_id, TaskState::Running, 5, None, None);
-    emit_log(app, task_id, &msg);
-    crate::log_info!("引导安装 {spec} 到 {}", tools_dir.display());
-
-    let mut child_cmd = tokio::process::Command::new(crate::process::npm());
-    crate::process::hide_console(&mut child_cmd);
-    crate::proxy::apply_to_command(&mut child_cmd);
-    child_cmd
-        .args(["install", "--global", "--prefix"])
-        .arg(&tools_dir)
-        .arg(&spec)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let child = child_cmd
-        .spawn()
-        .map_err(|e| format!("pnpm 安装启动失败: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("pnpm 安装等待失败: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let last = err.lines().last().unwrap_or(&err).to_string();
-        return Err(format!("pnpm 安装失败: {last}"));
-    }
-
-    let local = local_pnpm_path(&tools_dir);
-    if !local.exists() {
-        return Err(format!(
-            "pnpm 安装完成但未找到可执行文件: {}",
-            local.display()
-        ));
-    }
-    Ok(local)
-}
-
-/// Path of the pnpm executable inside a tools dir.
-fn local_pnpm_path(tools_dir: &std::path::Path) -> std::path::PathBuf {
-    tools_dir.join("pnpm")
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,14 +1117,14 @@ async fn stream_pipe(app: AppHandle, task_id: String, pipe: StreamPipe) {
     }
 }
 
-fn push_log_locked(task: &mut TaskInfo, line: &str) {
+pub(crate) fn push_log_locked(task: &mut TaskInfo, line: &str) {
     if task.logs.len() >= MAX_LOG_LINES {
         task.logs.remove(0);
     }
     task.logs.push(line.to_string());
 }
 
-fn emit_progress(
+pub(crate) fn emit_progress(
     app: &AppHandle,
     id: &str,
     state: TaskState,
@@ -1388,53 +1154,6 @@ fn emit_log(app: &AppHandle, id: &str, line: &str) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers reused by other modules (e.g. plugins.rs install tasks)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn now_millis_pub() -> i64 {
-    now_millis()
-}
-
-pub(crate) fn emit_progress_pub(
-    app: &AppHandle,
-    id: &str,
-    state: TaskState,
-    percent: u32,
-    message: Option<String>,
-    instance_id: Option<String>,
-) {
-    emit_progress(app, id, state, percent, message, instance_id);
-}
-
-pub(crate) fn push_log_locked_pub(task: &mut TaskInfo, line: &str) {
-    push_log_locked(task, line);
-}
-
-/// Append a log line to a running task and stream it to the frontend.
-pub(crate) async fn push_task_log_pub(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    task_id: &str,
-    line: &str,
-) {
-    {
-        let mut tasks = state.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(task_id) {
-            push_log_locked(task, line);
-        }
-    }
-    emit_log(app, task_id, line);
-}
-
-pub(crate) async fn ensure_pnpm_pub(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    task_id: &str,
-) -> Result<std::path::PathBuf, String> {
-    ensure_pnpm(app, state, task_id).await
-}
-
 /// Runs a piped child command as a task: streams stdout/stderr into the task
 /// log, exposes the child for cancellation, and nudges the percent upward
 /// while it runs. Returns Err when the command fails or is cancelled.
@@ -1457,7 +1176,7 @@ pub(crate) async fn run_streamed_command(
         }
         s
     };
-    push_task_log_pub(app, state, task_id, &format!("$ {cmdline}")).await;
+    push_task_log(app, state, task_id, &format!("$ {cmdline}")).await;
     crate::log_debug!("run_streamed_command[{what}]: {cmdline}");
 
     // The launcher's proxy must apply to the children it spawns (pnpm, git),
@@ -1624,22 +1343,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pnpm_major_parses_version_output() {
-        assert_eq!(pnpm_major("11.17.0\n"), Some(11));
-        assert_eq!(pnpm_major("  10.4.1  "), Some(10));
-        assert_eq!(pnpm_major("12.0.0-beta.1"), Some(12));
-        assert_eq!(pnpm_major(""), None);
-        assert_eq!(pnpm_major("not-a-version"), None);
-    }
-
-    #[test]
-    fn required_pnpm_major_is_the_profile_toolchain() {
-        // DSH profiles are initialized by pnpm 11; changing this constant
-        // means the launcher drives installs with a different major.
-        assert_eq!(REQUIRED_PNPM_MAJOR, 11);
-    }
-
-    #[test]
     fn valid_version_string_accepts_semver_shapes() {
         assert!(valid_version_string("1.2.3"));
         assert!(valid_version_string("0.1.3-alpha.2"));
@@ -1719,7 +1422,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
     #[test]
     fn assert_lan_bind_port_rewrites_only_the_managed_port() {
         let home = patch_fixture("web", MANAGED_BLOCK);
-        assert_profile_lan_bind_port(&home, "web", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "web", 3099);
         let text =
             std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert!(text.contains("port: 3099"), "{text}");
@@ -1735,13 +1438,13 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
         // No managed block: the CLI --port already wins, so nothing is written
         // and a hand-authored webserver row keeps its pin.
         let home = patch_fixture("web", "[]\n\n- id: webserver\n  config:\n    port: 3080\n");
-        assert_profile_lan_bind_port(&home, "web", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "web", 3099);
         let text =
             std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert_eq!(text, "[]\n\n- id: webserver\n  config:\n    port: 3080\n");
 
         // A missing patch file is a no-op, not an error.
-        assert_profile_lan_bind_port(&home, "absent", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "absent", 3099);
         assert!(!home.join("profiles/absent").exists());
         std::fs::remove_dir_all(&home).ok();
     }
@@ -1750,9 +1453,9 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
     fn assert_lan_bind_port_refuses_path_traversal_profile() {
         let home = patch_fixture("web", MANAGED_BLOCK);
         // An escaping name must not write outside profiles/web.
-        assert_profile_lan_bind_port(&home, "../web", 3099);
-        assert_profile_lan_bind_port(&home, "..", 3099);
-        assert_profile_lan_bind_port(&home, "/tmp/evil", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "../web", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "..", 3099);
+        crate::profile::assert_profile_lan_bind_port(&home, "/tmp/evil", 3099);
         let text =
             std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert!(text.contains("port: 3080"), "{text}");

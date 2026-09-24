@@ -1,9 +1,8 @@
-use crate::config::{Config, InstanceState, InstanceStatus};
+use crate::config::{InstanceState, InstanceStatus};
 use crate::AppState;
 use regex::Regex;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -112,6 +111,7 @@ async fn adopt_external_process(
     host: &str,
     pid: i32,
 ) {
+    let url = format!("http://{host}:{port}");
     {
         let mut running = state.running.lock().await;
         if running.contains_key(instance_id) {
@@ -122,7 +122,7 @@ async fn adopt_external_process(
             RunningInstance {
                 kill: Arc::new(Notify::new()),
                 profile: profile.to_string(),
-                url: Some(format!("http://{host}:{port}")),
+                url: Some(url.clone()),
                 adopted: Some(Adopted { pid, port, host: host.to_string() }),
             },
         );
@@ -135,7 +135,7 @@ async fn adopt_external_process(
         &InstanceStatus {
             id: instance_id.to_string(),
             state: InstanceState::Running,
-            url: Some(format!("http://{host}:{port}")),
+            url: Some(url),
             profile: Some(profile.to_string()),
             exit_code: None,
         },
@@ -166,19 +166,20 @@ async fn adopt_external_process(
             if pid_alive(pid) {
                 continue;
             }
-            state.running.lock().await.remove(&watcher_id);
             crate::log_info!("实例 {watcher_id} 收养的外部进程（pid {pid}）已退出");
-            emit_status(
+            unregister_running(
                 &watcher_app,
-                &InstanceStatus {
+                &state,
+                &watcher_id,
+                InstanceStatus {
                     id: watcher_id.clone(),
                     state: InstanceState::Exited,
                     url: None,
                     profile: Some(watcher_profile),
                     exit_code: None,
                 },
-            );
-            crate::tray::rebuild_tray_menu(&watcher_app).await;
+            )
+            .await;
             return;
         }
     });
@@ -206,111 +207,19 @@ pub fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Node's own flags every spawned DSH process carries. They must be placed
-/// *before* the CLI script path, otherwise the CLI parser sees them as DSH
-/// arguments.
-///
-/// `--preserve-symlinks` keeps a `link:`-ed plugin's module URL on its profile
-/// path instead of its realpath inside the plugin's checkout. DSH routes
-/// kernel packages (`@deepseek-ai/*`) only for importers that live inside the
-/// profiles directory, so without this flag a linked plugin falls back to
-/// Node's own ancestor walk and needs a `node_modules` inside the checkout —
-/// which then has to be re-pointed by hand after every DSH upgrade.
-///
-/// It is passed as an argument rather than via `NODE_OPTIONS` on purpose: an
-/// argument applies to the DSH process alone, while `NODE_OPTIONS` would leak
-/// into the `pnpm` child that `dsh plugin` spawns.
-pub const NODE_RUNTIME_FLAGS: &[&str] = &["--preserve-symlinks"];
-
-/// Whether a version directory is a source checkout (GitHub-only tags
-/// installed via clone + build) rather than an npm-installed package tree.
-/// The marker is the upstream monorepo's CLI package manifest.
-fn is_repo_checkout(version_dir: &std::path::Path) -> bool {
-    version_dir
-        .join("apps")
-        .join("cli")
-        .join("package.json")
-        .exists()
-}
-
-pub fn version_bin(version_dir: &std::path::Path) -> PathBuf {
-    if is_repo_checkout(version_dir) {
-        return version_dir
-            .join("apps")
-            .join("cli")
-            .join("lib")
-            .join("bin.js");
-    }
-    version_dir
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh")
-        .join("lib")
-        .join("bin.js")
-}
-
-/// Checks that a version's bin.js is present and readable. On Windows, pnpm
-/// hard-links store files into the version tree and a transient filesystem
-/// state (antivirus scan, indexer, post-install flush) can make `exists()`
-/// return false once; retry briefly before declaring the install broken.
-pub fn version_bin_ready(version_dir: &std::path::Path) -> bool {
-    let bin = version_bin(version_dir);
-    for _ in 0..5 {
-        if bin.exists() {
-            if let Ok(meta) = std::fs::metadata(&bin) {
-                if meta.len() > 0 {
-                    return true;
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    bin.exists()
-}
-
-/// Builds the effective environment for an instance: DSH_HOME (from the
-/// instance's home), the launcher marker, then the user's overrides
-/// (DSH_HOME is reserved and never overridden).
-pub fn build_env(cfg: &Config, instance_id: &str) -> Result<Vec<(String, String)>, String> {
-    let inst = cfg
-        .instances
-        .iter()
-        .find(|i| i.id == instance_id)
-        .ok_or_else(|| "实例不存在".to_string())?;
-    let home = cfg
-        .homes
-        .iter()
-        .find(|h| h.id == inst.home_id)
-        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-
-    let mut env: Vec<(String, String)> = Vec::new();
-    env.push((
-        "DSH_HOME".to_string(),
-        home.path.to_string_lossy().to_string(),
-    ));
-    env.push(("DSH_LAUNCHER_INSTANCE".to_string(), inst.name.clone()));
-    for (k, v) in &inst.env_overrides {
-        if k == "DSH_HOME" {
-            continue; // reserved
-        }
-        env.push((k.clone(), v.clone()));
-    }
-    // Launcher proxy applied to dsh: overrides the instance's own proxy vars.
-    if cfg.settings.proxy_enabled && cfg.settings.proxy_apply_dsh {
-        crate::proxy::override_env(&mut env, &cfg.settings);
-    }
-    Ok(env)
-}
+/// Version layout + every DSH invocation shape lives in `crate::launch`.
+pub use crate::launch::instance_env as build_env;
+use crate::launch::{version_bin, version_bin_ready};
 
 /// Whether a profile is a DSH web application: its package.json
 /// `dsh.profile.bundles` includes `@deepseek-ai/dsh-web-app`. Such profiles
 /// understand `--host/--port` and get a webview; they must bind a random
 /// free port so several instances don't collide.
 fn is_web_profile(home_path: &std::path::Path, profile: &str) -> bool {
-    let pkg = home_path
-        .join("profiles")
-        .join(profile)
-        .join("package.json");
+    let pkg = crate::profile::profile_dir(home_path, profile)
+        .ok()
+        .map(|d| d.join("package.json"))
+        .unwrap_or_else(|| home_path.join("profiles").join(profile).join("package.json"));
     let Ok(raw) = std::fs::read_to_string(&pkg) else {
         return false;
     };
@@ -324,40 +233,6 @@ fn is_web_profile(home_path: &std::path::Path, profile: &str) -> bool {
                 .any(|b| b.as_str() == Some("@deepseek-ai/dsh-web-app"))
         })
         .unwrap_or(false)
-}
-
-/// Whether the installed `dsh-web-app` bundle accepts `--no-open` (added in
-/// 0.1.0-rc.8). Feature-detect the flag in the bundle's startup script: the
-/// flag is a string literal in `lib/startup.js`, so presence is an exact
-/// signal that survives pre-release version-number formats. The bundle lives
-/// under pnpm's store; we scan `node_modules/.pnpm/**/@deepseek-ai/dsh-web-app/lib/startup.js`.
-fn web_app_supports_no_open(version_dir: &std::path::Path) -> bool {
-    // Source checkouts keep the bundle at its workspace path; npm trees hoist
-    // one canonical copy into the pnpm public store.
-    let startup = if is_repo_checkout(version_dir) {
-        version_dir
-            .join("packages")
-            .join("bundle")
-            .join("web-app")
-            .join("lib")
-            .join("startup.js")
-    } else {
-        // The pnpm hoisted "public" store keeps one canonical copy with a
-        // stable path; the hashed `.pnpm/<name>@<ver>_<hash>` layout would
-        // need a scan.
-        version_dir
-            .join("node_modules")
-            .join(".pnpm")
-            .join("node_modules")
-            .join("@deepseek-ai")
-            .join("dsh-web-app")
-            .join("lib")
-            .join("startup.js")
-    };
-    let Ok(raw) = std::fs::read_to_string(&startup) else {
-        return false;
-    };
-    raw.contains("--no-open") || raw.contains("no-open")
 }
 
 /// Spawns a DSH CLI process for the instance/profile and starts the watchers
@@ -439,44 +314,24 @@ pub async fn start_instance_process(
         }
     }
 
-    let mut cmd = Command::new(node());
-    hide_console(&mut cmd);
-    cmd.args(NODE_RUNTIME_FLAGS).arg(&bin).arg("--profile").arg(profile);
-    // Web-app profiles get a random free port (pinned ports were handled by
-    // the preflight above); other profiles are managed purely as processes
-    // (no URL/webview).
+    // Web-app profiles: the profile patch's managed lan-bind block outranks
+    // `--port` and the plugin only re-asserts it at boot, so sync it here
+    // first — otherwise a changed port would need a stop/start cycle to take
+    // effect. (Pinned ports were handled by the preflight above.)
     if is_web {
-        // The profile patch's managed lan-bind block outranks `--port` and the
-        // plugin only re-asserts it at boot, so sync it here first — otherwise
-        // a changed port would need a stop/start cycle to take effect.
         if let Some(hp) = home_path.as_deref() {
-            crate::tasks::assert_profile_lan_bind_port(hp, profile, inst.port.unwrap_or(0));
-        }
-        // Issue #21: a pinned port (1-65535) is used verbatim; otherwise 0
-        // binds a random free port so several instances don't collide.
-        let port = inst
-            .port
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "0".to_string());
-        // `--host` is deliberately NOT passed. 127.0.0.1 is already the
-        // webserver row's default when no flag is given, but an explicit host
-        // flag outranks every config-layer bind: @linxin666/dsh-remote-web-ui
-        // resolves its own LAN toggle through
-        // `desiredBindHost(lanBind, startupHost)`, which returns the flag
-        // verbatim whenever it is `127.0.0.1`/`0.0.0.0`. Hardcoding the flag here
-        // therefore made that plugin's「局域网访问」toggle impossible to turn on
-        // for launcher-started instances (it kept writing the loopback block),
-        // while omitting it leaves the decision where it belongs — the profile
-        // layer (default loopback, or the plugin's managed bind block).
-        cmd.arg("--port").arg(port);
-        // `--no-open` was added to dsh-web-app in 0.1.0-rc.8: the launcher
-        // embeds the UI in its own webview, so the app must not open the
-        // system browser. Feature-detect the flag in the installed bundle's
-        // startup.js rather than comparing pre-release versions.
-        if web_app_supports_no_open(&version.dir) {
-            cmd.arg("--no-open");
+            crate::profile::assert_profile_lan_bind_port(hp, profile, inst.port.unwrap_or(0));
         }
     }
+
+    // The launch spec module owns the argv: NODE_RUNTIME_FLAGS order,
+    // --profile, per-instance --port, --no-open feature detection, and the
+    // deliberate absence of --host (the profile layer owns the bind host).
+    let mut cmd = crate::launch::instance_command(
+        &version.dir,
+        profile,
+        is_web.then(|| inst.port.unwrap_or(0)),
+    )?;
 
     let env = build_env(&cfg, instance_id)?;
     for (k, v) in env {
@@ -524,17 +379,20 @@ pub async fn start_instance_process(
         },
     );
 
-    // Register the running entry (stop_instance reaches it through the map).
-    state.running.lock().await.insert(
-        instance_id.to_string(),
+    // Register the running entry (stop_instance reaches it through the map);
+    // the tray menu is a projection of the registry.
+    register_running(
+        app,
+        state,
+        instance_id,
         RunningInstance {
             kill: kill_switch.clone(),
             profile: profile.to_string(),
             url: None,
             adopted: None,
         },
-    );
-    crate::tray::rebuild_tray_menu(app).await;
+    )
+    .await;
 
     // Waiter: owns the child, awaits exit or a kill request, then cleans up
     // and notifies. It is the single place that removes the map entry and
@@ -556,7 +414,9 @@ pub async fn start_instance_process(
                     (code, true)
                 }
             };
-            state.running.lock().await.remove(&waiter_id);
+            // Quiet removal: the terminal status depends on the adoption
+            // re-probe below, so projections are deferred until it resolves.
+            remove_entry_quiet(&state, &waiter_id).await;
             if stopped {
                 crate::log_info!("实例 {waiter_id} 已停止（exit code: {code:?}）");
             } else {
@@ -594,9 +454,11 @@ pub async fn start_instance_process(
                     }
                 }
             }
-            emit_status(
+            unregister_running(
                 &waiter_app,
-                &InstanceStatus {
+                &state,
+                &waiter_id,
+                InstanceStatus {
                     id: waiter_id.clone(),
                     state: if stopped {
                         InstanceState::Stopped
@@ -607,8 +469,8 @@ pub async fn start_instance_process(
                     profile: Some(waiter_profile),
                     exit_code: code,
                 },
-            );
-            crate::tray::rebuild_tray_menu(&waiter_app).await;
+            )
+            .await;
         });
     }
 
@@ -738,6 +600,28 @@ pub fn kill_all(state: &AppState) {
     }
 }
 
+/// The restart transition, owned by the lifecycle module instead of being
+/// re-assembled by every caller: a full stop (which observes a clean
+/// registry on return — see [`stop_instance_process`]) followed by a start
+/// on the same profile.
+pub async fn restart_instance_process(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    instance_id: &str,
+) -> Result<(), String> {
+    let profile = state
+        .running
+        .lock()
+        .await
+        .get(instance_id)
+        .map(|r| r.profile.clone());
+    let Some(profile) = profile else {
+        return Err("实例未在运行".to_string());
+    };
+    stop_instance_process(app, state, instance_id).await?;
+    start_instance_process(app, state, instance_id, &profile).await
+}
+
 pub async fn list_statuses(state: &State<'_, AppState>) -> Vec<InstanceStatus> {
     let running = state.running.lock().await;
     running
@@ -760,6 +644,47 @@ async fn log_line(log: &Arc<Mutex<std::fs::File>>, line: &str) {
 
 fn emit_status(app: &AppHandle, status: &InstanceStatus) {
     let _ = app.emit(STATUS_EVENT, status);
+}
+
+// ---------------------------------------------------------------------------
+// Registry transitions — the lifecycle module's one rule: mutate the running
+// table only through these helpers, and every mutation carries its
+// projections (status event + tray menu). A new transition site cannot
+// forget the choreography because there is no choreography.
+// ---------------------------------------------------------------------------
+
+/// Inserts (or replaces) a running entry and refreshes the tray menu. The
+/// caller emits the instance's own status event (Starting / Running) around
+/// it — those carry per-transition detail (url, exit code) this helper
+/// doesn't know.
+async fn register_running(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    id: &str,
+    entry: RunningInstance,
+) {
+    state.running.lock().await.insert(id.to_string(), entry);
+    crate::tray::rebuild_tray_menu(app).await;
+}
+
+/// Removes a running entry and projects the terminal status (status event +
+/// tray menu). Not for the exit waiter, which must remove first and re-probe
+/// adoption before deciding the terminal status — see [`remove_entry_quiet`].
+async fn unregister_running(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    id: &str,
+    status: InstanceStatus,
+) {
+    state.running.lock().await.remove(id);
+    emit_status(app, &status);
+    crate::tray::rebuild_tray_menu(app).await;
+}
+
+/// Removes a running entry WITHOUT projections: for the exit waiter, whose
+/// terminal status depends on the adoption re-probe that follows.
+async fn remove_entry_quiet(state: &State<'_, AppState>, id: &str) {
+    state.running.lock().await.remove(id);
 }
 
 #[cfg(test)]
@@ -819,78 +744,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn web_app_supports_no_open_feature_detects_flag() {
-        let dir = std::env::temp_dir().join(format!("dsh-proc-test-{}", uuid::Uuid::new_v4()));
-        let startup_dir = dir
-            .join("node_modules")
-            .join(".pnpm")
-            .join("node_modules")
-            .join("@deepseek-ai")
-            .join("dsh-web-app")
-            .join("lib");
-        // No startup.js yet -> false.
-        assert!(!web_app_supports_no_open(&dir));
-        std::fs::create_dir_all(&startup_dir).unwrap();
-        // Old bundle without the flag (<= 0.1.0-rc.7) -> false.
-        std::fs::write(
-            startup_dir.join("startup.js"),
-            "const p = new Command().option('--host <host>').option('--port <port>')",
-        )
-        .unwrap();
-        assert!(!web_app_supports_no_open(&dir));
-        // New bundle with the flag (>= 0.1.0-rc.8) -> true.
-        std::fs::write(
-            startup_dir.join("startup.js"),
-            "const p = new Command().option('--no-open', 'do not open the Web UI in the default browser')",
-        )
-        .unwrap();
-        assert!(web_app_supports_no_open(&dir));
-        std::fs::remove_dir_all(&dir).ok();
+    
+    
     }
-
-    #[test]
-    fn version_bin_detects_source_checkout_layout() {
-        let dir = std::env::temp_dir().join(format!("dsh-proc-test-{}", uuid::Uuid::new_v4()));
-        // npm layout: node_modules/@deepseek-ai/dsh/lib/bin.js.
-        assert!(version_bin(&dir).ends_with(
-            std::path::Path::new("node_modules")
-                .join("@deepseek-ai")
-                .join("dsh")
-                .join("lib")
-                .join("bin.js")
-        ));
-        assert!(!version_bin_ready(&dir));
-        // Source checkout layout (GitHub-only tags): apps/cli/lib/bin.js.
-        let cli = dir.join("apps").join("cli");
-        std::fs::create_dir_all(cli.join("lib")).unwrap();
-        std::fs::write(cli.join("package.json"), r#"{"name":"@deepseek-ai/dsh"}"#).unwrap();
-        assert_eq!(version_bin(&dir), cli.join("lib").join("bin.js"));
-        assert!(!version_bin_ready(&dir));
-        std::fs::write(cli.join("lib").join("bin.js"), "// bin").unwrap();
-        assert!(version_bin_ready(&dir));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn web_app_no_open_detects_flag_in_source_checkout() {
-        let dir = std::env::temp_dir().join(format!("dsh-proc-test-{}", uuid::Uuid::new_v4()));
-        let cli = dir.join("apps").join("cli");
-        std::fs::create_dir_all(&cli).unwrap();
-        std::fs::write(cli.join("package.json"), r#"{"name":"@deepseek-ai/dsh"}"#).unwrap();
-        let lib = dir
-            .join("packages")
-            .join("bundle")
-            .join("web-app")
-            .join("lib");
-        assert!(!web_app_supports_no_open(&dir));
-        std::fs::create_dir_all(&lib).unwrap();
-        std::fs::write(
-            lib.join("startup.js"),
-            "const p = new Command().option('--no-open', 'x')",
-        )
-        .unwrap();
-        assert!(web_app_supports_no_open(&dir));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}

@@ -159,17 +159,6 @@ pub struct RemoteVersion {
     pub source: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NewInstanceInput {
-    pub name: String,
-    pub version_id: String,
-    pub home_id: String,
-    #[serde(default)]
-    pub env_overrides: BTreeMap<String, String>,
-    #[serde(default)]
-    pub default_profile: Option<String>,
-}
-
 /// Partial settings update: only present fields are applied.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SettingsPatch {

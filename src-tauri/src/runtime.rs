@@ -234,7 +234,7 @@ fn node_archive_name(version: &str) -> String {
 /// first with the mirror as fallback.
 async fn resolve_node_version() -> Result<String, String> {
     for base in [NODE_DIST_PRIMARY, NODE_DIST_MIRROR] {
-        match crate::plugins::fetch_json_pub(&format!("{base}/index.json"), 8 * 1024 * 1024).await {
+        match crate::plugins::fetch_json(&format!("{base}/index.json"), 8 * 1024 * 1024).await {
             Ok(doc) => {
                 if let Some(arr) = doc.as_array() {
                     for rel in arr {
@@ -276,7 +276,7 @@ async fn download_node_archive(
     let mut last_err = String::new();
     for base in [NODE_DIST_PRIMARY, NODE_DIST_MIRROR] {
         let url = format!("{base}/{version}/{name}");
-        crate::tasks::push_task_log_pub(app, state, task_id, &format!("下载 {url}")).await;
+        crate::tasks::push_task_log(app, state, task_id, &format!("下载 {url}")).await;
         match download_one(&client, &url, dest, app, task_id).await {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -317,7 +317,7 @@ async fn download_one(
             if pct > last_pct {
                 last_pct = pct;
                 let shown = done.saturating_mul(100).checked_div(total).unwrap_or(0);
-                crate::tasks::emit_progress_pub(
+                crate::tasks::emit_progress(
                     app,
                     task_id,
                     crate::tasks::TaskState::Running,
@@ -405,11 +405,7 @@ pub async fn start_install_node_task(
     {
         let tasks = state.tasks.lock().await;
         if tasks.values().any(|t| {
-            t.kind == "install-node"
-                && matches!(
-                    t.state,
-                    crate::tasks::TaskState::Running | crate::tasks::TaskState::Queued
-                )
+            t.kind == "install-node" && t.state == crate::tasks::TaskState::Running
         }) {
             return Err("Node.js 安装任务已在进行".to_string());
         }
@@ -422,7 +418,7 @@ pub async fn start_install_node_task(
         version: String::new(),
         state: crate::tasks::TaskState::Running,
         percent: 0,
-        created_at: crate::tasks::now_millis_pub(),
+        created_at: crate::tasks::now_millis(),
         message: None,
         instance_id: None,
         instance_name: None,
@@ -432,7 +428,7 @@ pub async fn start_install_node_task(
     };
     let task_id = task.id.clone();
     state.tasks.lock().await.insert(task_id.clone(), task);
-    crate::tasks::emit_progress_pub(
+    crate::tasks::emit_progress(
         &app,
         &task_id,
         crate::tasks::TaskState::Running,
@@ -445,46 +441,26 @@ pub async fn start_install_node_task(
     let worker_task_id = task_id.clone();
     tauri::async_runtime::spawn(async move {
         let state = worker_app.state::<AppState>();
+        // The task runner owns the completion invariants (cancel-stays-
+        // cancelled, capped logs, terminal progress); this body only runs
+        // the stages.
         let result = do_install_node(&worker_app, &state, &worker_task_id).await;
-        let mut tasks = state.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(&worker_task_id) {
-            // A cancelled task stays cancelled: don't flip it to Done/Error
-            // when the worker finishes anyway (mirrors the create-instance
-            // path).
-            if task.state == crate::tasks::TaskState::Cancelled {
-                return;
-            }
-            match result {
-                Ok(version) => {
-                    task.state = crate::tasks::TaskState::Done;
-                    task.percent = 100;
-                    task.message = Some(format!("Node.js {version} 已就绪"));
-                    crate::tasks::emit_progress_pub(
-                        &worker_app,
-                        &worker_task_id,
-                        crate::tasks::TaskState::Done,
-                        100,
-                        Some(format!("Node.js {version} 已就绪")),
-                        None,
-                    );
+        let msg_done = result
+            .as_ref()
+            .ok()
+            .map(|version| format!("Node.js {version} 已就绪"));
+        crate::tasks::finish_task(
+            &worker_app,
+            &state,
+            &worker_task_id,
+            result.map(|_| ()),
+            |task, ()| {
+                if let Some(msg) = msg_done {
+                    task.message = Some(msg);
                 }
-                Err(msg) => {
-                    task.state = crate::tasks::TaskState::Error;
-                    task.message = Some(msg.clone());
-                    crate::tasks::push_log_locked_pub(task, &format!("error: {msg}"));
-                    let pct = task.percent;
-                    drop(tasks);
-                    crate::tasks::emit_progress_pub(
-                        &worker_app,
-                        &worker_task_id,
-                        crate::tasks::TaskState::Error,
-                        pct,
-                        Some(msg),
-                        None,
-                    );
-                }
-            }
-        }
+            },
+        )
+        .await;
     });
 
     Ok(task_id)
@@ -495,7 +471,7 @@ async fn do_install_node(
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<String, String> {
-    crate::tasks::push_task_log_pub(app, state, task_id, "正在查询 Node.js 最新 LTS 版本…").await;
+    crate::tasks::push_task_log(app, state, task_id, "正在查询 Node.js 最新 LTS 版本…").await;
     let version = resolve_node_version().await?;
     // Cancellation during version resolution (no child to kill) must stop the
     // task here: the extraction below replaces any existing managed runtime.
@@ -508,7 +484,7 @@ async fn do_install_node(
             task.version = version.clone();
         }
     }
-    crate::tasks::push_task_log_pub(app, state, task_id, &format!("目标版本: {version}")).await;
+    crate::tasks::push_task_log(app, state, task_id, &format!("目标版本: {version}")).await;
 
     let tools = state.data_dir.join("tools");
     std::fs::create_dir_all(&tools).map_err(|e| format!("创建工具目录失败: {e}"))?;
@@ -522,7 +498,7 @@ async fn do_install_node(
         return Err("任务已取消".to_string());
     }
 
-    crate::tasks::emit_progress_pub(
+    crate::tasks::emit_progress(
         app,
         task_id,
         crate::tasks::TaskState::Running,
@@ -550,14 +526,14 @@ async fn do_install_node(
         return Err("Node.js 安装后无法运行".to_string());
     }
     let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    crate::tasks::push_task_log_pub(app, state, task_id, &format!("Node.js {got} 安装完成")).await;
+    crate::tasks::push_task_log(app, state, task_id, &format!("Node.js {got} 安装完成")).await;
 
     // npm ships with Node; bootstrap the pinned pnpm so the whole
     // environment goes green in one click.
     if !crate::tasks::task_is_running(state, task_id).await {
         return Err("任务已取消".to_string());
     }
-    crate::tasks::emit_progress_pub(
+    crate::tasks::emit_progress(
         app,
         task_id,
         crate::tasks::TaskState::Running,
@@ -565,8 +541,8 @@ async fn do_install_node(
         Some("正在安装 pnpm…".to_string()),
         None,
     );
-    crate::tasks::ensure_pnpm_pub(app, state, task_id).await?;
-    crate::tasks::push_task_log_pub(app, state, task_id, "pnpm 已就绪").await;
+    crate::toolchain::ensure_pnpm_for_task(app, state, task_id).await?;
+    crate::tasks::push_task_log(app, state, task_id, "pnpm 已就绪").await;
     Ok(got)
 }
 

@@ -59,7 +59,7 @@ fn http_client() -> Result<reqwest::Client, String> {
 }
 
 /// Fetch and parse a JSON document with a size cap.
-async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Value, String> {
+pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Value, String> {
     let client = http_client()?;
     let resp = client
         .get(url)
@@ -79,20 +79,14 @@ async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Value, String> 
     serde_json::from_slice(&bytes).map_err(|e| format!("解析 JSON 失败 {url}: {e}"))
 }
 
-/// `pub(crate)` so `commands.rs` (GitHub release tag listing) can reuse the
-/// same HTTP client and size cap.
-pub(crate) async fn fetch_json_pub(url: &str, cap: usize) -> Result<serde_json::Value, String> {
-    fetch_json(url, cap).await
-}
-
 // ---------------------------------------------------------------------------
 // Profile manifest helpers (read/write package.json + cordis.patch.yml)
 // ---------------------------------------------------------------------------
 
-/// Path of a profile dir under a DSH_HOME.
-fn profile_dir(home_path: &std::path::Path, profile: &str) -> std::path::PathBuf {
-    home_path.join("profiles").join(profile)
-}
+/// cordis id for a package: bundles register under their unscoped short name
+/// (dsh-auxiliary) unless the package declares otherwise. We default to the
+/// last path segment without the scope.
+pub use crate::profile::cordis_id_of;
 
 /// Read the profile package.json (dsh.profile.bundles + dependencies).
 fn read_profile_manifest(dir: &std::path::Path) -> Result<serde_json::Value, String> {
@@ -106,14 +100,6 @@ fn read_profile_manifest(dir: &std::path::Path) -> Result<serde_json::Value, Str
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("解析 package.json 失败: {e}"))
-}
-
-/// cordis id for a package: bundles register under their unscoped short name
-/// (dsh-auxiliary) unless the package declares otherwise. We default to the
-/// last path segment without the scope.
-pub fn cordis_id_of(package: &str) -> String {
-    let last = package.rsplit('/').next().unwrap_or(package);
-    last.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +116,7 @@ pub async fn list_installed_plugins(
     profile: String,
 ) -> Result<Vec<InstalledPlugin>, String> {
     let (home_path, _) = resolve_home_paths(&state, &home_id)?;
-    let dir = profile_dir(&home_path, &profile);
+    let dir = crate::profile::profile_dir(&home_path, &profile)?;
     let manifest = read_profile_manifest(&dir)?;
 
     let mut ids: Vec<String> = Vec::new();
@@ -162,7 +148,7 @@ pub async fn list_installed_plugins(
     ids.dedup();
 
     // Disabled set from cordis.patch.yml (`- id: <cordis-id>` + `disabled: true`).
-    let disabled = read_disabled_ids(&dir);
+    let disabled = crate::profile::read_disabled_ids(&dir);
 
     let out = ids
         .into_iter()
@@ -178,32 +164,6 @@ pub async fn list_installed_plugins(
         })
         .collect();
     Ok(out)
-}
-
-/// Parse disabled cordis ids from a profile's cordis.patch.yml. We do a
-/// lightweight line scan (avoid pulling a YAML parser dependency for this).
-fn read_disabled_ids(dir: &std::path::Path) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    let path = dir.join("cordis.patch.yml");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return set;
-    };
-    let mut current_id: Option<String> = None;
-    for line in raw.lines() {
-        let t = line.trim();
-        if t.starts_with("- id:") {
-            current_id = Some(t.trim_start_matches("- id:").trim().to_string());
-        } else if t.starts_with("id:") && !line.starts_with(' ') && !line.starts_with('\t') {
-            current_id = Some(t.trim_start_matches("id:").trim().to_string());
-        } else if t == "disabled: true" {
-            if let Some(id) = current_id.take() {
-                set.insert(id);
-            }
-        } else if t.starts_with("- ") && !t.starts_with("- id:") {
-            current_id = None;
-        }
-    }
-    set
 }
 
 /// Resolve a HOME to (home_path, version_dir): plugin file edits need the
@@ -235,7 +195,7 @@ pub async fn set_plugins_enabled(
     input: SetPluginsEnabledInput,
 ) -> Result<(), String> {
     let (home_path, _) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = profile_dir(&home_path, &input.profile);
+    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
     let patch_path = dir.join("cordis.patch.yml");
 
     let mut raw = if patch_path.exists() {
@@ -247,7 +207,7 @@ pub async fn set_plugins_enabled(
 
     for package in &input.plugin_ids {
         let cordis_id = cordis_id_of(package);
-        raw = set_disabled_row(&raw, &cordis_id, input.enabled);
+        raw = crate::profile::set_disabled_row(&raw, &cordis_id, input.enabled);
     }
 
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
@@ -276,7 +236,7 @@ pub async fn uninstall_plugin(
     input: UninstallPluginInput,
 ) -> Result<(), String> {
     let (home_path, version_dir) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = profile_dir(&home_path, &input.profile);
+    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
     if !dir.exists() {
         return Err(format!("Profile「{}」不存在", input.profile));
     }
@@ -284,9 +244,8 @@ pub async fn uninstall_plugin(
     // `dsh plugin remove <id>` through an installed CLI: it removes the
     // dependency and reconciles dsh.profile.bundles (a name that is no
     // longer an installed bundle leaves the layer stack), so the manifest is
-    // never edited by hand here. Runs synchronously; the frontend shows its
-    // own progress state.
-    run_dsh_plugin_sync(
+    // never edited by hand here. The frontend shows its own progress state.
+    run_dsh_plugin(
         &state,
         &PluginCliTarget {
             version_dir: &version_dir,
@@ -298,17 +257,17 @@ pub async fn uninstall_plugin(
             spec: &input.plugin_id,
             loglevel: "warn",
         },
-    )?;
+    )
+    .await?;
 
     // 2. Drop the plugin's rows from cordis.patch.yml (insert rows mount the
-    //    plugin; disabled rows gate it). Reuse the block-stripping logic in
-    //    set_disabled_row by removing any block whose id matches.
+    //    plugin; disabled rows gate it) — owned by the profile module.
     let patch_path = dir.join("cordis.patch.yml");
     if patch_path.exists() {
         let raw = std::fs::read_to_string(&patch_path)
             .map_err(|e| format!("读取 cordis.patch.yml 失败: {e}"))?;
         let cordis_id = cordis_id_of(&input.plugin_id);
-        let cleaned = strip_cordis_rows(&raw, &cordis_id, &input.plugin_id);
+        let cleaned = crate::profile::strip_cordis_rows(&raw, &cordis_id, &input.plugin_id);
         if cleaned != raw {
             std::fs::write(&patch_path, &cleaned)
                 .map_err(|e| format!("写入 cordis.patch.yml 失败: {e}"))?;
@@ -316,135 +275,6 @@ pub async fn uninstall_plugin(
     }
 
     Ok(())
-}
-
-/// Strips every cordis.patch.yml block whose id equals `cordis_id` (matching
-/// plain `- id:` / `id:` rows, including `- insert:` wrappers) and restores
-/// the `[]` placeholder when the document becomes empty.
-fn strip_cordis_rows(raw: &str, cordis_id: &str, plugin_id: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut skip = false;
-    for line in raw.lines() {
-        let t = line.trim();
-        if t == "[]" {
-            continue;
-        }
-        // Start of a block for the target: `- id: <id>` (plain or insert row).
-        let is_target = t == format!("- id: {cordis_id}")
-            || t == format!("id: {cordis_id}")
-            || t == format!("- id: {plugin_id}")
-            || t == format!("id: {plugin_id}");
-        if is_target {
-            skip = true;
-            continue;
-        }
-        if skip {
-            // Inside a target block: drop indented child lines and blank
-            // separators; stop at the next top-level key.
-            if t.is_empty() {
-                continue;
-            }
-            let indent = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-            if indent > 0 {
-                continue;
-            }
-            skip = false;
-        }
-        out.push(line.to_string());
-    }
-
-    let mut cleaned: Vec<String> = out;
-    while cleaned.last().map(|l| l.trim().is_empty()) == Some(true) {
-        cleaned.pop();
-    }
-    let mut result = cleaned.join("\n");
-    if !result.ends_with('\n') {
-        result.push('\n');
-    }
-    let body: String = result
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if body.trim().is_empty() {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str("[]\n");
-    }
-    result
-}
-
-/// Add or remove a `disabled: true` row for a cordis id in cordis.patch.yml.
-fn set_disabled_row(raw: &str, cordis_id: &str, enabled: bool) -> String {
-    // Remove any existing rows for this id (both plain and commented forms).
-    let mut out: Vec<String> = Vec::new();
-    let mut skip_block = false;
-    for line in raw.lines() {
-        let t = line.trim();
-        // A top-level `[]` placeholder is dropped when we have any real entry
-        // to write; it is kept only while the document stays empty.
-        if t == "[]" {
-            continue;
-        }
-        let is_target_id = t == format!("- id: {cordis_id}") || t == format!("id: {cordis_id}");
-        if is_target_id {
-            // Start of a block for this id; look ahead: if it is a pure
-            // `disabled: true` block we drop it entirely.
-            skip_block = true;
-            continue;
-        }
-        if skip_block {
-            // Inside the block: only `disabled:` and blank lines belong to it.
-            if t == "disabled: true" || t == "disabled: false" || t.is_empty() {
-                skip_block = false; // end of this small block
-                continue;
-            }
-            // Block has other content (config etc.) — keep it, stop skipping.
-            skip_block = false;
-            out.push(line.to_string());
-            continue;
-        }
-        out.push(line.to_string());
-    }
-
-    let mut cleaned: Vec<String> = out;
-    // Trim trailing blank lines.
-    while cleaned.last().map(|l| l.trim().is_empty()) == Some(true) {
-        cleaned.pop();
-    }
-
-    if !enabled {
-        // Append a fresh disable row (block sequence, never after `[]`).
-        cleaned.push(String::new());
-        cleaned.push(format!("- id: {cordis_id}"));
-        cleaned.push("  disabled: true".to_string());
-    }
-
-    let mut result = cleaned.join("\n");
-    if !result.ends_with('\n') {
-        result.push('\n');
-    }
-    // If the document became empty again (everything removed), restore the
-    // `[]` placeholder so the file stays a valid top-level array.
-    let body: String = result
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if body.trim().is_empty() {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str("[]\n");
-    }
-    result
 }
 
 /// Which instance/profile a `dsh plugin` invocation targets.
@@ -463,7 +293,7 @@ struct PluginCliOp<'a> {
 }
 
 /// Runs one `dsh plugin --profile <name> <pnpm subcommand> <spec/id>` through
-/// the instance's own CLI, streaming its output into the task log.
+/// the instance's own CLI.
 ///
 /// The launcher still prepares the two things the CLI does not: the
 /// build-scripts opt-in (pnpm ≥10 `onlyBuiltDependencies` / pnpm 11
@@ -473,42 +303,41 @@ struct PluginCliOp<'a> {
 /// invocation is retried once so native deps (node-pty, koffi, esbuild,
 /// sharp…) actually build. The CLI prints the same advice for git-hosted
 /// plugins, which this automates.
-/// Runs one `dsh plugin --profile <name> remove <id>` synchronously and
-/// returns its combined output on failure. The uninstall path is a plain
-/// command now (no background task): short-lived, cancellable by dropping
-/// the await on the frontend, with errors surfaced directly.
-fn run_dsh_plugin_sync(
+///
+/// Short-lived and interactive: errors surface directly to the caller (the
+/// frontend shows its own progress state and cancels by dropping the await).
+async fn run_dsh_plugin(
     state: &State<'_, AppState>,
     target: &PluginCliTarget<'_>,
     op: &PluginCliOp<'_>,
 ) -> Result<(), String> {
     let (version_dir, home_path, profile) = (target.version_dir, target.home_path, target.profile);
     let (subcommand, spec, loglevel) = (op.subcommand, op.spec, op.loglevel);
-    let dir = profile_dir(home_path, profile);
+    let dir = crate::profile::profile_dir(home_path, profile)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
     ensure_build_scripts_allowed(&dir)?;
     // Never let a plugin's peers pull a second copy of a core package in.
     ensure_profile_npmrc(&dir)?;
 
-    let pnpm_prog = ensure_pnpm_for_plugins(state)?;
+    let pnpm_prog = crate::toolchain::ensure_pnpm(state).await?;
     let what = format!("dsh plugin {subcommand}");
 
     // A node_modules tree linked from a *different* pnpm store makes pnpm
     // fail with ERR_PNPM_UNEXPECTED_STORE; relink proactively like the
     // installer path did.
-    let store_dir = state.data_dir.join(".pnpm-store");
+    let store_dir = crate::toolchain::store_dir(&state.data_dir);
     if let Some(linked) = linked_store_dir(&dir) {
         if !store_paths_match(&linked, &store_dir.to_string_lossy()) {
             crate::log_info!("node_modules 链接自其他 pnpm store（{linked}），重新链接后重试");
-            relink_profile_store_sync(state, target, &pnpm_prog)?;
+            relink_profile_store(state, target, &pnpm_prog).await?;
         }
     }
 
     for attempt in 1..=2 {
         let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
         args.extend(forwarded_pnpm_flags(state, loglevel, subcommand));
-        let cmd = dsh_plugin_command(version_dir, home_path, profile, &args, &pnpm_prog)?;
-        match run_command_sync(cmd, &what) {
+        let cmd = crate::launch::plugin_command(version_dir, home_path, profile, &args, &pnpm_prog)?;
+        match run_command(cmd, &what).await {
             Ok(()) => return Ok(()),
             Err(out) if attempt == 1 && mentions_ignored_builds(&out) => {
                 crate::log_info!("pnpm 拦截了依赖构建脚本，批准 allowBuilds 后重试");
@@ -516,7 +345,7 @@ fn run_dsh_plugin_sync(
             }
             Err(out) if attempt == 1 && mentions_unexpected_store(&out) => {
                 crate::log_info!("pnpm 报告 store 位置不一致，重新链接后重试");
-                relink_profile_store_sync(state, target, &pnpm_prog)?;
+                relink_profile_store(state, target, &pnpm_prog).await?;
             }
             Err(out) => return Err(format!("{what} 失败: {}", summarize_output(&out))),
         }
@@ -524,13 +353,16 @@ fn run_dsh_plugin_sync(
     unreachable!("attempt loop covers both attempts")
 }
 
-/// Runs a piped child command synchronously, returning the FULL combined
-/// output on failure: retryable-error detection (store mismatch, ignored
-/// builds) matches markers like `ERR_PNPM_UNEXPECTED_STORE` that pnpm prints
-/// at the START of its diagnostics, so callers must see the whole output.
-/// Display sites compress it through [`summarize_output`].
-fn run_command_sync(mut cmd: std::process::Command, what: &str) -> Result<(), String> {
-    let out = cmd.output().map_err(|e| format!("{what} 启动失败: {e}"))?;
+/// Runs a piped child command, returning the FULL combined output on
+/// failure: retryable-error detection (store mismatch, ignored builds)
+/// matches markers like `ERR_PNPM_UNEXPECTED_STORE` that pnpm prints at the
+/// START of its diagnostics, so callers must see the whole output. Display
+/// sites compress it through [`summarize_output`].
+async fn run_command(mut cmd: tokio::process::Command, what: &str) -> Result<(), String> {
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("{what} 启动失败: {e}"))?;
     if out.status.success() {
         return Ok(());
     }
@@ -611,12 +443,12 @@ fn store_paths_match(a: &str, b: &str) -> bool {
 /// reinstall re-imports the same versions; it only costs the first
 /// re-download into the launcher's store. Routing through
 /// `dsh plugin install` keeps the CLI's bundle reconciliation in the loop.
-fn relink_profile_store_sync(
+async fn relink_profile_store(
     state: &State<'_, AppState>,
     target: &PluginCliTarget<'_>,
     pnpm_prog: &std::path::Path,
 ) -> Result<(), String> {
-    let dir = profile_dir(target.home_path, target.profile);
+    let dir = crate::profile::profile_dir(target.home_path, target.profile)?;
     let nm = dir.join("node_modules");
     if nm.exists() {
         std::fs::remove_dir_all(&nm)
@@ -624,87 +456,23 @@ fn relink_profile_store_sync(
     }
     let mut args: Vec<String> = vec!["install".to_string()];
     args.extend(forwarded_pnpm_flags(state, "warn", "install"));
-    let cmd = dsh_plugin_command(
+    let cmd = crate::launch::plugin_command(
         target.version_dir,
         target.home_path,
         target.profile,
         &args,
         pnpm_prog,
     )?;
-    run_command_sync(cmd, "dsh plugin install（重新链接 store）").map_err(|e| {
-        format!(
-            "dsh plugin install（重新链接 store） 失败: {}",
-            summarize_output(&e)
-        )
-    })
+    run_command(cmd, "dsh plugin install（重新链接 store）")
+        .await
+        .map_err(|e| {
+            format!(
+                "dsh plugin install（重新链接 store） 失败: {}",
+                summarize_output(&e)
+            )
+        })
 }
 
-
-/// Builds a `dsh plugin --profile <name> <pnpm args…>` invocation for an
-/// instance's own CLI version.
-///
-/// Profile plugin management is a CLI-private flow: `dsh plugin` initializes
-/// the profile when needed, forwards the remaining arguments to pnpm with
-/// cwd = the profile directory, and then reconciles `dsh.profile.bundles`
-/// against the *installed* state (a dependency whose package declares
-/// `dsh.bundle.patch` joins the layer stack; one that no longer does leaves
-/// it). Driving pnpm ourselves would produce a tree the CLI does not expect
-/// and would leave the layer list to be guessed at, so every install and
-/// removal goes through the CLI of the version that instance runs.
-///
-/// The CLI resolves pnpm from PATH, so the launcher's pinned pnpm
-/// (`REQUIRED_PNPM_MAJOR`) is prepended to PATH: the pin then also applies
-/// inside the CLI's own pnpm invocation.
-fn dsh_plugin_command(
-    version_dir: &std::path::Path,
-    home_path: &std::path::Path,
-    profile: &str,
-    pnpm_args: &[String],
-    pnpm_prog: &std::path::Path,
-) -> Result<std::process::Command, String> {
-    let bin = crate::process::version_bin(version_dir);
-    if !crate::process::version_bin_ready(version_dir) {
-        return Err(format!(
-            "版本安装不完整（缺少 {}），请重新安装该 DSH 版本",
-            bin.display()
-        ));
-    }
-
-    let mut cmd = std::process::Command::new(crate::process::node());
-    cmd.arg(&bin)
-        .arg("plugin")
-        .arg("--profile")
-        .arg(profile)
-        .args(pnpm_args)
-        .env("DSH_HOME", home_path)
-        // The launcher can never answer an interactive prompt: pnpm aborts
-        // with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY when it needs to
-        // purge a modules dir (store/virtual-store relink) without a TTY.
-        // CI=true makes pnpm treat the run as non-interactive instead.
-        .env("CI", "true");
-
-    // Prepend the pinned pnpm's directory so the CLI's `spawnSync("pnpm")`
-    // picks it up instead of whatever major is on the user's PATH.
-    if let Some(pnpm_dir) = pnpm_prog.parent() {
-        if !pnpm_dir.as_os_str().is_empty() {
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            let mut entries = vec![pnpm_dir.to_path_buf()];
-            entries.extend(std::env::split_paths(&existing));
-            match std::env::join_paths(entries) {
-                Ok(joined) => {
-                    cmd.env("PATH", joined);
-                }
-                Err(e) => {
-                    crate::log_warn!("拼接 PATH 失败，沿用系统 PATH: {e}");
-                }
-            }
-        }
-    }
-
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    Ok(cmd)
-}
 
 /// Common pnpm flags forwarded through `dsh plugin` (shared store, network
 /// robustness, optional registry mirror). `--prefix` is deliberately absent:
@@ -719,30 +487,18 @@ fn forwarded_pnpm_flags(
     loglevel: &str,
     subcommand: &str,
 ) -> Vec<String> {
-    let store_dir = state.data_dir.join(".pnpm-store");
+    let store_dir = crate::toolchain::store_dir(&state.data_dir);
     let mut args: Vec<String> = vec![
         "--store-dir".to_string(),
         store_dir.to_string_lossy().to_string(),
         format!("--loglevel={loglevel}"),
     ];
     if subcommand != "remove" {
-        args.extend([
-            "--fetch-timeout".to_string(),
-            "300000".to_string(),
-            "--fetch-retries".to_string(),
-            "5".to_string(),
-            "--fetch-retry-maxtimeout".to_string(),
-            "120000".to_string(),
-            "--network-concurrency".to_string(),
-            "4".to_string(),
-        ]);
+        args.extend(crate::toolchain::pnpm_fetch_flags().map(String::from));
     }
-    if let Ok(registry) = std::env::var("DSH_NPM_REGISTRY") {
-        let registry = registry.trim().to_string();
-        if !registry.is_empty() {
-            args.push("--registry".to_string());
-            args.push(registry);
-        }
+    if let Some(registry) = crate::toolchain::registry_mirror() {
+        args.push("--registry".to_string());
+        args.push(registry);
     }
     args
 }
@@ -870,50 +626,6 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
-/// Resolve a pnpm executable on the required major, bootstrapping the
-/// pinned one into the data dir when needed (same policy as version
-/// installs, but synchronous and logging to the app log instead of a task).
-fn ensure_pnpm_for_plugins(state: &State<'_, AppState>) -> Result<std::path::PathBuf, String> {
-    use std::process::Command;
-    let major = crate::tasks::REQUIRED_PNPM_MAJOR;
-    let probe = |prog: &std::path::Path| -> bool {
-        Command::new(prog)
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| crate::tasks::pnpm_major_pub(&String::from_utf8_lossy(&o.stdout)))
-            .map(|m| m == major)
-            .unwrap_or(false)
-    };
-    let system = std::path::PathBuf::from(crate::process::pnpm());
-    if probe(&system) {
-        return Ok(system);
-    }
-    let tools_dir = state.data_dir.join("tools");
-    let local = tools_dir.join("pnpm");
-    if local.exists() && probe(&local) {
-        return Ok(local);
-    }
-    std::fs::create_dir_all(&tools_dir).map_err(|e| format!("创建工具目录失败: {e}"))?;
-    crate::log_info!("正在安装 DSH profile 所需的 pnpm@{major}…");
-    let out = Command::new(crate::process::npm())
-        .args(["install", "--global", "--prefix"])
-        .arg(&tools_dir)
-        .arg(format!("pnpm@{major}"))
-        .output()
-        .map_err(|e| format!("pnpm 安装启动失败: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let last = err.lines().last().unwrap_or("未知错误").to_string();
-        return Err(format!("pnpm 安装失败: {last}"));
-    }
-    if !local.exists() {
-        return Err(format!("pnpm 安装完成但未找到可执行文件: {}", local.display()));
-    }
-    Ok(local)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,72 +709,11 @@ mod tests {
         assert_eq!(summarize_output("\n  \n"), "");
     }
 
-    #[test]
-    fn set_disabled_row_adds_and_removes() {
-        let raw = "# comment\n- id: other-plugin\n  config:\n    a: 1\n";
-        // Add a disable row for dsh-auxiliary.
-        let out = set_disabled_row(raw, "dsh-auxiliary", false);
-        assert!(out.contains("- id: dsh-auxiliary"), "out: {out}");
-        assert!(out.contains("  disabled: true"), "out: {out}");
-        // The unrelated block must be preserved.
-        assert!(out.contains("other-plugin"), "out: {out}");
-        assert!(out.contains("config"), "out: {out}");
-        assert!(out.contains("a: 1"), "out: {out}");
-
-        // Remove it again -> back to the original content.
-        let back = set_disabled_row(&out, "dsh-auxiliary", true);
-        assert!(!back.contains("dsh-auxiliary"), "back: {back}");
-        assert!(back.contains("other-plugin"), "back: {back}");
-        assert!(back.contains("config"), "back: {back}");
-    }
-
-    #[test]
-    fn set_disabled_row_replaces_existing() {
-        let raw = "- id: dsh-auxiliary\n  disabled: true\n";
-        let out = set_disabled_row(raw, "dsh-auxiliary", true);
-        assert!(!out.contains("dsh-auxiliary"), "out: {out}");
-        // Re-disable after removal.
-        let out2 = set_disabled_row(&out, "dsh-auxiliary", false);
-        assert!(out2.contains("- id: dsh-auxiliary"), "out2: {out2}");
-        assert!(out2.contains("  disabled: true"), "out2: {out2}");
-    }
-
-    #[test]
-    fn read_disabled_ids_parses_blocks() {
-        let dir = std::env::temp_dir().join(format!("dsh-plugins-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("cordis.patch.yml"),
-            "# header\n- id: ui-dsh-aionui-panel\n  disabled: true\n\n- id: live-stats\n  disabled: true\n\n- id: keep\n  config:\n    x: 1\n",
-        )
-        .unwrap();
-        let set = read_disabled_ids(&dir);
-        assert!(set.contains("ui-dsh-aionui-panel"));
-        assert!(set.contains("live-stats"));
-        assert!(!set.contains("keep"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn strip_cordis_rows_removes_insert_and_disabled_blocks() {
-        // A plugin mounted via an insert row plus a disabled row for another
-        // plugin must leave the other plugin intact.
-        let raw = "# header\n- insert:\n    - id: dsh-auxiliary\n      name: '@dsh-plugin/dsh-auxiliary'\n\n- id: dsh-thought-buddy\n  disabled: true\n\n- id: keep\n  config:\n    x: 1\n";
-        let out = strip_cordis_rows(raw, "dsh-auxiliary", "@dsh-plugin/dsh-auxiliary");
-        assert!(!out.contains("dsh-auxiliary"), "insert row removed: {out}");
-        assert!(out.contains("dsh-thought-buddy"), "other block kept: {out}");
-        assert!(out.contains("keep"), "config block kept: {out}");
-        assert!(out.contains("x: 1"), "config content kept: {out}");
-    }
-
-    #[test]
-    fn strip_cordis_rows_restores_placeholder_when_empty() {
-        let raw = "# header\n- id: dsh-auxiliary\n  disabled: true\n";
-        let out = strip_cordis_rows(raw, "dsh-auxiliary", "@dsh-plugin/dsh-auxiliary");
-        assert!(out.contains("[]"), "placeholder restored: {out}");
-        assert!(!out.contains("dsh-auxiliary"), "entry removed: {out}");
-    }
-
+    
+    
+    
+    
+    
     // Live network smoke tests (skipped by default; run with
     // `cargo test plugins::tests::live_ -- --ignored`).
     #[test]
