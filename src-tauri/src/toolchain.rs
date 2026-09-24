@@ -71,32 +71,51 @@ pub(crate) fn store_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(".pnpm-store")
 }
 
-/// Network robustness flags for pnpm *download* subcommands (`add` /
+/// Network robustness settings for pnpm *download* subcommands (`add` /
 /// `install`): the defaults (60s timeout, 2 retries) are too tight for large
-/// native binaries (e.g. sharp), which abort on flaky connections. `pnpm
-/// remove` rejects these flags outright, so download-capable commands append
-/// them themselves.
+/// native binaries (e.g. sharp), which abort on flaky connections.
 ///
-/// They are spelled as `--config.<name>=<value>` rather than the bare
-/// `--fetch-timeout N` form because pnpm 12's CLI rewrite (Rust/clap) dropped
-/// the bare spellings: `--fetch-retries` fails with "unexpected argument" and
-/// `--loglevel=http` is not even a valid value any more. The `--config.` form
-/// is accepted by both major 11 and 12, which is what lets the launcher run on
-/// either. `--network-concurrency` has no cross-major spelling at all
+/// They travel as `pnpm_config_*` environment variables, NOT as
+/// `--config.<name>=<value>` flags. The flag form looks cross-major but is a
+/// trap on pnpm 11: pnpm re-parses the collected `--config.` args with an
+/// empty type map (`nopt({}, {}, configDotArgs)` in pnpm.mjs), so
+/// `--config.fetch-timeout=300000` reaches `AbortSignal.timeout()` as the
+/// *string* "300000". Node throws ERR_INVALID_ARG_TYPE, pnpm swallows that
+/// rejection, and the install promise never settles: the task sits at its
+/// percent ceiling forever having downloaded nothing. That is the
+/// stuck-near-100% report -- the progress bar is a heartbeat, not a download.
+///
+/// Env vars instead go through the config reader, which coerces by declared
+/// type (`fetch-timeout` is declared `Number`), so both majors get a number.
+/// Verified against pnpm 11.22.0 and 12.4.2.
+///
+/// `--network-concurrency` has no cross-major spelling at all
 /// (`--config.network-concurrency=4` crashes pnpm 11 with "Expected
-/// `concurrency` to be a number from 1 and up"), so it is deliberately absent:
-/// pnpm's default concurrency is a fine trade for one flag set that works
-/// everywhere.
-pub(crate) fn pnpm_fetch_flags() -> [&'static str; 3] {
+/// `concurrency` to be a number from 1 and up"), so it is deliberately
+/// absent: pnpm's default concurrency is a fine trade for one settings set
+/// that works everywhere.
+pub(crate) fn pnpm_network_env() -> [(&'static str, &'static str); 3] {
     [
-        "--config.fetch-timeout=300000", // 5 min per request
-        "--config.fetch-retries=5",
-        "--config.fetch-retry-maxtimeout=120000",
+        ("pnpm_config_fetch_timeout", "300000"), // 5 min per request
+        ("pnpm_config_fetch_retries", "5"),
+        ("pnpm_config_fetch_retry_maxtimeout", "120000"),
     ]
 }
 
+/// Applies [`pnpm_network_env`] to a command that downloads through pnpm.
+///
+/// Env is the only channel that carries these settings intact on pnpm 11 (see
+/// [`pnpm_network_env`]), and it survives being inherited: the `dsh plugin`
+/// path spawns pnpm itself, so the variables set on the CLI process are what
+/// reaches pnpm there.
+pub(crate) fn apply_pnpm_network_env(cmd: &mut tokio::process::Command) {
+    for (key, value) in pnpm_network_env() {
+        cmd.env(key, value);
+    }
+}
+
 /// The full pnpm argument set for a command that writes to the launcher's
-/// shared store: store, log level, network robustness, optional registry.
+/// shared store: store, log level, optional registry.
 ///
 /// This is the one place those choices are made. Three call sites used to
 /// assemble the same four pieces independently (npm version install, source
@@ -105,19 +124,17 @@ pub(crate) fn pnpm_fetch_flags() -> [&'static str; 3] {
 /// false for subcommands that reject the download flags outright (`pnpm
 /// remove` fails with "Unknown options: 'fetch-timeout'" before touching
 /// anything).
-pub(crate) fn pnpm_store_flags(
-    store_dir: &Path,
-    loglevel: &str,
-    fetch: bool,
-) -> Vec<String> {
+///
+/// The network-robustness settings are NOT here: they must reach pnpm as
+/// `pnpm_config_*` env vars (see [`pnpm_network_env`]), which is a property of
+/// the command, not of this argument list. Download-capable callers pair this
+/// with [`apply_pnpm_network_env`].
+pub(crate) fn pnpm_store_flags(store_dir: &Path, loglevel: &str) -> Vec<String> {
     let mut args = vec![
         "--store-dir".to_string(),
         store_dir.to_string_lossy().to_string(),
         format!("--config.loglevel={loglevel}"),
     ];
-    if fetch {
-        args.extend(pnpm_fetch_flags().iter().map(|f| f.to_string()));
-    }
     if let Some(registry) = registry_mirror() {
         args.push("--registry".to_string());
         args.push(registry);
@@ -262,21 +279,33 @@ mod tests {
     }
 
     #[test]
-    fn fetch_flags_all_use_the_cross_major_config_spelling() {
-        // pnpm 12 rejects the bare `--fetch-retries` / `--loglevel=http`
-        // spellings, so every flag must carry the `--config.` prefix and its
-        // value inline. This is the invariant that lets one flag set serve
-        // both majors.
-        for flag in pnpm_fetch_flags() {
+    fn network_settings_ride_as_env_not_config_flags() {
+        // Regression guard for the stuck-install bug: the network settings must
+        // NOT be passed as `--config.fetch-*=...`. pnpm 11 re-parses those with
+        // an empty type map, so the value arrives as a string and
+        // `AbortSignal.timeout()` throws ERR_INVALID_ARG_TYPE. pnpm swallows
+        // that rejection, the install promise never settles, and the task hangs
+        // at its percent ceiling having downloaded nothing.
+        for (key, value) in pnpm_network_env() {
             assert!(
-                flag.starts_with("--config.") && flag.contains('='),
-                "flag must be --config.<name>=<value>: {flag}"
+                key.starts_with("pnpm_config_"),
+                "network settings must use the pnpm_config_ env prefix: {key}"
             );
+            assert!(
+                !key.contains('-'),
+                "env keys cannot contain dashes: {key}"
+            );
+            assert!(!value.is_empty(), "missing value for {key}");
         }
+        // The three settings the flag set used to carry must all still be here.
+        let keys: Vec<&str> = pnpm_network_env().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&"pnpm_config_fetch_timeout"));
+        assert!(keys.contains(&"pnpm_config_fetch_retries"));
+        assert!(keys.contains(&"pnpm_config_fetch_retry_maxtimeout"));
         // `--network-concurrency` has no cross-major spelling; its absence is
         // deliberate, so guard against it being reintroduced by habit.
         assert!(
-            !pnpm_fetch_flags().iter().any(|f| f.contains("concurrency")),
+            !keys.iter().any(|k| k.contains("concurrency")),
             "network-concurrency cannot be passed to both majors"
         );
     }
@@ -297,20 +326,20 @@ mod tests {
     #[test]
     fn store_flags_carry_store_and_loglevel_always() {
         let store = Path::new("/data/.pnpm-store");
-        let with_fetch = pnpm_store_flags(store, "http", true);
-        assert!(with_fetch.iter().any(|a| a == "--store-dir"));
-        assert!(with_fetch.iter().any(|a| a == "/data/.pnpm-store"));
-        assert!(with_fetch.iter().any(|a| a == "--config.loglevel=http"));
-        assert!(with_fetch
-            .iter()
-            .any(|a| a.starts_with("--config.fetch-timeout")));
+        let flags = pnpm_store_flags(store, "http");
+        assert!(flags.iter().any(|a| a == "--store-dir"));
+        assert!(flags.iter().any(|a| a == "/data/.pnpm-store"));
+        assert!(flags.iter().any(|a| a == "--config.loglevel=http"));
     }
 
     #[test]
-    fn store_flags_drop_fetch_flags_for_non_download_subcommands() {
-        // `pnpm remove` fails on the fetch flags before touching anything.
-        let without = pnpm_store_flags(Path::new("/s"), "warn", false);
-        assert!(without.iter().any(|a| a == "--config.loglevel=warn"));
-        assert!(!without.iter().any(|a| a.starts_with("--config.fetch-")));
+    fn store_flags_never_carry_network_flags() {
+        // `pnpm remove` used to reject the fetch flags outright, which is why
+        // they are not in this arg list at all any more: env config is not
+        // validated per-subcommand. Guard that no `--config.fetch-*` sneaks back
+        // in -- that spelling is the stuck-install bug.
+        let flags = pnpm_store_flags(Path::new("/s"), "warn");
+        assert!(flags.iter().any(|a| a == "--config.loglevel=warn"));
+        assert!(!flags.iter().any(|a| a.starts_with("--config.fetch-")));
     }
 }

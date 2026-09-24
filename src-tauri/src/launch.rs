@@ -300,6 +300,12 @@ pub fn plugin_command(
         // CI=true makes pnpm treat the run as non-interactive instead.
         .env("CI", "true");
 
+    // The CLI spawns pnpm itself for plugin installs, so the network-robustness
+    // settings have to be inherited rather than passed on the CLI's argv. This
+    // is also the only spelling pnpm 11 honours: --config.fetch-* hangs it (see
+    // crate::toolchain::pnpm_network_env).
+    crate::toolchain::apply_pnpm_network_env(&mut cmd);
+
     // Prepend the pinned pnpm's directory so the CLI's `spawnSync("pnpm")`
     // picks it up instead of whatever major is on the user's PATH.
     if let Some(pnpm_dir) = pnpm_prog.parent() {

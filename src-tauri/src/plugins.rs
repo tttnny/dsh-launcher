@@ -336,7 +336,7 @@ async fn run_dsh_plugin(
 
     for attempt in 1..=2 {
         let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
-        args.extend(forwarded_pnpm_flags(state, loglevel, subcommand));
+        args.extend(forwarded_pnpm_flags(state, loglevel));
         let cmd =
             crate::launch::plugin_command(&node, version_dir, home_path, profile, &args, &pnpm_prog)?;
         match run_command(cmd, &what).await {
@@ -457,7 +457,7 @@ async fn relink_profile_store(
             .map_err(|e| format!("清理旧 node_modules 失败（{}）: {e}", nm.display()))?;
     }
     let mut args: Vec<String> = vec!["install".to_string()];
-    args.extend(forwarded_pnpm_flags(state, "warn", "install"));
+    args.extend(forwarded_pnpm_flags(state, "warn"));
     let node = crate::runtime::node_for_spawn_checked(state).await?;
     let cmd = crate::launch::plugin_command(
         &node,
@@ -484,15 +484,16 @@ async fn relink_profile_store(
 ///
 /// The flag *set* lives in [`crate::toolchain::pnpm_store_flags`] so this path
 /// and the launcher's own installs can never drift apart; only the
-/// download-flag toggle is decided here, because `pnpm remove` rejects the
-/// fetch flags.
-fn forwarded_pnpm_flags(
-    state: &State<'_, AppState>,
-    loglevel: &str,
-    subcommand: &str,
-) -> Vec<String> {
+/// The network-robustness settings are deliberately NOT forwarded as flags:
+/// the `--config.fetch-*` spelling hangs pnpm 11 (see
+/// [`crate::toolchain::pnpm_network_env`]). They ride along as env vars
+/// instead, set on the CLI process by [`crate::launch::plugin_command`] so the
+/// `pnpm` it spawns inherits them -- which also means `pnpm remove` no longer
+/// needs special-casing, since env config is never rejected the way an
+/// unknown flag is.
+fn forwarded_pnpm_flags(state: &State<'_, AppState>, loglevel: &str) -> Vec<String> {
     let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    crate::toolchain::pnpm_store_flags(&store_dir, loglevel, subcommand != "remove")
+    crate::toolchain::pnpm_store_flags(&store_dir, loglevel)
 }
 
 /// Pins `auto-install-peers=false` in a profile's `.npmrc`.

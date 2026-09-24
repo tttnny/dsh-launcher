@@ -752,12 +752,13 @@ async fn install_via_pnpm(
         // Network robustness: the default fetch timeout (60s) and retries (2)
         // are too tight for large native binaries (e.g. sharp-win32-x64),
         // which fail with "error (23) ... aborted due to timeout" on flaky
-        // connections.
+        // connections. These ride along as pnpm_config_* env vars -- the
+        // --config.fetch-* flag spelling hangs pnpm 11 (see
+        // crate::toolchain::pnpm_network_env).
         cmd.args(["install", "--prefix"])
             .arg(dir)
-            .args(crate::toolchain::pnpm_store_flags(
-                store_dir, "http", true,
-            ));
+            .args(crate::toolchain::pnpm_store_flags(store_dir, "http"));
+        crate::toolchain::apply_pnpm_network_env(&mut cmd);
         cmd.arg(format!("@deepseek-ai/dsh@{version}"));
         // No TTY under the launcher: keep pnpm non-interactive so a modules
         // purge (store relink) never aborts with
@@ -991,9 +992,8 @@ async fn install_version_from_repo(
     crate::process::hide_console(&mut cmd);
     cmd.current_dir(&dir)
         .args(["install", "--frozen-lockfile"])
-        .args(crate::toolchain::pnpm_store_flags(
-            &store_dir, "http", true,
-        ));
+        .args(crate::toolchain::pnpm_store_flags(&store_dir, "http"));
+    crate::toolchain::apply_pnpm_network_env(&mut cmd);
     cmd.env("CI", "true");
     run_streamed_command(app, state, task_id, cmd, "pnpm install（源码）").await?;
     ensure_pending_builds(app, state, task_id, &dir, &pnpm_prog).await?;
