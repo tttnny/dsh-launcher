@@ -63,14 +63,19 @@ jobs:
           # does not try to locate a pnpm executable.
           package-manager-cache: false
       # This project has no container-backed protocol tests; the isolated
-      # Linux job runs the release-note classifier tests and the manifest
-      # synchronization check instead.
+      # Linux job runs the source-level contract tests and the manifest
+      # synchronization check instead. All of them only read files, so they
+      # run on any platform.
       - name: Version synchronization
         run: node ci/check-versions.mjs
       - name: Release-note classifier tests
         run: node --test ci/release-notes.test.mjs
       - name: Bump-version tests
         run: node --test ci/bump-version.test.mjs
+      - name: API contract tests
+        run: node --test ci/api-contract.test.mjs
+      - name: Setup-page guidance tests
+        run: node --test ci/setup-guidance.test.mjs
 
   prepare:
     needs: [quality, integration]

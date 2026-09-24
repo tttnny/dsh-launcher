@@ -124,7 +124,11 @@ onUnmounted(() => {
         </p>
       </div>
 
-      <!-- Guidance: node missing -->
+      <!-- Guidance: one block per missing tool, so a machine that lacks both is
+           told both things at once. They used to be mutually exclusive (the
+           pnpm block required nodeOk), which left a fresh machine with a Node
+           command only — the user would install Node, assume they were done,
+           and hit the missing-pnpm error when installing a version. -->
       <div v-if="!nodeOk" class="guide-block">
         <h4>{{ t('setup.installNode') }}</h4>
         <p class="guide-desc">{{ t('setup.nodeCommandDesc') }}</p>
@@ -134,11 +138,9 @@ onUnmounted(() => {
             {{ copiedKey === 'node' ? t('common.copied') : t('common.copy') }}
           </button>
         </div>
-        <p class="guide-hint">{{ t('setup.afterInstallHint') }}</p>
       </div>
 
-      <!-- Guidance: node present, pnpm missing -->
-      <div v-if="nodeOk && !pnpmOk" class="guide-block">
+      <div v-if="!pnpmOk" class="guide-block">
         <h4>{{ t('setup.installPnpm') }}</h4>
         <p class="guide-desc">{{ t('setup.pnpmCommandDesc', { major: requirements?.min_pnpm_major }) }}</p>
         <div class="cmd-row">
@@ -147,8 +149,11 @@ onUnmounted(() => {
             {{ copiedKey === 'pnpm' ? t('common.copied') : t('common.copy') }}
           </button>
         </div>
-        <p class="guide-hint">{{ t('setup.afterInstallHint') }}</p>
       </div>
+
+      <!-- Shown once for however many blocks are above, so the "come back and
+           it re-checks itself" instruction is not repeated per tool. -->
+      <p v-if="!allOk" class="guide-hint shared-hint">{{ t('setup.afterInstallHint') }}</p>
 
       <div v-if="allOk" class="guide-block ready-block">
         <a-result status="success" :title="t('setup.allReady')" />
@@ -264,6 +269,13 @@ h2 {
   margin: 12px 0 0;
   font-size: 12px;
   color: var(--color-text-3);
+}
+
+/* The shared "it re-checks itself" line sits outside the guide blocks, so it
+   needs its own inset to line up with their text. */
+.shared-hint {
+  margin: 10px 0 0;
+  padding: 0 4px;
 }
 
 .cmd-row {

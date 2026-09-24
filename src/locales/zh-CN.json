@@ -364,7 +364,7 @@
     "nodeCommandDesc": "在终端执行以下命令安装 Node.js：",
     "installPnpm": "安装 pnpm",
     "pnpmCommandDesc": "启动器需要 pnpm {major} 或更高版本。在终端执行以下命令安装：",
-    "afterInstallHint": "装完后切回本窗口即会自动重新检测，也可点下方「重新检测」。",
+    "afterInstallHint": "上面的命令都执行完后，切回本窗口即会自动重新检测，也可点下方「重新检测」。",
     "allReady": "环境已就绪",
     "enterApp": "进入启动器",
     "recheck": "重新检测"

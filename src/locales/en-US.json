@@ -364,7 +364,7 @@
     "nodeCommandDesc": "Run this in your terminal to install Node.js:",
     "installPnpm": "Install pnpm",
     "pnpmCommandDesc": "The launcher needs pnpm {major} or newer. Run this in your terminal:",
-    "afterInstallHint": "Come back to this window and the check re-runs automatically, or press Re-check below.",
+    "afterInstallHint": "Once you have run the commands above, come back to this window and the check re-runs automatically — or press Re-check below.",
     "allReady": "Environment ready",
     "enterApp": "Enter launcher",
     "recheck": "Re-check"
