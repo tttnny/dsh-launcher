@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import type { LauncherUpdateInfo, LogLevel, ThemeMode } from '@/api/types'
+import { useAction } from '@/composables/useAction'
 import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { SHORTCUT_DOCS } from '@/shortcuts'
@@ -28,13 +29,15 @@ const shortcutRows = computed<{ label: string; keys: string[]; native: boolean }
   SHORTCUT_DOCS.map((d) => ({ label: t(d.labelKey), keys: d.keys, native: d.native ?? false })),
 )
 
+const saveAction = useAction(
+  (patch: Parameters<typeof api.updateSettings>[0]) => api.updateSettings(patch),
+  { success: () => t('settings.saved') },
+)
+
 async function patchSettings(patch: Parameters<typeof api.updateSettings>[0]) {
-  try {
-    store.settings = await api.updateSettings(patch)
-    Message.success(t('settings.saved'))
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const res = await saveAction.run(patch)
+  if (res === undefined) return
+  store.settings = res
 }
 
 async function onThemeChange(value: unknown) {
@@ -46,7 +49,6 @@ async function onLogLevelChange(value: unknown) {
 }
 
 const launcherVersion = ref('')
-const checkingUpdate = ref(false)
 const updateInfo = ref<LauncherUpdateInfo | null>(null)
 const updateChannel = ref<'dev' | 'release'>('dev')
 
@@ -70,16 +72,14 @@ onMounted(async () => {
   }
 })
 
+const checkUpdateAction = useAction(() => api.checkLauncherUpdate(updateChannel.value))
+const checkingUpdate = computed(() => checkUpdateAction.busy['*'])
+
 async function onCheckUpdate() {
-  checkingUpdate.value = true
-  try {
-    updateInfo.value = await api.checkLauncherUpdate(updateChannel.value)
-    if (updateInfo.value.up_to_date) Message.success(t('settings.update.upToDate'))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    checkingUpdate.value = false
-  }
+  const res = await checkUpdateAction.run()
+  if (res === undefined) return
+  updateInfo.value = res
+  if (res.up_to_date) Message.success(t('settings.update.upToDate'))
 }
 
 async function onUpdateChannelChange(value: unknown) {
@@ -88,23 +88,18 @@ async function onUpdateChannelChange(value: unknown) {
   updateInfo.value = null
 }
 
+const openDataDirAction = useAction(() => api.openLauncherDirectory())
+
 async function onOpenDataDir() {
-  try {
-    const dir = await api.openLauncherDirectory()
-    dataDir.value = dir
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const dir = await openDataDirAction.run()
+  if (dir === undefined) return
+  dataDir.value = dir
 }
 
-async function onOpenLauncherLog() {
-  try {
-    const path = await api.openLauncherLog()
-    Message.success(t('settings.logOpened', { path }))
-  } catch (e) {
-    Message.error(String(e))
-  }
-}
+const openLogAction = useAction(() => api.openLauncherLog(), {
+  success: (path) => t('settings.logOpened', { path }),
+})
+const onOpenLauncherLog = openLogAction.run
 
 async function onLocaleChange(value: unknown) {
   await patchSettings({ locale: String(value) })

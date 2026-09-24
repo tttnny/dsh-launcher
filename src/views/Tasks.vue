@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
+import { useAction } from '@/composables/useAction'
 import type { TaskInfo } from '@/api/types'
 
 const { t } = useI18n()
@@ -47,22 +47,19 @@ function toggleExpand(id: string) {
   if (expanded.value[id]) scrollToBottom(id)
 }
 
-async function onCancel(id: string) {
-  try {
-    await api.cancelTask(id)
-  } catch (e) {
-    Message.error(String(e))
-  }
-}
+const cancelAction = useAction((id: string) => api.cancelTask(id), {
+  key: (id) => id,
+})
+const onCancel = cancelAction.run
 
-async function onRemove(id: string) {
-  try {
+const removeAction = useAction(
+  async (id: string) => {
     await api.removeTask(id)
     await store.refreshTasks()
-  } catch (e) {
-    Message.error(String(e))
-  }
-}
+  },
+  { key: (id) => id },
+)
+const onRemove = removeAction.run
 
 function formatTime(ms: number): string {
   return new Date(ms).toLocaleString()
@@ -112,7 +109,6 @@ const sortedTasks = computed(() => store.taskList)
             </div>
             <div class="task-meta tnum">
               {{ formatTime(task.created_at) }}
-              <template v-if="task.state === 'queued'"> · {{ t('tasks.queuedHint') }}</template>
               <template v-if="task.state === 'done' && instanceName(task)">
                 · {{ t('tasks.createdInstance', { name: instanceName(task) }) }}
               </template>
@@ -147,7 +143,7 @@ const sortedTasks = computed(() => store.taskList)
 
           <div class="task-actions" @click.stop>
             <button
-              v-if="task.state === 'running' || task.state === 'queued'"
+              v-if="task.state === 'running'"
               class="mac-action-pill warning"
               @click="onCancel(task.id)"
             >

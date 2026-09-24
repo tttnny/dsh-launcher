@@ -6,6 +6,7 @@ import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import type { InstalledPlugin } from '@/api/types'
+import { useAction } from '@/composables/useAction'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -91,7 +92,7 @@ function onSelectProfile(p: unknown) {
 
 const installedPlugins = ref<InstalledPlugin[]>([])
 const pluginsLoading = ref(false)
-const pluginsBusy = ref(false)
+const setEnabledBusy = ref(false)
 const selectedPlugins = ref<string[]>([])
 
 function displayVersion(raw?: string): string {
@@ -122,7 +123,7 @@ watch([selectedHomeId, selectedProfile], () => {
 
 async function onTogglePlugin(p: InstalledPlugin, enabled: boolean) {
   if (!selectedHomeId.value || !selectedProfile.value) return
-  pluginsBusy.value = true
+  setEnabledBusy.value = true
   try {
     await api.setPluginsEnabled({
       homeId: selectedHomeId.value,
@@ -141,28 +142,33 @@ async function onTogglePlugin(p: InstalledPlugin, enabled: boolean) {
     Message.error(String(e))
     await loadPlugins()
   } finally {
-    pluginsBusy.value = false
+    setEnabledBusy.value = false
   }
 }
 
+const uninstallAction = useAction(async (p: InstalledPlugin) => {
+  await api.uninstallPlugin({
+    homeId: selectedHomeId.value!,
+    profile: selectedProfile.value!,
+    pluginId: p.id,
+  })
+  return p.id
+}, {
+  success: (name) => t('plugins.pluginUninstalled', { name }),
+})
+
 async function onUninstallPlugin(p: InstalledPlugin) {
   if (!selectedHomeId.value || !selectedProfile.value) return
-  pluginsBusy.value = true
-  try {
-    await api.uninstallPlugin({
-      homeId: selectedHomeId.value,
-      profile: selectedProfile.value,
-      pluginId: p.id,
-    })
-    Message.success(t('plugins.pluginUninstalled', { name: p.id }))
-    Message.info(t('plugins.pluginRestartHint'))
-    await loadPlugins()
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    pluginsBusy.value = false
-  }
+  const uninstalled = await uninstallAction.run(p)
+  if (uninstalled === undefined) return
+  Message.info(t('plugins.pluginRestartHint'))
+  await loadPlugins()
 }
+
+// onTogglePlugin / batchSetEnabled stay manual: their catch re-syncs the list
+// via loadPlugins(), which useAction's catch cannot express. This union keeps
+// every plugin control disabled while any operation is in flight.
+const pluginsBusy = computed(() => setEnabledBusy.value || uninstallAction.busy['*'])
 
 async function batchSetEnabled(enabled: boolean) {
   if (
@@ -171,7 +177,7 @@ async function batchSetEnabled(enabled: boolean) {
     selectedPlugins.value.length === 0
   )
     return
-  pluginsBusy.value = true
+  setEnabledBusy.value = true
   const ids = [...selectedPlugins.value]
   try {
     await api.setPluginsEnabled({
@@ -194,7 +200,7 @@ async function batchSetEnabled(enabled: boolean) {
     Message.error(String(e))
     await loadPlugins()
   } finally {
-    pluginsBusy.value = false
+    setEnabledBusy.value = false
   }
 }
 

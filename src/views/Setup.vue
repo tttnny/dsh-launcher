@@ -16,9 +16,7 @@ const checking = ref(false)
 
 const nodeTaskId = ref('')
 const nodeTask = computed(() => (nodeTaskId.value ? store.tasks[nodeTaskId.value] : null))
-const installing = computed(
-  () => nodeTask.value?.state === 'running' || nodeTask.value?.state === 'queued',
-)
+const installing = computed(() => nodeTask.value?.state === 'running')
 
 async function oneClickInstall() {
   try {

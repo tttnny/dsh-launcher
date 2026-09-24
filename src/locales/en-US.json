@@ -340,9 +340,7 @@
     "cancel": "Cancel",
     "remove": "Remove",
     "createdInstance": "Instance \"{name}\" created",
-    "queuedHint": "Waiting for another plugin operation on the same profile",
     "state": {
-      "queued": "Queued",
       "running": "Running",
       "done": "Done",
       "error": "Failed",

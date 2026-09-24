@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
+import { useAction } from '@/composables/useAction'
 import { useLauncherStore } from '@/stores/launcher'
 import type { DshInstance } from '@/api/types'
 
@@ -21,12 +22,10 @@ const homeId = ref<string | undefined>(undefined)
 const dedicatedPath = ref('')
 const defaultProfile = ref<string | undefined>(undefined)
 const profiles = ref<string[]>([])
-const saving = ref(false)
 
 // --- Web port -----------------------------------------------------------------
 
 const portInput = ref('')
-const portBusy = ref(false)
 
 function parsePortInput(raw: string): number | null {
   const text = raw.trim()
@@ -35,24 +34,24 @@ function parsePortInput(raw: string): number | null {
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
 }
 
-async function applyPort() {
-  if (!editingId.value) return
-  portBusy.value = true
-  try {
-    const updated = await api.setInstancePort(editingId.value, parsePortInput(portInput.value))
-    const inst = store.instanceById(editingId.value)
-    if (inst) inst.port = updated.port ?? null
-    portInput.value = updated.port ? String(updated.port) : ''
-    Message.success(
+const portAction = useAction(
+  () => api.setInstancePort(editingId.value!, parsePortInput(portInput.value)),
+  {
+    success: (updated) =>
       updated.port
         ? t('instanceEdit.portSaved', { port: updated.port })
         : t('instanceEdit.portSavedRandom'),
-    )
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    portBusy.value = false
-  }
+  },
+)
+const portBusy = computed(() => portAction.busy['*'])
+
+async function applyPort() {
+  if (!editingId.value) return
+  const updated = await portAction.run()
+  if (updated === undefined) return
+  const inst = store.instanceById(editingId.value)
+  if (inst) inst.port = updated.port ?? null
+  portInput.value = updated.port ? String(updated.port) : ''
 }
 
 interface EnvRow {
@@ -94,7 +93,19 @@ onMounted(async () => {
 
 const iconUrl = ref<string | null>(null)
 const iconInput = ref('')
-const iconBusy = ref(false)
+const iconAction = useAction(
+  async (source: string) => {
+    await api.setInstanceIcon(editingId.value!, source)
+    return true
+  },
+  { success: () => t('instanceEdit.iconUpdated') },
+)
+const iconBusy = computed(() => iconAction.busy['*'])
+
+const clearIconAction = useAction(async () => {
+  await api.clearInstanceIcon(editingId.value!)
+  return true
+})
 
 async function loadIcon() {
   if (!editingId.value) return
@@ -107,18 +118,11 @@ async function loadIcon() {
 
 async function applyIconInput() {
   if (!editingId.value || !iconInput.value.trim()) return
-  iconBusy.value = true
-  try {
-    await api.setInstanceIcon(editingId.value, iconInput.value.trim())
-    iconInput.value = ''
-    await loadIcon()
-    await store.refreshInstances()
-    Message.success(t('instanceEdit.iconUpdated'))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    iconBusy.value = false
-  }
+  const ok = await iconAction.run(iconInput.value.trim())
+  if (ok !== true) return
+  iconInput.value = ''
+  await loadIcon()
+  await store.refreshInstances()
 }
 
 async function pickIconFile() {
@@ -129,28 +133,18 @@ async function pickIconFile() {
     filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
   })
   if (typeof file !== 'string') return
-  iconBusy.value = true
-  try {
-    await api.setInstanceIcon(editingId.value, file)
-    await loadIcon()
-    await store.refreshInstances()
-    Message.success(t('instanceEdit.iconUpdated'))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    iconBusy.value = false
-  }
+  const ok = await iconAction.run(file)
+  if (ok !== true) return
+  await loadIcon()
+  await store.refreshInstances()
 }
 
 async function clearIcon() {
   if (!editingId.value) return
-  try {
-    await api.clearInstanceIcon(editingId.value)
-    await loadIcon()
-    await store.refreshInstances()
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const ok = await clearIconAction.run()
+  if (ok !== true) return
+  await loadIcon()
+  await store.refreshInstances()
 }
 
 watch(homeId, async (v) => {
@@ -180,14 +174,12 @@ const formValid = computed(
   () => name.value.trim().length > 0 && !!versionId.value && !!homeId.value && envValid.value,
 )
 
-async function onSave() {
-  if (!formValid.value) return
-  const envOverrides: Record<string, string> = {}
-  for (const row of envRows.value) {
-    if (row.key) envOverrides[row.key] = row.value
-  }
-  saving.value = true
-  try {
+const saveAction = useAction(
+  async () => {
+    const envOverrides: Record<string, string> = {}
+    for (const row of envRows.value) {
+      if (row.key) envOverrides[row.key] = row.value
+    }
     let resolvedHomeId = homeId.value!
     if (homeId.value === DEDICATED) {
       const home = await api.createHome(name.value.trim(), dedicatedPath.value)
@@ -204,13 +196,17 @@ async function onSave() {
       default_profile: defaultProfile.value ?? null,
     })
     await store.refreshInstances()
-    Message.success(t('instanceEdit.saved'))
-    router.push({ name: 'home' })
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    saving.value = false
-  }
+    return true
+  },
+  { success: () => t('instanceEdit.saved') },
+)
+const saving = computed(() => saveAction.busy['*'])
+
+async function onSave() {
+  if (!formValid.value) return
+  const ok = await saveAction.run()
+  if (ok !== true) return
+  router.push({ name: 'home' })
 }
 
 function addEnvRow() {
@@ -221,33 +217,23 @@ function removeEnvRow(idx: number) {
   envRows.value.splice(idx, 1)
 }
 
-const dirBusy = ref(false)
-const logBusy = ref(false)
+const dirAction = useAction(() => api.openInstanceDirectory(editingId.value!), {
+  success: (path) => t('instanceEdit.dirOpened', { path }),
+})
+const logAction = useAction(() => api.openInstanceLog(editingId.value!), {
+  success: (path) => t('instanceEdit.logOpened', { path }),
+})
+const dirBusy = computed(() => dirAction.busy['*'])
+const logBusy = computed(() => logAction.busy['*'])
 
 async function onOpenDirectory() {
   if (!editingId.value) return
-  dirBusy.value = true
-  try {
-    const path = await api.openInstanceDirectory(editingId.value)
-    Message.success(t('instanceEdit.dirOpened', { path }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    dirBusy.value = false
-  }
+  await dirAction.run()
 }
 
 async function onViewLog() {
   if (!editingId.value) return
-  logBusy.value = true
-  try {
-    const path = await api.openInstanceLog(editingId.value)
-    Message.success(t('instanceEdit.logOpened', { path }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    logBusy.value = false
-  }
+  await logAction.run()
 }
 
 const homeLabel = computed(() => {

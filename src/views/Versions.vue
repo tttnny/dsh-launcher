@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
+import { useAction } from '@/composables/useAction'
 import type { RemoteVersion } from '@/api/types'
 
 const router = useRouter()
@@ -44,6 +45,17 @@ function formatDate(iso: string | null): string {
   return d.toLocaleString()
 }
 
+const installAction = useAction(
+  async (version: string) => {
+    await api.startInstallVersionTask(version)
+    return version
+  },
+  {
+    key: (version) => version,
+    success: (version) => t('versions.installTaskStarted', { version }),
+  },
+)
+
 function onSelectVersion(row: RemoteVersion) {
   if (installedSet.value.has(row.version)) {
     Message.info(t('versions.alreadyInstalled', { version: row.version }))
@@ -58,30 +70,27 @@ function onSelectVersion(row: RemoteVersion) {
     okText: t('versions.installNow'),
     cancelText: t('common.cancel'),
     onOk: async () => {
-      try {
-        await api.startInstallVersionTask(row.version)
-        Message.success(t('versions.installTaskStarted', { version: row.version }))
-        void router.push('/tasks')
-      } catch (e) {
-        Message.error(String(e))
-      }
+      const res = await installAction.run(row.version)
+      if (res === undefined) return
+      void router.push('/tasks')
     },
   })
 }
 
-function usedByCount(versionId: string) {
-  return store.instances.filter((i) => i.version_id === versionId).length
-}
+const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).length
 
-async function onRemove(id: string, version: string) {
-  try {
+const removeAction = useAction(
+  async (id: string, version: string) => {
     await api.removeVersion(id)
     await store.refreshVersions()
-    Message.success(t('versions.versionDeleted', { version }))
-  } catch (e) {
-    Message.error(String(e))
-  }
-}
+    return version
+  },
+  {
+    key: (id) => id,
+    success: (version) => t('versions.versionDeleted', { version }),
+  },
+)
+const onRemove = removeAction.run
 </script>
 
 <template>

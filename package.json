@@ -11,7 +11,8 @@
     "tauri": "tauri",
     "tauri-dev": "tauri dev",
     "app:local": "bash ci/build-local-app.sh",
-    "test:release-notes": "node --test ci/release-notes.test.mjs"
+    "test:release-notes": "node --test ci/release-notes.test.mjs",
+    "test:api-contract": "node --test ci/api-contract.test.mjs"
   },
   "dependencies": {
     "@arco-design/web-vue": "^2.57.0",

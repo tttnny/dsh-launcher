@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
+import { useAction } from '@/composables/useAction'
 import { useLauncherStore } from '@/stores/launcher'
 
 const { t } = useI18n()
@@ -15,13 +16,9 @@ const store = useLauncherStore()
 const newHomeName = ref('')
 const newHomePath = ref('')
 
-function homeUsedBy(id: string): number {
-  return store.instances.filter((i) => i.home_id === id).length
-}
-
-function instancesOfHome(homeId: string) {
-  return store.instances.filter((i) => i.home_id === homeId)
-}
+// Referential integrity comes from the store getters, not per-view filters.
+const homeUsedBy = computed(() => (id: string) => store.instancesOfHome(id).length)
+const instancesOfHome = store.instancesOfHome
 
 async function onPickDir() {
   if (api.isTauri) {
@@ -37,45 +34,39 @@ async function onPickDir() {
   }
 }
 
+const addHomeAction = useAction((name: string, path: string) => api.createHome(name, path), {
+  success: () => t('settings.saved'),
+})
+
 async function onAddHome() {
-  try {
-    await api.createHome(newHomeName.value, newHomePath.value)
-    newHomeName.value = ''
-    newHomePath.value = ''
-    await store.refreshHomes()
-    Message.success(t('settings.saved'))
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const home = await addHomeAction.run(newHomeName.value, newHomePath.value)
+  if (home === undefined) return
+  newHomeName.value = ''
+  newHomePath.value = ''
+  await store.refreshHomes()
 }
 
+const removeHomeAction = useAction(async (id: string) => {
+  await api.removeHome(id)
+  return true
+}, { success: () => t('settings.saved') })
+
 async function onRemoveHome(id: string) {
-  try {
-    await api.removeHome(id)
-    await store.refreshHomes()
-    Message.success(t('settings.saved'))
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const ok = await removeHomeAction.run(id)
+  if (ok !== true) return
+  await store.refreshHomes()
 }
 
 function onViewProfiles(homeId: string) {
   void router.push({ path: '/profiles', query: { homeId } })
 }
 
-const dirBusyId = ref<string | null>(null)
-
-async function onOpenHomeDir(homeId: string) {
-  dirBusyId.value = homeId
-  try {
-    const path = await api.openHomeDirectory(homeId)
-    Message.success(t('homes.dirOpened', { path }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    dirBusyId.value = null
-  }
-}
+const dirAction = useAction((homeId: string) => api.openHomeDirectory(homeId), {
+  key: (homeId) => homeId,
+  success: (path) => t('homes.dirOpened', { path }),
+})
+const dirBusy = dirAction.busy
+const onOpenHomeDir = dirAction.run
 
 const homeColumns = computed(() => [
   { title: t('homes.homeName'), dataIndex: 'name', width: 170 },
@@ -136,7 +127,7 @@ const homeColumns = computed(() => [
           <div class="action-cell-btns">
             <button
               class="mac-action-pill"
-              :disabled="dirBusyId === record.id"
+              :disabled="dirBusy[record.id]"
               @click="onOpenHomeDir(record.id)"
             >
               {{ t('homes.openDir') }}

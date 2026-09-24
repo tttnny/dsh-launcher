@@ -344,9 +344,7 @@
     "cancel": "取消",
     "remove": "移除",
     "createdInstance": "已创建实例「{name}」",
-    "queuedHint": "排队等待中",
     "state": {
-      "queued": "排队中",
       "running": "进行中",
       "done": "已完成",
       "error": "失败",

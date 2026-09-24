@@ -102,8 +102,7 @@ export interface RuntimeStatus {
   pnpm: ToolStatus
 }
 
-/** `queued`: waiting for another operation on the same profile to finish. */
-export type TaskState = 'queued' | 'running' | 'done' | 'error' | 'cancelled'
+export type TaskState = 'running' | 'done' | 'error' | 'cancelled'
 
 export interface TaskInfo {
   id: string
@@ -137,21 +136,6 @@ export interface RemoteVersion {
   released_at: string | null
   /** 'github' = GitHub-only tag, installed by building from source. */
   source?: 'npm' | 'github' | null
-}
-
-export interface NewInstanceInput {
-  name: string
-  version_id: string
-  home_id: string
-  env_overrides: Record<string, string>
-  default_profile: string | null
-}
-
-/** Input for duplicating an instance (new name + reuse/new DSH_HOME choice). */
-export interface CopyInstanceInput {
-  source_id: string
-  name: string
-  new_home: boolean
 }
 
 // ---------------------------------------------------------------------------

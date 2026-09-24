@@ -69,19 +69,21 @@ export const useLauncherStore = defineStore('launcher', {
     versionById: (s) => (id: string) => s.versions.find((v) => v.id === id),
     homeById: (s) => (id: string) => s.homes.find((h) => h.id === id),
     instanceById: (s) => (id: string) => s.instances.find((i) => i.id === id),
+    // Referential integrity: "who uses this HOME / version" is answered here,
+    // once, instead of being re-derived per view.
+    instancesOfHome: (s) => (homeId: string) => s.instances.filter((i) => i.home_id === homeId),
+    instancesOfVersion: (s) => (versionId: string) =>
+      s.instances.filter((i) => i.version_id === versionId),
+    isHomeShared: (s) => (homeId: string) =>
+      s.instances.some((i) => i.home_id === homeId) &&
+      s.instances.filter((i) => i.home_id === homeId).length > 1,
     statusOf: (s) => (id: string): InstanceStatus =>
       s.statusById[id] ?? { id, state: 'stopped', url: null, profile: null, exit_code: null },
     taskList: (s) => Object.values(s.tasks).sort((a, b) => b.created_at - a.created_at),
     healthErrorCount: (s) => s.healthLogs.filter((l) => l.level === 'error').length,
     healthWarnCount: (s) => s.healthLogs.filter((l) => l.level === 'warn').length,
     healthTotalCount: (s) => s.healthLogs.length,
-    // A queued task is pending work too, so both counts treat it as active.
-    runningTaskCount: (s) =>
-      Object.values(s.tasks).filter((t) => t.state === 'running' || t.state === 'queued').length,
-    instanceNameBusy: (s) => (name: string) =>
-      Object.values(s.tasks).some(
-        (t) => (t.state === 'running' || t.state === 'queued') && t.instance_name === name,
-      ),
+    runningTaskCount: (s) => Object.values(s.tasks).filter((t) => t.state === 'running').length,
   },
 
   actions: {
@@ -173,9 +175,6 @@ export const useLauncherStore = defineStore('launcher', {
     },
     async refreshHomes() {
       this.homes = await api.listHomes()
-    },
-    async refreshSettings() {
-      this.settings = await api.getSettings()
     },
     async refreshTasks() {
       const tasks = await api.listTasks()

@@ -5,6 +5,8 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
+import type { DshInstance } from '@/api/types'
+import { useAction } from '@/composables/useAction'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -17,9 +19,8 @@ const selectedHomeId = ref<string | undefined>(undefined)
 
 const selectedHome = computed(() => store.homeById(selectedHomeId.value ?? ''))
 
-function instancesOfHome(homeId: string) {
-  return store.instances.filter((i) => i.home_id === homeId)
-}
+// Referential integrity comes from the store getter, not a per-view copy.
+const instancesOfHome = store.instancesOfHome
 
 // Watch route.query or store.homes to initialize / sync selectedHomeId
 watch(
@@ -47,13 +48,10 @@ const profiles = ref<string[]>([])
 const profilesLoading = ref(false)
 const newProfileName = ref('')
 const addingProfile = ref(false)
-const creatingProfile = ref(false)
 const renamingProfile = ref<string | null>(null)
 const renameValue = ref('')
 const copyingProfile = ref<string | null>(null)
 const copyProfileName = ref('')
-const copyProfileBusy = ref(false)
-const busyProfile = ref<string | null>(null)
 
 async function loadProfiles() {
   profiles.value = []
@@ -76,27 +74,34 @@ watch(
   { immediate: true },
 )
 
+const createAction = useAction((homeId: string, name: string) => api.createProfile(homeId, name), {
+  success: (name) => t('profiles.profileCreated', { name }),
+})
+const creatingProfile = computed(() => createAction.busy['*'])
+
 async function onCreateProfile() {
   const name = newProfileName.value.trim()
   if (!selectedHomeId.value || !name) return
-  creatingProfile.value = true
-  try {
-    await api.createProfile(selectedHomeId.value, name)
-    newProfileName.value = ''
-    addingProfile.value = false
-    await loadProfiles()
-    Message.success(t('profiles.profileCreated', { name }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    creatingProfile.value = false
-  }
+  const created = await createAction.run(selectedHomeId.value, name)
+  if (created === undefined) return
+  newProfileName.value = ''
+  addingProfile.value = false
+  await loadProfiles()
 }
 
 function startRenameProfile(name: string) {
   renamingProfile.value = name
   renameValue.value = name
 }
+
+const renameAction = useAction(async (homeId: string, oldName: string, newName: string) => {
+  const renamed = await api.renameProfile(homeId, oldName, newName)
+  return { old: oldName, name: renamed }
+}, {
+  key: (_homeId, oldName) => oldName,
+  success: ({ old, name }) => t('profiles.profileRenamed', { old, name }),
+})
+const renameBusy = renameAction.busy
 
 async function confirmRenameProfile() {
   const old = renamingProfile.value
@@ -105,24 +110,25 @@ async function confirmRenameProfile() {
     renamingProfile.value = null
     return
   }
-  busyProfile.value = old
-  try {
-    await api.renameProfile(selectedHomeId.value, old, name)
-    await store.refreshInstances()
-    await loadProfiles()
-    renamingProfile.value = null
-    Message.success(t('profiles.profileRenamed', { old, name }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    busyProfile.value = null
-  }
+  const res = await renameAction.run(selectedHomeId.value, old, name)
+  if (res === undefined) return
+  await store.refreshInstances()
+  await loadProfiles()
+  renamingProfile.value = null
 }
 
 function startCopyProfile(name: string) {
   copyingProfile.value = name
   copyProfileName.value = `${name}-copy`
 }
+
+const copyAction = useAction(async (homeId: string, source: string, name: string) => {
+  const copied = await api.copyProfile(homeId, source, name)
+  return { source, name: copied }
+}, {
+  success: ({ source, name }) => t('profiles.profileCopied', { source, name }),
+})
+const copyProfileBusy = computed(() => copyAction.busy['*'])
 
 async function confirmCopyProfile() {
   const source = copyingProfile.value
@@ -131,44 +137,43 @@ async function confirmCopyProfile() {
     copyingProfile.value = null
     return
   }
-  copyProfileBusy.value = true
-  try {
-    await api.copyProfile(selectedHomeId.value, source, name)
-    await loadProfiles()
-    copyingProfile.value = null
-    Message.success(t('profiles.profileCopied', { source, name }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    copyProfileBusy.value = false
-  }
+  const res = await copyAction.run(selectedHomeId.value, source, name)
+  if (res === undefined) return
+  await loadProfiles()
+  copyingProfile.value = null
 }
+
+const deleteAction = useAction(async (homeId: string, name: string) => {
+  await api.deleteProfile(homeId, name)
+  return name
+}, {
+  key: (_homeId, name) => name,
+  success: (name) => t('profiles.profileDeleted', { name }),
+})
+const deleteBusy = deleteAction.busy
 
 async function confirmDeleteProfile(name: string) {
   if (!selectedHomeId.value) return
-  busyProfile.value = name
-  try {
-    await api.deleteProfile(selectedHomeId.value, name)
-    await store.refreshInstances()
-    await loadProfiles()
-    Message.success(t('profiles.profileDeleted', { name }))
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    busyProfile.value = null
-  }
+  const deleted = await deleteAction.run(selectedHomeId.value, name)
+  if (deleted === undefined) return
+  await store.refreshInstances()
+  await loadProfiles()
 }
+
+const setDefaultAction = useAction(async (inst: DshInstance, profile: string) => {
+  await api.updateInstance({ ...inst, default_profile: profile })
+  return profile
+}, {
+  key: (inst) => inst.id,
+  success: (profile) => t('profiles.profileSetDefault', { name: profile }),
+})
 
 async function setDefaultProfile(instanceId: string, profile: string) {
   const inst = store.instanceById(instanceId)
   if (!inst) return
-  try {
-    await api.updateInstance({ ...inst, default_profile: profile })
-    await store.refreshInstances()
-    Message.success(t('profiles.profileSetDefault', { name: profile }))
-  } catch (e) {
-    Message.error(String(e))
-  }
+  const set = await setDefaultAction.run(inst, profile)
+  if (set === undefined) return
+  await store.refreshInstances()
 }
 
 function onManagePlugins(profile: string) {
@@ -243,7 +248,7 @@ function onManagePlugins(profile: string) {
           <template v-if="renamingProfile === p">
             <input v-model="renameValue" class="apple-input-sm" @press-enter="confirmRenameProfile" />
             <div class="inline-btn-group">
-              <button class="mac-primary-btn" :disabled="busyProfile === p" @click="confirmRenameProfile">
+              <button class="mac-primary-btn" :disabled="renameBusy[p] || deleteBusy[p]" @click="confirmRenameProfile">
                 {{ t('profiles.profileRenameSave') }}
               </button>
               <button class="mac-secondary-btn" @click="renamingProfile = null">
@@ -278,7 +283,7 @@ function onManagePlugins(profile: string) {
                 :content="t('profiles.profileDeleteConfirm', { name: p })"
                 @ok="confirmDeleteProfile(p)"
               >
-                <button class="mac-micro-btn danger" :disabled="busyProfile === p">
+                <button class="mac-micro-btn danger" :disabled="renameBusy[p] || deleteBusy[p]">
                   {{ t('instances.table.delete') }}
                 </button>
               </a-popconfirm>
