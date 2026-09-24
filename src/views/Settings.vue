@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
@@ -8,6 +9,15 @@ import { useAction } from '@/composables/useAction'
 import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { SHORTCUT_DOCS } from '@/shortcuts'
+
+const router = useRouter()
+
+/** The setup page doubles as the toolchain detail view; Settings is its
+ *  permanent entry point (the page is otherwise only reached by the
+ *  missing-Node redirect). */
+function openEnvironmentCheck() {
+  void router.push({ name: 'setup' })
+}
 
 const { t } = useI18n()
 const store = useLauncherStore()
@@ -157,6 +167,7 @@ async function onProxyFieldsSave() {
 }
 
 const sections = computed(() => [
+  { key: 'environment', label: t('settings.environment.title') },
   { key: 'general', label: t('settings.general') },
   { key: 'shortcuts', label: t('settings.shortcuts.title') },
   { key: 'proxy', label: t('settings.proxy.title') },
@@ -194,6 +205,47 @@ function scrollToSection(key: string) {
 
     <!-- Settings Content Area -->
     <div class="dl-page settings-content-area">
+      <!-- Environment Section: which node/pnpm the launcher resolved, and a way
+           back into the setup page once the environment is already green. -->
+      <div :ref="(el: unknown) => setSectionRef('environment', el)" class="settings-section">
+        <div class="section-title">
+          <h3>{{ t('settings.environment.title') }}</h3>
+        </div>
+        <p class="section-sub">{{ t('settings.environment.desc') }}</p>
+
+        <div class="apple-inset-group">
+          <div class="apple-inset-row">
+            <div class="row-info">
+              <span class="row-title">Node.js</span>
+              <span class="row-desc">
+                {{ store.runtime?.node?.path ?? t('settings.environment.notFound') }}
+              </span>
+            </div>
+            <a-tag :color="store.runtime?.node?.installed ? 'green' : 'red'">
+              {{ store.runtime?.node?.version ?? t('settings.environment.missing') }}
+            </a-tag>
+          </div>
+
+          <div class="apple-inset-row">
+            <div class="row-info">
+              <span class="row-title">pnpm</span>
+              <span class="row-desc">
+                {{ store.runtime?.pnpm?.path ?? t('settings.environment.notFound') }}
+              </span>
+            </div>
+            <a-tag :color="store.runtime?.pnpm?.installed ? 'green' : 'red'">
+              {{ store.runtime?.pnpm?.version ?? t('settings.environment.missing') }}
+            </a-tag>
+          </div>
+        </div>
+
+        <div class="env-actions">
+          <button class="mac-secondary-btn" @click="openEnvironmentCheck">
+            {{ t('settings.environment.openGuide') }}
+          </button>
+        </div>
+      </div>
+
       <!-- General Section -->
       <div :ref="(el: unknown) => setSectionRef('general', el)" class="settings-section">
         <div class="section-title">

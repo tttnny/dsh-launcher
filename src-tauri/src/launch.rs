@@ -136,7 +136,14 @@ pub const NODE_RUNTIME_FLAGS: &[&str] = &["--preserve-symlinks"];
 
 /// The base `node NODE_RUNTIME_FLAGS <bin>` invocation shared by every DSH
 /// spawn; callers then add their own subcommand and flags.
-fn dsh_base(version_dir: &Path) -> Result<Command, String> {
+///
+/// `node` is the resolved absolute path from the launcher's toolchain binding,
+/// not the bare name: a Finder-launched app inherits a minimal PATH, so
+/// resolving the interpreter at spawn time made every instance depend on the
+/// environment the app happened to start with (and on pnpm/nvm shims that
+/// re-resolve per cwd). Passing it in keeps that decision in one place while
+/// leaving argv ordering — this module's real contract — here.
+fn dsh_base(node: &Path, version_dir: &Path) -> Result<Command, String> {
     let bin = version_bin(version_dir);
     if !version_bin_ready(version_dir) {
         return Err(format!(
@@ -144,7 +151,7 @@ fn dsh_base(version_dir: &Path) -> Result<Command, String> {
             bin.display()
         ));
     }
-    let mut cmd = Command::new(crate::process::node());
+    let mut cmd = Command::new(node);
     crate::process::hide_console(&mut cmd);
     cmd.args(NODE_RUNTIME_FLAGS).arg(&bin);
     Ok(cmd)
@@ -207,11 +214,12 @@ pub fn instance_env(cfg: &Config, instance_id: &str) -> Result<Vec<(String, Stri
 /// Env comes separately from [`instance_env`] so the caller controls ordering
 /// relative to its own bookkeeping.
 pub fn instance_command(
+    node: &Path,
     version_dir: &Path,
     profile: &str,
     web_port: Option<u16>,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(version_dir)?;
+    let mut cmd = dsh_base(node, version_dir)?;
     cmd.arg("--profile").arg(profile);
     if let Some(port) = web_port {
         cmd.arg("--port").arg(port.to_string());
@@ -235,11 +243,12 @@ pub fn instance_command(
 /// port once and exit, and the host is the launcher's own decision — unlike
 /// instances, where the profile layer must decide (see [`instance_command`]).
 pub fn template_boot_command(
+    node: &Path,
     version_dir: &Path,
     home_path: &Path,
     port: u16,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(version_dir)?;
+    let mut cmd = dsh_base(node, version_dir)?;
     cmd.arg("--profile")
         .arg("web")
         .arg("--host")
@@ -268,17 +277,18 @@ pub fn template_boot_command(
 /// and would leave the layer list to be guessed at, so every install and
 /// removal goes through the CLI of the version that instance runs.
 ///
-/// The CLI resolves pnpm from PATH, so the launcher's pinned pnpm is
-/// prepended to PATH: the pin then also applies inside the CLI's own pnpm
+/// The CLI resolves pnpm from PATH, so the resolved pnpm's directory is
+/// prepended to PATH: that choice then also applies inside the CLI's own pnpm
 /// invocation.
 pub fn plugin_command(
+    node: &Path,
     version_dir: &Path,
     home_path: &Path,
     profile: &str,
     pnpm_args: &[String],
     pnpm_prog: &Path,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(version_dir)?;
+    let mut cmd = dsh_base(node, version_dir)?;
     cmd.arg("plugin")
         .arg("--profile")
         .arg(profile)
@@ -363,15 +373,13 @@ pub fn ensure_terminal_dsh_wrapper(version_dir: &Path) -> Option<PathBuf> {
 }
 
 /// The PATH directories an instance terminal prepends: the version's `.bin`
-/// (via [`ensure_terminal_dsh_wrapper`]) and the launcher's managed node.
-pub fn terminal_path_dirs(version_dir: Option<&Path>, data_dir: &Path) -> Vec<PathBuf> {
+/// (via [`ensure_terminal_dsh_wrapper`]), so a bare `dsh` in the terminal is
+/// the same CLI the launcher runs. Node itself comes from the user's own
+/// toolchain — the launcher no longer ships one.
+pub fn terminal_path_dirs(version_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = version_dir.and_then(ensure_terminal_dsh_wrapper) {
         dirs.push(dir);
-    }
-    let managed_node_bin = data_dir.join("tools").join("node").join("bin");
-    if managed_node_bin.exists() {
-        dirs.push(managed_node_bin);
     }
     dirs
 }
@@ -489,8 +497,12 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("bin.js"), "// bin").unwrap();
 
-        let cmd = instance_command(&dir, "web", Some(3099)).unwrap();
+        // The interpreter comes from the caller's resolved binding; the test
+        // only cares that it is used verbatim as argv[0]'s program.
+        let node = Path::new("/opt/test/bin/node");
+        let cmd = instance_command(node, &dir, "web", Some(3099)).unwrap();
         let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program().to_string_lossy(), node.to_string_lossy());
         let argv: Vec<String> = std_cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -506,7 +518,7 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--host"));
 
         // Non-web profile: no --port, no --no-open.
-        let plain = instance_command(&dir, "bot", None).unwrap();
+        let plain = instance_command(node, &dir, "bot", None).unwrap();
         let plain_argv: Vec<String> = plain
             .as_std()
             .get_args()
@@ -529,7 +541,13 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("bin.js"), "// bin").unwrap();
 
-        let cmd = template_boot_command(&dir, Path::new("/tmp/home"), 20001).unwrap();
+        let cmd = template_boot_command(
+            Path::new("/opt/test/bin/node"),
+            &dir,
+            Path::new("/tmp/home"),
+            20001,
+        )
+        .unwrap();
         let argv: Vec<String> = cmd
             .as_std()
             .get_args()

@@ -79,6 +79,52 @@ pub struct LauncherSettings {
     /// terminal window with DSH_HOME set and cwd at the HOME directory.
     #[serde(default = "default_terminal")]
     pub terminal: String,
+    /// Where the launcher's own toolchain resolution last landed: the absolute
+    /// paths of the `node` and `pnpm` it will drive DSH with. This is a probe
+    /// *cache*, not a user preference — it is rewritten at startup and by the
+    /// setup page's re-check, and a stored path that no longer exists is
+    /// re-probed rather than reported as an error. Persisting it means a
+    /// spawned process no longer depends on the PATH the app happened to
+    /// inherit at launch.
+    #[serde(default)]
+    pub toolchain: ToolchainBinding,
+}
+
+/// The resolved toolchain. Each entry is `None` until a probe finds it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolchainBinding {
+    #[serde(default)]
+    pub node: Option<BoundTool>,
+    #[serde(default)]
+    pub pnpm: Option<BoundTool>,
+}
+
+/// One bound tool: the absolute path the launcher will execute, plus the
+/// version it reported when it was probed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BoundTool {
+    pub path: PathBuf,
+    pub version: String,
+}
+
+impl ToolchainBinding {
+    /// Whether a bound tool is still usable as recorded. A path that vanished
+    /// (a deleted nvm version, an uninstalled brew formula) makes the binding
+    /// stale, which the resolver treats as "probe again".
+    fn is_fresh(&self, tool: &Option<BoundTool>) -> bool {
+        match tool {
+            Some(bound) => bound.path.is_file(),
+            None => false,
+        }
+    }
+
+    pub fn node_is_fresh(&self) -> bool {
+        self.is_fresh(&self.node)
+    }
+
+    pub fn pnpm_is_fresh(&self) -> bool {
+        self.is_fresh(&self.pnpm)
+    }
 }
 
 fn default_terminal() -> String {
@@ -128,6 +174,7 @@ impl Default for LauncherSettings {
             no_proxy: default_no_proxy(),
             proxy_apply_dsh: false,
             terminal: default_terminal(),
+            toolchain: ToolchainBinding::default(),
         }
     }
 }
@@ -403,4 +450,164 @@ pub fn sanitize_name(name: &str) -> String {
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4())
+}
+
+/// Normalizes a user-entered directory path into an absolute one.
+///
+/// The launcher's path inputs are free-text: without this, `~/.dsh` was taken
+/// literally and `create_dir_all` built a directory named `~` under whatever
+/// cwd the app happened to have. Rules, applied to every such input:
+///
+/// * a leading `~` (alone, `~/…`, or `~user/…`) expands to `$HOME`;
+/// * `.` / `..` segments are resolved textually;
+/// * trailing separators are dropped (`/a/b/` and `/a/b` are one HOME);
+/// * a relative path is rejected — its meaning would depend on the app's cwd.
+///
+/// The result is not canonicalized: symlinks are intentionally preserved so a
+/// user-managed `/Volumes/data/dsh` stays spelled that way.
+pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("路径不能为空".to_string());
+    }
+
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let expanded: PathBuf = if trimmed == "~" {
+        home.clone().ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home.clone()
+            .ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
+            .join(rest)
+    } else if trimmed.starts_with('~') {
+        // `~user/...` needs the user database; treat it as unsupported rather
+        // than silently creating a literal `~user` directory.
+        return Err(format!("不支持 ~用户名 形式的路径：{trimmed}"));
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    // Resolve `.`/`..` and drop trailing separators without touching the
+    // filesystem (the path may not exist yet).
+    let mut out = PathBuf::new();
+    for comp in expanded.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    return Err(format!("路径越界：{trimmed}"));
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+
+    if !out.is_absolute() {
+        return Err(format!("请填写绝对路径（以 / 开头）：{trimmed}"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These tests need a stable HOME; the expansion target only has to be
+    /// absolute and match whatever HOME says.
+    fn home() -> PathBuf {
+        std::env::var_os("HOME").map(PathBuf::from).unwrap()
+    }
+
+    #[test]
+    fn normalize_expands_tilde() {
+        assert_eq!(normalize_dir_path("~/.dsh").unwrap(), home().join(".dsh"));
+        assert_eq!(normalize_dir_path("~").unwrap(), home());
+        assert_eq!(normalize_dir_path("  ~/.dsh  ").unwrap(), home().join(".dsh"));
+    }
+
+    #[test]
+    fn normalize_drops_trailing_separator_and_dot_segments() {
+        // `/a/b/` and `/a/b` must be one HOME, and `./` segments must not
+        // produce a path with `~` or `.` baked in.
+        assert_eq!(
+            normalize_dir_path("/tmp/dsh-home/").unwrap(),
+            PathBuf::from("/tmp/dsh-home")
+        );
+        assert_eq!(
+            normalize_dir_path("/tmp/./dsh-home").unwrap(),
+            PathBuf::from("/tmp/dsh-home")
+        );
+        assert_eq!(
+            normalize_dir_path("/tmp/other/../dsh-home").unwrap(),
+            PathBuf::from("/tmp/dsh-home")
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_relative_and_tilde_user_paths() {
+        // A relative path would mean "relative to the app's cwd" — the exact
+        // bug that produced a literal `~` directory.
+        assert!(normalize_dir_path("relative/dsh").is_err());
+        assert!(normalize_dir_path("~/../x").is_ok(), ".. inside an absolute path is fine");
+        assert!(normalize_dir_path("~someone/.dsh").is_err());
+        assert!(normalize_dir_path("").is_err());
+        assert!(normalize_dir_path("   ").is_err());
+    }
+
+    #[test]
+    fn normalize_tilde_and_explicit_home_are_the_same_path() {
+        // So that the ~/.dsh record and a typed /Users/me/.dsh dedupe to one
+        // HOME instead of showing up twice.
+        let explicit = home().join(".dsh");
+        let via_tilde = normalize_dir_path("~/.dsh").unwrap();
+        assert!(paths_equal(&explicit, &via_tilde));
+    }
+
+    #[test]
+    fn bound_tool_is_stale_when_its_path_disappears() {
+        // The binding is a resolution, not a preference: a path that no longer
+        // exists must read as stale so the resolver re-probes instead of
+        // failing to spawn. This is the nvm-switched-versions case.
+        let dir = std::env::temp_dir().join(format!("bound-tool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("node");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+
+        let binding = ToolchainBinding {
+            node: Some(BoundTool {
+                path: exe.clone(),
+                version: "v22.0.0".to_string(),
+            }),
+            pnpm: None,
+        };
+        assert!(binding.node_is_fresh());
+        assert!(!binding.pnpm_is_fresh(), "an absent binding is never fresh");
+
+        std::fs::remove_file(&exe).unwrap();
+        assert!(!binding.node_is_fresh(), "a vanished path must be stale");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toolchain_binding_defaults_are_absent() {
+        // A config written before the binding existed must deserialize with
+        // both tools unbound rather than failing to load.
+        let binding = ToolchainBinding::default();
+        assert!(binding.node.is_none());
+        assert!(binding.pnpm.is_none());
+        assert!(!binding.node_is_fresh());
+
+        let raw = r#"{}"#;
+        let parsed: ToolchainBinding = serde_json::from_str(raw).unwrap();
+        assert!(parsed.node.is_none() && parsed.pnpm.is_none());
+    }
+
+    #[test]
+    fn settings_without_toolchain_field_still_load() {
+        // Forward compatibility of the config file itself: `toolchain` is
+        // `#[serde(default)]`, so an old config.json keeps loading.
+        let raw = r#"{"locale":"zh-CN"}"#;
+        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
+        assert!(settings.toolchain.node.is_none());
+    }
 }

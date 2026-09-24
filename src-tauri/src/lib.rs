@@ -105,9 +105,6 @@ pub fn run() {
             runtime::ensure_macos_paths();
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            // A managed Node.js installed by a previous one-click install
-            // (issue #23) joins PATH for everything the launcher spawns.
-            runtime::ensure_local_node_on_path(&data_dir);
             let config_path = data_dir.join("config.json");
             let cfg = config::load_config(&config_path);
             proxy::sync_from_settings(&cfg.settings);
@@ -132,6 +129,31 @@ pub fn run() {
                 running: tokio::sync::Mutex::new(HashMap::new()),
                 tasks: tokio::sync::Mutex::new(HashMap::new()),
             });
+
+            // Resolve the toolchain once at startup and persist it, so the
+            // first spawn of any instance uses a known absolute node/pnpm
+            // rather than whatever PATH this process happens to have. A stale
+            // binding (a deleted nvm version) is re-probed inside.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    let binding = runtime::refresh_toolchain_binding(&state).await;
+                    crate::log_info!(
+                        "工具链绑定：node={}，pnpm={}",
+                        binding
+                            .node
+                            .as_ref()
+                            .map(|b| format!("{}（{}）", b.version, b.path.display()))
+                            .unwrap_or_else(|| "未找到".to_string()),
+                        binding
+                            .pnpm
+                            .as_ref()
+                            .map(|b| format!("{}（{}）", b.version, b.path.display()))
+                            .unwrap_or_else(|| "未找到".to_string()),
+                    );
+                });
+            }
 
             // System tray with dynamic menu.
             tray::build_tray(app.handle())?;
@@ -160,7 +182,6 @@ pub fn run() {
             tasks::remove_task,
             tasks::cancel_task,
             runtime::get_runtime_status,
-            runtime::start_install_node_task,
             commands::list_instances,
             commands::update_instance,
             commands::set_instance_port,

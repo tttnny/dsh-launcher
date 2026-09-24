@@ -100,6 +100,22 @@ export interface ToolStatus {
 export interface RuntimeStatus {
   node: ToolStatus
   pnpm: ToolStatus
+  /** Detected Node version managers ('nvm' | 'fnm' | 'brew'), most preferred
+   *  first, so the setup page can offer a command that fits this machine. */
+  managers: string[]
+  /** node is present but older than the recommended major (advisory only). */
+  node_below_recommended: boolean
+  /** The version floors the backend enforces, so UI copy states the same
+   *  numbers the resolver checks rather than repeating them as literals. */
+  requirements: ToolchainRequirements
+}
+
+export interface ToolchainRequirements {
+  min_pnpm_major: number
+  recommended_node_major: number
+  pnpm_install_command: string
+  /** Node install command for this machine, chosen from the detected managers. */
+  node_install_command: string
 }
 
 export type TaskState = 'running' | 'done' | 'error' | 'cancelled'

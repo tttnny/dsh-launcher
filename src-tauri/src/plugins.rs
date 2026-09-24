@@ -319,7 +319,8 @@ async fn run_dsh_plugin(
     // Never let a plugin's peers pull a second copy of a core package in.
     ensure_profile_npmrc(&dir)?;
 
-    let pnpm_prog = crate::toolchain::ensure_pnpm(state).await?;
+    let node = crate::runtime::node_for_spawn_checked(state).await?;
+    let pnpm_prog = crate::toolchain::ensure_pnpm().await?;
     let what = format!("dsh plugin {subcommand}");
 
     // A node_modules tree linked from a *different* pnpm store makes pnpm
@@ -336,7 +337,8 @@ async fn run_dsh_plugin(
     for attempt in 1..=2 {
         let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
         args.extend(forwarded_pnpm_flags(state, loglevel, subcommand));
-        let cmd = crate::launch::plugin_command(version_dir, home_path, profile, &args, &pnpm_prog)?;
+        let cmd =
+            crate::launch::plugin_command(&node, version_dir, home_path, profile, &args, &pnpm_prog)?;
         match run_command(cmd, &what).await {
             Ok(()) => return Ok(()),
             Err(out) if attempt == 1 && mentions_ignored_builds(&out) => {
@@ -456,7 +458,9 @@ async fn relink_profile_store(
     }
     let mut args: Vec<String> = vec!["install".to_string()];
     args.extend(forwarded_pnpm_flags(state, "warn", "install"));
+    let node = crate::runtime::node_for_spawn_checked(state).await?;
     let cmd = crate::launch::plugin_command(
+        &node,
         target.version_dir,
         target.home_path,
         target.profile,
@@ -474,33 +478,21 @@ async fn relink_profile_store(
 }
 
 
-/// Common pnpm flags forwarded through `dsh plugin` (shared store, network
-/// robustness, optional registry mirror). `--prefix` is deliberately absent:
-/// the CLI already runs pnpm with cwd = the profile directory, and passing a
-/// prefix would break that contract.
+/// Common pnpm flags forwarded through `dsh plugin`. `--prefix` is deliberately
+/// absent: the CLI already runs pnpm with cwd = the profile directory, and
+/// passing a prefix would break that contract.
 ///
-/// The fetch/network flags only exist on download commands (`add` /
-/// `install`): `pnpm remove` rejects them outright ("Unknown options:
-/// 'fetch-timeout', …") and would fail before touching anything.
+/// The flag *set* lives in [`crate::toolchain::pnpm_store_flags`] so this path
+/// and the launcher's own installs can never drift apart; only the
+/// download-flag toggle is decided here, because `pnpm remove` rejects the
+/// fetch flags.
 fn forwarded_pnpm_flags(
     state: &State<'_, AppState>,
     loglevel: &str,
     subcommand: &str,
 ) -> Vec<String> {
     let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    let mut args: Vec<String> = vec![
-        "--store-dir".to_string(),
-        store_dir.to_string_lossy().to_string(),
-        format!("--loglevel={loglevel}"),
-    ];
-    if subcommand != "remove" {
-        args.extend(crate::toolchain::pnpm_fetch_flags().map(String::from));
-    }
-    if let Some(registry) = crate::toolchain::registry_mirror() {
-        args.push("--registry".to_string());
-        args.push(registry);
-    }
-    args
+    crate::toolchain::pnpm_store_flags(&store_dir, loglevel, subcommand != "remove")
 }
 
 /// Pins `auto-install-peers=false` in a profile's `.npmrc`.

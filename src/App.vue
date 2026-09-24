@@ -43,7 +43,15 @@ onMounted(async () => {
   locale.value = store.settings.locale || 'zh-CN'
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
-  if (!store.runtime?.node?.installed && route.name !== 'setup') {
+  // Land on the environment check when the toolchain is incomplete. pnpm is
+  // included because it is a hard requirement for installing a version and for
+  // plugin management, and the launcher no longer installs one itself — being
+  // sent here is the only place the user learns that. Navigation stays open
+  // (the sidebar is untouched) so a network-restricted user can still reach
+  // Settings and configure a proxy.
+  const runtimeIncomplete =
+    !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
+  if (runtimeIncomplete && route.name !== 'setup') {
     router.push({ name: 'setup' })
   }
   await setupLaunchDeepLink()

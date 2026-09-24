@@ -1,68 +1,83 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
-import { api } from '@/api'
+import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 
 const router = useRouter()
 const { t } = useI18n()
+const { copy } = useCopy()
 const store = useLauncherStore()
 
 const checking = ref(false)
 
-// --- One-click Node.js install (issue #23) ------------------------------------
-
-const nodeTaskId = ref('')
-const nodeTask = computed(() => (nodeTaskId.value ? store.tasks[nodeTaskId.value] : null))
-const installing = computed(() => nodeTask.value?.state === 'running')
-
-async function oneClickInstall() {
-  try {
-    nodeTaskId.value = await api.startInstallNodeTask()
-    await store.refreshTasks()
-  } catch (e) {
-    Message.error(String(e))
-  }
-}
-
-// Install finished: re-probe the runtime (pnpm is bootstrapped by the task)
-// and enter the launcher when everything is green.
-watch(
-  () => nodeTask.value?.state,
-  async (state) => {
-    if (state === 'done') {
-      await store.checkRuntime()
-      if (allOk.value) {
-        Message.success(t('setup.allReady'))
-        router.push({ name: 'home' })
-      }
-    } else if (state === 'error') {
-      Message.error(nodeTask.value?.message ?? t('setup.installFailed'))
-    }
-  },
-)
-
-const nodeOk = computed(() => store.runtime?.node?.installed ?? false)
-const pnpmOk = computed(() => store.runtime?.pnpm?.installed ?? false)
+const node = computed(() => store.runtime?.node)
+const pnpm = computed(() => store.runtime?.pnpm)
+const nodeOk = computed(() => node.value?.installed ?? false)
+const pnpmOk = computed(() => pnpm.value?.installed ?? false)
+// Readiness is about usability: node is what DSH needs to boot; pnpm is needed
+// to install a version or manage plugins, and the launcher no longer installs
+// one itself, so its absence is something to fix here rather than at the first
+// install attempt.
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
+const belowRecommended = computed(() => store.runtime?.node_below_recommended ?? false)
 
-const nodeVersion = computed(() => store.runtime?.node?.version ?? '')
-const pnpmVersion = computed(() => store.runtime?.pnpm?.version ?? '')
+// --- Adaptive install guidance ------------------------------------------------
+
+/** Version floors and install commands as the backend computes them: the page
+ *  then states the same numbers the resolver enforces, and offers the command
+ *  the backend picked from the managers it actually detected. */
+const requirements = computed(() => store.runtime?.requirements)
+
+/** The node command to copy. The backend chose it from the detected managers —
+ *  extending whichever the user already has — so the cascade lives there. */
+const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
+
+/** The pnpm command, likewise from the backend. Deliberately not version-pinned:
+ *  the launcher accepts any pnpm at or above the floor, so pinning would go
+ *  stale. */
+const pnpmCommand = computed(() => requirements.value?.pnpm_install_command ?? '')
+
+const copiedKey = ref('')
+
+/** Copies via the shared helper (which reports the real outcome), and tracks
+ *  which button to flip to「已复制」. */
+async function copyCommand(text: string, key: string) {
+  if (!(await copy(text))) return
+  copiedKey.value = key
+  window.setTimeout(() => {
+    if (copiedKey.value === key) copiedKey.value = ''
+  }, 2000)
+}
 
 async function recheck() {
   checking.value = true
   try {
     await store.checkRuntime()
-    if (store.runtime?.node?.installed && store.runtime?.pnpm?.installed) {
-      Message.success(t('setup.allReady'))
-      router.push({ name: 'home' })
-    }
+    if (nodeOk.value && pnpmOk.value) Message.success(t('setup.allReady'))
   } finally {
     checking.value = false
   }
 }
+
+/**
+ * A toolchain installed in a terminal becomes visible as soon as the user
+ * comes back to the window, so the page does not make them hunt for a button.
+ * The store's refresh debounces nothing, so a focus storm costs one probe.
+ */
+async function onFocus() {
+  if (checking.value) return
+  await store.checkRuntime()
+}
+
+onMounted(() => {
+  window.addEventListener('focus', onFocus)
+})
+onUnmounted(() => {
+  window.removeEventListener('focus', onFocus)
+})
 </script>
 
 <template>
@@ -75,53 +90,67 @@ async function recheck() {
       <!-- Node status -->
       <div class="tool-row">
         <span class="tool-name">Node.js</span>
-        <a-tag v-if="nodeOk" color="green">{{ t('setup.installed', { v: nodeVersion }) }}</a-tag>
-        <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
+        <span class="tool-value">
+          <a-tag v-if="nodeOk" color="green">
+            {{ t('setup.installed', { v: node?.version ?? '' }) }}
+          </a-tag>
+          <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
+          <a-tag v-if="nodeOk && belowRecommended" color="orange">
+            {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
+          </a-tag>
+        </span>
       </div>
 
       <!-- pnpm status -->
       <div class="tool-row">
         <span class="tool-name">pnpm</span>
-        <a-tag v-if="pnpmOk" color="green">{{ t('setup.installed', { v: pnpmVersion }) }}</a-tag>
-        <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
+        <span class="tool-value">
+          <a-tag v-if="pnpmOk" color="green">
+            {{ t('setup.installed', { v: pnpm?.version ?? '' }) }}
+          </a-tag>
+          <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
+        </span>
       </div>
 
-      <!-- Guidance -->
+      <!-- Where each tool resolves to: the launcher drives these exact paths. -->
+      <div v-if="nodeOk || pnpmOk" class="resolved-paths">
+        <p v-if="nodeOk && node?.path" class="resolved-path">
+          <span class="resolved-label">node</span>
+          <code>{{ node.path }}</code>
+        </p>
+        <p v-if="pnpmOk && pnpm?.path" class="resolved-path">
+          <span class="resolved-label">pnpm</span>
+          <code>{{ pnpm.path }}</code>
+        </p>
+      </div>
+
+      <!-- Guidance: node missing -->
       <div v-if="!nodeOk" class="guide-block">
         <h4>{{ t('setup.installNode') }}</h4>
-        <p class="one-click-desc">{{ t('setup.oneClickNodeDesc') }}</p>
-        <a-button
-          type="primary"
-          size="large"
-          long
-          :loading="installing"
-          :disabled="installing"
-          @click="oneClickInstall"
-        >
-          {{ t('setup.oneClickNode') }}
-        </a-button>
-        <a-progress
-          v-if="installing && nodeTask"
-          class="one-click-progress"
-          :percent="nodeTask.percent / 100"
-        />
-        <p v-if="installing && nodeTask?.message" class="one-click-message">
-          {{ nodeTask.message }}
-        </p>
-        <p class="manual-hint">
-          {{ t('setup.nodeManualHint') }}
-          <a-link @click="api.openExternal('https://nodejs.org/zh-cn/download')">
-            {{ t('setup.openNodeSite') }}
-          </a-link>
-        </p>
+        <p class="guide-desc">{{ t('setup.nodeCommandDesc') }}</p>
+        <div class="cmd-row">
+          <pre class="cmd-text">{{ nodeCommand }}</pre>
+          <button class="mac-secondary-btn" @click="copyCommand(nodeCommand, 'node')">
+            {{ copiedKey === 'node' ? t('common.copied') : t('common.copy') }}
+          </button>
+        </div>
+        <p class="guide-hint">{{ t('setup.afterInstallHint') }}</p>
       </div>
 
+      <!-- Guidance: node present, pnpm missing -->
       <div v-if="nodeOk && !pnpmOk" class="guide-block">
         <h4>{{ t('setup.installPnpm') }}</h4>
-        <p>{{ t('setup.pnpmAuto') }}</p>
+        <p class="guide-desc">{{ t('setup.pnpmCommandDesc', { major: requirements?.min_pnpm_major }) }}</p>
+        <div class="cmd-row">
+          <pre class="cmd-text">{{ pnpmCommand }}</pre>
+          <button class="mac-secondary-btn" @click="copyCommand(pnpmCommand, 'pnpm')">
+            {{ copiedKey === 'pnpm' ? t('common.copied') : t('common.copy') }}
+          </button>
+        </div>
+        <p class="guide-hint">{{ t('setup.afterInstallHint') }}</p>
       </div>
 
-      <div v-if="allOk" class="guide-block">
+      <div v-if="allOk" class="guide-block ready-block">
         <a-result status="success" :title="t('setup.allReady')" />
         <a-button type="primary" @click="router.push({ name: 'home' })">
           {{ t('setup.enterApp') }}
@@ -149,21 +178,23 @@ async function recheck() {
 .setup-card {
   max-width: 560px;
   width: 100%;
-  text-align: center;
   padding: 40px 48px;
 }
 
 .setup-icon {
   font-size: 44px;
+  text-align: center;
 }
 
 h2 {
   margin: 12px 0 4px;
+  text-align: center;
 }
 
 .setup-desc {
   color: var(--color-text-3);
   margin-bottom: 24px;
+  text-align: center;
 }
 
 .tool-row {
@@ -175,6 +206,36 @@ h2 {
 
   .tool-name {
     font-weight: 600;
+  }
+
+  .tool-value {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+  }
+}
+
+.resolved-paths {
+  margin-top: 10px;
+  text-align: left;
+}
+
+.resolved-path {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--color-text-3);
+
+  .resolved-label {
+    flex: 0 0 34px;
+    font-weight: 600;
+  }
+
+  code {
+    word-break: break-all;
+    user-select: text;
   }
 }
 
@@ -188,45 +249,46 @@ h2 {
   h4 {
     margin: 0 0 8px;
   }
-
-  ol {
-    padding-left: 20px;
-    line-height: 1.8;
-    color: var(--color-text-2);
-  }
 }
 
-.one-click-desc {
+.ready-block {
+  text-align: center;
+}
+
+.guide-desc {
   margin: 0 0 12px;
   color: var(--color-text-2);
 }
 
-.one-click-progress {
-  margin-top: 12px;
-}
-
-.one-click-message {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--color-text-3);
-}
-
-.manual-hint {
+.guide-hint {
   margin: 12px 0 0;
   font-size: 12px;
   color: var(--color-text-3);
 }
 
-.code-block {
+.cmd-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.cmd-text {
+  flex: 1;
+  margin: 0;
+  padding: 10px 14px;
   background: #1d2129;
   color: #a9b7c6;
-  padding: 10px 14px;
   border-radius: 6px;
   font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
   user-select: text;
 }
 
 .setup-actions {
   margin-top: 24px;
+  text-align: center;
 }
 </style>

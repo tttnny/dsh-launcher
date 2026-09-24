@@ -518,7 +518,8 @@ async fn ensure_web_profile_template(
     // The launch spec module owns this argv: the template boot is the ONE
     // DSH invocation allowed to pass --host (a throwaway bind whose host is
     // the launcher's own decision).
-    let mut child = crate::launch::template_boot_command(&version.dir, home_path, port)
+    let node = crate::runtime::node_for_spawn_checked(state).await?;
+    let mut child = crate::launch::template_boot_command(&node, &version.dir, home_path, port)
         .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?
         .spawn()
         .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?;
@@ -754,14 +755,9 @@ async fn install_via_pnpm(
         // connections.
         cmd.args(["install", "--prefix"])
             .arg(dir)
-            .arg("--store-dir")
-            .arg(store_dir)
-            .args(["--loglevel=http"])
-            .args(crate::toolchain::pnpm_fetch_flags());
-        // Optional npm registry mirror (e.g. npmmirror) via DSH_NPM_REGISTRY.
-        if let Some(registry) = crate::toolchain::registry_mirror() {
-            cmd.args(["--registry", &registry]);
-        }
+            .args(crate::toolchain::pnpm_store_flags(
+                store_dir, "http", true,
+            ));
         cmd.arg(format!("@deepseek-ai/dsh@{version}"));
         // No TTY under the launcher: keep pnpm non-interactive so a modules
         // purge (store relink) never aborts with
@@ -995,13 +991,9 @@ async fn install_version_from_repo(
     crate::process::hide_console(&mut cmd);
     cmd.current_dir(&dir)
         .args(["install", "--frozen-lockfile"])
-        .arg("--store-dir")
-        .arg(&store_dir)
-        .args(["--loglevel=http"])
-        .args(crate::toolchain::pnpm_fetch_flags());
-    if let Some(registry) = crate::toolchain::registry_mirror() {
-        cmd.args(["--registry", &registry]);
-    }
+        .args(crate::toolchain::pnpm_store_flags(
+            &store_dir, "http", true,
+        ));
     cmd.env("CI", "true");
     run_streamed_command(app, state, task_id, cmd, "pnpm install（源码）").await?;
     ensure_pending_builds(app, state, task_id, &dir, &pnpm_prog).await?;

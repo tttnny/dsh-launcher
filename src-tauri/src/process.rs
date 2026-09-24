@@ -194,10 +194,6 @@ pub fn npm() -> &'static str {
     "npm"
 }
 
-pub fn pnpm() -> &'static str {
-    "pnpm"
-}
-
 pub fn node() -> &'static str {
     "node"
 }
@@ -324,10 +320,16 @@ pub async fn start_instance_process(
         }
     }
 
+    // The interpreter is the resolved binding rather than a bare name, and a
+    // toolchain installed while the app was running is picked up here (the
+    // binding is re-probed when its recorded path no longer exists).
+    let node = crate::runtime::node_for_spawn_checked(state).await?;
+
     // The launch spec module owns the argv: NODE_RUNTIME_FLAGS order,
     // --profile, per-instance --port, --no-open feature detection, and the
     // deliberate absence of --host (the profile layer owns the bind host).
     let mut cmd = crate::launch::instance_command(
+        &node,
         &version.dir,
         profile,
         is_web.then(|| inst.port.unwrap_or(0)),

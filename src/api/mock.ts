@@ -293,13 +293,19 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'get_runtime_status': {
       // Browser preview: assume Node + pnpm are available so the UI is usable.
       const mockRuntime: RuntimeStatus = {
-        node: { installed: true, version: 'v22.14.0', path: null },
-        pnpm: { installed: true, version: '9.15.4', path: null },
+        node: { installed: true, version: 'v22.14.0', path: '/usr/local/bin/node' },
+        pnpm: { installed: true, version: '11.17.0', path: '/usr/local/bin/pnpm' },
+        managers: ['brew'],
+        node_below_recommended: false,
+        requirements: {
+          min_pnpm_major: 11,
+          recommended_node_major: 20,
+          pnpm_install_command: 'npm install -g pnpm',
+          node_install_command: 'brew install node',
+        },
       }
       return mockRuntime as T
     }
-    case 'start_install_node_task':
-      return 'task-mock-node' as T
     case 'list_tasks': {
       return [...mockTasks.values()].sort((a, b) => b.created_at - a.created_at) as T
     }

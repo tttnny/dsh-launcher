@@ -98,8 +98,6 @@ export const api = {
   getSettings: () => call<LauncherSettings>('get_settings'),
   updateSettings: (settings: Partial<LauncherSettings>) => call<LauncherSettings>('update_settings', { settings }),
 
-  /** Starts the one-click Node.js install background task (issue #23). */
-  startInstallNodeTask: () => call<string>('start_install_node_task'),
   /** Checks GitHub for a newer launcher release on the given channel. */
   checkLauncherUpdate: (channel: 'dev' | 'release' = 'dev') =>
     call<LauncherUpdateInfo>('check_launcher_update', { channel }),

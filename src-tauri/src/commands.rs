@@ -24,26 +24,25 @@ pub fn create_home(
     create_home_record(&state, &name, &path)
 }
 
-/// Shared helper: validates + creates a DSH_HOME record. If a HOME with the
-/// same (case-insensitively on Windows) path already exists, the existing
-/// record is returned instead of creating a duplicate (prevents duplicate
-/// same-name HOMEs when a dedicated HOME is requested repeatedly).
+/// Shared helper: validates + creates a DSH_HOME record. The path is
+/// normalized first (see [`crate::config::normalize_dir_path`]), so `~/.dsh`
+/// and `/Users/me/.dsh` are recognized as one HOME instead of two records,
+/// and a relative path is refused rather than resolved against the app's cwd.
+/// If a HOME with the same path already exists, the existing record is
+/// returned instead of creating a duplicate (prevents duplicate same-name
+/// HOMEs when a dedicated HOME is requested repeatedly).
 pub(crate) fn create_home_record(
     state: &State<'_, AppState>,
     name: &str,
     path: &str,
 ) -> Result<DshHome, String> {
     let name = name.trim();
-    let path = path.trim();
     if name.is_empty() {
         return Err("名称不能为空".to_string());
     }
-    if path.is_empty() {
-        return Err("路径不能为空".to_string());
-    }
-    let path_buf = std::path::PathBuf::from(path);
+    let path_buf = crate::config::normalize_dir_path(path)?;
 
-    // Reuse an existing HOME with the same normalized path.
+    // Reuse an existing HOME with the same path.
     {
         let cfg = state.config.lock().unwrap();
         if let Some(existing) = cfg
@@ -845,7 +844,7 @@ pub fn open_instance_terminal(
     let version_dir: Option<std::path::PathBuf> = cfg_ver
         .as_ref()
         .map(|v| std::path::PathBuf::from(&v.dir));
-    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref(), &state.data_dir);
+    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref());
 
     let path_prefix = if !path_dirs.is_empty() {
         let joined = path_dirs

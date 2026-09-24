@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
+import { useCopy } from '@/composables/useCopy'
 import { api } from '@/api'
 
 const props = defineProps<{
@@ -15,6 +16,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const { copy } = useCopy()
 const store = useLauncherStore()
 
 const filter = ref<'all' | 'error' | 'warn'>('all')
@@ -33,7 +35,7 @@ function formatTime(ts: number): string {
   return `${hh}:${mm}:${ss}`
 }
 
-function onCopy() {
+async function onCopy() {
   if (store.healthLogs.length === 0) return
   const text = store.healthLogs
     .map((l) => {
@@ -42,8 +44,7 @@ function onCopy() {
       return `[${time}] [${level}] [${l.instanceName} · ${l.profile}] ${l.message}`
     })
     .join('\n')
-  navigator.clipboard?.writeText(text)
-  Message.success(t('home.copiedLogs'))
+  await copy(text, 'home.copiedLogs')
 }
 
 function onClear() {

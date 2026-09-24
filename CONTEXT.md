@@ -59,10 +59,25 @@ _Avoid_: 进程管理（泛指时用生命周期）
 DSH 自重启后占住固定端口的外部进程被登记为运行中实例，靠 pid 存活轮询看护。
 
 **后台任务（Task）**：
-版本安装 / Node 安装一类长时操作；有 Running / Done / Error / Cancelled 状态。
+版本安装一类长时操作；有 Running / Done / Error / Cancelled 状态。
 
 **工具链（Toolchain）**：
-"哪个 pnpm（主版本钉 11）、哪个 store、哪个 registry、哪些网络 flags" 的唯一裁决。
+"哪个 pnpm（接受 11 及以上）、哪个 store、哪个 registry、哪些网络 flags" 的唯一
+裁决。装不装工具链是用户的决定，启动器只探测与驱动——见 ADR-0003。
+
+**工具链绑定（Toolchain Binding）**：
+启动器探测到的 node / pnpm 绝对路径，记在 `settings.toolchain`。它是探测缓存而
+非用户偏好：路径失效即重探并更新。作用是让 spawn 不再依赖启动那一刻的 PATH。
+_Avoid_: 工具链配置（那是用户自己的，不是我们记的）
+
+**环境检测页（Setup）**：
+`/setup` 路由：显示绑定到的绝对路径，缺什么就给一条贴合本机（nvm / fnm / brew）
+的可复制安装命令。设置页可随时进入，环境不全时启动也会自动跳入。
+
+**版本管理器（Version Manager）**：
+用户自己用来装 Node 的工具：nvm / fnm / brew。启动器**不**管理版本，只探测它们
+的目录布局，并据此建议该用哪条安装命令——已有哪个就扩展哪个，不另起一套。
+_Avoid_: Node 管理（那是版本管理器的职责）
 
 **启动规格（Launch Spec）**：
 "这个用途下如何调用 DSH"——argv（NODE_RUNTIME_FLAGS 顺序、`--host` 去留、

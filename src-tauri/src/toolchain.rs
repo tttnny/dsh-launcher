@@ -5,19 +5,43 @@
 //! builds, plugin management, version listings) derives its toolchain policy
 //! from here, so a policy change (a new pnpm major, different timeouts, a
 //! mirror variable) is made once and applies everywhere. Two entry flavors
-//! resolve the pinned pnpm: background tasks get task-log notes and a percent
-//! nudge ([`ensure_pnpm_for_task`]); interactive paths just app-log
+//! resolve the pnpm: background tasks get task-log notes and a percent nudge
+//! ([`ensure_pnpm_for_task`]); interactive paths just app-log
 //! ([`ensure_pnpm`]). They share the probe and bootstrap decisions.
 
 use crate::AppState;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 
-/// DSH profiles are initialized by pnpm 11, and `dsh plugin` shells out to
-/// whatever pnpm is on PATH. A different pnpm major produces trees the CLI
-/// does not expect and fails in ways that look unrelated, so the launcher
-/// pins the major it drives every install with.
-pub(crate) const REQUIRED_PNPM_MAJOR: u32 = 11;
+/// Lowest pnpm major the launcher drives installs with.
+///
+/// This used to be an exact pin on 11, on the theory that "DSH profiles are
+/// initialized by pnpm 11" and any other major produces trees the CLI does not
+/// expect. That premise did not hold up: DSH's profile init writes only
+/// `package.json`, `cordis.patch.yml` and `pnpm-workspace.yaml` and checks no
+/// pnpm version anywhere (the `pnpm@11.7.0` in DSH's own repo builds DSH's
+/// monorepo, not consumer profiles). Meanwhile every easy install channel —
+/// `brew install pnpm`, `npm i -g pnpm`, `curl get.pnpm.io` — now delivers
+/// major 12, so an exact pin rejected the toolchain most users already had.
+///
+/// The floor stays at 11 rather than being dropped: it is the oldest major the
+/// launcher's own flag set and store layout are verified against. See
+/// ADR-0003.
+pub(crate) const MIN_PNPM_MAJOR: u32 = 11;
+
+/// What the user is told to run when no acceptable pnpm is on the machine.
+/// The launcher no longer installs one itself: toolchain provisioning is the
+/// user's call (nvm/brew/standalone all work), and the setup guide offers this
+/// same text as a copyable command. Not pinned to a version — the accept floor
+/// is a range, so pinning here would only go stale.
+pub(crate) const PNPM_INSTALL_HINT: &str = "npm install -g pnpm";
+
+/// Whether a probe's major version is one the launcher will drive installs
+/// with. `None` (unparsable version output) is not acceptable — a shim whose
+/// `--version` is unreadable cannot be trusted to run a 600-package tree.
+pub(crate) fn accepts_pnpm_major(major: u32) -> bool {
+    major >= MIN_PNPM_MAJOR
+}
 
 /// Parses the major version out of `pnpm --version` output ("11.17.0\n").
 pub(crate) fn pnpm_major(version_output: &str) -> Option<u32> {
@@ -52,29 +76,68 @@ pub(crate) fn store_dir(data_dir: &Path) -> PathBuf {
 /// native binaries (e.g. sharp), which abort on flaky connections. `pnpm
 /// remove` rejects these flags outright, so download-capable commands append
 /// them themselves.
-pub(crate) fn pnpm_fetch_flags() -> [&'static str; 8] {
+///
+/// They are spelled as `--config.<name>=<value>` rather than the bare
+/// `--fetch-timeout N` form because pnpm 12's CLI rewrite (Rust/clap) dropped
+/// the bare spellings: `--fetch-retries` fails with "unexpected argument" and
+/// `--loglevel=http` is not even a valid value any more. The `--config.` form
+/// is accepted by both major 11 and 12, which is what lets the launcher run on
+/// either. `--network-concurrency` has no cross-major spelling at all
+/// (`--config.network-concurrency=4` crashes pnpm 11 with "Expected
+/// `concurrency` to be a number from 1 and up"), so it is deliberately absent:
+/// pnpm's default concurrency is a fine trade for one flag set that works
+/// everywhere.
+pub(crate) fn pnpm_fetch_flags() -> [&'static str; 3] {
     [
-        "--fetch-timeout",
-        "300000", // 5 min per request
-        "--fetch-retries",
-        "5",
-        "--fetch-retry-maxtimeout",
-        "120000",
-        "--network-concurrency",
-        "4",
+        "--config.fetch-timeout=300000", // 5 min per request
+        "--config.fetch-retries=5",
+        "--config.fetch-retry-maxtimeout=120000",
     ]
 }
 
-/// Path of the pinned pnpm executable inside the data dir's tools dir.
-fn local_pnpm_path(tools_dir: &Path) -> PathBuf {
-    tools_dir.join("pnpm")
+/// The full pnpm argument set for a command that writes to the launcher's
+/// shared store: store, log level, network robustness, optional registry.
+///
+/// This is the one place those choices are made. Three call sites used to
+/// assemble the same four pieces independently (npm version install, source
+/// build, plugin management through `dsh plugin`), which is exactly why the
+/// pnpm-12 flag migration had to be applied three times by hand. `fetch` is
+/// false for subcommands that reject the download flags outright (`pnpm
+/// remove` fails with "Unknown options: 'fetch-timeout'" before touching
+/// anything).
+pub(crate) fn pnpm_store_flags(
+    store_dir: &Path,
+    loglevel: &str,
+    fetch: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "--store-dir".to_string(),
+        store_dir.to_string_lossy().to_string(),
+        format!("--config.loglevel={loglevel}"),
+    ];
+    if fetch {
+        args.extend(pnpm_fetch_flags().iter().map(|f| f.to_string()));
+    }
+    if let Some(registry) = registry_mirror() {
+        args.push("--registry".to_string());
+        args.push(registry);
+    }
+    args
 }
 
-/// Runs `<prog> --version`; `Some((raw_output, major))` when the probe
-/// succeeded (the major is `None` when the output is not a version).
+/// Runs `<prog> --version` from a neutral cwd; `Some((raw_output, major))`
+/// when the probe succeeded (the major is `None` when the output is not a
+/// version).
+///
+/// The cwd matters: pnpm resolves a `packageManager` field from the working
+/// directory and reports *that* version — a corepack shim would even download
+/// it — so a probe run from the app's cwd can report a version the binary is
+/// not. [`crate::runtime::PROBE_CWD`] makes the answer depend only on the
+/// binary.
 async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
     let mut cmd = tokio::process::Command::new(prog);
     crate::process::hide_console(&mut cmd);
+    cmd.current_dir(crate::runtime::PROBE_CWD);
     let out = cmd.arg("--version").output().await.ok()?;
     if !out.status.success() {
         return None;
@@ -84,128 +147,105 @@ async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
     Some((raw, major))
 }
 
-/// The shared probe: system pnpm on the required major, else the pinned pnpm
-/// already bootstrapped into the data dir. `None` means bootstrap is needed.
-/// `note` receives the human-readable reason when a system pnpm exists but is
-/// skipped (wrong major).
-async fn find_pnpm(
-    data_dir: &Path,
+/// The pnpm executable the launcher should drive installs with: the first
+/// candidate whose major is acceptable, plus its version output. Candidates
+/// come from the same scan the setup page reports (see
+/// [`crate::runtime::candidate_paths`]), so the two never disagree.
+///
+/// `note` receives a human-readable reason for each candidate that was
+/// skipped, so a user with pnpm 9 learns why it was not used instead of seeing
+/// a bare "not found".
+pub(crate) async fn resolve_pnpm(
     note: &mut (dyn FnMut(String) + Send),
-) -> Option<PathBuf> {
-    let system = PathBuf::from(crate::process::pnpm());
-    if let Some((raw, major)) = probe_pnpm_version(&system).await {
-        if major == Some(REQUIRED_PNPM_MAJOR) {
-            return Some(system);
+) -> Option<(PathBuf, String)> {
+    for candidate in crate::runtime::candidate_paths("pnpm") {
+        if !candidate.is_file() {
+            continue;
         }
-        let shown = raw.trim().to_string();
-        note(format!(
-            "系统 pnpm {shown} 与所需的 pnpm {REQUIRED_PNPM_MAJOR} 不符，使用启动器内置 pnpm"
-        ));
-    }
-
-    let tools_dir = data_dir.join("tools");
-    let local = local_pnpm_path(&tools_dir);
-    if local.exists() {
-        if let Some((_, major)) = probe_pnpm_version(&local).await {
-            if major == Some(REQUIRED_PNPM_MAJOR) {
-                return Some(local);
+        let Some((raw, major)) = probe_pnpm_version(&candidate).await else {
+            continue;
+        };
+        match major {
+            Some(m) if accepts_pnpm_major(m) => {
+                return Some((candidate, raw.trim().to_string()));
             }
+            Some(m) => note(format!(
+                "{}（pnpm {m}）低于所需的 pnpm {MIN_PNPM_MAJOR}，已跳过",
+                candidate.display()
+            )),
+            None => note(format!(
+                "{} 的版本号无法解析（{}），已跳过",
+                candidate.display(),
+                raw.trim()
+            )),
         }
     }
     None
 }
 
-/// Bootstraps the pinned pnpm major into `<data>/tools` via npm. The install
-/// honors the launcher proxy like every other network step. Callers wrap
-/// this with their own flavor of user-facing notes.
-async fn bootstrap_pnpm(data_dir: &Path) -> Result<PathBuf, String> {
-    let tools_dir = data_dir.join("tools");
-    std::fs::create_dir_all(&tools_dir).map_err(|e| format!("创建工具目录失败: {e}"))?;
-    let spec = format!("pnpm@{REQUIRED_PNPM_MAJOR}");
-
-    let mut child_cmd = tokio::process::Command::new(crate::process::npm());
-    crate::process::hide_console(&mut child_cmd);
-    crate::proxy::apply_to_command(&mut child_cmd);
-    child_cmd
-        .args(["install", "--global", "--prefix"])
-        .arg(&tools_dir)
-        .arg(&spec)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let child = child_cmd
-        .spawn()
-        .map_err(|e| format!("pnpm 安装启动失败: {e}"))?;
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("pnpm 安装等待失败: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let last = err.lines().last().unwrap_or(&err).to_string();
-        return Err(format!("pnpm 安装失败: {last}"));
-    }
-
-    let local = local_pnpm_path(&tools_dir);
-    if !local.exists() {
-        return Err(format!(
-            "pnpm 安装完成但未找到可执行文件: {}",
-            local.display()
-        ));
-    }
-    Ok(local)
+/// The error every pnpm-dependent flow returns when no acceptable pnpm exists.
+/// One shared wording so the version-install task, the source build and plugin
+/// management all tell the user the same actionable thing.
+pub(crate) fn pnpm_missing_error() -> String {
+    format!(
+        "未找到可用的 pnpm（需要 {MIN_PNPM_MAJOR} 或更高版本）。\n\
+         请在终端执行以下命令后，回到「设置 → 环境」点重新检测：\n\n  {PNPM_INSTALL_HINT}"
+    )
 }
 
-/// Resolves a pnpm executable on the required major for interactive paths
-/// (plugin management): notes go to the app log.
-pub(crate) async fn ensure_pnpm(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+/// Resolves a pnpm executable for interactive paths (plugin management); notes
+/// go to the app log.
+pub(crate) async fn ensure_pnpm() -> Result<PathBuf, String> {
     let mut notes = Vec::new();
-    if let Some(p) = find_pnpm(&state.data_dir, &mut |s| notes.push(s)).await {
-        for note in notes {
-            crate::log_info!("{note}");
+    match resolve_pnpm(&mut |s| notes.push(s)).await {
+        Some((path, version)) => {
+            for note in notes {
+                crate::log_warn!("{note}");
+            }
+            crate::log_info!("使用系统 pnpm {}（{}）", version, path.display());
+            Ok(path)
         }
-        return Ok(p);
+        None => {
+            for note in notes {
+                crate::log_warn!("{note}");
+            }
+            Err(pnpm_missing_error())
+        }
     }
-    crate::log_info!("正在安装 DSH profile 所需的 pnpm@{REQUIRED_PNPM_MAJOR}…");
-    bootstrap_pnpm(&state.data_dir).await
 }
 
-/// Resolves a pnpm executable on the required major for a background task:
-/// mismatch/bootstrap notes also land in the task log, and bootstrap bumps
-/// the task percent so the UI shows the extra phase.
+/// Resolves a pnpm executable for a background task: the same decision, with
+/// the skip reasons also landing in the task log so the user sees why an
+/// installed pnpm was not used.
 pub(crate) async fn ensure_pnpm_for_task(
     app: &AppHandle,
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
     let mut notes = Vec::new();
-    if let Some(p) = find_pnpm(&state.data_dir, &mut |s| notes.push(s)).await {
-        for note in &notes {
-            crate::log_warn!("{note}");
-            crate::tasks::push_task_log(app, state, task_id, note).await;
+    match resolve_pnpm(&mut |s| notes.push(s)).await {
+        Some((path, version)) => {
+            for note in &notes {
+                crate::log_warn!("{note}");
+                crate::tasks::push_task_log(app, state, task_id, note).await;
+            }
+            crate::tasks::push_task_log(
+                app,
+                state,
+                task_id,
+                &format!("使用 pnpm {version}（{}）", path.display()),
+            )
+            .await;
+            Ok(path)
         }
-        return Ok(p);
-    }
-
-    let spec = format!("pnpm@{REQUIRED_PNPM_MAJOR}");
-    let msg = format!("正在安装 DSH profile 所需的 {spec}…");
-    {
-        let mut tasks = state.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(task_id) {
-            task.percent = 5;
-            crate::tasks::push_log_locked(task, &msg);
+        None => {
+            for note in &notes {
+                crate::log_warn!("{note}");
+                crate::tasks::push_task_log(app, state, task_id, note).await;
+            }
+            Err(pnpm_missing_error())
         }
     }
-    crate::tasks::emit_progress(
-        app,
-        task_id,
-        crate::tasks::TaskState::Running,
-        5,
-        None,
-        None,
-    );
-    crate::log_info!("引导安装 {spec} 到 {}", state.data_dir.join("tools").display());
-    bootstrap_pnpm(&state.data_dir).await
 }
 
 #[cfg(test)]
@@ -222,15 +262,55 @@ mod tests {
     }
 
     #[test]
-    fn required_pnpm_major_is_the_profile_toolchain() {
-        // DSH profiles are initialized by pnpm 11; changing this constant
-        // means the launcher drives installs with a different major.
-        assert_eq!(REQUIRED_PNPM_MAJOR, 11);
+    fn fetch_flags_all_use_the_cross_major_config_spelling() {
+        // pnpm 12 rejects the bare `--fetch-retries` / `--loglevel=http`
+        // spellings, so every flag must carry the `--config.` prefix and its
+        // value inline. This is the invariant that lets one flag set serve
+        // both majors.
+        for flag in pnpm_fetch_flags() {
+            assert!(
+                flag.starts_with("--config.") && flag.contains('='),
+                "flag must be --config.<name>=<value>: {flag}"
+            );
+        }
+        // `--network-concurrency` has no cross-major spelling; its absence is
+        // deliberate, so guard against it being reintroduced by habit.
+        assert!(
+            !pnpm_fetch_flags().iter().any(|f| f.contains("concurrency")),
+            "network-concurrency cannot be passed to both majors"
+        );
     }
 
     #[test]
-    fn fetch_flags_pair_up() {
-        // All flags are `--name value` pairs; even count means no dangling flag.
-        assert!(pnpm_fetch_flags().len() % 2 == 0);
+    fn accepted_major_is_a_floor_not_an_exact_pin() {
+        // DSH itself never pins a pnpm major (its profile init writes only
+        // package.json / cordis.patch.yml / pnpm-workspace.yaml), so the
+        // launcher accepts anything at or above the verified floor. pnpm 12's
+        // tree, lockfile and build-approval flow are compatible; see ADR-0003.
+        assert!(accepts_pnpm_major(11));
+        assert!(accepts_pnpm_major(12));
+        assert!(accepts_pnpm_major(13));
+        assert!(!accepts_pnpm_major(10));
+        assert!(!accepts_pnpm_major(9));
+    }
+
+    #[test]
+    fn store_flags_carry_store_and_loglevel_always() {
+        let store = Path::new("/data/.pnpm-store");
+        let with_fetch = pnpm_store_flags(store, "http", true);
+        assert!(with_fetch.iter().any(|a| a == "--store-dir"));
+        assert!(with_fetch.iter().any(|a| a == "/data/.pnpm-store"));
+        assert!(with_fetch.iter().any(|a| a == "--config.loglevel=http"));
+        assert!(with_fetch
+            .iter()
+            .any(|a| a.starts_with("--config.fetch-timeout")));
+    }
+
+    #[test]
+    fn store_flags_drop_fetch_flags_for_non_download_subcommands() {
+        // `pnpm remove` fails on the fetch flags before touching anything.
+        let without = pnpm_store_flags(Path::new("/s"), "warn", false);
+        assert!(without.iter().any(|a| a == "--config.loglevel=warn"));
+        assert!(!without.iter().any(|a| a.starts_with("--config.fetch-")));
     }
 }

@@ -284,7 +284,14 @@
       "unknown": "Unknown"
     },
     "viewLog": "View log",
-    "logOpened": "Log revealed in Finder: {path}"
+    "logOpened": "Log revealed in Finder: {path}",
+    "environment": {
+      "title": "Environment",
+      "desc": "The toolchain the launcher resolved and bound to. Instances and plugins use these paths.",
+      "notFound": "Not found",
+      "openGuide": "Open environment check",
+      "missing": "Not installed"
+    }
   },
   "instanceEdit": {
     "titleEdit": "Instance settings",
@@ -349,18 +356,15 @@
   },
   "setup": {
     "title": "Environment Check",
-    "desc": "Running DSH instances requires Node.js and pnpm. Please prepare the environment first.",
+    "desc": "Running a DSH instance needs Node.js; installing versions and plugins also needs pnpm. The launcher detects your existing toolchain automatically and binds to it.",
     "installed": "Installed {v}",
-    "missing": "Missing",
+    "missing": "Not installed",
+    "nodeBelowRecommended": "Upgrade to {v}+ recommended",
     "installNode": "Install Node.js",
-    "oneClickNode": "Install Node.js automatically",
-    "oneClickNodeDesc": "Downloads the latest Node.js LTS into the launcher's own data directory (~30MB, no system installer; falls back to a mirror on restricted networks) and sets up pnpm as well.",
-    "nodeManualHint": "Prefer a manual install?",
-    "installFailed": "Node.js installation failed",
-    "openNodeSite": "Open nodejs.org",
+    "nodeCommandDesc": "Run this in your terminal to install Node.js:",
     "installPnpm": "Install pnpm",
-    "pnpmAuto": "The launcher will automatically install the latest pnpm into its own data directory on the first download; no manual step needed. To install it yourself, run:",
-    "pnpmIntro": "Run the following command in a terminal to install pnpm globally:",
+    "pnpmCommandDesc": "The launcher needs pnpm {major} or newer. Run this in your terminal:",
+    "afterInstallHint": "Come back to this window and the check re-runs automatically, or press Re-check below.",
     "allReady": "Environment ready",
     "enterApp": "Enter launcher",
     "recheck": "Re-check"
@@ -373,6 +377,7 @@
     "copied": "Copied",
     "refresh": "Refresh",
     "loading": "Loading…",
-    "operationFailed": "Operation failed: {msg}"
+    "operationFailed": "Operation failed: {msg}",
+    "copyFailed": "Copy failed — select the text and copy it manually"
   }
 }

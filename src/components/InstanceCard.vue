@@ -8,6 +8,7 @@ import { useLauncherStore } from '@/stores/launcher'
 import type { HealthLogItem } from '@/stores/launcher'
 import type { DshInstance } from '@/api/types'
 import { useAction } from '@/composables/useAction'
+import { useCopy } from '@/composables/useCopy'
 import { useProfiles } from '@/composables/useProfiles'
 import launcherDefaultIcon from '@/assets/launcher-icon.png'
 
@@ -20,6 +21,7 @@ const props = defineProps<{ inst: DshInstance }>()
 
 const router = useRouter()
 const { t } = useI18n()
+const { copy } = useCopy()
 const store = useLauncherStore()
 const { profilesByHome, selectionByInstance, loadingByHome, loadForHome, ensureSelection, invalidateHome } =
   useProfiles()
@@ -206,9 +208,9 @@ async function onChangeHome(newHomeId: string) {
   await refreshProfiles()
 }
 
-function copyUrl(url: string) {
-  navigator.clipboard?.writeText(url)
-  Message.success(t('common.copied'))
+/** Copies only reports success once the write resolves (see useCopy). */
+async function copyUrl(url: string) {
+  await copy(url)
 }
 </script>
 
