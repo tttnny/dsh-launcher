@@ -39,8 +39,15 @@ pnpm dev            # 浏览器预览（localStorage mock）
 
 ## 架构
 
-- `src/`：Vue 3 前端（页面、store、API 封装、i18n）；浏览器环境走 localStorage mock。
-- `src-tauri/src/`：Rust 后端——`config`（配置持久化）、`commands`（Tauri 命令）、`plugins`（插件市场与安装）、`tasks`（后台任务）、`process`（实例进程管理）、`terminal`（内置终端）、`tray`（托盘）、`windows`（窗口管理）。
+- `src/`：Vue 3 前端（页面、store、composables、i18n）。`src/api/` 是唯一 invoke
+  seam：`index.ts` 定义公共 interface，`tauri.ts`（桌面）与 `mock.ts`（浏览器预览，
+  后端契约参考实现）是两个 adapter，`ci/api-contract.test.mjs` 防漂移。
+- `src-tauri/src/`：Rust 后端——`config`（配置持久化）、`commands`（Tauri 命令）、
+  `process`（实例生命周期：running 表、迁移与投影）、`launch`（DSH 调用规格：
+  argv/env/PATH/版本布局）、`profile`（profile 目录与 cordis.patch.yml 文档）、
+  `toolchain`（pnpm/registry/网络参数）、`tasks`（后台任务 runner）、`plugins`
+  （插件市场与安装）、`runtime`（Node 探测与安装）、`tray`（托盘）、`windows`
+  （窗口管理）。领域词汇见 `CONTEXT.md`，架构决策见 `docs/adr/`。
 
 ## License
 
