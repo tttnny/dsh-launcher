@@ -24,6 +24,12 @@ export interface DshInstance {
   icon?: string | null
   /** Preferred web port (1-65535); null/undefined = random free port. */
   port?: number | null
+  /**
+   * Pass --preserve-symlinks to this instance's DSH process. Only needed when
+   * the profile depends on a `link:`-ed plugin; off by default because it
+   * breaks DSH's settings writes (the Web UI wedges on the first-run notice).
+   */
+  preserve_symlinks?: boolean
 }
 
 export interface LauncherSettings {
@@ -45,12 +51,6 @@ export interface LauncherSettings {
   no_proxy: string
   /** Inject the proxy into launched dsh instances (overrides instance env; applies on next start). */
   proxy_apply_dsh: boolean
-  /**
-   * Pass --preserve-symlinks to every spawned DSH process. Only needed for
-   * profiles that depend on a `link:`-ed plugin; off by default because it
-   * breaks DSH's settings writes (the Web UI wedges on the first-run notice).
-   */
-  preserve_symlinks: boolean
 }
 
 /** UI theme: explicit light/dark, or follow the OS color scheme. */

@@ -22,6 +22,13 @@ const homeId = ref<string | undefined>(undefined)
 const dedicatedPath = ref('')
 const defaultProfile = ref<string | undefined>(undefined)
 const profiles = ref<string[]>([])
+const preserveSymlinks = ref(false)
+
+// --- Node runtime flags -------------------------------------------------------
+
+async function onPreserveSymlinksChange(value: unknown) {
+  preserveSymlinks.value = Boolean(value)
+}
 
 // --- Web port -----------------------------------------------------------------
 
@@ -85,6 +92,7 @@ onMounted(async () => {
   homeId.value = inst.home_id
   defaultProfile.value = inst.default_profile ?? undefined
   portInput.value = inst.port ? String(inst.port) : ''
+  preserveSymlinks.value = inst.preserve_symlinks ?? false
   envRows.value = Object.entries(inst.env_overrides).map(([key, value]) => ({ key, value }))
   await loadIcon()
 })
@@ -194,6 +202,7 @@ const saveAction = useAction(
       home_id: resolvedHomeId,
       env_overrides: envOverrides,
       default_profile: defaultProfile.value ?? null,
+      preserve_symlinks: preserveSymlinks.value,
     })
     await store.refreshInstances()
     return true
@@ -378,6 +387,17 @@ const homeLabel = computed(() => {
               {{ t('instanceEdit.portApply') }}
             </button>
           </div>
+        </a-form-item>
+
+        <a-form-item :label="t('instanceEdit.preserveSymlinks')">
+          <div class="port-row">
+            <a-switch
+              :model-value="preserveSymlinks"
+              size="small"
+              @change="onPreserveSymlinksChange"
+            />
+          </div>
+          <p class="field-hint-text">{{ t('instanceEdit.preserveSymlinksHint') }}</p>
         </a-form-item>
 
         <a-form-item :label="t('instanceEdit.env')">

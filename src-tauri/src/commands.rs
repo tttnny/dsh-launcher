@@ -783,9 +783,6 @@ pub fn update_settings(
             _ => return Err(format!("无效的终端: {v}")),
         }
     }
-    if let Some(v) = settings.preserve_symlinks {
-        cfg.settings.preserve_symlinks = v;
-    }
     crate::proxy::sync_from_settings(&cfg.settings);
     let out = cfg.settings.clone();
     save_state(&state, &cfg)?;
@@ -839,7 +836,9 @@ pub fn open_instance_terminal(
         (home, inst, ver)
     };
     let terminal = state.config.lock().unwrap().settings.terminal.clone();
-    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
+    // The terminal's wrapper must boot the same CLI the instance does, so it
+    // takes the instance's own flag.
+    let preserve_symlinks = cfg_inst.preserve_symlinks;
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 

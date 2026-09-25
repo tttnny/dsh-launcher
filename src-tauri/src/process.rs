@@ -333,7 +333,7 @@ pub async fn start_instance_process(
         &version.dir,
         profile,
         is_web.then(|| inst.port.unwrap_or(0)),
-        cfg.settings.preserve_symlinks,
+        inst.preserve_symlinks,
     )?;
 
     let env = build_env(&cfg, instance_id)?;

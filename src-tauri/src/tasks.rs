@@ -454,8 +454,8 @@ async fn do_create_instance(
             default_profile: None,
             last_profile: None,
             icon: None,
-
             port: None,
+            preserve_symlinks: false,
         };
         cfg.instances.push(inst.clone());
         crate::commands::save_state(state, &cfg)?;
@@ -519,7 +519,9 @@ async fn ensure_web_profile_template(
     // DSH invocation allowed to pass --host (a throwaway bind whose host is
     // the launcher's own decision).
     let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
+    // No instance exists yet, so the flag is derived from the profile being
+    // materialized rather than from a user setting.
+    let preserve_symlinks = crate::profile::declares_link_dependency(&web_dir);
     let mut child = crate::launch::template_boot_command(
         &node,
         &version.dir,

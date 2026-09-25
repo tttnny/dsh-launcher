@@ -313,10 +313,10 @@ async fn run_dsh_plugin(
 ) -> Result<(), String> {
     let (version_dir, home_path, profile) = (target.version_dir, target.home_path, target.profile);
     let (subcommand, spec, loglevel) = (op.subcommand, op.spec, op.loglevel);
-    // Read the settings snapshot before any await: a std MutexGuard must not
-    // be held across one.
-    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
     let dir = crate::profile::profile_dir(home_path, profile)?;
+    // No instance is in scope here, so the flag comes from the profile's own
+    // manifest: a `link:` dependency is exactly what needs it.
+    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
     ensure_build_scripts_allowed(&dir)?;
     // Never let a plugin's peers pull a second copy of a core package in.
@@ -469,7 +469,7 @@ async fn relink_profile_store(
     }
     let mut args: Vec<String> = vec!["install".to_string()];
     args.extend(forwarded_pnpm_flags(state, "warn"));
-    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
+    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
     let node = crate::runtime::node_for_spawn_checked(state).await?;
     let cmd = crate::launch::plugin_command(
         &node,

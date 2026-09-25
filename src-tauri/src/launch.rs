@@ -118,9 +118,9 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 // Node runtime flags
 // ---------------------------------------------------------------------------
 
-/// Node's own flags a spawned DSH process carries, given the
-/// `preserve_symlinks` setting. They must be placed *before* the CLI script
-/// path, otherwise the CLI parser sees them as DSH arguments — every
+/// Node's own flags a spawned DSH process carries, given the caller's
+/// `preserve_symlinks` decision. They must be placed *before* the CLI
+/// script path, otherwise the CLI parser sees them as DSH arguments — every
 /// constructor below enforces the ordering once.
 ///
 /// `--preserve-symlinks` keeps a `link:`-ed plugin's module URL on its profile
@@ -134,15 +134,23 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 /// argument applies to the DSH process alone, while `NODE_OPTIONS` would leak
 /// into the `pnpm` child that `dsh plugin` spawns.
 ///
-/// It is OFF by default because it breaks the Web UI for everyone who does not
-/// need it: preserving symlinks lets Node reach one package through several
-/// distinct paths, so `@deepseek-ai/dsh-app-boot` is loaded as multiple module
-/// instances (3 on a stock 0.1.7-rc.2 pnpm tree). Its `bootstrapIncludes`
-/// WeakMap is module-level, so the instance that mounted the root Include entry
-/// is not the one serving `settings/mutate`; every settings write is rejected
-/// with `profile reload requires the root Include entry`. The welcome notice's
-/// 继续 button is a settings write and its dialog offers no way out, so the Web
-/// UI opens permanently stuck on 内测声明.
+/// It is OFF unless the caller asks, because it breaks the Web UI for everyone
+/// who does not need it: preserving symlinks lets Node reach one package
+/// through several distinct paths, so `@deepseek-ai/dsh-app-boot` is loaded as
+/// multiple module instances (3 on a stock 0.1.7-rc.2 pnpm tree). Its
+/// `bootstrapIncludes` WeakMap is module-level, so the instance that mounted
+/// the root Include entry is not the one serving `settings/mutate`; every
+/// settings write is rejected with `profile reload requires the root Include
+/// entry`. The welcome notice's 继续 button is a settings write and its dialog
+/// offers no way out, so the Web UI opens permanently stuck on 内测声明.
+///
+/// Who decides the flag:
+/// * an **instance** carries its own `preserve_symlinks` (Instance settings —
+///   the escape hatch for a linked plugin);
+/// * the **profile template boot** and **`dsh plugin`** have no instance and
+///   derive it from the profile manifest via
+///   [`crate::profile::declares_link_dependency`];
+/// * the **instance terminal** follows the instance it belongs to.
 pub fn node_runtime_flags(preserve_symlinks: bool) -> &'static [&'static str] {
     if preserve_symlinks {
         &["--preserve-symlinks"]
@@ -583,10 +591,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The linked-plugin switch is the only thing that puts a Node runtime
-    /// flag on argv, and it must stay ahead of bin.js when it does.
+    /// The caller's preserve_symlinks decision is the only thing that puts a
+    /// Node runtime flag on argv, and it must stay ahead of bin.js when it does.
     #[test]
-    fn preserve_symlinks_setting_controls_the_node_flag() {
+    fn preserve_symlinks_flag_is_optional_and_ordered_first() {
         let dir = std::env::temp_dir().join(format!("dsh-launch-test-{}", uuid::Uuid::new_v4()));
         let bin = dir
             .join("node_modules")

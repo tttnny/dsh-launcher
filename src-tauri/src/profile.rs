@@ -314,6 +314,36 @@ fn rewrite_row_in_id_block(raw: &str, block_id: &str, key: &str, value: &str) ->
 // File-level patch operations
 // ---------------------------------------------------------------------------
 
+/// Whether a profile's manifest declares any `link:` dependency.
+///
+/// A linked plugin needs DSH's own kernel-package routing, which keys on the
+/// importer living inside the profiles directory — that is what
+/// `--preserve-symlinks` preserves (see
+/// [`crate::launch::node_runtime_flags`]). The flag cannot be left on for
+/// every process though: it also makes DSH load `@deepseek-ai/dsh-app-boot`
+/// more than once and every settings write then fails. So the spawn points
+/// that have no instance to ask — the profile template boot and
+/// `dsh plugin` — derive it from the profile itself instead of a user
+/// setting.
+///
+/// Returns false for a missing or unreadable manifest: that is the common
+/// case (`pnpm install` has not written it yet) and the safe default.
+pub(crate) fn declares_link_dependency(profile_dir: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(profile_dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    manifest
+        .get("dependencies")
+        .and_then(|deps| deps.as_object())
+        .is_some_and(|deps| {
+            deps.values()
+                .any(|spec| spec.as_str().is_some_and(|s| s.starts_with("link:")))
+        })
+}
+
 /// Scrubs the webserver port pin in a copied profile directory's patch
 /// document (template flows). Missing file / absent block: no-op.
 pub(crate) fn scrub_profile_port_pin(profile_dir: &Path) {
@@ -456,5 +486,42 @@ mod tests {
             profile_dir(Path::new("/h"), "web").unwrap(),
             Path::new("/h/profiles/web")
         );
+    }
+
+    /// The two spawn points with no instance to ask (profile template boot,
+    /// `dsh plugin`) read the flag out of the profile manifest, so this
+    /// predicate is what keeps a linked plugin working there.
+    #[test]
+    fn declares_link_dependency_reads_the_manifest() {
+        let dir = std::env::temp_dir().join(format!("dsh-profile-test-{}", uuid::Uuid::new_v4()));
+        // No manifest at all (pnpm install has not written one) -> false.
+        assert!(!declares_link_dependency(&dir));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!declares_link_dependency(&dir));
+
+        // Regular semver deps, and a manifest without a dependencies object.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"@dsh-plugin/plain":"^0.3.1"}}"#,
+        )
+        .unwrap();
+        assert!(!declares_link_dependency(&dir));
+        std::fs::write(dir.join("package.json"), r#"{"private":true}"#).unwrap();
+        assert!(!declares_link_dependency(&dir));
+
+        // Unparsable JSON is treated as "no link deps" rather than an error:
+        // the safe default, since the flag must not be enabled by accident.
+        std::fs::write(dir.join("package.json"), "{ not json").unwrap();
+        assert!(!declares_link_dependency(&dir));
+
+        // A link: dep anywhere in the map turns it on.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"@dsh-plugin/plain":"^0.3.1","my-plugin":"link:../my-plugin"}}"#,
+        )
+        .unwrap();
+        assert!(declares_link_dependency(&dir));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
