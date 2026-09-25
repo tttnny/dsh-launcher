@@ -2,10 +2,12 @@
 
 :root {
   --dl-header-height: 52px;
-  --dl-traffic-height: 42px;
   --dl-content-max: 1120px;
   --dl-sider-width: 216px;
-  --dl-sider-collapsed-width: 104px;
+  // Collapsed rail: wide enough for a centered 18px icon and for the native
+  // traffic lights that draw over the sidebar header (their right edge sits at
+  // ~79px from the window edge, so the rail must clear that).
+  --dl-sider-collapsed-width: 84px;
   --dl-card-radius: 14px;
   --dl-page-gap: 18px;
 

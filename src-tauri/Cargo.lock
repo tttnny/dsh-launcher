@@ -968,7 +968,6 @@ dependencies = [
  "flate2",
  "image",
  "libc",
- "objc2",
  "open",
  "portable-pty",
  "regex",

@@ -12,7 +12,6 @@ mod proxy;
 mod runtime;
 mod tasks;
 mod toolchain;
-mod traffic;
 mod tray;
 mod update;
 mod windows;
@@ -162,9 +161,6 @@ pub fn run() {
             // is handled by show_or_create_main / the RunEvent loop below).
             if let Some(win) = app.get_webview_window("main") {
                 windows::attach_close_behavior(app.handle(), &win);
-                // Hide the native traffic lights; the sidebar draws its own,
-                // aligned with the sidebar controls.
-                traffic::attach(&win);
             }
 
             Ok(())

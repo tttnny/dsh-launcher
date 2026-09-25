@@ -39,11 +39,10 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
         .decorations(true)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(20.0, 28.0))
         .build()
         .map_err(|e| e.to_string())?;
     attach_close_behavior(app, &win);
-    // Recreated windows need their native traffic lights hidden as well.
-    crate::traffic::attach(&win);
     Ok(())
 }
 

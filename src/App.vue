@@ -56,8 +56,6 @@ onMounted(async () => {
   }
   await setupLaunchDeepLink()
   window.addEventListener('keydown', onAppKeydown)
-  window.addEventListener('focus', onWinFocus)
-  window.addEventListener('blur', onWinBlur)
   await setupMenuListeners()
 })
 
@@ -200,8 +198,6 @@ async function openBrowserWhenReady(id: string) {
 onUnmounted(() => {
   themeMedia.removeEventListener('change', onSystemThemeChange)
   window.removeEventListener('keydown', onAppKeydown)
-  window.removeEventListener('focus', onWinFocus)
-  window.removeEventListener('blur', onWinBlur)
   unlistenDeepLink?.()
   unlistenMenu.forEach((un) => un())
   unlistenMenu = []
@@ -364,7 +360,8 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   await toggleWindowZoom()
 }
 
-// --- Custom traffic lights (the native buttons are hidden by the Rust side) ---
+// --- Window zoom: the native traffic lights own close / minimize / zoom, but
+// double-clicking the custom header strip still zooms the window. ---
 
 async function toggleWindowZoom() {
   try {
@@ -379,98 +376,20 @@ async function toggleWindowZoom() {
     // Advisory only
   }
 }
-
-async function onLightClose() {
-  const w = await appWindow
-  void w?.close()
-}
-
-async function onLightMinimize() {
-  const w = await appWindow
-  void w?.minimize()
-}
-
-const winFocused = ref(true)
-
-function onWinFocus() {
-  winFocused.value = true
-}
-
-function onWinBlur() {
-  winFocused.value = false
-}
 </script>
 
 <template>
   <div class="apple-window">
     <!-- Unified Sidebar: spans full vertical height -->
-    <aside class="apple-sider" :class="{ collapsed: siderCollapsed, 'is-tauri': isTauri }">
-      <!-- Sidebar Header: custom traffic lights + sidebar toggle, one aligned row -->
+    <aside class="apple-sider" :class="{ collapsed: siderCollapsed }">
+      <!-- Sidebar Header: a bare drag strip. The native traffic lights draw
+           over its left end, exactly as they do over Finder's sidebar; the
+           sidebar toggle lives in the main toolbar (see .header-left). -->
       <div
         class="sider-traffic-header"
         @mousedown="onHeaderMouseDown"
         @dblclick="onHeaderDoubleClick"
-      >
-        <div v-if="isTauri" class="traffic-lights">
-          <button class="tl tl-close" :class="{ blurred: !winFocused }" title="关闭" @click="onLightClose">
-            <svg viewBox="0 0 16 16" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-              <line x1="4" y1="4" x2="12" y2="12" />
-              <line x1="12" y1="4" x2="4" y2="12" />
-            </svg>
-          </button>
-          <button class="tl tl-min" :class="{ blurred: !winFocused }" title="最小化" @click="onLightMinimize">
-            <svg viewBox="0 0 16 16" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-              <line x1="3.5" y1="8" x2="12.5" y2="8" />
-            </svg>
-          </button>
-          <button class="tl tl-zoom" :class="{ blurred: !winFocused }" title="缩放" @click="toggleWindowZoom">
-            <svg viewBox="0 0 16 16" width="9" height="9" fill="currentColor">
-              <polygon points="3,6.5 3,3 6.5,3" />
-              <polygon points="13,9.5 13,13 9.5,13" />
-            </svg>
-          </button>
-        </div>
-        <button
-          class="sider-toggle-btn"
-          :title="t('nav.toggleSider')"
-          data-no-drag
-          @click="toggleSider"
-        >
-          <!-- Expanded → arrow points left (collapse); collapsed → arrow points right (expand) -->
-          <svg
-            v-if="!siderCollapsed"
-            viewBox="0 0 16 16"
-            width="15"
-            height="15"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.5" />
-            <line x1="6.25" y1="2.75" x2="6.25" y2="13.25" />
-            <polyline points="9.7 5.9 7.6 8 9.7 10.1" />
-            <line x1="7.6" y1="8" x2="12.4" y2="8" />
-          </svg>
-          <svg
-            v-else
-            viewBox="0 0 16 16"
-            width="15"
-            height="15"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.5" />
-            <line x1="6.25" y1="2.75" x2="6.25" y2="13.25" />
-            <polyline points="10.3 5.9 12.4 8 10.3 10.1" />
-            <line x1="7.6" y1="8" x2="12.4" y2="8" />
-          </svg>
-        </button>
-      </div>
+      />
 
       <!-- Navigation List -->
       <nav class="sider-nav">
@@ -602,6 +521,39 @@ function onWinBlur() {
       <!-- Unified Header Toolbar -->
       <header class="apple-header" @mousedown="onHeaderMouseDown" @dblclick="onHeaderDoubleClick">
         <div class="header-left">
+          <button
+            class="header-mac-btn"
+            :title="t('nav.toggleSider')"
+            data-no-drag
+            @click="toggleSider"
+          >
+            <!-- SF-Symbol-like sidebar toggle: a window frame with the sidebar
+                 rail filled when it is open, and hollow when collapsed. -->
+            <svg
+              viewBox="0 0 16 16"
+              width="15"
+              height="15"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.5" />
+              <line x1="6.25" y1="2.75" x2="6.25" y2="13.25" />
+              <rect
+                v-if="!siderCollapsed"
+                x="2.5"
+                y="3.5"
+                width="3"
+                height="9"
+                rx="1.4"
+                fill="currentColor"
+                stroke="none"
+                opacity="0.28"
+              />
+            </svg>
+          </button>
           <button v-if="showBack" class="header-mac-btn" :title="t('common.back')" data-no-drag @click="onHeaderBack">
             <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M10 13L5 8l5-5" />
@@ -675,105 +627,16 @@ function onWinBlur() {
   }
 }
 
-// Window Traffic Area in Sidebar
-// Content sits 4px below the box center: the native title-bar hit zone covers
-// roughly the top 22px and swallows clicks there.
+// Window Traffic Area in Sidebar.
+// A bare drag strip: the native traffic lights draw over its left end, and
+// the sidebar toggle lives in the main toolbar. onHeaderMouseDown makes the
+// rest of the strip draggable.
 .sider-traffic-header {
   height: var(--dl-header-height);
   flex-shrink: 0;
-  padding: 4px 10px 0 10px;
-  display: flex;
-  align-items: center;
   border-bottom: 1px solid var(--apple-separator);
   -webkit-app-region: drag;
   user-select: none;
-}
-
-.traffic-lights {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-right: 12px;
-  flex-shrink: 0;
-}
-
-.tl {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1px solid transparent;
-  padding: 0;
-  cursor: default;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(0, 0, 0, 0.55);
-  transition: filter 0.15s ease;
-
-  svg {
-    opacity: 0;
-    transition: opacity 0.12s ease;
-  }
-
-  &:hover svg {
-    opacity: 1;
-  }
-
-  &:active {
-    filter: brightness(0.8);
-  }
-
-  &.tl-close {
-    background: #ff5f57;
-    border-color: #de4b41;
-  }
-
-  &.tl-min {
-    background: #febc2e;
-    border-color: #d8a024;
-  }
-
-  &.tl-zoom {
-    background: #28c840;
-    border-color: #1b9e32;
-  }
-
-  // macOS dims the lights when the window loses focus and hides the glyphs.
-  &.blurred {
-    background: var(--color-text-4);
-    border-color: transparent;
-
-    &:hover svg {
-      opacity: 0;
-    }
-  }
-}
-
-.sider-toggle-btn {
-  border: none;
-  background: transparent;
-  color: var(--color-text-3);
-  cursor: pointer;
-  border-radius: 6px;
-  padding: 5px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.16s ease;
-
-  &:focus,
-  &:focus-visible {
-    outline: none;
-  }
-
-  &:hover {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
-  }
-
-  &:active {
-    transform: scale(var(--apple-active-scale));
-  }
 }
 
 // Sidebar Navigation
@@ -897,14 +760,12 @@ function onWinBlur() {
 }
 
 // Unified Header
-// Same 4px top padding as the sidebar strip so title / buttons sit on the
-// traffic lights' line.
 .apple-header {
   height: var(--dl-header-height);
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  padding: 4px 24px 0;
+  padding: 0 24px;
   border-bottom: 1px solid var(--apple-separator);
   background: var(--apple-content-bg);
   -webkit-app-region: drag;
