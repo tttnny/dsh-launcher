@@ -100,11 +100,11 @@ async function onRecheck() {
   >
     <template #title>
       <div class="terminal-modal-title">
-        <div class="terminal-window-dots">
-          <span class="dot red" />
-          <span class="dot yellow" />
-          <span class="dot green" />
-        </div>
+        <svg class="terminal-modal-glyph" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.2" />
+          <polyline points="4.6 6.2 6.6 8 4.6 9.8" />
+          <line x1="8.2" y1="10" x2="11.4" y2="10" />
+        </svg>
         <span class="terminal-title-text">{{ t('home.healthModalTitle') }}</span>
         <div class="terminal-summary-tags">
           <span v-if="store.healthErrorCount > 0" class="summary-badge error">
@@ -236,7 +236,7 @@ async function onRecheck() {
   }
   .arco-modal-body {
     padding: 14px 18px 18px;
-    background: var(--apple-window-bg);
+    background: var(--apple-content-bg);
   }
 }
 </style>
@@ -245,22 +245,11 @@ async function onRecheck() {
 .terminal-modal-title {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 
-  .terminal-window-dots {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-
-    .dot {
-      width: 11px;
-      height: 11px;
-      border-radius: 50%;
-
-      &.red { background: #ff5f56; }
-      &.yellow { background: #ffbd2e; }
-      &.green { background: #27c93f; }
-    }
+  .terminal-modal-glyph {
+    color: var(--color-text-3);
+    flex-shrink: 0;
   }
 
   .terminal-title-text {

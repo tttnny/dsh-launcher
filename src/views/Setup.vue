@@ -83,52 +83,43 @@ onUnmounted(() => {
 <template>
   <div class="setup-page">
     <div class="dl-card setup-card">
-      <div class="setup-icon">🛠️</div>
+      <div class="setup-icon">
+        <svg viewBox="0 0 48 48" width="42" height="42" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M30 6a9 9 0 0 0-8.5 12.1L8 31.6V40h8.4l13.5-13.5A9 9 0 1 0 30 6z" />
+          <circle cx="33" cy="15" r="2.4" />
+        </svg>
+      </div>
       <h2>{{ t('setup.title') }}</h2>
       <p class="setup-desc">{{ t('setup.desc') }}</p>
 
-      <!-- Node status -->
-      <div class="tool-row">
-        <span class="tool-name">Node.js</span>
-        <span class="tool-value">
-          <a-tag v-if="nodeOk" color="green">
-            {{ t('setup.installed', { v: node?.version ?? '' }) }}
-          </a-tag>
-          <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
-          <a-tag v-if="nodeOk && belowRecommended" color="orange">
-            {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
-          </a-tag>
-        </span>
+      <!-- Toolchain status: inset group, one row per tool. -->
+      <div class="apple-inset-group setup-tools">
+        <div class="apple-inset-row">
+          <div class="row-info">
+            <span class="row-title">Node.js</span>
+            <span v-if="nodeOk && node?.path" class="row-desc tnum">{{ node.path }}</span>
+          </div>
+          <span :class="['setup-tag', nodeOk ? 'ok' : 'missing']">
+            {{ nodeOk ? t('setup.installed', { v: node?.version ?? '' }) : t('setup.missing') }}
+          </span>
+        </div>
+        <div class="apple-inset-row">
+          <div class="row-info">
+            <span class="row-title">pnpm</span>
+            <span v-if="pnpmOk && pnpm?.path" class="row-desc tnum">{{ pnpm.path }}</span>
+          </div>
+          <span :class="['setup-tag', pnpmOk ? 'ok' : 'missing']">
+            {{ pnpmOk ? t('setup.installed', { v: pnpm?.version ?? '' }) : t('setup.missing') }}
+          </span>
+        </div>
       </div>
 
-      <!-- pnpm status -->
-      <div class="tool-row">
-        <span class="tool-name">pnpm</span>
-        <span class="tool-value">
-          <a-tag v-if="pnpmOk" color="green">
-            {{ t('setup.installed', { v: pnpm?.version ?? '' }) }}
-          </a-tag>
-          <a-tag v-else color="red">{{ t('setup.missing') }}</a-tag>
-        </span>
-      </div>
-
-      <!-- Where each tool resolves to: the launcher drives these exact paths. -->
-      <div v-if="nodeOk || pnpmOk" class="resolved-paths">
-        <p v-if="nodeOk && node?.path" class="resolved-path">
-          <span class="resolved-label">node</span>
-          <code>{{ node.path }}</code>
-        </p>
-        <p v-if="pnpmOk && pnpm?.path" class="resolved-path">
-          <span class="resolved-label">pnpm</span>
-          <code>{{ pnpm.path }}</code>
-        </p>
-      </div>
+      <p v-if="nodeOk && belowRecommended" class="setup-note warn">
+        {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
+      </p>
 
       <!-- Guidance: one block per missing tool, so a machine that lacks both is
-           told both things at once. They used to be mutually exclusive (the
-           pnpm block required nodeOk), which left a fresh machine with a Node
-           command only — the user would install Node, assume they were done,
-           and hit the missing-pnpm error when installing a version. -->
+           told both things at once. -->
       <div v-if="!nodeOk" class="guide-block">
         <h4>{{ t('setup.installNode') }}</h4>
         <p class="guide-desc">{{ t('setup.nodeCommandDesc') }}</p>
@@ -151,21 +142,24 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Shown once for however many blocks are above, so the "come back and
-           it re-checks itself" instruction is not repeated per tool. -->
       <p v-if="!allOk" class="guide-hint shared-hint">{{ t('setup.afterInstallHint') }}</p>
 
-      <div v-if="allOk" class="guide-block ready-block">
-        <a-result status="success" :title="t('setup.allReady')" />
-        <a-button type="primary" @click="router.push({ name: 'home' })">
+      <div v-if="allOk" class="ready-block">
+        <span class="ready-check">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        </span>
+        <p class="ready-title">{{ t('setup.allReady') }}</p>
+        <button class="mac-primary-btn" @click="router.push({ name: 'home' })">
           {{ t('setup.enterApp') }}
-        </a-button>
+        </button>
       </div>
 
       <div class="setup-actions">
-        <a-button :loading="checking" type="outline" @click="recheck">
+        <button class="mac-secondary-btn" :disabled="checking" @click="recheck">
           {{ t('setup.recheck') }}
-        </a-button>
+        </button>
       </div>
     </div>
   </div>
@@ -183,12 +177,14 @@ onUnmounted(() => {
 .setup-card {
   max-width: 560px;
   width: 100%;
-  padding: 40px 48px;
+  padding: 36px 40px;
 }
 
 .setup-icon {
-  font-size: 44px;
-  text-align: center;
+  display: flex;
+  justify-content: center;
+  color: rgb(var(--primary-6));
+  opacity: 0.9;
 }
 
 h2 {
@@ -198,71 +194,69 @@ h2 {
 
 .setup-desc {
   color: var(--color-text-3);
-  margin-bottom: 24px;
+  margin: 0 0 22px;
   text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.tool-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 0;
-  border-bottom: 1px dashed var(--color-border-2);
-
-  .tool-name {
-    font-weight: 600;
-  }
-
-  .tool-value {
-    display: inline-flex;
-    gap: 6px;
-    align-items: center;
-  }
-}
-
-.resolved-paths {
-  margin-top: 10px;
+// Toolchain status rows (reuses the shared inset-group look).
+.setup-tools {
   text-align: left;
+
+  .row-desc {
+    word-break: break-all;
+    font-size: 11.5px;
+  }
 }
 
-.resolved-path {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  margin: 4px 0;
+.setup-tag {
+  flex-shrink: 0;
+  padding: 2px 9px;
   font-size: 12px;
-  color: var(--color-text-3);
+  font-weight: 600;
+  border-radius: 6px;
 
-  .resolved-label {
-    flex: 0 0 34px;
-    font-weight: 600;
+  &.ok {
+    background: rgb(var(--green-6) / 14%);
+    color: rgb(var(--green-6));
   }
 
-  code {
-    word-break: break-all;
-    user-select: text;
+  &.missing {
+    background: rgb(var(--red-6) / 14%);
+    color: rgb(var(--red-6));
+  }
+}
+
+.setup-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  text-align: left;
+
+  &.warn {
+    color: rgb(var(--orange-6));
   }
 }
 
 .guide-block {
   text-align: left;
-  margin-top: 24px;
-  padding: 16px;
-  background: var(--color-fill-1);
-  border-radius: 8px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  background: var(--apple-group-bg);
+  border: 1px solid var(--apple-card-border);
+  border-radius: 10px;
 
   h4 {
-    margin: 0 0 8px;
+    margin: 0 0 6px;
+    font-size: 13.5px;
   }
 }
 
-.ready-block {
-  text-align: center;
-}
-
 .guide-desc {
-  margin: 0 0 12px;
-  color: var(--color-text-2);
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--color-text-3);
+  line-height: 1.55;
 }
 
 .guide-hint {
@@ -286,12 +280,13 @@ h2 {
 
 .cmd-text {
   flex: 1;
+  min-width: 0;
   margin: 0;
   padding: 10px 14px;
   background: #1d2129;
   color: #a9b7c6;
-  border-radius: 6px;
-  font-family: Consolas, 'Courier New', monospace;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -299,8 +294,39 @@ h2 {
   user-select: text;
 }
 
+// Ready state: a centered success mark instead of Arco's result block.
+.ready-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 18px;
+  background: rgb(var(--green-6) / 8%);
+  border: 1px solid rgb(var(--green-6) / 20%);
+  border-radius: 10px;
+
+  .ready-check {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgb(var(--green-6) / 15%);
+    color: rgb(var(--green-6));
+  }
+
+  .ready-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-1);
+  }
+}
+
 .setup-actions {
-  margin-top: 24px;
+  margin-top: 18px;
   text-align: center;
 }
 </style>

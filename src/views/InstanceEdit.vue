@@ -318,7 +318,7 @@ const homeLabel = computed(() => {
                   v-model="iconInput"
                   :placeholder="t('instanceEdit.iconUrlHint')"
                   allow-clear
-                  style="max-width: 300px"
+                  style="width: 300px"
                 />
                 <button
                   type="button"

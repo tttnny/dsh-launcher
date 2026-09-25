@@ -400,8 +400,13 @@ async function toggleWindowZoom() {
           @click="navGo('home')"
         >
           <span class="nav-icon">
+            <!-- Home: a grid of instance tiles, not a play triangle (which reads
+                 as a media control and clashed with the HOME house icon). -->
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="5 3 19 12 5 21 5 3" />
+              <rect x="3" y="3" width="7.5" height="7.5" rx="1.8" />
+              <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.8" />
+              <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.8" />
+              <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.8" />
             </svg>
           </span>
           <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.home') }}</span>

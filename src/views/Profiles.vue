@@ -7,6 +7,7 @@ import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import type { DshInstance } from '@/api/types'
 import { useAction } from '@/composables/useAction'
+import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -240,7 +241,7 @@ function onManagePlugins(profile: string) {
       <p v-else class="dl-card-desc">{{ t('profiles.noInstances') }}</p>
 
       <div v-if="profilesLoading" class="dl-card-desc">{{ t('common.loading') }}</div>
-      <a-empty v-else-if="profiles.length === 0" :description="t('profiles.profilesEmpty')" />
+      <DlEmpty v-else-if="profiles.length === 0" icon="profile" :description="t('profiles.profilesEmpty')" />
 
       <!-- Profile Items List -->
       <div class="profile-items-group">
@@ -320,7 +321,7 @@ function onManagePlugins(profile: string) {
 
     <!-- Empty Home state -->
     <div v-else class="dl-card">
-      <a-empty :description="t('profiles.noHomeSelected')" />
+      <DlEmpty icon="profile" :description="t('profiles.noHomeSelected')" />
     </div>
   </div>
 </template>

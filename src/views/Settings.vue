@@ -323,7 +323,7 @@ function scrollToSection(key: string) {
             </div>
             <a-select
               :model-value="store.settings.terminal"
-              style="width: 170px"
+              style="width: 210px"
               size="small"
               @change="onTerminalChange"
             >

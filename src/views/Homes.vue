@@ -6,6 +6,7 @@ import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
 import { useLauncherStore } from '@/stores/launcher'
+import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -153,7 +154,7 @@ const homeColumns = computed(() => [
           </div>
         </template>
         <template #empty>
-          <a-empty :description="t('homes.homesEmpty')" />
+          <DlEmpty icon="tray" :description="t('homes.homesEmpty')" />
         </template>
       </a-table>
     </div>

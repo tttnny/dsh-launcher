@@ -6,6 +6,7 @@ import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
+import DlEmpty from '@/components/DlEmpty.vue'
 import type { RemoteVersion } from '@/api/types'
 
 const router = useRouter()
@@ -243,7 +244,7 @@ const onRemove = removeAction.run
           <button class="mac-action-pill danger">{{ t('versions.deleteVersion') }}</button>
         </a-popconfirm>
       </div>
-      <a-empty v-if="store.versions.length === 0" :description="t('versions.emptyInstalled')" />
+      <DlEmpty v-if="store.versions.length === 0" icon="version" :description="t('versions.emptyInstalled')" />
     </div>
   </div>
 </template>

@@ -166,6 +166,14 @@ button,
   }
 }
 
+// Keyboard focus: macOS draws a soft ring only for keyboard users, never for
+// pointer clicks, so focus-visible is the right hook throughout the app.
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(var(--primary-6) / 32%);
+  border-radius: 8px;
+}
+
 // Apple Status Indicator Dots
 .apple-status-dot {
   display: inline-flex;
@@ -343,11 +351,13 @@ button,
 .mac-primary-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   height: 30px;
   padding: 0 14px;
   font-size: 13px;
   font-weight: 500;
+  white-space: nowrap;
   border-radius: 8px;
   border: none;
   background: rgb(var(--primary-6));
@@ -374,11 +384,13 @@ button,
 .mac-secondary-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   height: 30px;
   padding: 0 12px;
   font-size: 13px;
   font-weight: 500;
+  white-space: nowrap;
   border-radius: 8px;
   border: 1px solid var(--apple-card-border);
   background: var(--apple-card-bg);

@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
+import DlEmpty from '@/components/DlEmpty.vue'
 import type { TaskInfo } from '@/api/types'
 
 const { t } = useI18n()
@@ -95,7 +96,7 @@ const sortedTasks = computed(() => store.taskList)
       </div>
 
       <div v-if="sortedTasks.length === 0" class="empty-tasks">
-        <a-empty :description="t('tasks.empty')" />
+        <DlEmpty icon="task" :description="t('tasks.empty')" />
       </div>
 
       <div v-for="task in sortedTasks" :key="task.id" class="task-box">

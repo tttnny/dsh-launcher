@@ -7,6 +7,7 @@ import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import type { InstalledPlugin } from '@/api/types'
 import { useAction } from '@/composables/useAction'
+import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -324,14 +325,14 @@ const pluginColumns = computed(() => [
           </a-popconfirm>
         </template>
         <template #empty>
-          <a-empty :description="t('plugins.pluginsEmpty')" />
+          <DlEmpty icon="plugin" :description="t('plugins.pluginsEmpty')" />
         </template>
       </a-table>
     </div>
 
     <!-- Empty Selection Card -->
     <div v-else class="dl-card">
-      <a-empty :description="t('plugins.pluginsPickProfile')" />
+      <DlEmpty icon="plugin" :description="t('plugins.pluginsPickProfile')" />
     </div>
   </div>
 </template>
