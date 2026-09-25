@@ -313,6 +313,9 @@ async fn run_dsh_plugin(
 ) -> Result<(), String> {
     let (version_dir, home_path, profile) = (target.version_dir, target.home_path, target.profile);
     let (subcommand, spec, loglevel) = (op.subcommand, op.spec, op.loglevel);
+    // Read the settings snapshot before any await: a std MutexGuard must not
+    // be held across one.
+    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
     let dir = crate::profile::profile_dir(home_path, profile)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
     ensure_build_scripts_allowed(&dir)?;
@@ -338,7 +341,15 @@ async fn run_dsh_plugin(
         let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
         args.extend(forwarded_pnpm_flags(state, loglevel));
         let cmd =
-            crate::launch::plugin_command(&node, version_dir, home_path, profile, &args, &pnpm_prog)?;
+            crate::launch::plugin_command(
+                &node,
+                version_dir,
+                home_path,
+                profile,
+                &args,
+                &pnpm_prog,
+                preserve_symlinks,
+            )?;
         match run_command(cmd, &what).await {
             Ok(()) => return Ok(()),
             Err(out) if attempt == 1 && mentions_ignored_builds(&out) => {
@@ -458,6 +469,7 @@ async fn relink_profile_store(
     }
     let mut args: Vec<String> = vec!["install".to_string()];
     args.extend(forwarded_pnpm_flags(state, "warn"));
+    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
     let node = crate::runtime::node_for_spawn_checked(state).await?;
     let cmd = crate::launch::plugin_command(
         &node,
@@ -466,6 +478,7 @@ async fn relink_profile_store(
         target.profile,
         &args,
         pnpm_prog,
+        preserve_symlinks,
     )?;
     run_command(cmd, "dsh plugin install（重新链接 store）")
         .await

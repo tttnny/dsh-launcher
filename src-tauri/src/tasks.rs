@@ -519,8 +519,15 @@ async fn ensure_web_profile_template(
     // DSH invocation allowed to pass --host (a throwaway bind whose host is
     // the launcher's own decision).
     let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let mut child = crate::launch::template_boot_command(&node, &version.dir, home_path, port)
-        .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?
+    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
+    let mut child = crate::launch::template_boot_command(
+        &node,
+        &version.dir,
+        home_path,
+        port,
+        preserve_symlinks,
+    )
+    .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?
         .spawn()
         .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?;
 

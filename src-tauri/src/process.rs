@@ -325,7 +325,7 @@ pub async fn start_instance_process(
     // binding is re-probed when its recorded path no longer exists).
     let node = crate::runtime::node_for_spawn_checked(state).await?;
 
-    // The launch spec module owns the argv: NODE_RUNTIME_FLAGS order,
+    // The launch spec module owns the argv: node_runtime_flags order,
     // --profile, per-instance --port, --no-open feature detection, and the
     // deliberate absence of --host (the profile layer owns the bind host).
     let mut cmd = crate::launch::instance_command(
@@ -333,6 +333,7 @@ pub async fn start_instance_process(
         &version.dir,
         profile,
         is_web.then(|| inst.port.unwrap_or(0)),
+        cfg.settings.preserve_symlinks,
     )?;
 
     let env = build_env(&cfg, instance_id)?;

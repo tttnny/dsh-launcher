@@ -74,6 +74,7 @@ function seedDb(): MockDb {
       proxy_port: 7890,
       no_proxy: '127.0.0.1,localhost,::1',
       proxy_apply_dsh: false,
+      preserve_symlinks: false,
     },
     running: {},
   }
@@ -91,6 +92,7 @@ function loadDb(): MockDb {
       db.settings.proxy_port = db.settings.proxy_port ?? 7890
       db.settings.no_proxy = db.settings.no_proxy ?? '127.0.0.1,localhost,::1'
       db.settings.proxy_apply_dsh = db.settings.proxy_apply_dsh ?? false
+      db.settings.preserve_symlinks = db.settings.preserve_symlinks ?? false
       db.settings.terminal = db.settings.terminal ?? 'system'
       return db
     }

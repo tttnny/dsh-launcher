@@ -55,6 +55,7 @@ export const useLauncherStore = defineStore('launcher', {
       proxy_port: 7890,
       no_proxy: '127.0.0.1,localhost,::1',
       proxy_apply_dsh: false,
+      preserve_symlinks: false,
     },
     statusById: {},
     tasks: {},

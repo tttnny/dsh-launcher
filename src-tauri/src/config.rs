@@ -79,6 +79,18 @@ pub struct LauncherSettings {
     /// terminal window with DSH_HOME set and cwd at the HOME directory.
     #[serde(default = "default_terminal")]
     pub terminal: String,
+    /// Pass `--preserve-symlinks` to every DSH process the launcher spawns.
+    ///
+    /// Needed only when a profile depends on a `link:`-ed plugin: the flag
+    /// keeps that plugin's module URL on its profile path, which is what DSH's
+    /// kernel-package routing keys on. Off by default because it makes Node
+    /// resolve one package through several distinct paths, so
+    /// `@deepseek-ai/dsh-app-boot` gets loaded more than once and every DSH
+    /// settings write fails with `profile reload requires the root Include
+    /// entry` — which bricks the Web UI's first-run notice and the whole
+    /// Settings surface.
+    #[serde(default)]
+    pub preserve_symlinks: bool,
     /// Where the launcher's own toolchain resolution last landed: the absolute
     /// paths of the `node` and `pnpm` it will drive DSH with. This is a probe
     /// *cache*, not a user preference — it is rewritten at startup and by the
@@ -174,6 +186,7 @@ impl Default for LauncherSettings {
             no_proxy: default_no_proxy(),
             proxy_apply_dsh: false,
             terminal: default_terminal(),
+            preserve_symlinks: false,
             toolchain: ToolchainBinding::default(),
         }
     }
@@ -233,6 +246,8 @@ pub struct SettingsPatch {
     pub proxy_apply_dsh: Option<bool>,
     #[serde(default)]
     pub terminal: Option<String>,
+    #[serde(default)]
+    pub preserve_symlinks: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

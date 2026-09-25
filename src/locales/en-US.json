@@ -290,7 +290,9 @@
       "desc": "The toolchain the launcher resolved and bound to. Instances and plugins use these paths.",
       "notFound": "Not found",
       "openGuide": "Open environment check",
-      "missing": "Not installed"
+      "missing": "Not installed",
+      "preserveSymlinks": "Preserve symlinks (--preserve-symlinks)",
+      "preserveSymlinksHint": "Only needed when a profile depends on a link:-ed plugin. With it on, Node loads one package through several distinct paths, so dsh-app-boot is loaded more than once and every DSH settings write fails — the Web UI stays stuck on the internal-testing notice and the settings page cannot save. Restart the instance after changing it."
     }
   },
   "instanceEdit": {

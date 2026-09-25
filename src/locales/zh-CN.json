@@ -290,7 +290,9 @@
       "desc": "启动器已识别并绑定的工具链。实例与插件都使用这里的路径。",
       "notFound": "未找到",
       "openGuide": "打开环境检测",
-      "missing": "未安装"
+      "missing": "未安装",
+      "preserveSymlinks": "保留符号链接（--preserve-symlinks）",
+      "preserveSymlinksHint": "仅在 profile 依赖 link: 链接的插件时才需要开启。开启后 Node 会用多个不同路径加载同一个包，dsh-app-boot 会被加载多份，导致 DSH 的设置写入全部失败——Web UI 会永久卡在内测声明上，设置页也无法保存。改完需重启实例。"
     }
   },
   "instanceEdit": {

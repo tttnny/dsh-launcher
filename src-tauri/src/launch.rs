@@ -4,7 +4,7 @@
 //! documented (or not) at one call site while the other three silently
 //! depended on them:
 //!
-//! * **Instance run** ([`instance_command`]): `node NODE_RUNTIME_FLAGS bin
+//! * **Instance run** ([`instance_command`]): `node [flags] bin
 //!   --profile P [--port N] [--no-open]`. `--host` is NEVER passed — the
 //!   profile layer owns the bind-host decision (the remote-web-ui plugin's
 //!   LAN toggle). Port 0 = random.
@@ -118,9 +118,10 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 // Node runtime flags
 // ---------------------------------------------------------------------------
 
-/// Node's own flags every spawned DSH process carries. They must be placed
-/// *before* the CLI script path, otherwise the CLI parser sees them as DSH
-/// arguments — every constructor below enforces the ordering once.
+/// Node's own flags a spawned DSH process carries, given the
+/// `preserve_symlinks` setting. They must be placed *before* the CLI script
+/// path, otherwise the CLI parser sees them as DSH arguments — every
+/// constructor below enforces the ordering once.
 ///
 /// `--preserve-symlinks` keeps a `link:`-ed plugin's module URL on its profile
 /// path instead of its realpath inside the plugin's checkout. DSH routes
@@ -132,9 +133,25 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 /// It is passed as an argument rather than via `NODE_OPTIONS` on purpose: an
 /// argument applies to the DSH process alone, while `NODE_OPTIONS` would leak
 /// into the `pnpm` child that `dsh plugin` spawns.
-pub const NODE_RUNTIME_FLAGS: &[&str] = &["--preserve-symlinks"];
+///
+/// It is OFF by default because it breaks the Web UI for everyone who does not
+/// need it: preserving symlinks lets Node reach one package through several
+/// distinct paths, so `@deepseek-ai/dsh-app-boot` is loaded as multiple module
+/// instances (3 on a stock 0.1.7-rc.2 pnpm tree). Its `bootstrapIncludes`
+/// WeakMap is module-level, so the instance that mounted the root Include entry
+/// is not the one serving `settings/mutate`; every settings write is rejected
+/// with `profile reload requires the root Include entry`. The welcome notice's
+/// 继续 button is a settings write and its dialog offers no way out, so the Web
+/// UI opens permanently stuck on 内测声明.
+pub fn node_runtime_flags(preserve_symlinks: bool) -> &'static [&'static str] {
+    if preserve_symlinks {
+        &["--preserve-symlinks"]
+    } else {
+        &[]
+    }
+}
 
-/// The base `node NODE_RUNTIME_FLAGS <bin>` invocation shared by every DSH
+/// The base `node [node_runtime_flags] <bin>` invocation shared by every DSH
 /// spawn; callers then add their own subcommand and flags.
 ///
 /// `node` is the resolved absolute path from the launcher's toolchain binding,
@@ -143,7 +160,11 @@ pub const NODE_RUNTIME_FLAGS: &[&str] = &["--preserve-symlinks"];
 /// environment the app happened to start with (and on pnpm/nvm shims that
 /// re-resolve per cwd). Passing it in keeps that decision in one place while
 /// leaving argv ordering — this module's real contract — here.
-fn dsh_base(node: &Path, version_dir: &Path) -> Result<Command, String> {
+fn dsh_base(
+    node: &Path,
+    version_dir: &Path,
+    preserve_symlinks: bool,
+) -> Result<Command, String> {
     let bin = version_bin(version_dir);
     if !version_bin_ready(version_dir) {
         return Err(format!(
@@ -153,7 +174,7 @@ fn dsh_base(node: &Path, version_dir: &Path) -> Result<Command, String> {
     }
     let mut cmd = Command::new(node);
     crate::process::hide_console(&mut cmd);
-    cmd.args(NODE_RUNTIME_FLAGS).arg(&bin);
+    cmd.args(node_runtime_flags(preserve_symlinks)).arg(&bin);
     Ok(cmd)
 }
 
@@ -218,8 +239,9 @@ pub fn instance_command(
     version_dir: &Path,
     profile: &str,
     web_port: Option<u16>,
+    preserve_symlinks: bool,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(node, version_dir)?;
+    let mut cmd = dsh_base(node, version_dir, preserve_symlinks)?;
     cmd.arg("--profile").arg(profile);
     if let Some(port) = web_port {
         cmd.arg("--port").arg(port.to_string());
@@ -247,8 +269,9 @@ pub fn template_boot_command(
     version_dir: &Path,
     home_path: &Path,
     port: u16,
+    preserve_symlinks: bool,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(node, version_dir)?;
+    let mut cmd = dsh_base(node, version_dir, preserve_symlinks)?;
     cmd.arg("--profile")
         .arg("web")
         .arg("--host")
@@ -287,8 +310,9 @@ pub fn plugin_command(
     profile: &str,
     pnpm_args: &[String],
     pnpm_prog: &Path,
+    preserve_symlinks: bool,
 ) -> Result<Command, String> {
-    let mut cmd = dsh_base(node, version_dir)?;
+    let mut cmd = dsh_base(node, version_dir, preserve_symlinks)?;
     cmd.arg("plugin")
         .arg("--profile")
         .arg(profile)
@@ -340,31 +364,30 @@ pub fn plugin_command(
 ///
 /// Returns the `.bin` directory (to prepend to the terminal's PATH) when the
 /// version tree exists.
-pub fn ensure_terminal_dsh_wrapper(version_dir: &Path) -> Option<PathBuf> {
+pub fn ensure_terminal_dsh_wrapper(version_dir: &Path, preserve_symlinks: bool) -> Option<PathBuf> {
     let bin_dir = version_dir.join("node_modules").join(".bin");
     let dsh_bin = bin_dir.join("dsh");
-    // Rewrite a wrapper an earlier launcher build generated, so its Node
-    // flags cannot go stale; never touch a real pnpm-provided `dsh`.
-    let wrapper_is_ours = std::fs::read_to_string(&dsh_bin)
-        .map(|existing| existing.starts_with("#!/bin/sh\nexec node "))
-        .unwrap_or(false);
-    if !dsh_bin.exists() || wrapper_is_ours {
-        let target_bin = version_bin(version_dir);
-        if target_bin.exists() {
+    // The wrapper this build wants, or `None` when the version tree has no
+    // bin.js to point at (a partial install has nothing to write).
+    let desired = wrapper_script(version_dir, preserve_symlinks);
+    if let Some(content) = desired {
+        let existing = std::fs::read_to_string(&dsh_bin).ok();
+        // Never touch a real pnpm-provided `dsh`. Our own wrapper is rewritten
+        // whenever its flags differ, because `preserve_symlinks` is
+        // user-toggled and a stale wrapper would silently keep the old
+        // behaviour in instance terminals.
+        let wrapper_is_ours = existing
+            .as_deref()
+            .is_some_and(|raw| raw.starts_with("#!/bin/sh\nexec node "));
+        if (!dsh_bin.exists() || wrapper_is_ours) && existing.as_deref() != Some(content.as_str()) {
             let _ = std::fs::create_dir_all(&bin_dir);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 // A bare `dsh` typed in this terminal boots the same
                 // profiles as the launcher, so it carries the same Node
-                // runtime flags (see NODE_RUNTIME_FLAGS).
-                let flags = NODE_RUNTIME_FLAGS.join(" ");
-                let content = format!(
-                    "#!/bin/sh\nexec node {} \"{}\" \"$@\"\n",
-                    flags,
-                    target_bin.to_string_lossy()
-                );
-                if std::fs::write(&dsh_bin, content).is_ok() {
+                // runtime flags (see `node_runtime_flags`).
+                if std::fs::write(&dsh_bin, &content).is_ok() {
                     let _ =
                         std::fs::set_permissions(&dsh_bin, std::fs::Permissions::from_mode(0o755));
                 }
@@ -378,13 +401,37 @@ pub fn ensure_terminal_dsh_wrapper(version_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The wrapper script a version's `node_modules/.bin/dsh` should hold, or
+/// `None` when that version tree does not exist yet. Unix-only by
+/// construction: the launcher targets macOS.
+#[cfg(unix)]
+fn wrapper_script(version_dir: &Path, preserve_symlinks: bool) -> Option<String> {
+    let target_bin = version_bin(version_dir);
+    if !target_bin.exists() {
+        return None;
+    }
+    let flags = node_runtime_flags(preserve_symlinks).join(" ");
+    Some(format!(
+        "#!/bin/sh\nexec node {} \"{}\" \"$@\"\n",
+        flags,
+        target_bin.to_string_lossy()
+    ))
+}
+
+#[cfg(not(unix))]
+fn wrapper_script(_version_dir: &Path, _preserve_symlinks: bool) -> Option<String> {
+    None
+}
+
 /// The PATH directories an instance terminal prepends: the version's `.bin`
 /// (via [`ensure_terminal_dsh_wrapper`]), so a bare `dsh` in the terminal is
 /// the same CLI the launcher runs. Node itself comes from the user's own
 /// toolchain — the launcher no longer ships one.
-pub fn terminal_path_dirs(version_dir: Option<&Path>) -> Vec<PathBuf> {
+pub fn terminal_path_dirs(version_dir: Option<&Path>, preserve_symlinks: bool) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(dir) = version_dir.and_then(ensure_terminal_dsh_wrapper) {
+    if let Some(dir) =
+        version_dir.and_then(|dir| ensure_terminal_dsh_wrapper(dir, preserve_symlinks))
+    {
         dirs.push(dir);
     }
     dirs
@@ -506,7 +553,7 @@ mod tests {
         // The interpreter comes from the caller's resolved binding; the test
         // only cares that it is used verbatim as argv[0]'s program.
         let node = Path::new("/opt/test/bin/node");
-        let cmd = instance_command(node, &dir, "web", Some(3099)).unwrap();
+        let cmd = instance_command(node, &dir, "web", Some(3099), false).unwrap();
         let std_cmd = cmd.as_std();
         assert_eq!(std_cmd.get_program().to_string_lossy(), node.to_string_lossy());
         let argv: Vec<String> = std_cmd
@@ -514,17 +561,17 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         // Ordering: runtime flags, then bin.js, then DSH subcommand/flags.
-        assert_eq!(argv[0], "--preserve-symlinks");
-        assert!(argv[1].ends_with("bin.js"));
-        assert_eq!(argv[2], "--profile");
-        assert_eq!(argv[3], "web");
-        assert_eq!(argv[4], "--port");
-        assert_eq!(argv[5], "3099");
+        // With the setting off there is no flag row at all.
+        assert!(argv[0].ends_with("bin.js"));
+        assert_eq!(argv[1], "--profile");
+        assert_eq!(argv[2], "web");
+        assert_eq!(argv[3], "--port");
+        assert_eq!(argv[4], "3099");
         // The instance run never passes --host (profile layer owns the bind).
         assert!(!argv.iter().any(|a| a == "--host"));
 
         // Non-web profile: no --port, no --no-open.
-        let plain = instance_command(node, &dir, "bot", None).unwrap();
+        let plain = instance_command(node, &dir, "bot", None, false).unwrap();
         let plain_argv: Vec<String> = plain
             .as_std()
             .get_args()
@@ -532,6 +579,40 @@ mod tests {
             .collect();
         assert!(!plain_argv.iter().any(|a| a.starts_with("--port")));
         assert!(!plain_argv.iter().any(|a| a == "--no-open"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The linked-plugin switch is the only thing that puts a Node runtime
+    /// flag on argv, and it must stay ahead of bin.js when it does.
+    #[test]
+    fn preserve_symlinks_setting_controls_the_node_flag() {
+        let dir = std::env::temp_dir().join(format!("dsh-launch-test-{}", uuid::Uuid::new_v4()));
+        let bin = dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("bin.js"), "// bin").unwrap();
+
+        let node = Path::new("/opt/test/bin/node");
+        let argv_of = |preserve_symlinks: bool| -> Vec<String> {
+            instance_command(node, &dir, "web", Some(3099), preserve_symlinks)
+                .unwrap()
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect()
+        };
+
+        let on = argv_of(true);
+        assert_eq!(on[0], "--preserve-symlinks");
+        assert!(on[1].ends_with("bin.js"));
+
+        let off = argv_of(false);
+        assert_eq!(off, on[1..].to_vec());
+        assert!(!off.iter().any(|a| a == "--preserve-symlinks"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -552,6 +633,7 @@ mod tests {
             &dir,
             Path::new("/tmp/home"),
             20001,
+            false,
         )
         .unwrap();
         let argv: Vec<String> = cmd
@@ -563,9 +645,11 @@ mod tests {
         assert_eq!(argv[host + 1], "127.0.0.1");
         let port = argv.iter().position(|a| a == "--port").unwrap();
         assert_eq!(argv[port + 1], "20001");
-        // argv = [flags, bin.js, --profile, web, --host, 127.0.0.1, --port, N]
-        assert_eq!(argv[2], "--profile");
-        assert_eq!(argv[3], "web");
+        // argv = [bin.js, --profile, web, --host, 127.0.0.1, --port, N]:
+        // no Node runtime flag ahead of bin.js while the setting is off.
+        assert!(argv[0].ends_with("bin.js"));
+        assert_eq!(argv[1], "--profile");
+        assert_eq!(argv[2], "web");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

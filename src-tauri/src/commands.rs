@@ -783,6 +783,9 @@ pub fn update_settings(
             _ => return Err(format!("无效的终端: {v}")),
         }
     }
+    if let Some(v) = settings.preserve_symlinks {
+        cfg.settings.preserve_symlinks = v;
+    }
     crate::proxy::sync_from_settings(&cfg.settings);
     let out = cfg.settings.clone();
     save_state(&state, &cfg)?;
@@ -836,6 +839,7 @@ pub fn open_instance_terminal(
         (home, inst, ver)
     };
     let terminal = state.config.lock().unwrap().settings.terminal.clone();
+    let preserve_symlinks = state.config.lock().unwrap().settings.preserve_symlinks;
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 
@@ -844,7 +848,7 @@ pub fn open_instance_terminal(
     let version_dir: Option<std::path::PathBuf> = cfg_ver
         .as_ref()
         .map(|v| std::path::PathBuf::from(&v.dir));
-    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref());
+    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref(), preserve_symlinks);
 
     let path_prefix = if !path_dirs.is_empty() {
         let joined = path_dirs

@@ -140,6 +140,10 @@ async function onProxyApplyDshChange(value: unknown) {
   await patchSettings({ proxy_apply_dsh: Boolean(value) })
 }
 
+async function onPreserveSymlinksChange(value: unknown) {
+  await patchSettings({ preserve_symlinks: Boolean(value) })
+}
+
 const proxyUrl = ref(store.settings.proxy_url ?? '')
 const proxyPort = ref(store.settings.proxy_port ?? 7890)
 const noProxy = ref(store.settings.no_proxy ?? '')
@@ -236,6 +240,18 @@ function scrollToSection(key: string) {
             <a-tag :color="store.runtime?.pnpm?.installed ? 'green' : 'red'">
               {{ store.runtime?.pnpm?.version ?? t('settings.environment.missing') }}
             </a-tag>
+          </div>
+
+          <div class="apple-inset-row">
+            <div class="row-info">
+              <span class="row-title">{{ t('settings.environment.preserveSymlinks') }}</span>
+              <span class="row-desc">{{ t('settings.environment.preserveSymlinksHint') }}</span>
+            </div>
+            <a-switch
+              :model-value="store.settings.preserve_symlinks"
+              size="small"
+              @change="onPreserveSymlinksChange"
+            />
           </div>
         </div>
 
