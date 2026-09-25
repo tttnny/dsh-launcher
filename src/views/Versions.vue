@@ -7,6 +7,7 @@ import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
 import DlEmpty from '@/components/DlEmpty.vue'
+import DlRefreshButton from '@/components/DlRefreshButton.vue'
 import type { RemoteVersion } from '@/api/types'
 
 const router = useRouter()
@@ -101,13 +102,14 @@ const onRemove = removeAction.run
       <div class="dl-card-title">
         <h3>{{ t('versions.latest') }}</h3>
         <div class="dl-toolbar">
-          <button class="mac-secondary-btn" :disabled="loading" @click="store.refreshRemoteVersions()">
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8">
-              <path d="M13.5 8A5.5 5.5 0 1 1 12 4.1L14 2" />
-              <polyline points="14 5.5 14 2 10.5 2" />
-            </svg>
+          <DlRefreshButton
+            class="mac-secondary-btn"
+            :action="store.refreshRemoteVersions"
+            :disabled="loading"
+            :size="12"
+          >
             <span>{{ t('common.refresh') }}</span>
-          </button>
+          </DlRefreshButton>
         </div>
       </div>
 

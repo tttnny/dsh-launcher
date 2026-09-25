@@ -11,6 +11,7 @@ import { useAction } from '@/composables/useAction'
 import { useCopy } from '@/composables/useCopy'
 import { useProfiles } from '@/composables/useProfiles'
 import launcherDefaultIcon from '@/assets/launcher-icon.png'
+import DlRefreshButton from '@/components/DlRefreshButton.vue'
 
 // InstanceCard: one instance as a deep module. It owns everything per-card —
 // profile list + selection (via useProfiles), icon, busy flags, the start /
@@ -279,17 +280,13 @@ async function copyUrl(url: string) {
         >
           <a-option v-for="p in profiles" :key="p" :value="p">{{ p }}</a-option>
         </a-select>
-        <button
+        <DlRefreshButton
           class="profile-refresh-btn"
           :title="t('common.refresh')"
           :disabled="profilesLoading"
-          @click="refreshProfiles"
-        >
-          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M13.5 8A5.5 5.5 0 1 1 12 4.1L14 2" />
-            <polyline points="14 5.5 14 2 10.5 2" />
-          </svg>
-        </button>
+          :action="refreshProfiles"
+          :size="12"
+        />
       </div>
     </div>
 
