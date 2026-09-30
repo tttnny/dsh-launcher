@@ -70,6 +70,16 @@ DSH 自重启后占住固定端口的外部进程被登记为运行中实例，�
 非用户偏好：路径失效即重探并更新。作用是让 spawn 不再依赖启动那一刻的 PATH。
 _Avoid_: 工具链配置（那是用户自己的，不是我们记的）
 
+**Profile Store 固定（Store Pin）**：
+写在 profile 的 `pnpm-workspace.yaml` 里的 `storeDir`，钉住该 profile 的 pnpm
+内容 store。启动器自己 spawn 的 pnpm 一律带 `--store-dir`，但网页端插件管理器
+（实例自己进程内的 `dsh plugin`）在 profile 目录里跑的是裸 `pnpm`，看不到那个
+flag——没有这条固定它会回落到用户的全局 store，pnpm 随即对每次增删报
+`ERR_PNPM_UNEXPECTED_STORE`。固定值取该 profile 已经链接的 store（已装过的
+profile 不被搬到别的 store），仅从未装过的 profile 才取启动器的共享 store；
+显式 `--store-dir` 优先级更高，所以启动器自己的调用不受影响。
+_Avoid_: 全局 store 设置（那是用户的，启动器不改）
+
 **环境检测页（Setup）**：
 `/setup` 路由：显示绑定到的绝对路径，缺什么就给一条贴合本机（nvm / fnm / brew）
 的可复制安装命令。设置页可随时进入，环境不全时启动也会自动跳入。

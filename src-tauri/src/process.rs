@@ -320,6 +320,29 @@ pub async fn start_instance_process(
         }
     }
 
+    // The running instance's own plugin manager (the Web UI's 插件 page) spawns
+    // bare `pnpm` in the profile directory — it never sees the `--store-dir`
+    // the launcher passes on its own invocations, so it falls back to the
+    // user's global store and pnpm refuses every add/remove with
+    // ERR_PNPM_UNEXPECTED_STORE. Pinning the store in the profile itself is
+    // what that process reads; a failure here only costs the Web UI's plugin
+    // management, so the launch continues.
+    if let Some(hp) = home_path.as_deref() {
+        let launcher_store = crate::toolchain::store_dir(&state.data_dir);
+        match crate::profile::profile_dir(hp, profile) {
+            Ok(dir) => {
+                // The store the profile is already linked from, so a profile a
+                // user installed by hand against their global store keeps
+                // working instead of being dragged onto the launcher's.
+                let store = crate::plugins::profile_store_target(&dir, &launcher_store);
+                if let Err(e) = crate::plugins::ensure_profile_store_pin(&dir, &store) {
+                    crate::log_warn!("固定 profile pnpm store 失败（{}）: {e}", dir.display());
+                }
+            }
+            Err(e) => crate::log_warn!("解析 profile 目录失败，跳过 store 固定: {e}"),
+        }
+    }
+
     // The interpreter is the resolved binding rather than a bare name, and a
     // toolchain installed while the app was running is picked up here (the
     // binding is re-probed when its recorded path no longer exists).

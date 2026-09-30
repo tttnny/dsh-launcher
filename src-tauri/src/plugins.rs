@@ -321,6 +321,12 @@ async fn run_dsh_plugin(
     ensure_build_scripts_allowed(&dir)?;
     // Never let a plugin's peers pull a second copy of a core package in.
     ensure_profile_npmrc(&dir)?;
+    // Record the store this invocation will use. This path always drives pnpm
+    // with the launcher store (and relinks the profile onto it when it is
+    // linked elsewhere), so the pin names that store — never the profile's
+    // current one, which a relink a few lines below may replace.
+    let store_dir = crate::toolchain::store_dir(&state.data_dir);
+    ensure_profile_store_pin(&dir, &store_dir)?;
 
     let node = crate::runtime::node_for_spawn_checked(state).await?;
     let pnpm_prog = crate::toolchain::ensure_pnpm().await?;
@@ -329,7 +335,6 @@ async fn run_dsh_plugin(
     // A node_modules tree linked from a *different* pnpm store makes pnpm
     // fail with ERR_PNPM_UNEXPECTED_STORE; relink proactively like the
     // installer path did.
-    let store_dir = crate::toolchain::store_dir(&state.data_dir);
     if let Some(linked) = linked_store_dir(&dir) {
         if !store_paths_match(&linked, &store_dir.to_string_lossy()) {
             crate::log_info!("node_modules 链接自其他 pnpm store（{linked}），重新链接后重试");
@@ -443,6 +448,115 @@ fn store_paths_match(a: &str, b: &str) -> bool {
     let norm = |s: &str| s.trim_end_matches('/').to_string();
     let (a, b) = (norm(a), norm(b));
     a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+/// The store a profile's pnpm invocations should agree on: the one its
+/// `node_modules` is already linked from, or the launcher's shared store for a
+/// profile nothing has installed into yet.
+///
+/// Pinning to the *linked* store (rather than unconditionally to the
+/// launcher's) keeps a profile that a user installed by hand against their
+/// global store working: rewriting it onto the launcher store would only move
+/// the mismatch, not resolve it. A linked path that is an ancestor/descendant
+/// of the launcher store is normalized to the launcher's base dir, which is
+/// the canonical spelling pnpm derives `<base>/v<major>` from.
+pub(crate) fn profile_store_target(
+    profile_dir: &std::path::Path,
+    launcher_store: &std::path::Path,
+) -> std::path::PathBuf {
+    match linked_store_dir(profile_dir) {
+        Some(linked) if !store_paths_match(&linked, &launcher_store.to_string_lossy()) => {
+            std::path::PathBuf::from(linked)
+        }
+        _ => launcher_store.to_path_buf(),
+    }
+}
+
+/// Quotes a path for a double-quoted YAML scalar. The launcher's data dir
+/// contains a space (`.../Application Support/...`), which bare YAML would
+/// truncate at, so quoting is mandatory rather than cosmetic.
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Pins the profile's pnpm content store in `pnpm-workspace.yaml`.
+///
+/// The launcher drives every pnpm it spawns with an explicit `--store-dir`
+/// (the shared store under the data dir), so profiles it installs into end up
+/// linked from that store. Processes the launcher does **not** spawn have no
+/// such flag: above all the DSH Web UI's own plugin manager, which runs bare
+/// `pnpm` in the profile directory and therefore falls back to the user's
+/// global store — which pnpm refuses with ERR_PNPM_UNEXPECTED_STORE for every
+/// add/remove, the symptom this exists to remove. pnpm ≥10 reads its settings
+/// from `pnpm-workspace.yaml` (not `.npmrc`), and an explicit `--store-dir`
+/// still outranks the value written here, so recording the store in the
+/// profile makes every pnpm that runs in it agree without changing what the
+/// launcher's own invocations use.
+pub(crate) fn ensure_profile_store_pin(
+    dir: &std::path::Path,
+    store_dir: &std::path::Path,
+) -> Result<(), String> {
+    let path = dir.join("pnpm-workspace.yaml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The same base document DSH's own `initProfile` writes, because
+            // that writer never touches an existing file: creating a thinner
+            // one here would permanently deny the profile its `nodeLinker:
+            // hoisted` (the setting out-of-tree plugins depend on).
+            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n".to_string()
+        }
+        Err(e) => return Err(format!("读取 pnpm-workspace.yaml 失败: {e}")),
+    };
+
+    let pinned = format!(
+        "storeDir: {}",
+        yaml_double_quoted(&store_dir.to_string_lossy())
+    );
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+    let mut found = false;
+    let mut changed = false;
+    for line in lines.iter_mut() {
+        let trimmed = line.trim_start();
+        // Only a top-level key counts: an indented `storeDir` belongs to some
+        // nested mapping, and a commented one is not a setting.
+        if line.len() != trimmed.len() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !trimmed.starts_with("storeDir:") {
+            continue;
+        }
+        found = true;
+        if trimmed != pinned {
+            *line = pinned.clone();
+            changed = true;
+        }
+    }
+    if !found {
+        if !lines.is_empty() && !lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            lines.push(String::new());
+        }
+        lines.push(pinned);
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(&path, out).map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))
 }
 
 /// Relinks a profile's `node_modules` onto the launcher's pinned store.
@@ -713,6 +827,151 @@ mod tests {
         );
         // Empty output stays empty.
         assert_eq!(summarize_output("\n  \n"), "");
+    }
+
+    /// The regression this fix exists for: a profile installed through the
+    /// launcher is linked from the launcher's store, while the Web UI's own
+    /// plugin manager runs bare `pnpm` (no `--store-dir`) and would otherwise
+    /// fall back to the global store and die with ERR_PNPM_UNEXPECTED_STORE.
+    /// The pin has to land in `pnpm-workspace.yaml`, the file pnpm ≥10 reads.
+    #[test]
+    fn ensure_profile_store_pin_writes_workspace_setting() {
+        let dir = std::env::temp_dir().join(format!("dsh-store-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = dir.join("pnpm-workspace.yaml");
+        let store = "/Users/x/Library/Application Support/in.dsh-plug.dsh-launcher/.pnpm-store";
+
+        // Existing workspace document: the key is appended, existing settings
+        // (which the CLI's own template owns) survive.
+        std::fs::write(
+            &ws,
+            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n",
+        )
+        .unwrap();
+        ensure_profile_store_pin(&dir, std::path::Path::new(store)).unwrap();
+        let pinned = std::fs::read_to_string(&ws).unwrap();
+        // The path contains a space, so it must be quoted or YAML truncates it.
+        assert!(
+            pinned.contains(&format!("storeDir: \"{store}\"")),
+            "pinned: {pinned}"
+        );
+        assert!(pinned.contains("nodeLinker: hoisted"), "pinned: {pinned}");
+        assert!(
+            pinned.contains("autoInstallPeers: false"),
+            "pinned: {pinned}"
+        );
+
+        // Idempotent: a second run leaves the bytes alone.
+        ensure_profile_store_pin(&dir, std::path::Path::new(store)).unwrap();
+        assert_eq!(std::fs::read_to_string(&ws).unwrap(), pinned);
+
+        // A moved store is replaced in place, never duplicated.
+        let moved = "/Users/x/other store/.pnpm-store";
+        ensure_profile_store_pin(&dir, std::path::Path::new(moved)).unwrap();
+        let repinned = std::fs::read_to_string(&ws).unwrap();
+        assert_eq!(
+            repinned.matches("storeDir:").count(),
+            1,
+            "repinned: {repinned}"
+        );
+        assert!(
+            repinned.contains(&format!("storeDir: \"{moved}\"")),
+            "repinned: {repinned}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_profile_store_pin_keeps_dsh_workspace_defaults_on_fresh_dir() {
+        // A fresh profile must end up with the same base document DSH's own
+        // `initProfile` writes: it never touches an existing file, so a
+        // thinner file here would permanently deny the profile its
+        // `nodeLinker: hoisted`.
+        let dir = std::env::temp_dir().join(format!("dsh-store-test-{}", uuid::Uuid::new_v4()));
+        let store = "/Users/x/.pnpm-store";
+        ensure_profile_store_pin(&dir, std::path::Path::new(store)).unwrap();
+        let fresh = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        assert!(fresh.contains("packages:"), "fresh: {fresh}");
+        assert!(fresh.contains("nodeLinker: hoisted"), "fresh: {fresh}");
+        assert!(fresh.contains("autoInstallPeers: false"), "fresh: {fresh}");
+        assert!(
+            fresh.contains(&format!("storeDir: \"{store}\"")),
+            "fresh: {fresh}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ensure_profile_store_pin_ignores_nested_and_commented_keys() {
+        // An indented `storeDir` belongs to a nested mapping and a commented
+        // one is not a setting; rewriting either would corrupt the document.
+        let dir = std::env::temp_dir().join(format!("dsh-store-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = dir.join("pnpm-workspace.yaml");
+        std::fs::write(
+            &ws,
+            "packages:\n  - .\n# storeDir: /old\nfoo:\n  storeDir: /nested\n",
+        )
+        .unwrap();
+        ensure_profile_store_pin(&dir, std::path::Path::new("/Users/x/.pnpm-store")).unwrap();
+        let out = std::fs::read_to_string(&ws).unwrap();
+        assert!(out.contains("# storeDir: /old"), "out: {out}");
+        assert!(out.contains("  storeDir: /nested"), "out: {out}");
+        assert!(
+            out.contains("storeDir: \"/Users/x/.pnpm-store\""),
+            "out: {out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The target chooses which store to pin: a profile already linked from
+    /// the launcher store keeps that (canonical base-dir) spelling, while one
+    /// a user installed by hand against their global store keeps its own — the
+    /// pin must not drag a working profile onto a different store.
+    #[test]
+    fn profile_store_target_follows_the_linked_store() {
+        let dir = std::env::temp_dir().join(format!("dsh-store-test-{}", uuid::Uuid::new_v4()));
+        let nm = dir.join("node_modules");
+        std::fs::create_dir_all(&nm).unwrap();
+        let launcher = "/Users/x/Library/Application Support/in.dsh-plug.dsh-launcher/.pnpm-store";
+
+        // No node_modules record: nothing to preserve, pin the launcher store.
+        assert_eq!(
+            profile_store_target(&dir, std::path::Path::new(launcher)),
+            std::path::PathBuf::from(launcher)
+        );
+
+        // Linked from the launcher store via its versioned subdir: normalize
+        // to the base dir pnpm derives `<base>/v11` from.
+        std::fs::write(
+            nm.join(".modules.yaml"),
+            format!("{{\"storeDir\": \"{launcher}/v11\"}}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            profile_store_target(&dir, std::path::Path::new(launcher)),
+            std::path::PathBuf::from(launcher)
+        );
+
+        // Linked from the user's global store: that store is the target.
+        std::fs::write(
+            nm.join(".modules.yaml"),
+            "{\"storeDir\": \"/Users/x/Library/pnpm/store/v11\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            profile_store_target(&dir, std::path::Path::new(launcher)),
+            std::path::PathBuf::from("/Users/x/Library/pnpm/store/v11")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn yaml_double_quoted_escapes_backslash_and_quote() {
+        assert_eq!(yaml_double_quoted("/a b/c"), "\"/a b/c\"");
+        assert_eq!(yaml_double_quoted("C:\\store"), "\"C:\\\\store\"");
+        assert_eq!(yaml_double_quoted("say \"hi\""), "\"say \\\"hi\\\"\"");
     }
 
     
