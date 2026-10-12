@@ -424,6 +424,23 @@ impl NativeClient {
             .await?;
         serde_json::from_value(value).map_err(|e| format!("解析插件启停结果失败: {e}"))
     }
+
+    /// Removes one whole **Bundle（补丁层）** by `name` (the native
+    /// `removeBundle` argument is `name` only — no `enabled`). This is the
+    /// native removal path the Web UI uses, so a plugin the Web UI can remove
+    /// the launcher can too.
+    ///
+    /// A bundle that ships with DSH (`removable:false`) is **refused** as
+    /// HTTP 200 + `result.ok:true` with `changed:false` +
+    /// `error.code:"not-removable"` — returned as a [`NativeChangeResult`] so
+    /// the page can show the reason, not raised as an `Err` (design §4b). Only
+    /// transport-layer failures and `ok:false` are errors.
+    pub async fn remove_bundle(&self, name: &str) -> Result<NativeChangeResult, String> {
+        let value = self
+            .call("removeBundle", serde_json::json!({ "name": name }))
+            .await?;
+        serde_json::from_value(value).map_err(|e| format!("解析卸载结果失败: {e}"))
+    }
 }
 
 /// Interprets a raw response: transport-layer failures (bad status, `not
@@ -1123,5 +1140,48 @@ mod tests {
             assert_eq!(out.enabled, None);
             assert_eq!(out.warnings, vec!["w1".to_string()]);
         }
+    }
+
+    /// `removeBundle` sends the verified envelope: the bare method name (the
+    /// `pluginManager/` prefix is added in the envelope) and the flat `{name}`
+    /// args — removal takes only the bundle name.
+    #[test]
+    fn remove_bundle_sends_the_name_argument() {
+        let (client, fake) = client_with(vec![ok_response(serde_json::json!({
+            "changed": true,
+            "application": "applied",
+            "stage": "remove",
+            "target": "ds-bot"
+        }))]);
+        let outcome = block_on(client.remove_bundle("ds-bot")).unwrap();
+
+        let req = fake.last_sent();
+        assert_eq!(req.url, "http://127.0.0.1:34567/api/pluginManager/removeBundle");
+        assert_eq!(req.envelope.method, "pluginManager/removeBundle");
+        assert_eq!(req.envelope.payload.args, serde_json::json!({ "name": "ds-bot" }));
+        assert!(outcome.changed);
+        assert_eq!(outcome.application, "applied");
+        assert_eq!(outcome.stage, "remove");
+        assert_eq!(outcome.target, "ds-bot");
+    }
+
+    /// Removing a bundle that ships with DSH (`removable:false`) is refused as
+    /// HTTP 200 + `result.ok:true` with `changed:false` and
+    /// `error.code:"not-removable"` — an ordinary result the page explains,
+    /// never an `Err`. This is the common case, not an edge case.
+    #[test]
+    fn remove_bundle_parses_a_not_removable_refusal_as_a_result() {
+        let (client, _) = client_with(vec![ok_response(serde_json::json!({
+            "changed": false,
+            "application": "failed",
+            "stage": "remove",
+            "target": "@deepseek-ai/dsh-base",
+            "error": { "code": "not-removable" }
+        }))]);
+        let outcome = block_on(client.remove_bundle("@deepseek-ai/dsh-base")).unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(outcome.application, "failed");
+        assert_eq!(outcome.stage, "remove");
+        assert_eq!(outcome.error.as_ref().unwrap().code, "not-removable");
     }
 }
