@@ -4,6 +4,7 @@
 // enforces it so the two adapters cannot drift silently.
 
 import type {
+  ChangeOutcome,
   DshHome,
   DshInstance,
   DshVersion,
@@ -14,6 +15,7 @@ import type {
   PluginView,
   RemoteVersion,
   RuntimeStatus,
+  SetBundleEnabledInput,
   SetPluginsEnabledInput,
   TaskInfo,
   TaskProgress,
@@ -231,6 +233,19 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           errorCode: null,
         },
         {
+          name: '@deepseek-ai/dsh-web-app',
+          title: 'DSH 网页端',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: true,
+          installed: true,
+          removable: false,
+          optional: false,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
           name: '@canglongcl/ds-bot',
           title: 'ds-bot',
           description: null,
@@ -242,6 +257,47 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           availability: 'profile',
           readOnlyReason: null,
           errorCode: null,
+        },
+        // Disabled layers the user could re-mount; most bundles ship this way.
+        {
+          name: '@deepseek-ai/dsh-llm-anthropic',
+          title: 'Anthropic LLM',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: false,
+          installed: false,
+          removable: false,
+          optional: true,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
+          name: 'ds-better-sidebar',
+          title: '侧边栏增强',
+          description: null,
+          version: '^1.2.0',
+          enabled: false,
+          installed: true,
+          removable: true,
+          optional: true,
+          availability: 'profile',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        // A bundle whose package files cannot be read.
+        {
+          name: '@example/dsh-missing',
+          title: '缺失的层',
+          description: null,
+          version: null,
+          enabled: false,
+          installed: false,
+          removable: true,
+          optional: true,
+          availability: 'missing',
+          readOnlyReason: null,
+          errorCode: 'unknown-plugin',
         },
       ],
     }
@@ -680,6 +736,45 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           db.running[i.id]?.profile === profile,
       )
       return nativeViewFor(homeId, profile, running) as T
+    }
+    case 'set_bundle_enabled': {
+      const input = args?.input as SetBundleEnabledInput
+      const homeId = input.homeId
+      const profile = input.profile
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      // No instance → a plain error (mirrors the backend Err), not a refusal.
+      if (!running) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, true)
+      const bundle = view.bundles.find((b) => b.name === input.name)
+      const refusal = (errorCode: string): ChangeOutcome => ({
+        changed: false,
+        application: 'failed',
+        stage: 'enable',
+        target: input.name,
+        errorCode,
+        diagnostic: null,
+        warnings: [],
+      })
+      if (!bundle) return refusal('实例里找不到这个 Bundle') as T
+      // A missing package's files cannot be read, so the layer cannot mount.
+      // `removable:false` does NOT block this toggle — it only forbids deletion
+      // (the delete rule is a separate concern).
+      if (bundle.availability === 'missing') return refusal('实例里找不到这个 Bundle') as T
+      bundle.enabled = input.enabled
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'enable',
+        target: input.name,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
     }
     case 'list_installed_plugins': {
       const homeId = String(args?.home_id)
