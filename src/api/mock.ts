@@ -545,7 +545,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         channel: dev ? 'dev' : 'stable',
         up_to_date: !dev,
         latest: dev ? '0.2.0-dev.2' : null,
-        url: dev ? 'https://github.com/dsh-plugins/dsh-launcher/releases' : null,
+        url: dev ? 'https://github.com/tttnny/dsh-launcher/releases' : null,
         published_at: dev ? new Date().toISOString() : null,
       } as T
     }

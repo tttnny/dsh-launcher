@@ -16,7 +16,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-const RELEASES_API: &str = "/repos/dsh-plugins/dsh-launcher/releases?per_page=100";
+/// Self-update follows *this* repository's releases only.
+const RELEASES_API: &str = "/repos/tttnny/dsh-launcher/releases?per_page=100";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
@@ -169,12 +170,12 @@ mod tests {
         let body = br#"[
           {
             "tag_name": "v0.2.0-dev.41",
-            "html_url": "https://github.com/dsh-plugins/dsh-launcher/releases/tag/v0.2.0-dev.41",
+            "html_url": "https://github.com/tttnny/dsh-launcher/releases/tag/v0.2.0-dev.41",
             "published_at": "2026-08-27T03:54:57Z"
           },
           {
             "tag_name": "v0.2.0-dev.40",
-            "html_url": "https://github.com/dsh-plugins/dsh-launcher/releases/tag/v0.2.0-dev.40",
+            "html_url": "https://github.com/tttnny/dsh-launcher/releases/tag/v0.2.0-dev.40",
             "published_at": null
           }
         ]"#;
@@ -183,7 +184,7 @@ mod tests {
         assert_eq!(entries[0].tag_name, "v0.2.0-dev.41");
         assert_eq!(
             entries[0].html_url,
-            "https://github.com/dsh-plugins/dsh-launcher/releases/tag/v0.2.0-dev.41"
+            "https://github.com/tttnny/dsh-launcher/releases/tag/v0.2.0-dev.41"
         );
         assert_eq!(
             entries[0].published_at.as_deref(),

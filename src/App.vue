@@ -134,7 +134,7 @@ async function onMenuCheckUpdate() {
 
 async function onMenuOpenHelp() {
   try {
-    await api.openExternal('https://github.com/dsh-plugins/dsh-launcher')
+    await api.openExternal('https://github.com/tttnny/dsh-launcher')
   } catch (e) {
     Message.error(String(e))
   }
