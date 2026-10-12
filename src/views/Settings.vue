@@ -546,7 +546,7 @@ function scrollToSection(key: string) {
   }
 
   &.active {
-    background: rgb(var(--primary-6) / 14%);
+    background: rgba(var(--primary-6), 0.14);
     color: rgb(var(--primary-6));
     font-weight: 600;
   }
@@ -639,7 +639,7 @@ function scrollToSection(key: string) {
   &:focus {
     background: var(--apple-card-bg);
     border-color: rgb(var(--primary-6));
-    box-shadow: 0 0 0 2px rgb(var(--primary-6) / 18%);
+    box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.18);
   }
 
   &:disabled {
@@ -717,8 +717,8 @@ function scrollToSection(key: string) {
   margin-top: 10px;
   padding: 10px 14px;
   border-radius: 9px;
-  background: rgb(var(--primary-6) / 10%);
-  border: 1px solid rgb(var(--primary-6) / 20%);
+  background: rgba(var(--primary-6), 0.1);
+  border: 1px solid rgba(var(--primary-6), 0.2);
   display: flex;
   align-items: center;
   justify-content: space-between;

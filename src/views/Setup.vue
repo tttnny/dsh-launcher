@@ -218,12 +218,12 @@ h2 {
   border-radius: 6px;
 
   &.ok {
-    background: rgb(var(--green-6) / 14%);
+    background: rgba(var(--green-6), 0.14);
     color: rgb(var(--green-6));
   }
 
   &.missing {
-    background: rgb(var(--red-6) / 14%);
+    background: rgba(var(--red-6), 0.14);
     color: rgb(var(--red-6));
   }
 }
@@ -302,8 +302,8 @@ h2 {
   gap: 12px;
   margin-top: 20px;
   padding: 18px;
-  background: rgb(var(--green-6) / 8%);
-  border: 1px solid rgb(var(--green-6) / 20%);
+  background: rgba(var(--green-6), 0.08);
+  border: 1px solid rgba(var(--green-6), 0.2);
   border-radius: 10px;
 
   .ready-check {
@@ -313,7 +313,7 @@ h2 {
     width: 44px;
     height: 44px;
     border-radius: 50%;
-    background: rgb(var(--green-6) / 15%);
+    background: rgba(var(--green-6), 0.15);
     color: rgb(var(--green-6));
   }
 

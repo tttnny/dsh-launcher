@@ -573,7 +573,7 @@ const homeLabel = computed(() => {
   &:focus {
     background: var(--apple-card-bg);
     border-color: rgb(var(--primary-6));
-    box-shadow: 0 0 0 2px rgb(var(--primary-6) / 18%);
+    box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.18);
   }
 
   &.has-error {
@@ -695,7 +695,7 @@ const homeLabel = computed(() => {
     color: rgb(var(--red-6));
 
     &:hover {
-      background: rgb(var(--red-6) / 12%);
+      background: rgba(var(--red-6), 0.12);
     }
   }
 
@@ -719,7 +719,7 @@ const homeLabel = computed(() => {
     color: rgb(var(--red-6));
 
     &:hover {
-      background: rgb(var(--red-6) / 12%);
+      background: rgba(var(--red-6), 0.12);
     }
   }
 

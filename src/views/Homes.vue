@@ -202,7 +202,7 @@ const homeColumns = computed(() => [
   &:focus {
     background: var(--apple-card-bg);
     border-color: rgb(var(--primary-6));
-    box-shadow: 0 0 0 2px rgb(var(--primary-6) / 18%);
+    box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.18);
   }
 }
 
@@ -287,8 +287,8 @@ const homeColumns = computed(() => [
     color: rgb(var(--red-6));
 
     &:hover:not(:disabled) {
-      background: rgb(var(--red-6) / 10%);
-      border-color: rgb(var(--red-6) / 25%);
+      background: rgba(var(--red-6), 0.1);
+      border-color: rgba(var(--red-6), 0.25);
     }
   }
 

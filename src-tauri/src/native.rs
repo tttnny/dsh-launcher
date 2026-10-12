@@ -60,6 +60,12 @@ pub struct NativePlugin {
     /// Present = not manageable (`management-required` | `unaddressable`).
     #[serde(default)]
     pub read_only_reason: Option<String>,
+    /// Not part of the service's answer: the launcher fills it in from the
+    /// bundle that provides this entry's package, so the two halves of the
+    /// page state versions the same way. `skip_deserializing` keeps a stray
+    /// field in the response from being mistaken for the service's own.
+    #[serde(default, skip_deserializing)]
+    pub version: Option<String>,
 }
 
 /// Localized display metadata carried on a plugin entry or a bundle.
@@ -568,6 +574,13 @@ pub struct PluginItem {
     pub patch_id: Option<String>,
     /// `management-required` | `unaddressable`.
     pub read_only_reason: Option<String>,
+    /// The version of the bundle（补丁层）this entry arrived in.
+    ///
+    /// The native inventory has no version for an entry — the service does not
+    /// send one. The launcher fills this in from the bundle that provides the
+    /// entry's package (`plugins::attach_entry_versions`) so an entry row can
+    /// state a version at all; an entry no bundle claims keeps `None`.
+    pub version: Option<String>,
 }
 
 /// A **Bundle（补丁层）** — the native `BundleInfo`'s stable subset.
@@ -661,6 +674,7 @@ impl From<NativePlugin> for PluginItem {
             fiber_phase: p.fiber_phase,
             patch_id: p.patch_id,
             read_only_reason: p.read_only_reason,
+            version: p.version,
         }
     }
 }

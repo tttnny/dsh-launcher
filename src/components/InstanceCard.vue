@@ -471,7 +471,7 @@ async function copyUrl(url: string) {
     padding: 1px 7px;
     font-size: 11px;
     border-radius: 6px;
-    background: rgb(var(--orange-6) / 12%);
+    background: rgba(var(--orange-6), 0.12);
     color: rgb(var(--orange-6));
     font-weight: 500;
   }
@@ -593,7 +593,7 @@ async function copyUrl(url: string) {
     &.primary-action {
       background: rgb(var(--primary-6));
       color: #fff;
-      box-shadow: 0 1px 3px rgb(var(--primary-6) / 25%);
+      box-shadow: 0 1px 3px rgba(var(--primary-6), 0.25);
 
       &:hover:not(:disabled) {
         filter: brightness(1.08);
@@ -601,7 +601,7 @@ async function copyUrl(url: string) {
 
       &.active-open {
         background: rgb(var(--green-6));
-        box-shadow: 0 1px 3px rgb(var(--green-6) / 25%);
+        box-shadow: 0 1px 3px rgba(var(--green-6), 0.25);
       }
 
       &:disabled {
@@ -622,11 +622,11 @@ async function copyUrl(url: string) {
 
     &.danger-action {
       flex: 0 0 68px;
-      background: rgb(var(--red-6) / 12%);
+      background: rgba(var(--red-6), 0.12);
       color: rgb(var(--red-6));
 
       &:hover {
-        background: rgb(var(--red-6) / 20%);
+        background: rgba(var(--red-6), 0.2);
       }
     }
 

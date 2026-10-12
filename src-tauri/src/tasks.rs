@@ -24,7 +24,7 @@ pub enum TaskState {
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskInfo {
     pub id: String,
-    pub kind: String, // "create-instance"
+    pub kind: String, // "install-version"
     pub label: String,
     pub version: String,
     pub state: TaskState,
@@ -113,8 +113,9 @@ pub async fn start_install_version_task(
 
 /// Enqueues a background task that installs the given DSH version (if not
 /// installed yet) and then creates the instance. Returns the task id.
-/// Internal: only reachable through `start_install_version_task` — installing
-/// a version IS creating its 1:1 instance (see ADR-0001).
+/// Internal: only reachable through `start_install_version_task`. Installing a
+/// version acquires its directory; the dedicated HOME and the 1:1 instance are
+/// recorded by the task body only after the install succeeds.
 async fn start_create_instance_task(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -170,7 +171,7 @@ async fn start_create_instance_task(
     };
 
     // Deduplicate and insert under one lock scope so two concurrent submissions
-    // can never both pass the checks (TOCTOU). A running create-instance task
+    // can never both pass the checks (TOCTOU). A running install-version task
     // for the same version must also be rejected: the version record is only
     // registered when its install finishes, so two installs of the same
     // version would otherwise run `pnpm install --prefix` into the same
@@ -182,7 +183,7 @@ async fn start_create_instance_task(
                 if task.instance_name.as_deref() == Some(name.as_str()) {
                     return Err("同名实例的下载任务已在进行中".to_string());
                 }
-                if task.kind == "create-instance" && task.version == version {
+                if task.kind == "install-version" && task.version == version {
                     return Err(format!("版本 {version} 的下载任务已在进行中"));
                 }
                 if let (Some(a), Some(b)) = (&task.reserved_home_path, &reserved_home_path) {
@@ -194,7 +195,7 @@ async fn start_create_instance_task(
         }
         let task = TaskInfo {
             id: new_id("t"),
-            kind: "create-instance".to_string(),
+            kind: "install-version".to_string(),
             label: task_label,
             version: version.clone(),
             state: TaskState::Running,
@@ -233,7 +234,7 @@ async fn start_create_instance_task(
 
 // ---------------------------------------------------------------------------
 // Task runner — completion bookkeeping shared by every background task kind
-// (create-instance, install-node). A task body runs to `Ok(payload)` /
+// (install-version is the only one today). A task body runs to `Ok(payload)` /
 // `Err(message)`; [`finish_task`] encodes the completion invariants once:
 // a cancelled task stays cancelled (the worker finishing anyway must not
 // flip it back), logs cap at MAX_LOG_LINES, and terminal progress always

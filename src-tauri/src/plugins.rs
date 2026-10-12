@@ -172,7 +172,51 @@ async fn list_plugins_for(
     };
     let plugins = client.list_plugins().await?;
     let bundles = client.list_bundles().await?;
+    // The two halves of the page agree on one vocabulary: a plugin entry is
+    // part of the bundle it arrived in, so it carries that bundle's version.
+    // Applied before the view model is built, so the wire version is a
+    // property of the entry itself.
+    let versions = entry_versions_from_bundles(&bundles);
+    let mut plugins = plugins;
+    attach_entry_versions(&mut plugins, &versions);
     Ok(PluginView::managed(plugins, bundles))
+}
+
+/// Bundle name → its version, for the entries those bundles bring in.
+fn entry_versions_from_bundles(bundles: &[crate::native::NativeBundle]) -> Vec<(String, String)> {
+    bundles
+        .iter()
+        .filter_map(|b| b.version.clone().map(|v| (b.name.clone(), v)))
+        .collect()
+}
+
+/// Fills each entry's `version` from the bundle that provides it.
+///
+/// The native inventory lists plugin **entries** and carries no version for
+/// them — the unit that has a version is the bundle（补丁层）a package ships.
+/// For the common case they are the same package (the bundle's own entry is
+/// the package it names), so the entry takes its bundle's version. When two
+/// bundles could claim the same entry, the first match wins: bundle order is
+/// the instance's own priority order, and a stable answer beats a clever one.
+///
+/// Entries no bundle claims — a plugin the profile added directly — keep no
+/// version rather than borrowing an unrelated one; the UI adds nothing then.
+fn attach_entry_versions(
+    plugins: &mut [crate::native::NativePlugin],
+    versions: &[(String, String)],
+) {
+    if versions.is_empty() {
+        return;
+    }
+    for plugin in plugins.iter_mut() {
+        let Some((_, version)) = versions
+            .iter()
+            .find(|(name, _)| *name == plugin.module_name)
+        else {
+            continue;
+        };
+        plugin.version = Some(version.clone());
+    }
 }
 
 /// A read-only view listing a profile's plugins from its own files.
@@ -235,6 +279,9 @@ fn offline_plugin_items(
                 fiber_phase: None,
                 patch_id: None,
                 read_only_reason: None,
+                // The offline read has the manifest's own version spec, not an
+                // installed version; leaving it empty keeps the row honest.
+                version: None,
             }
         })
         .collect();
@@ -782,6 +829,38 @@ pub(crate) fn localize_refusal(outcome: ChangeOutcome) -> ChangeOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The entry a bundle ships takes that bundle's version, so the profile's
+    /// plugin rows and its patch-layer rows state versions the same way.
+    #[test]
+    fn entry_versions_come_from_the_bundle_that_provides_the_package() {
+        let mut plugins = vec![
+            plugin("@deepseek-ai/dsh-base"),
+            // Added to the profile directly: no bundle names this package, so
+            // it borrows nothing and says nothing.
+            plugin("@dsh-plugin/loose-plugin"),
+        ];
+        attach_entry_versions(&mut plugins, &[("@deepseek-ai/dsh-base".into(), "0.2.1".into())]);
+        assert_eq!(plugins[0].version.as_deref(), Some("0.2.1"));
+        assert!(plugins[1].version.is_none());
+    }
+
+    /// A bundle whose entry is a different module still versions the package it
+    /// declares, and a bundle with no version never invents one.
+    #[test]
+    fn entry_versions_ignore_bundles_without_a_version() {
+        let mut plugins = vec![plugin("@deepseek-ai/dsh-base")];
+        attach_entry_versions(&mut plugins, &[]);
+        assert!(plugins[0].version.is_none());
+    }
+
+    fn plugin(module_name: &str) -> crate::native::NativePlugin {
+        crate::native::NativePlugin {
+            entry_id: module_name.to_string(),
+            module_name: module_name.to_string(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn cordis_id_of_strips_scope_and_org() {

@@ -60,7 +60,7 @@ onMounted(async () => {
   await setupMenuListeners()
 })
 
-// --- In-app shortcuts: Cmd/Ctrl+1/2/3/4, Cmd+, K/R, Esc -----------------------
+// --- In-app shortcuts: Cmd/Ctrl+1/2/3/4, Cmd+, R, Esc -------------------------
 
 function goShortcut(name: ShortcutRoute) {
   if (name === 'instances' && route.name === 'instance-edit') return
@@ -69,7 +69,7 @@ function goShortcut(name: ShortcutRoute) {
 }
 
 async function refreshAll() {
-  await Promise.allSettled([store.refreshInstances(), store.refreshTasks(), store.checkRuntime()])
+  await Promise.allSettled([store.refreshInstances(), store.refreshVersions(), store.checkRuntime()])
 }
 
 function refreshShortcut() {
@@ -224,7 +224,7 @@ watch(
 
 // --- Sidebar navigation -------------------------------------------------------
 
-type NavKey = 'home' | 'homes' | 'profiles' | 'plugins' | 'versions' | 'tasks' | 'settings'
+type NavKey = 'home' | 'homes' | 'profiles' | 'versions' | 'settings'
 
 const siderCollapsed = ref(localStorage.getItem('dsh-launcher.siderCollapsed') === '1')
 
@@ -241,10 +241,10 @@ const navSelected = computed<NavKey>(() => {
   const name = route.name as string
   if (name === 'instance-edit') return 'home'
   if (name === 'homes') return 'homes'
-  if (name === 'profiles') return 'profiles'
-  if (name === 'plugins') return 'plugins'
+  // The plugin manager is a second-level page under a Profile row, so its nav
+  // home is Profiles.
+  if (name === 'profiles' || name === 'plugins') return 'profiles'
   if (name === 'versions') return 'versions'
-  if (name === 'tasks') return 'tasks'
   if (name === 'settings') return 'settings'
   return 'home'
 })
@@ -260,14 +260,8 @@ function navGo(key: NavKey) {
     case 'profiles':
       void router.push({ name: 'profiles' }).catch(() => undefined)
       break
-    case 'plugins':
-      void router.push({ name: 'plugins' }).catch(() => undefined)
-      break
     case 'versions':
       void router.push({ name: 'versions' }).catch(() => undefined)
-      break
-    case 'tasks':
-      void router.push({ name: 'tasks' }).catch(() => undefined)
       break
     case 'settings':
       void router.push({ name: 'settings' }).catch(() => undefined)
@@ -293,11 +287,9 @@ const pageTitle = computed(() => {
     case 'profiles':
       return t('profiles.title')
     case 'plugins':
-      return t('plugins.title')
+      return t('plugins.pageTitle')
     case 'versions':
       return t('versions.title')
-    case 'tasks':
-      return t('tasks.title')
     case 'settings':
       return t('settings.title')
     case 'setup':
@@ -307,12 +299,27 @@ const pageTitle = computed(() => {
   }
 })
 
+// --- Back button targets ------------------------------------------------------
+// Only the instance editor has a literal parent. The plugin manager is opened
+// from a Profile row but switches its Profile in place, so its back button
+// returns to the Profile list it belongs to instead of replaying history.
+const backTarget = computed<string | null>(() => {
+  const name = route.name as string
+  if (name === 'instance-edit') return null
+  if (name === 'plugins') return 'profiles'
+  return null
+})
+
 const showBack = computed(() => {
   const name = route.name as string
-  return name === 'instance-edit'
+  return name === 'instance-edit' || name === 'plugins'
 })
 
 function onHeaderBack() {
+  if (backTarget.value) {
+    void router.push({ name: backTarget.value }).catch(() => undefined)
+    return
+  }
   router.back()
 }
 
@@ -452,20 +459,6 @@ async function toggleWindowZoom() {
 
         <button
           class="nav-item"
-          :class="{ active: navSelected === 'plugins' }"
-          :title="siderCollapsed ? t('nav.plugins') : ''"
-          @click="navGo('plugins')"
-        >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 7h3a1 1 0 0 0 1-1V5a2 2 0 0 1 4 0v1a1 1 0 0 0 1 1h3a1 1 0 0 1 1 1v3a1 1 0 0 0 1 1h1a2 2 0 0 1 0 4h-1a1 1 0 0 0-1 1v3a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-1a2 2 0 0 0-4 0v1a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a2 2 0 0 0 0-4H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.plugins') }}</span>
-        </button>
-
-        <button
-          class="nav-item"
           :class="{ active: navSelected === 'versions' }"
           :title="siderCollapsed ? t('nav.versions') : ''"
           @click="navGo('versions')"
@@ -483,25 +476,6 @@ async function toggleWindowZoom() {
 
         <button
           class="nav-item"
-          :class="{ active: navSelected === 'tasks' }"
-          :title="siderCollapsed ? t('nav.tasks') : ''"
-          @click="navGo('tasks')"
-        >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.tasks') }}</span>
-          <span v-if="!siderCollapsed && store.runningTaskCount > 0" class="nav-pill-badge active-task">
-            {{ store.runningTaskCount }}
-          </span>
-          <span v-if="siderCollapsed && store.runningTaskCount > 0" class="nav-dot-active" />
-        </button>
-
-        <button
-          class="nav-item"
           :class="{ active: navSelected === 'settings' }"
           :title="siderCollapsed ? t('nav.settings') : ''"
           @click="navGo('settings')"
@@ -515,15 +489,6 @@ async function toggleWindowZoom() {
           <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.settings') }}</span>
         </button>
       </nav>
-
-      <!-- Sidebar Footer (Status Hint) -->
-      <div v-if="!siderCollapsed" class="sider-footer">
-        <div class="sider-status-row">
-          <span :class="['apple-status-dot', store.runningTaskCount > 0 ? 'starting' : 'idle']">
-            {{ store.runningTaskCount > 0 ? t('tasks.runningHint', { count: store.runningTaskCount }) : t('tasks.idleHint') }}
-          </span>
-        </div>
-      </div>
     </aside>
 
     <!-- Main Window Area -->
@@ -680,7 +645,7 @@ async function toggleWindowZoom() {
   }
 
   &.active {
-    background: rgb(var(--primary-6) / 14%);
+    background: rgba(var(--primary-6), 0.14);
     color: rgb(var(--primary-6));
     font-weight: 600;
 
@@ -721,36 +686,8 @@ async function toggleWindowZoom() {
   font-size: 11px;
   font-weight: 600;
   border-radius: 10px;
-  background: rgb(var(--green-6) / 16%);
+  background: rgba(var(--green-6), 0.16);
   color: rgb(var(--green-6));
-
-  &.active-task {
-    background: rgb(var(--primary-6) / 18%);
-    color: rgb(var(--primary-6));
-  }
-}
-
-.nav-dot-active {
-  position: absolute;
-  top: 7px;
-  right: 10px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: rgb(var(--primary-6));
-  box-shadow: 0 0 6px rgb(var(--primary-6) / 60%);
-}
-
-// Sidebar Footer
-.sider-footer {
-  padding: 12px 14px;
-  border-top: 1px solid var(--apple-sidebar-border);
-  font-size: 12px;
-}
-
-.sider-status-row {
-  display: flex;
-  align-items: center;
 }
 
 // Main Window Area
@@ -794,7 +731,7 @@ async function toggleWindowZoom() {
   font-size: 11px;
   font-weight: 600;
   border-radius: 6px;
-  background: rgb(var(--orange-6) / 14%);
+  background: rgba(var(--orange-6), 0.14);
   color: rgb(var(--orange-6));
 }
 

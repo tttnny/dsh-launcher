@@ -151,6 +151,8 @@ function nativePlugin(
   enabled: boolean,
   patchId: string | null,
   readOnlyReason: string | null,
+  /** The providing bundle's version, as the real backend fills it in. */
+  version: string | null = null,
 ): PluginItem {
   return {
     entryId,
@@ -161,6 +163,7 @@ function nativePlugin(
     fiberPhase: enabled ? 'active' : 'pending',
     patchId,
     readOnlyReason,
+    version,
   }
 }
 
@@ -200,6 +203,9 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
       plugins: [
         // Core entries are shown offline too (the old reader's blanket
         // @deepseek-ai/* filter is gone), sourced from the profile files.
+        // The offline read has the manifest's version spec, not an installed
+        // version, so these rows state none — same as the real backend, which
+        // leaves `version` empty on the file-sourced path.
         nativePlugin('dsh-base', '@deepseek-ai/dsh-base', 'DSH 基础', true, null, null),
         nativePlugin('dsh-auxiliary', '@dsh-plugin/dsh-auxiliary', '辅助工具', true, null, null),
         nativePlugin('ds-bot', '@canglongcl/ds-bot', 'ds-bot', false, null, null),
@@ -215,6 +221,8 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
       files: false,
       plugins: [
         // Core entries the launcher's old reader dropped: they must show up.
+        // The version is the providing bundle's, exactly as the real backend
+        // fills it in from `listBundles` (see plugins::attach_entry_versions).
         nativePlugin(
           'include:plugin-manager',
           '@deepseek-ai/dsh-plugin-manager',
@@ -222,6 +230,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           true,
           null,
           'management-required',
+          '0.2.1-alpha.2',
         ),
         nativePlugin(
           'include:llm',
@@ -230,6 +239,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           true,
           'p1',
           null,
+          '0.2.1-alpha.2',
         ),
         nativePlugin(
           'include:plugin:dsh-auxiliary',
@@ -238,6 +248,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           true,
           'p2',
           null,
+          '0.2.1-alpha.2',
         ),
         nativePlugin(
           'include:plugin:dsh-better-sidebar',
@@ -245,6 +256,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           '侧边栏增强',
           false,
           'p3',
+          null,
           null,
         ),
       ],
@@ -408,7 +420,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
 
       const task: TaskInfo = {
         id: mockNewId('t'),
-        kind: 'create-instance',
+        // The launcher's only long task, and the only `kind` the UI branches
+        // on: see `installingVersions` in the launcher store.
+        kind: 'install-version',
         label: `下载 DSH ${version} 并创建实例「${name}」`,
         version,
         state: 'running',

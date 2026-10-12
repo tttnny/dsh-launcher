@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
@@ -10,91 +9,31 @@ import type { BundleItem, ChangeOutcome, PluginItem, PluginView } from '@/api/ty
 import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
-const route = useRoute()
-const router = useRouter()
 const store = useLauncherStore()
 
-// --- Selectors: HOME & Profile -----------------------------------------------
-// The selectors stay (HOME, Profile); the backend resolves them to the
-// instance running that profile (design §4).
+// --- The (HOME, Profile) it manages -------------------------------------------
+// The card is driven by its parent — the Profile row it was opened from — and
+// never picks its own subject: the Profile is the row the route named, and the
+// HOME is the list's. Both are props, so the manager cannot quietly show one
+// Profile while the page above it highlights another.
 
-const selectedHomeId = ref<string | undefined>(undefined)
-const selectedProfile = ref<string | undefined>(undefined)
+const props = defineProps<{ profile: string; homeId: string }>()
 
-const selectedHome = computed(() => store.homeById(selectedHomeId.value ?? ''))
+const emit = defineEmits<{ close: [] }>()
 
-const profileOptions = ref<string[]>([])
-const profilesLoading = ref(false)
+const selectedHomeId = computed(() => props.homeId)
+const selectedProfile = computed(() => props.profile)
 
-// Initialize / sync selectedHomeId from route.query or store.homes
-watch(
-  [() => route.query.homeId, () => store.homes],
-  ([qHomeId]) => {
-    const qStr = typeof qHomeId === 'string' ? qHomeId : undefined
-    if (qStr && store.homes.some((h) => h.id === qStr)) {
-      selectedHomeId.value = qStr
-    } else if (!selectedHomeId.value || !store.homes.some((h) => h.id === selectedHomeId.value)) {
-      selectedHomeId.value = store.homes[0]?.id
-    }
-  },
-  { immediate: true },
-)
-
-// When selectedHomeId changes, fetch its profile list
-watch(
-  selectedHomeId,
-  async (newHomeId) => {
-    profileOptions.value = []
-    if (!newHomeId) {
-      selectedProfile.value = undefined
-      return
-    }
-    profilesLoading.value = true
-    try {
-      const list = await api.listProfiles(newHomeId)
-      profileOptions.value = list
-      const qProfile = typeof route.query.profile === 'string' ? route.query.profile : undefined
-      if (qProfile && list.includes(qProfile)) {
-        selectedProfile.value = qProfile
-      } else if (!selectedProfile.value || !list.includes(selectedProfile.value)) {
-        selectedProfile.value = list[0]
-      }
-    } catch (e) {
-      Message.error(String(e))
-    } finally {
-      profilesLoading.value = false
-    }
-  },
-  { immediate: true },
-)
-
-function onSelectHome(id: unknown) {
-  const homeId = String(id ?? '')
-  selectedHomeId.value = homeId
-  void router.replace({
-    query: {
-      ...route.query,
-      homeId,
-      profile: undefined,
-    },
-  })
-}
-
-function onSelectProfile(p: unknown) {
-  const profile = String(p ?? '')
-  selectedProfile.value = profile
-  void router.replace({
-    query: {
-      ...route.query,
-      profile,
-    },
-  })
-}
+const selectedHome = computed(() => store.homeById(props.homeId))
 
 // --- The plugin view of (selectedHomeId, selectedProfile) ---------------------
 // One snapshot from the running instance's native plugin manager. `mode`
 // decides whether the page manages or only displays; `reason` is shown
 // verbatim (the backend localizes it).
+//
+// The Profile identifier is part of every row: a Profile can sit under several
+// DSH_HOME directories, and the plugin manager always asks one (HOME, Profile)
+// pair, so the pair is what the header states and what the rows are read from.
 
 const pluginView = ref<PluginView | null>(null)
 const pluginsLoading = ref(false)
@@ -109,6 +48,63 @@ const viewFiles = computed(() => pluginView.value?.files ?? false)
 const filesNote = computed(() =>
   viewFiles.value && plugins.value.length > 0 ? t('plugins.readonlyFilesNote') : '',
 )
+
+// --- Status filter ------------------------------------------------------------
+// The absolute list is what the instance answered; the filter only narrows what
+// is on screen, so a hidden row is never mistaken for a missing one (the count
+// on each chip is the real one).
+
+type StatusFilter = 'all' | 'on' | 'off' | 'problem'
+
+const statusFilter = ref<StatusFilter>('all')
+
+const problemCount = computed(() => plugins.value.filter(isProblem).length)
+
+/** A row the instance cannot address through the profile patch. `management-required`
+ *  entries (the manager's own core entries) are normal, not problems. */
+function isProblem(p: PluginItem): boolean {
+  return p.readOnlyReason === 'unaddressable'
+}
+
+const statusCounts = computed(() => ({
+  all: plugins.value.length,
+  on: plugins.value.filter((p) => p.enabled).length,
+  off: plugins.value.filter((p) => !p.enabled).length,
+  problem: problemCount.value,
+}))
+
+const statusFilters = computed(() => {
+  const counts = statusCounts.value
+  return [
+    { key: 'all' as const, label: t('plugins.filterAll'), count: counts.all },
+    { key: 'on' as const, label: t('plugins.filterOn'), count: counts.on },
+    { key: 'off' as const, label: t('plugins.filterOff'), count: counts.off },
+    // Only offered when something is actually wrong: a chip that always reads 0
+    // is noise on the majority of profiles.
+    ...(counts.problem > 0
+      ? [{ key: 'problem' as const, label: t('plugins.filterProblem'), count: counts.problem }]
+      : []),
+  ]
+})
+
+const visiblePlugins = computed<PluginItem[]>(() => {
+  switch (statusFilter.value) {
+    case 'on':
+      return plugins.value.filter((p) => p.enabled)
+    case 'off':
+      return plugins.value.filter((p) => !p.enabled)
+    case 'problem':
+      return plugins.value.filter(isProblem)
+    default:
+      return plugins.value
+  }
+})
+
+// A narrowed list the user then changes Profile on should not stay filtered —
+// the chips' counts would no longer describe what is on screen.
+watch(statusFilter, (v) => {
+  if (v !== 'all' && pluginView.value === null) statusFilter.value = 'all'
+})
 
 /** Display name: the instance's localized title, falling back to the module. */
 function pluginName(p: PluginItem): string {
@@ -128,6 +124,19 @@ async function loadPlugins() {
     pluginsLoading.value = false
   }
 }
+
+// The card is mounted once per open Profile, so the first read is the mount,
+// and a later change of either prop is a switch to another Profile's manager.
+//
+// `onMounted` rather than `{ immediate: true }` on the watcher: an immediate
+// watcher runs inside `setup()`, before the parent has finished mounting, and
+// its `await` then lands outside the render — the fetch resolved in a later
+// tick than the mount effect's first run, and the table painted once, empty,
+// and never updated. Mounting is the one hook that reliably precedes the first
+// paint.
+onMounted(() => {
+  void loadPlugins()
+})
 
 watch([selectedHomeId, selectedProfile], () => {
   void loadPlugins()
@@ -414,53 +423,160 @@ async function onRemoveBundle(b: BundleItem) {
 }
 
 const pluginColumns = computed(() => [
-  { title: t('plugins.pluginName'), slotName: 'pname' },
-  { title: t('plugins.pluginEntry'), slotName: 'pentry', width: 320 },
-  { title: t('plugins.pluginPhase'), slotName: 'pphase', width: 130 },
-  { title: t('plugins.pluginStatus'), slotName: 'pstatus', width: 120 },
+  { title: t('plugins.pluginName'), slotName: 'pname', width: 260 },
+  { title: t('plugins.pluginEntry'), slotName: 'pentry', ellipsis: true, tooltip: true },
+  { title: t('plugins.pluginPhase'), slotName: 'pphase', width: 110 },
+  { title: t('plugins.pluginStatus'), slotName: 'pstatus', width: 130 },
 ])
 </script>
 
 <template>
-  <div class="dl-page plugins-page">
-    <!-- Top Selector Bar -->
-    <div class="dl-card scope-selector-bar">
-      <div class="selector-row">
-        <div class="selector-item">
-          <label class="selector-label">{{ t('plugins.selectHome') }}：</label>
-          <a-select
-            :model-value="selectedHomeId"
-            :placeholder="t('plugins.selectHome')"
-            class="scope-select"
-            @change="onSelectHome"
-          >
-            <a-option v-for="h in store.homes" :key="h.id" :value="h.id">
-              {{ h.name }}
-            </a-option>
-          </a-select>
-        </div>
+  <!-- The subject is the parent's: this card renders one (HOME, Profile) and
+       never another, so it opens on the row's own section instead of a page
+       heading plus a second set of selectors. -->
+  <section class="plugin-manager">
+    <div class="plugin-manager-head">
+      <h3>
+        {{ t('plugins.pageTitle') }}
+        <span class="plugin-manager-scope tnum">{{ selectedHome?.name }} / {{ selectedProfile }}</span>
+      </h3>
+      <button class="mac-secondary-btn" @click="emit('close')">{{ t('plugins.close') }}</button>
+    </div>
+    <p class="plugin-manager-desc">{{ t('plugins.pageDesc') }}</p>
 
-        <div class="selector-item">
-          <label class="selector-label">{{ t('plugins.selectProfile') }}：</label>
-          <a-select
-            :model-value="selectedProfile"
-            :placeholder="t('plugins.selectProfile')"
-            :loading="profilesLoading"
-            class="scope-select"
-            @change="onSelectProfile"
-          >
-            <a-option v-for="p in profileOptions" :key="p" :value="p">
-              {{ p }}
-            </a-option>
-          </a-select>
-        </div>
-      </div>
+    <div v-if="!selectedHomeId || !selectedProfile" class="dl-card">
+      <DlEmpty icon="plugin" :description="t('plugins.pluginsPickProfile')" />
     </div>
 
-    <!-- Patch layers (bundles) card — a layer ABOVE the plugin entries.
-         The switch here is a bundle-layer switch; the switch in the entry
-         table below is a single-plugin-entry switch. Kept separate so the
-         user can tell which layer they are touching. -->
+    <template v-else>
+      <!-- Plugins Card — the primary object of this page, so it comes first. -->
+      <div class="dl-card entries-card">
+        <div class="dl-card-title">
+          <div class="title-with-pill">
+            <h3>{{ t('plugins.pluginsTitle') }}</h3>
+            <span class="layer-tag entry-layer-tag">{{ t('plugins.entriesLayerTag') }}</span>
+          </div>
+        <!-- Batch enable/disable: the same native path as a single toggle. Only
+             meaningful while the instance is manageable. -->
+        <div v-if="managed && plugins.length > 0" class="batch-btns">
+          <button
+            class="mac-action-pill"
+            :disabled="selectedEntries.length === 0 || pluginsBusy"
+            @click="applyBatch(true)"
+          >
+            {{ t('plugins.pluginsBatchEnable', { count: selectedEntries.length }) }}
+          </button>
+          <button
+            class="mac-action-pill"
+            :disabled="selectedEntries.length === 0 || pluginsBusy"
+            @click="applyBatch(false)"
+          >
+            {{ t('plugins.pluginsBatchDisable', { count: selectedEntries.length }) }}
+          </button>
+        </div>
+      </div>
+      <p class="dl-card-desc">{{ t('plugins.pluginsDesc') }}</p>
+
+      <!-- Read-only banner: no instance running this profile, adopted instance,
+           or an unreachable instance. The reason is backend-localized. -->
+      <div v-if="!managed && viewReason" class="plugins-readonly-banner">
+        {{ viewReason }}
+      </div>
+
+      <!-- Status filter: chips carry the real counts (absolute, never filtered
+           counts), so a narrowed list is never mistaken for a shorter one. -->
+      <div v-if="plugins.length > 0" class="filter-chips">
+        <button
+          v-for="f in statusFilters"
+          :key="f.key"
+          class="filter-chip"
+          :class="{ active: statusFilter === f.key }"
+          type="button"
+          @click="statusFilter = f.key"
+        >
+          {{ f.label }}
+          <span class="filter-chip-count tnum">{{ f.count }}</span>
+        </button>
+      </div>
+
+      <!-- The table renders whenever the instance gave us entries (managed), or
+           the offline read produced a file-sourced list; a pure read-only page
+           with nothing to show has only the banner, not a contradictory empty
+           table. -->
+      <a-table
+        v-if="managed || plugins.length > 0"
+        :columns="pluginColumns"
+        :data="visiblePlugins"
+        :loading="pluginsLoading"
+        :pagination="false"
+        row-key="entryId"
+        :row-selection="
+          managed
+            ? {
+                type: 'checkbox',
+                showCheckedAll: true,
+                onlyCurrent: true,
+                selectedRowKeys: selectedEntries,
+              }
+            : undefined
+        "
+        class="apple-styled-table"
+        @selection-change="(keys: (string | number)[]) => (selectedEntries = keys.map(String))"
+      >
+        <template #pname="{ record }">
+          <span class="plugin-cell-name">{{ pluginName(record) }}</span>
+          <!-- Identity line: the module the entry loads, then its version.
+               Two versions are the same vocabulary as the patch-layer card
+               below — a plugin entry simply has no version of its own, so it
+               is the version of the bundle that provided it. -->
+          <span class="plugin-cell-sub">
+            <span
+              v-if="record.title?.trim() && record.title.trim() !== record.moduleName"
+              class="plugin-cell-module tnum"
+            >{{ record.moduleName }}</span>
+            <span v-if="record.version" class="dl-chip tnum">{{ record.version }}</span>
+          </span>
+        </template>
+        <template #pentry="{ record }">
+          <span class="plugin-cell-id tnum">{{ record.entryId }}</span>
+        </template>
+        <template #pphase="{ record }">
+          <span v-if="record.fiberPhase" class="plugin-phase">{{ record.fiberPhase }}</span>
+          <span v-else class="plugin-no-version">-</span>
+        </template>
+        <template #pstatus="{ record }">
+          <!-- The instance owns the state: the toggle is wired to the native
+               writer. The switch reflects the instance's value (the row is
+               re-synced after every write, and on failure too). -->
+          <a-switch
+            :model-value="record.enabled"
+            :disabled="!managed || pluginsBusy"
+            :checked-text="t('plugins.pluginOn')"
+            :unchecked-text="t('plugins.pluginOff')"
+            size="small"
+            @change="(v: string | number | boolean) => onTogglePlugin(record, v === true)"
+          />
+        </template>
+        <template #empty>
+          <DlEmpty
+            :icon="statusFilter === 'all' ? 'plugin' : 'search'"
+            :description="
+              statusFilter === 'all'
+                ? t('plugins.pluginsEmpty')
+                : t('plugins.pluginsFilteredEmpty')
+            "
+          />
+        </template>
+      </a-table>
+      <!-- Read-only list read from the profile files: the offline content is a
+           best-effort projection, so say how it differs from the instance's. -->
+      <p v-if="filesNote" class="plugins-files-note">{{ filesNote }}</p>
+    </div>
+
+    <!-- Patch layers (bundles) card — a layer ABOVE the plugin entries. The
+         switch here is a bundle-layer switch; the switch in the entry table is
+         a single-plugin-entry switch. It sits below the entries because it is
+         the rarer operation, and its own heading carries the distinction. -->
     <div
       v-if="selectedHomeId && selectedProfile && (managed || bundles.length > 0)"
       class="dl-card bundles-card"
@@ -469,7 +585,6 @@ const pluginColumns = computed(() => [
         <div class="title-with-pill">
           <h3>{{ t('plugins.bundlesTitle') }}</h3>
           <span class="layer-tag bundle-layer-tag">{{ t('plugins.bundlesLayerTag') }}</span>
-          <span v-if="selectedHome" class="scope-pill">{{ selectedHome.name }} / {{ selectedProfile }}</span>
         </div>
       </div>
       <p class="dl-card-desc">{{ t('plugins.bundlesDesc') }}</p>
@@ -482,7 +597,7 @@ const pluginColumns = computed(() => [
           <div class="bundle-row-main">
             <div class="bundle-row-head">
               <span class="bundle-row-name">{{ bundleName(b) }}</span>
-              <span v-if="b.version" class="bundle-row-version tnum">{{ b.version }}</span>
+              <span v-if="b.version" class="dl-chip">{{ b.version }}</span>
               <span v-if="b.optional" class="bundle-chip">{{ t('plugins.bundleOptional') }}</span>
               <span v-if="!b.removable" class="bundle-chip bundle-chip-muted">{{ t('plugins.bundleReadonly') }}</span>
               <span v-if="b.availability === 'missing'" class="bundle-chip bundle-chip-warn">{{ t('plugins.bundleMissing') }}</span>
@@ -541,7 +656,7 @@ const pluginColumns = computed(() => [
             <div class="bundle-row-main">
               <div class="bundle-row-head">
                 <span class="bundle-row-name">{{ bundleName(b) }}</span>
-                <span v-if="b.version" class="bundle-row-version tnum">{{ b.version }}</span>
+                <span v-if="b.version" class="dl-chip">{{ b.version }}</span>
                 <span v-if="b.optional" class="bundle-chip">{{ t('plugins.bundleOptional') }}</span>
                 <span v-if="!b.removable" class="bundle-chip bundle-chip-muted">{{ t('plugins.bundleReadonly') }}</span>
                 <span v-if="b.availability === 'missing'" class="bundle-chip bundle-chip-warn">{{ t('plugins.bundleMissing') }}</span>
@@ -580,141 +695,53 @@ const pluginColumns = computed(() => [
         </template>
       </div>
     </div>
-
-    <!-- Plugins Table Card -->
-    <div v-if="selectedHomeId && selectedProfile" class="dl-card plugins-card">
-      <div class="dl-card-title">
-        <div class="title-with-pill">
-          <h3>{{ t('plugins.pluginsTitle') }}</h3>
-          <span class="layer-tag entry-layer-tag">{{ t('plugins.entriesLayerTag') }}</span>
-          <span v-if="selectedHome" class="scope-pill">{{ selectedHome.name }} / {{ selectedProfile }}</span>
-        </div>
-      </div>
-      <p class="dl-card-desc">{{ t('plugins.pluginsDesc') }}</p>
-
-      <!-- Read-only banner: no instance running this profile, adopted instance,
-           or an unreachable instance. The reason is backend-localized. -->
-      <div v-if="!managed && viewReason" class="plugins-readonly-banner">
-        {{ viewReason }}
-      </div>
-
-      <!-- Batch enable/disable: the same native path as a single toggle. Only
-           meaningful while the instance is manageable. -->
-      <div v-if="managed && plugins.length > 0" class="plugins-batch-row">
-        <div class="batch-btns">
-          <button
-            class="mac-action-pill"
-            :disabled="selectedEntries.length === 0 || pluginsBusy"
-            @click="applyBatch(true)"
-          >
-            {{ t('plugins.pluginsBatchEnable', { count: selectedEntries.length }) }}
-          </button>
-          <button
-            class="mac-action-pill"
-            :disabled="selectedEntries.length === 0 || pluginsBusy"
-            @click="applyBatch(false)"
-          >
-            {{ t('plugins.pluginsBatchDisable', { count: selectedEntries.length }) }}
-          </button>
-        </div>
-      </div>
-
-      <!-- The table renders whenever the instance gave us entries (managed), or
-           the offline read produced a file-sourced list; a pure read-only page
-           with nothing to show has only the banner, not a contradictory empty
-           table. -->
-      <a-table
-        v-if="managed || plugins.length > 0"
-        :columns="pluginColumns"
-        :data="plugins"
-        :loading="pluginsLoading"
-        :pagination="false"
-        row-key="entryId"
-        :row-selection="
-          managed
-            ? {
-                type: 'checkbox',
-                showCheckedAll: true,
-                onlyCurrent: true,
-                selectedRowKeys: selectedEntries,
-              }
-            : undefined
-        "
-        class="apple-styled-table"
-        @selection-change="(keys: (string | number)[]) => (selectedEntries = keys.map(String))"
-      >
-        <template #pname="{ record }">
-          <span class="plugin-cell-name">{{ pluginName(record) }}</span>
-        </template>
-        <template #pentry="{ record }">
-          <span class="plugin-cell-id tnum">{{ record.entryId }}</span>
-        </template>
-        <template #pphase="{ record }">
-          <span v-if="record.fiberPhase" class="plugin-phase">{{ record.fiberPhase }}</span>
-          <span v-else class="plugin-no-version">-</span>
-        </template>
-        <template #pstatus="{ record }">
-          <!-- The instance owns the state: the toggle is wired to the native
-               writer. The switch reflects the instance's value (the row is
-               re-synced after every write, and on failure too). -->
-          <a-switch
-            :model-value="record.enabled"
-            :disabled="!managed || pluginsBusy"
-            :checked-text="t('plugins.pluginOn')"
-            :unchecked-text="t('plugins.pluginOff')"
-            size="small"
-            @change="(v: string | number | boolean) => onTogglePlugin(record, v === true)"
-          />
-        </template>
-        <template #empty>
-          <DlEmpty icon="plugin" :description="t('plugins.pluginsEmpty')" />
-        </template>
-      </a-table>
-      <!-- Read-only list read from the profile files: the offline content is a
-           best-effort projection, so say how it differs from the instance's. -->
-      <p v-if="filesNote" class="plugins-files-note">{{ filesNote }}</p>
-    </div>
-
-    <!-- Empty Selection Card -->
-    <div v-else class="dl-card">
-      <DlEmpty icon="plugin" :description="t('plugins.pluginsPickProfile')" />
-    </div>
-  </div>
+    </template>
+  </section>
 </template>
 
 <style lang="scss" scoped>
-.plugins-page {
+// The manager is not a page: it is a section of the Profile list, opened from
+// the row it manages. It therefore carries a section heading rather than a page
+// heading, and its parts are spaced like the cards around it.
+.plugin-manager {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.scope-selector-bar {
-  padding: 14px 18px;
+.plugin-manager-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--apple-separator);
 
-  .selector-row {
+  h3 {
     display: flex;
-    align-items: center;
-    gap: 24px;
-    flex-wrap: wrap;
-
-    .selector-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-
-      .selector-label {
-        font-size: 13px;
-        font-weight: 500;
-        color: var(--color-text-2);
-        white-space: nowrap;
-      }
-
-      .scope-select {
-        width: 200px;
-      }
-    }
+    align-items: baseline;
+    gap: 10px;
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    color: var(--color-text-1);
   }
+}
+
+.plugin-manager-scope {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-3);
+}
+
+.plugin-manager-desc {
+  margin: -6px 0 0;
+  max-width: 68ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-3);
 }
 
 .title-with-pill {
@@ -727,28 +754,55 @@ const pluginColumns = computed(() => [
   }
 }
 
-.plugins-batch-row {
+.batch-btns {
   display: flex;
   align-items: center;
-  margin-bottom: 12px;
-
-  .batch-btns {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
+  gap: 8px;
+  flex-shrink: 0;
 }
 
-.scope-pill {
+/* Status filter chips: one row, counts always absolute. */
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.filter-chip {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--apple-card-border);
+  background: var(--apple-card-bg);
+  color: var(--color-text-2);
   font-size: 12px;
   font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: rgb(var(--primary-6) / 10%);
-  color: rgb(var(--primary-6));
-  border: 1px solid rgb(var(--primary-6) / 20%);
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  .filter-chip-count {
+    font-size: 11px;
+    color: var(--color-text-3);
+  }
+
+  &:hover {
+    background: var(--apple-group-bg);
+    color: var(--color-text-1);
+  }
+
+  &.active {
+    border-color: rgba(var(--primary-6), 0.35);
+    background: rgba(var(--primary-6), 0.1);
+    color: rgb(var(--primary-6));
+
+    .filter-chip-count {
+      color: rgb(var(--primary-6));
+    }
+  }
 }
 
 /* Layer tag: tells the user which kind of switch a card holds — a whole
@@ -850,11 +904,6 @@ const pluginColumns = computed(() => [
   color: var(--color-text-1);
 }
 
-.bundle-row-version {
-  font-size: 12px;
-  color: var(--color-text-3);
-}
-
 .bundle-chip {
   font-size: 11px;
   padding: 1px 6px;
@@ -915,8 +964,27 @@ const pluginColumns = computed(() => [
 }
 
 .plugin-cell-name {
+  display: block;
   font-weight: 500;
   color: var(--color-text-1);
+}
+
+/* Identity under the title: the module specifier and the version, on one line
+   so a row's technical facts stay a unit instead of stacking three deep. */
+.plugin-cell-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  min-width: 0;
+}
+
+.plugin-cell-module {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-4);
 }
 
 .plugin-cell-id {

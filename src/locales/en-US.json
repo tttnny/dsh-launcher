@@ -9,9 +9,7 @@
     "instances": "Instances",
     "homes": "HOME",
     "profiles": "Profiles",
-    "plugins": "Plugins",
     "versions": "Versions",
-    "tasks": "Tasks",
     "toggleSider": "Collapse / expand sidebar"
   },
   "home": {
@@ -61,7 +59,9 @@
     "filterError": "Errors",
     "filterWarn": "Warnings",
     "recheckHealth": "Recheck",
-    "noProfile": "No profile available under this instance's DSH_HOME"
+    "noProfile": "No profile available under this instance's DSH_HOME",
+    "pageTitle": "Instances",
+    "pageDesc": "Each instance binds one DSH version, one DSH_HOME and one Profile. Pick a Profile and start it — the DSH web UI opens in your system browser."
   },
   "instances": {
     "title": "Instances",
@@ -89,22 +89,6 @@
       "copy": "Copy",
       "delete": "Delete"
     }
-  },
-  "newInstance": {
-    "title": "New instance",
-    "name": "Instance name",
-    "namePlaceholder": "e.g. main instance",
-    "version": "DSH version",
-    "home": "DSH_HOME",
-    "dedicatedHome": "✦ Create a dedicated DSH_HOME for this instance",
-    "dedicatedHomeHint": "A dedicated directory will be created: {path}",
-    "defaultProfile": "Default profile",
-    "defaultProfilePlaceholder": "Profile selected by default at launch",
-    "create": "Create instance",
-    "taskAdded": "Background creation task added; track it on the Tasks page",
-    "alreadyInstalled": "This version is already installed; the instance will be created directly",
-    "willInstall": "Will download DSH {version} and create the instance",
-    "sourceBuildHint": "This version is GitHub-only (not on npm); it will be cloned and built from source, which takes much longer (possibly 10+ minutes). Watch the task log."
   },
   "homes": {
     "title": "HOME",
@@ -153,7 +137,10 @@
     "noInstances": "No instances reference this HOME",
     "defaultOf": "default of \"{instance}\"",
     "noDefault": "not set",
-    "managePlugins": "Manage Plugins"
+    "managePlugins": "Manage Plugins",
+    "pageTitle": "Profiles",
+    "pageDesc": "A Profile is one plugin composition inside a DSH_HOME. Manage the profiles of the selected HOME here, and open a profile's plugin manager from its row.",
+    "closePlugins": "Close"
   },
   "plugins": {
     "title": "Plugins",
@@ -179,7 +166,6 @@
     "pluginsBatchDisable": "Disable ({count})",
     "pluginsBatchEnabled": "Enabled {count} plugin(s)",
     "pluginsBatchDisabled": "Disabled {count} plugin(s)",
-
     "bundlesTitle": "Patch layers (bundles)",
     "bundlesLayerTag": "Patch layer",
     "entriesLayerTag": "Plugin entry",
@@ -202,14 +188,13 @@
     "bundleRestartRequired": "This patch-layer change needs an instance restart to take effect",
     "bundleApplied": "Updated patch layer \"{name}\"",
     "bundleAppliedRestart": "Updated patch layer \"{name}\"; restart the instance to apply",
-    "bundleRemove": "Uninstall",
-    "bundleRemoveConfirm": "Uninstall patch layer \"{name}\"? The plugin entries and config it brings disappear with it; dependencies stay.",
-    "bundleRemoveOk": "Uninstall",
-    "bundleRemoveManaged": "This patch layer is managed by DSH itself; it cannot be uninstalled",
-    "bundleRemoveNotRemovable": "This patch layer ships with DSH; it can only be disabled, never uninstalled",
-    "bundleRemoved": "Uninstalled patch layer \"{name}\"",
-    "bundleRemovedRestart": "Uninstalled patch layer \"{name}\"; restart the instance to apply",
-
+    "bundleRemove": "Detach",
+    "bundleRemoveConfirm": "Detach patch layer \"{name}\"? The plugin entries and config it brings disappear with it; dependencies stay.",
+    "bundleRemoveOk": "Detach",
+    "bundleRemoveManaged": "This patch layer is managed by DSH itself; it cannot be detached",
+    "bundleRemoveNotRemovable": "This patch layer ships with DSH; it can only be disabled, never detached",
+    "bundleRemoved": "Detached patch layer \"{name}\"",
+    "bundleRemovedRestart": "Detached patch layer \"{name}\"; restart the instance to apply",
     "outcomeApplied": "Applied",
     "outcomeRestartRequired": "Restart this instance to apply",
     "outcomeOverridden": "Overridden by a higher-priority layer; this change has no effect",
@@ -219,7 +204,15 @@
     "outcomeRefused": "Could not change: {reason}",
     "outcomeFor": "{name}: {message}",
     "outcomeBatch": "Handled {total}: {parts}",
-    "outcomeBatchRefused": "could not change"
+    "outcomeBatchRefused": "could not change",
+    "pageTitle": "Plugin manager",
+    "pageDesc": "The running instance answers this list: enabling, disabling and mounting patch layers all go through DSH's own plugin manager, and whether a change took effect is whatever the instance reports back.",
+    "filterAll": "All",
+    "filterOn": "Enabled",
+    "filterOff": "Disabled",
+    "filterProblem": "Not manageable",
+    "pluginsFilteredEmpty": "No plugins match this filter",
+    "close": "Close plugin manager"
   },
   "versions": {
     "title": "Versions",
@@ -244,7 +237,10 @@
     "installNow": "Install Now",
     "installTaskStarted": "Started install task for DSH {version}",
     "alreadyInstalled": "Version {version} is already installed",
-    "newInstance": "New instance"
+    "newInstance": "New instance",
+    "cancelInstall": "Cancel install",
+    "installing": "Installing…",
+    "pageDesc": "Install and remove DSH versions here. Clicking a version starts the install, whose progress shows on that very row; a finished install creates the matching instance and its dedicated home."
   },
   "settings": {
     "title": "Settings",
@@ -281,11 +277,8 @@
       "goInstances": "Go to Instances",
       "goHomes": "Go to HOME",
       "goProfiles": "Go to Profiles",
-      "goPlugins": "Go to Plugins",
       "goVersions": "Go to versions",
-      "goTasks": "Go to Tasks",
       "openSettings": "Open Settings (Preferences)",
-      "goTasksAlt": "Go to Tasks (alternate binding)",
       "showMain": "Show main window",
       "quitApp": "Quit the launcher",
       "nativeTag": "Native",
@@ -381,24 +374,6 @@
     "cancel": "Cancel",
     "saved": "Instance saved",
     "notFound": "Instance not found"
-  },
-  "tasks": {
-    "title": "Task Manager",
-    "fab": "Tasks",
-    "runningHint": "{count} background task(s) running",
-    "idleHint": "No background tasks",
-    "empty": "No tasks",
-    "noLogs": "No logs yet",
-    "installingHint": "Installing dependencies, please wait…",
-    "cancel": "Cancel",
-    "remove": "Remove",
-    "createdInstance": "Instance \"{name}\" created",
-    "state": {
-      "running": "Running",
-      "done": "Done",
-      "error": "Failed",
-      "cancelled": "Cancelled"
-    }
   },
   "setup": {
     "title": "Environment Check",
