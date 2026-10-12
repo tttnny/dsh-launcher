@@ -139,14 +139,16 @@ export const api = {
   /**
    * Removes one whole Bundle（补丁层） through the instance's native plugin
    * manager — the same path the Web UI uses. A bundle that ships with DSH
-   * (`removable:false`) is refused as an outcome with `errorCode`, never a
-   * thrown error; the launcher never writes the profile files (ADR-0001).
+   * (`removable:false`) is refused as an outcome carrying the raw `errorCode`
+   * and the localized reason in `diagnostic`, never a thrown error; the
+   * launcher never writes the profile files (ADR-0001).
    */
   removeBundle: (input: RemoveBundleInput) => call<ChangeOutcome>('remove_bundle', { input }),
   /**
    * Enables/disables one **plugin entry** through the instance's native plugin
    * manager (`id` is the entryId). The result says truthfully whether it took
-   * effect; a refusal is an outcome with `errorCode`, not a thrown error.
+   * effect; a refusal is an outcome carrying the raw `errorCode` and the
+   * localized reason in `diagnostic`, not a thrown error.
    */
   setPluginEnabled: (input: SetPluginEnabledInput) =>
     call<ChangeOutcome>('set_plugin_enabled', { input }),

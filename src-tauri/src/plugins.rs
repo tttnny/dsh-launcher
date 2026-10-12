@@ -56,7 +56,7 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 }
 
 // ---------------------------------------------------------------------------
-// Profile manifest helpers (read/write package.json + cordis.patch.yml)
+// Profile manifest helpers (read-only package.json + cordis.patch.yml)
 // ---------------------------------------------------------------------------
 
 /// cordis id for a package: bundles register under their unscoped short name
@@ -269,20 +269,6 @@ pub struct SetBundleEnabledInput {
     pub enabled: bool,
 }
 
-/// Translates a native `ManagementError` code into a localized reason shown to
-/// the user (one place for the whole app — design §4d). Refused operations are
-/// not command errors; this explains *why* the instance would not change.
-fn bundle_error_reason(code: &str) -> String {
-    match code {
-        "management-required" | "unaddressable" => {
-            "该 Bundle 由 DSH 自身管理，不能在这里改动".to_string()
-        }
-        "not-removable" => "该 Bundle 随 DSH 发布，只能停用不能删除".to_string(),
-        "unknown-plugin" => "实例里找不到这个 Bundle".to_string(),
-        other => format!("实例拒绝了本次改动（{other}）"),
-    }
-}
-
 /// Enables/disables one whole **Bundle（补丁层）** through the running
 /// instance's native plugin manager (`setBundleEnabled`), so the launcher never
 /// writes the profile manifest (`package.json`) or the patch document — the
@@ -291,8 +277,9 @@ fn bundle_error_reason(code: &str) -> String {
 /// The instance is resolved the same way as [`list_plugins`]; without one (or
 /// with an adopted one) the command is a plain `Err`. A **refusal** from the
 /// instance (`changed:false` + `error.code`) is *not* an error: it is returned
-/// as a [`ChangeOutcome`] carrying the translated `errorCode`, so the UI can
-/// explain "this can't be changed" rather than "something broke" (design §4b).
+/// as a [`ChangeOutcome`] carrying the raw `errorCode` and the localized reason
+/// in `diagnostic`, so the UI can explain "this can't be changed" rather than
+/// "something broke" (design §4b).
 ///
 /// Note the native semantics the UI surfaces: disabling removes the whole layer
 /// (its entries and config disappear, dependencies remain); re-enabling
@@ -314,7 +301,9 @@ pub async fn set_bundle_enabled(
 }
 
 /// The body of [`set_bundle_enabled`], taking `&AppState` so tests drive the
-/// outcome branches without a Tauri runtime.
+/// outcome branches without a Tauri runtime. Shares the write path
+/// ([`write_client`]) with T2/T4, and funnels the result through
+/// [`localize_refusal`] so every write command returns the same shape.
 pub(crate) async fn set_bundle_enabled_for(
     state: &AppState,
     home_id: &str,
@@ -322,27 +311,15 @@ pub(crate) async fn set_bundle_enabled_for(
     name: &str,
     enabled: bool,
 ) -> Result<ChangeOutcome, String> {
-    use crate::native::NativeClient;
-
-    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
-        return Err("实例未在运行，请先启动实例".to_string());
-    };
-    if entry.adopted {
-        return Err("该实例由系统接管，无法管理插件".to_string());
-    }
-    let Some(url) = entry.url else {
-        return Err("实例未在运行，请先启动实例".to_string());
-    };
-    // connect / transport / ok:false failures are real errors — the caller
-    // re-syncs the list and shows the message.
-    let client = NativeClient::connect(&url).await?;
+    let client = write_client(state, home_id, profile).await?;
     let result = client.set_bundle_enabled(name, enabled).await?;
-    Ok(ChangeOutcome::from(result))
+    Ok(localize_refusal(ChangeOutcome::from(result)))
 }
 
 /// A write result handed to the frontend (design §4 frozen contract): the
 /// native `ChangeResult`'s stable subset, `application` passed through as the
-/// five-valued string, plus a localized `errorCode` reason for refusals.
+/// five-valued string, plus the native `errorCode` and the localized
+/// `diagnostic` for refusals.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeOutcome {
@@ -352,18 +329,22 @@ pub struct ChangeOutcome {
     /// enable | remove.
     pub stage: String,
     pub target: String,
-    /// Localized reason for a refusal (`changed:false` + `error.code`); the UI
-    /// shows it instead of a raw code.
+    /// The **raw** native `error.code` for a refusal (`changed:false`); logic,
+    /// not display — the localized reason rides in `diagnostic`.
     pub error_code: Option<String>,
-    /// The instance's own diagnostic, when it reported one.
+    /// The localized reason a refusal gives, folded in by [`localize_refusal`];
+    /// the instance's own diagnostic otherwise. The UI shows it verbatim.
     pub diagnostic: Option<String>,
     pub warnings: Vec<String>,
 }
 
 impl From<NativeChangeResult> for ChangeOutcome {
     fn from(r: NativeChangeResult) -> Self {
+        // The raw code is kept as-is; the localized reason is added later by
+        // `localize_refusal`, the single place every write command funnels
+        // through (design §4d).
         let (error_code, diagnostic) = match r.error {
-            Some(e) => (Some(bundle_error_reason(&e.code)), e.diagnostic),
+            Some(e) => (Some(e.code), e.diagnostic),
             None => (None, None),
         };
         Self {
@@ -1015,13 +996,6 @@ mod tests {
         assert_eq!(yaml_double_quoted("say \"hi\""), "\"say \\\"hi\\\"\"");
     }
 
-    
-    
-    
-    
-    
-    // Live network smoke tests (skipped by default; run with
-    // `cargo test plugins::tests::live_ -- --ignored`).
     #[test]
     fn ensure_build_scripts_allowed_converts_placeholders_and_adds_sections() {
         let dir = std::env::temp_dir().join(format!("dsh-plugins-test-{}", uuid::Uuid::new_v4()));
@@ -1475,20 +1449,67 @@ mod tests {
         }))
         .unwrap();
         let outcome = ChangeOutcome::from(native);
-        // The code is localized in the projection (one place), the instance's
-        // own diagnostic rides alongside it untouched.
-        assert_eq!(
-            outcome.error_code.as_deref(),
-            Some(bundle_error_reason("unaddressable").as_str())
-        );
+        // `errorCode` carries the **raw native code** (logic); the instance's
+        // own diagnostic rides alongside it untouched. The localized reason is
+        // folded in later, by `localize_refusal`, for every write command.
+        assert_eq!(outcome.error_code.as_deref(), Some("unaddressable"));
         assert_eq!(outcome.diagnostic.as_deref(), Some("root group"));
 
         let json = serde_json::to_value(&outcome).unwrap();
-        assert_eq!(json["errorCode"], bundle_error_reason("unaddressable"));
+        assert_eq!(json["errorCode"], "unaddressable");
         assert_eq!(json["application"], "failed");
         assert_eq!(json["stage"], "enable");
         assert_eq!(json["target"], "include:llm");
         assert_eq!(json["warnings"], serde_json::json!([]));
+    }
+
+    /// The shape every write command (`set_plugin_enabled`, `set_bundle_enabled`,
+    /// `remove_bundle`) returns for a bare refusal: the **raw** code in
+    /// `errorCode` plus the **localized** reason in `diagnostic` — the single
+    /// rule the frontend renders. Driven through the same two helpers all three
+    /// commands compose (`ChangeOutcome::from` + `localize_refusal`).
+    #[test]
+    fn write_commands_return_a_raw_code_and_a_localized_diagnostic() {
+        let refusal = |code: &str| -> NativeChangeResult {
+            serde_json::from_value(serde_json::json!({
+                "changed": false,
+                "application": "failed",
+                "stage": "enable",
+                "target": "ds-bot",
+                "error": { "code": code },
+                "warnings": [],
+            }))
+            .unwrap()
+        };
+
+        // Bundle toggle: `management-required` (the "ships with DSH" refusal).
+        let bundle = localize_refusal(ChangeOutcome::from(refusal("management-required")));
+        assert_eq!(bundle.error_code.as_deref(), Some("management-required"));
+        assert_eq!(
+            bundle.diagnostic.as_deref(),
+            Some("该条目由 DSH 自身管理，不能在这里改动")
+        );
+
+        // Bundle removal: `not-removable`.
+        let removed = localize_refusal(ChangeOutcome::from(refusal("not-removable")));
+        assert_eq!(removed.error_code.as_deref(), Some("not-removable"));
+        assert_eq!(
+            removed.diagnostic.as_deref(),
+            Some("该 Bundle 随 DSH 发布，只能停用不能删除")
+        );
+
+        // Plugin-entry toggle: `unknown-plugin`.
+        let entry = localize_refusal(ChangeOutcome::from(refusal("unknown-plugin")));
+        assert_eq!(entry.error_code.as_deref(), Some("unknown-plugin"));
+        assert_eq!(
+            entry.diagnostic.as_deref(),
+            Some("实例里找不到这个插件")
+        );
+
+        // An empty code still reads as a sentence, never an empty diagnostic.
+        let bare = localize_refusal(ChangeOutcome::from(refusal("")));
+        assert_eq!(bare.error_code.as_deref(), Some(""));
+        assert_eq!(bare.diagnostic.as_deref(), Some("实例未说明原因"));
     }
 
     /// A refusal is rewritten so the page shows the Chinese reason verbatim

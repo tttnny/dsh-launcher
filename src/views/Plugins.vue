@@ -140,31 +140,69 @@ watch([selectedHomeId, selectedProfile], () => {
 
 const selectedEntries = ref<string[]>([])
 
-/** The message for one write outcome, from the instance's own answer. */
-function outcomeMessage(o: ChangeOutcome): string {
-  if (!o.changed) {
-    // A refusal: the backend folds the localized reason into `diagnostic`.
-    return t('plugins.outcomeRefused', { reason: o.diagnostic ?? o.errorCode ?? '' })
-  }
-  return applicationMessage(o.application)
-}
+/** How an outcome message should be announced. */
+type OutcomeTone = 'success' | 'warning' | 'info'
 
-/** The message for one `application` value (five possible, not three). */
-function applicationMessage(application: string): string {
+/** Tone + label for one `application` value (five possible, not three). */
+function applicationOutcome(application: string): { tone: OutcomeTone; label: string } {
   switch (application) {
     case 'applied':
-      return t('plugins.outcomeApplied')
+      return { tone: 'success', label: t('plugins.outcomeApplied') }
     case 'restart-required':
-      return t('plugins.outcomeRestartRequired')
+      return { tone: 'success', label: t('plugins.outcomeRestartRequired') }
     case 'overridden':
-      return t('plugins.outcomeOverridden')
+      return { tone: 'warning', label: t('plugins.outcomeOverridden') }
     case 'failed':
-      return t('plugins.outcomeFailed')
+      return { tone: 'warning', label: t('plugins.outcomeFailed') }
     case 'cancelled':
-      return t('plugins.outcomeCancelled')
+      return { tone: 'info', label: t('plugins.outcomeCancelled') }
     default:
-      return t('plugins.outcomeUnknown', { application })
+      return { tone: 'warning', label: t('plugins.outcomeUnknown', { application }) }
   }
+}
+
+/**
+ * The one renderer for a write outcome, shared by the plugin-entry path, the
+ * bundle toggle and the bundle removal (design §4b/§4e), so the refusal branch
+ * and the five `application` branches can never drift between them.
+ *
+ * A refusal (`changed:false`) is read from the **localized** reason the backend
+ * folders into `diagnostic`; `errorCode` is the raw native code and is never
+ * shown (a missing diagnostic falls back to a graceful generic sentence, never
+ * a bare code). `success` carries only the per-call-site success wording that
+ * genuinely differs (a bundle says "已更新补丁层…", an entry says "已生效").
+ */
+function renderOutcome(
+  o: ChangeOutcome,
+  success?: { applied: string; restartRequired: string },
+): { tone: OutcomeTone; message: string } {
+  if (!o.changed) {
+    const reason = o.diagnostic?.trim()
+    // `errorCode` is a raw native code and is never shown; with no localized
+    // reason to show, fall back to the generic refusal sentence, not a code.
+    return {
+      tone: 'warning',
+      message: reason ? t('plugins.outcomeRefused', { reason }) : t('plugins.outcomeBatchRefused'),
+    }
+  }
+  const { tone, label } = applicationOutcome(o.application)
+  if (o.application === 'applied' && success) return { tone, message: success.applied }
+  if (o.application === 'restart-required' && success) {
+    return { tone, message: success.restartRequired }
+  }
+  // A `failed` outcome carries the instance's own diagnostic when it has one.
+  if (o.application === 'failed') {
+    const detail = o.diagnostic?.trim()
+    if (detail) return { tone, message: `${label}：${detail}` }
+  }
+  return { tone, message: label }
+}
+
+/** Shows one rendered outcome at the tone it deserves. */
+function showOutcome({ tone, message }: { tone: OutcomeTone; message: string }) {
+  if (tone === 'success') Message.success(message)
+  else if (tone === 'info') Message.info(message)
+  else Message.warning(message)
 }
 
 async function onTogglePlugin(record: PluginItem, enabled: boolean) {
@@ -205,8 +243,11 @@ async function applyBatch(enabled: boolean) {
 function reportOutcomes(results: { name: string; outcome: ChangeOutcome }[]) {
   if (results.length === 1) {
     const { name, outcome } = results[0]
-    const text = t('plugins.outcomeFor', { name, message: outcomeMessage(outcome) })
-    outcome.changed ? Message.success(text) : Message.warning(text)
+    const { tone, message } = renderOutcome(outcome)
+    const text = t('plugins.outcomeFor', { name, message })
+    if (tone === 'success') Message.success(text)
+    else if (tone === 'info') Message.info(text)
+    else Message.warning(text)
     return
   }
   // A batch may mix results; count each answer instead of flattening them.
@@ -216,7 +257,8 @@ function reportOutcomes(results: { name: string; outcome: ChangeOutcome }[]) {
     return acc
   }, {})
   const parts = Object.entries(summary).map(([key, count]) => {
-    const label = key === 'refused' ? t('plugins.outcomeBatchRefused') : applicationMessage(key)
+    const label =
+      key === 'refused' ? t('plugins.outcomeBatchRefused') : applicationOutcome(key).label
     return `${label} ${count}`
   })
   Message.info(t('plugins.outcomeBatch', { total: results.length, parts: parts.join('，') }))
@@ -289,27 +331,14 @@ async function onToggleBundle(b: BundleItem, enabled: boolean) {
       name: b.name,
       enabled,
     })
-    // changed:false = the instance refused (a reason, not a failure); the
-    // localized reason is in errorCode.
-    if (!outcome.changed) {
-      Message.warning(outcome.errorCode || t('plugins.outcomeFailed'))
-      return
-    }
-    if (outcome.application === 'applied') {
-      Message.success(t('plugins.bundleApplied', { name: bundleName(b) }))
-    } else if (outcome.application === 'restart-required') {
-      Message.success(t('plugins.bundleAppliedRestart', { name: bundleName(b) }))
-    } else if (outcome.application === 'overridden') {
-      Message.warning(t('plugins.outcomeOverridden'))
-    } else if (outcome.application === 'failed') {
-      Message.warning(
-        outcome.diagnostic
-          ? `${t('plugins.outcomeFailed')}：${outcome.diagnostic}`
-          : t('plugins.outcomeFailed'),
-      )
-    } else {
-      Message.info(t('plugins.outcomeCancelled'))
-    }
+    // The shared renderer folds in the localized refusal reason (diagnostic) and
+    // the five application branches; only the success wording is bundle-specific.
+    showOutcome(
+      renderOutcome(outcome, {
+        applied: t('plugins.bundleApplied', { name: bundleName(b) }),
+        restartRequired: t('plugins.bundleAppliedRestart', { name: bundleName(b) }),
+      }),
+    )
     // Re-sync: the entries the layer brought in appear/disappear, and the
     // order reflects the instance's list (a re-mounted layer is appended last).
     await loadPlugins()
@@ -360,27 +389,15 @@ async function onRemoveBundle(b: BundleItem) {
       profile: selectedProfile.value,
       name: b.name,
     })
-    // changed:false = the instance refused (a reason, not a failure); the
-    // localized reason is in errorCode (the backend folds it in).
-    if (!outcome.changed) {
-      Message.warning(outcome.errorCode || t('plugins.outcomeFailed'))
-      return
-    }
-    if (outcome.application === 'applied') {
-      Message.success(t('plugins.bundleRemoved', { name: bundleName(b) }))
-    } else if (outcome.application === 'restart-required') {
-      Message.success(t('plugins.bundleRemovedRestart', { name: bundleName(b) }))
-    } else if (outcome.application === 'overridden') {
-      Message.warning(t('plugins.outcomeOverridden'))
-    } else if (outcome.application === 'failed') {
-      Message.warning(
-        outcome.diagnostic
-          ? `${t('plugins.outcomeFailed')}：${outcome.diagnostic}`
-          : t('plugins.outcomeFailed'),
-      )
-    } else {
-      Message.info(t('plugins.outcomeCancelled'))
-    }
+    // Same shared renderer as the toggle and the plugin-entry path: the
+    // localized refusal reason lives in `diagnostic`, the five application
+    // branches live in one place, and only the success wording differs.
+    showOutcome(
+      renderOutcome(outcome, {
+        applied: t('plugins.bundleRemoved', { name: bundleName(b) }),
+        restartRequired: t('plugins.bundleRemovedRestart', { name: bundleName(b) }),
+      }),
+    )
     // Re-sync so the list matches the instance's true state — the bundle and
     // the entries it brought in must really be gone.
     await loadPlugins()

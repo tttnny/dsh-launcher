@@ -164,6 +164,29 @@ function nativePlugin(
   }
 }
 
+/**
+ * A refusal, shaped exactly like the backend's `ChangeOutcome` (design §4d/§4b):
+ * `errorCode` carries the **raw** native code and `diagnostic` carries the
+ * **localized** reason the UI renders verbatim. `changed:false`, never an error.
+ */
+function mockRefusal(stage: string, target: string, code: string): ChangeOutcome {
+  const reasons: Record<string, string> = {
+    'management-required': '该条目由 DSH 自身管理，不能在这里改动',
+    unaddressable: '该条目由 DSH 自身管理，不能在这里改动',
+    'not-removable': '该 Bundle 随 DSH 发布，只能停用不能删除',
+    'unknown-plugin': '实例里找不到这个插件',
+  }
+  return {
+    changed: false,
+    application: 'failed',
+    stage,
+    target,
+    errorCode: code,
+    diagnostic: reasons[code] ?? (code || '实例未说明原因'),
+    warnings: [],
+  }
+}
+
 /** Seed a native view on first read, so the Plugins page is usable. */
 function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
   if (!running) {
@@ -241,7 +264,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         },
         {
           name: '@deepseek-ai/dsh-web-app',
-          title: 'DSH 网页端',
+          title: 'DSH Web App',
           description: null,
           version: '0.2.1-alpha.2',
           enabled: true,
@@ -758,20 +781,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (!running) fail('实例未在运行，请先启动实例')
       const view = nativeViewFor(homeId, profile, true)
       const bundle = view.bundles.find((b) => b.name === input.name)
-      const refusal = (errorCode: string): ChangeOutcome => ({
-        changed: false,
-        application: 'failed',
-        stage: 'enable',
-        target: input.name,
-        errorCode,
-        diagnostic: null,
-        warnings: [],
-      })
-      if (!bundle) return refusal('实例里找不到这个 Bundle') as T
+      const refusal = (code: string): ChangeOutcome =>
+        mockRefusal('enable', input.name, code)
+      if (!bundle) return refusal('unknown-plugin') as T
       // A missing package's files cannot be read, so the layer cannot mount.
       // `removable:false` does NOT block this toggle — it only forbids deletion
       // (the delete rule is a separate concern).
-      if (bundle.availability === 'missing') return refusal('实例里找不到这个 Bundle') as T
+      if (bundle.availability === 'missing') return refusal('unknown-plugin') as T
       bundle.enabled = input.enabled
       return {
         changed: true,
@@ -799,28 +815,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const index = view.bundles.findIndex((b) => b.name === input.name)
       if (index < 0) {
         // The instance answers a refusal (not an error) with the code only.
-        return {
-          changed: false,
-          application: 'failed',
-          stage: 'remove',
-          target: input.name,
-          errorCode: '实例里找不到这个 Bundle',
-          diagnostic: null,
-          warnings: [],
-        } as T
+        return mockRefusal('remove', input.name, 'unknown-plugin') as T
       }
       // Bundles that ship with DSH can only be disabled, never removed — the
       // instance refuses with `not-removable` (HTTP 200, changed:false).
       if (!view.bundles[index].removable) {
-        return {
-          changed: false,
-          application: 'failed',
-          stage: 'remove',
-          target: input.name,
-          errorCode: '该 Bundle 随 DSH 发布，只能停用不能删除',
-          diagnostic: null,
-          warnings: [],
-        } as T
+        return mockRefusal('remove', input.name, 'not-removable') as T
       }
       view.bundles.splice(index, 1)
       return {
@@ -847,28 +847,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (view.mode !== 'managed') fail(String(view.reason ?? '实例未在运行，请先启动实例'))
       const entry = view.plugins.find((p) => p.entryId === input.id)
       if (!entry) {
-        return {
-          changed: false,
-          application: 'failed',
-          stage: 'enable',
-          target: input.id,
-          errorCode: 'unknown-plugin',
-          diagnostic: null,
-          warnings: [],
-        } as T
+        return mockRefusal('enable', input.id, 'unknown-plugin') as T
       }
       // A read-only entry is refused by the instance — an outcome carrying the
       // code, never a thrown error (design §4b).
       if (entry.readOnlyReason) {
-        return {
-          changed: false,
-          application: 'failed',
-          stage: 'enable',
-          target: input.id,
-          errorCode: entry.readOnlyReason,
-          diagnostic: null,
-          warnings: [],
-        } as T
+        return mockRefusal('enable', input.id, entry.readOnlyReason) as T
       }
       entry.enabled = input.enabled
       return {

@@ -231,7 +231,9 @@ export interface ChangeOutcome {
   /** enable | remove. */
   stage: string
   target: string
+  /** The raw native `error.code` for a refusal; logic, not display. */
   errorCode?: string | null
+  /** The localized refusal reason; the UI shows this verbatim. */
   diagnostic?: string | null
   warnings: string[]
 }
