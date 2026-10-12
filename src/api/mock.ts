@@ -4,19 +4,22 @@
 // enforces it so the two adapters cannot drift silently.
 
 import type {
+  ChangeOutcome,
   DshHome,
   DshInstance,
   DshVersion,
-  InstalledPlugin,
   InstanceStatus,
   LauncherSettings,
+  PluginItem,
+  PluginView,
   RemoteVersion,
   RuntimeStatus,
-  SetPluginsEnabledInput,
+  RemoveBundleInput,
+  SetBundleEnabledInput,
+  SetPluginEnabledInput,
   TaskInfo,
   TaskProgress,
   TaskLog,
-  UninstallPluginInput,
 } from './types'
 
 export type Listener<T> = (payload: T) => void
@@ -38,8 +41,8 @@ function seedDb(): MockDb {
       { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab' },
     ],
     versions: [
-      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6' },
-      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5' },
+      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6' },
+      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5' },
     ],
     instances: [
       {
@@ -92,6 +95,12 @@ function loadDb(): MockDb {
       db.settings.no_proxy = db.settings.no_proxy ?? '127.0.0.1,localhost,::1'
       db.settings.proxy_apply_dsh = db.settings.proxy_apply_dsh ?? false
       db.settings.terminal = db.settings.terminal ?? 'system'
+      // Backfill the dedicated DSH_HOME added with the version-delete change.
+      for (const v of db.versions) {
+        v.dedicated_home =
+          v.dedicated_home ??
+          `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${v.version}`
+      }
       return db
     }
   } catch {
@@ -129,8 +138,202 @@ function emitTaskLog(l: TaskLog) {
 const mockTasks = new Map<string, TaskInfo>()
 // Mock profiles created at runtime per home id.
 const mockProfiles: Record<string, string[]> = {}
-// Mock plugin lists per `homeId:profile` (mirrors the backend's HOME+profile scope).
-const mockPluginStore: Record<string, InstalledPlugin[]> = {}
+// Mock native plugin views per `homeId:profile` (mirrors the instance's own
+// /api/pluginManager lists; includes the @deepseek-ai/* core entries the old
+// file reader filtered out, so the two are visibly different).
+const mockNativeStore: Record<string, PluginView> = {}
+
+/** One native entry with only the fields the mock needs; the rest default. */
+function nativePlugin(
+  entryId: string,
+  moduleName: string,
+  title: string,
+  enabled: boolean,
+  patchId: string | null,
+  readOnlyReason: string | null,
+): PluginItem {
+  return {
+    entryId,
+    moduleName,
+    title,
+    description: null,
+    enabled,
+    fiberPhase: enabled ? 'active' : 'pending',
+    patchId,
+    readOnlyReason,
+  }
+}
+
+/**
+ * A refusal, shaped exactly like the backend's `ChangeOutcome` (design §4d/§4b):
+ * `errorCode` carries the **raw** native code and `diagnostic` carries the
+ * **localized** reason the UI renders verbatim. `changed:false`, never an error.
+ */
+function mockRefusal(stage: string, target: string, code: string): ChangeOutcome {
+  const reasons: Record<string, string> = {
+    'management-required': '该条目由 DSH 自身管理，不能在这里改动',
+    unaddressable: '该条目由 DSH 自身管理，不能在这里改动',
+    'not-removable': '该 Bundle 随 DSH 发布，只能停用不能删除',
+    'unknown-plugin': '实例里找不到这个插件',
+  }
+  return {
+    changed: false,
+    application: 'failed',
+    stage,
+    target,
+    errorCode: code,
+    diagnostic: reasons[code] ?? (code || '实例未说明原因'),
+    warnings: [],
+  }
+}
+
+/** Seed a native view on first read, so the Plugins page is usable. */
+function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
+  if (!running) {
+    // Mirror the backend's offline branch: read-only, list from the profile's
+    // files (best-effort, includes core entries), distinct reason.
+    return {
+      mode: 'not-running',
+      reason:
+        '实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。',
+      files: true,
+      plugins: [
+        // Core entries are shown offline too (the old reader's blanket
+        // @deepseek-ai/* filter is gone), sourced from the profile files.
+        nativePlugin('dsh-base', '@deepseek-ai/dsh-base', 'DSH 基础', true, null, null),
+        nativePlugin('dsh-auxiliary', '@dsh-plugin/dsh-auxiliary', '辅助工具', true, null, null),
+        nativePlugin('ds-bot', '@canglongcl/ds-bot', 'ds-bot', false, null, null),
+      ],
+      bundles: [],
+    }
+  }
+  const key = `${homeId}:${profile}`
+  if (!mockNativeStore[key]) {
+    mockNativeStore[key] = {
+      mode: 'managed',
+      reason: null,
+      files: false,
+      plugins: [
+        // Core entries the launcher's old reader dropped: they must show up.
+        nativePlugin(
+          'include:plugin-manager',
+          '@deepseek-ai/dsh-plugin-manager',
+          '插件管理',
+          true,
+          null,
+          'management-required',
+        ),
+        nativePlugin(
+          'include:llm',
+          '@deepseek-ai/dsh-llm',
+          'LLM',
+          true,
+          'p1',
+          null,
+        ),
+        nativePlugin(
+          'include:plugin:dsh-auxiliary',
+          '@dsh-plugin/dsh-auxiliary',
+          '辅助工具',
+          true,
+          'p2',
+          null,
+        ),
+        nativePlugin(
+          'include:plugin:dsh-better-sidebar',
+          'dsh-better-sidebar',
+          '侧边栏增强',
+          false,
+          'p3',
+          null,
+        ),
+      ],
+      bundles: [
+        {
+          name: '@deepseek-ai/dsh-base',
+          title: 'DSH 基础',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: true,
+          installed: true,
+          removable: false,
+          optional: false,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
+          name: '@deepseek-ai/dsh-web-app',
+          title: 'DSH Web App',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: true,
+          installed: true,
+          removable: false,
+          optional: false,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
+          name: '@canglongcl/ds-bot',
+          title: 'ds-bot',
+          description: null,
+          version: '^0.9.4',
+          enabled: true,
+          installed: true,
+          removable: true,
+          optional: true,
+          availability: 'profile',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        // Disabled layers the user could re-mount; most bundles ship this way.
+        {
+          name: '@deepseek-ai/dsh-llm-anthropic',
+          title: 'Anthropic LLM',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: false,
+          installed: false,
+          removable: false,
+          optional: true,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
+          name: 'ds-better-sidebar',
+          title: '侧边栏增强',
+          description: null,
+          version: '^1.2.0',
+          enabled: false,
+          installed: true,
+          removable: true,
+          optional: true,
+          availability: 'profile',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        // A bundle whose package files cannot be read.
+        {
+          name: '@example/dsh-missing',
+          title: '缺失的层',
+          description: null,
+          version: null,
+          enabled: false,
+          installed: false,
+          removable: true,
+          optional: true,
+          availability: 'missing',
+          readOnlyReason: null,
+          errorCode: 'unknown-plugin',
+        },
+      ],
+    }
+  }
+  return mockNativeStore[key]
+}
 
 function mockNewId(prefix: string): string {
   return `${prefix}-${uuid()}`
@@ -265,6 +468,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
             id: mockNewId('v'),
             version,
             dir: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\${version}`,
+            dedicated_home: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${version}`,
           }
           cur.versions.push(ver)
         }
@@ -549,35 +753,117 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         published_at: dev ? new Date().toISOString() : null,
       } as T
     }
-    case 'list_installed_plugins': {
+    case 'list_plugins': {
       const homeId = String(args?.home_id)
       const profile = String(args?.profile ?? 'web')
-      const key = `${homeId}:${profile}`
-      // Seed a realistic set on first read so the Plugins page is usable.
-      if (!mockPluginStore[key]) {
-        mockPluginStore[key] = [
-          { id: '@dsh-plugin/dsh-auxiliary', version: '^0.3.1', enabled: true, cordis_id: 'dsh-auxiliary' },
-          { id: 'dsh-better-sidebar', version: '^1.2.0', enabled: false, cordis_id: 'dsh-better-sidebar' },
-          { id: '@canglongcl/dsh-web-review', version: '^0.9.4', enabled: true, cordis_id: 'dsh-web-review' },
-        ]
-      }
-      return mockPluginStore[key] as T
+      // Mirror the backend: the view is managed only while an instance of this
+      // HOME is running this profile (the launcher resolves HOME+Profile to an
+      // instance), otherwise the read-only not-running stub.
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      return nativeViewFor(homeId, profile, running) as T
     }
-    case 'set_plugins_enabled': {
-      const input = args?.input as SetPluginsEnabledInput
-      const key = `${input.homeId}:${input.profile}`
-      const list = mockPluginStore[key] ?? []
-      for (const p of list) {
-        if (input.pluginIds.includes(p.id)) p.enabled = input.enabled
-      }
-      mockPluginStore[key] = list
-      return undefined as T
+    case 'set_bundle_enabled': {
+      const input = args?.input as SetBundleEnabledInput
+      const homeId = input.homeId
+      const profile = input.profile
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      // No instance → a plain error (mirrors the backend Err), not a refusal.
+      if (!running) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, true)
+      const bundle = view.bundles.find((b) => b.name === input.name)
+      const refusal = (code: string): ChangeOutcome =>
+        mockRefusal('enable', input.name, code)
+      if (!bundle) return refusal('unknown-plugin') as T
+      // A missing package's files cannot be read, so the layer cannot mount.
+      // `removable:false` does NOT block this toggle — it only forbids deletion
+      // (the delete rule is a separate concern).
+      if (bundle.availability === 'missing') return refusal('unknown-plugin') as T
+      bundle.enabled = input.enabled
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'enable',
+        target: input.name,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
     }
-    case 'uninstall_plugin': {
-      const input = args?.input as UninstallPluginInput
-      const key = `${input.homeId}:${input.profile}`
-      mockPluginStore[key] = (mockPluginStore[key] ?? []).filter((p) => p.id !== input.pluginId)
-      return undefined as T
+    case 'remove_bundle': {
+      const input = args?.input as RemoveBundleInput
+      const homeId = input.homeId
+      const profile = input.profile
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      // No instance → a plain error (mirrors the backend Err), not a refusal.
+      if (!running) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, true)
+      const index = view.bundles.findIndex((b) => b.name === input.name)
+      if (index < 0) {
+        // The instance answers a refusal (not an error) with the code only.
+        return mockRefusal('remove', input.name, 'unknown-plugin') as T
+      }
+      // Bundles that ship with DSH can only be disabled, never removed — the
+      // instance refuses with `not-removable` (HTTP 200, changed:false).
+      if (!view.bundles[index].removable) {
+        return mockRefusal('remove', input.name, 'not-removable') as T
+      }
+      view.bundles.splice(index, 1)
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'remove',
+        target: input.name,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
+    }
+    case 'set_plugin_enabled': {
+      const input = args?.input as SetPluginEnabledInput
+      // Mirror the backend: resolve HOME+Profile to a running instance; a
+      // missing one is a command error, not an outcome.
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === input.homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === input.profile,
+      )
+      const view = nativeViewFor(input.homeId, input.profile, running)
+      if (view.mode !== 'managed') fail(String(view.reason ?? '实例未在运行，请先启动实例'))
+      const entry = view.plugins.find((p) => p.entryId === input.id)
+      if (!entry) {
+        return mockRefusal('enable', input.id, 'unknown-plugin') as T
+      }
+      // A read-only entry is refused by the instance — an outcome carrying the
+      // code, never a thrown error (design §4b).
+      if (entry.readOnlyReason) {
+        return mockRefusal('enable', input.id, entry.readOnlyReason) as T
+      }
+      entry.enabled = input.enabled
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'enable',
+        target: input.id,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
     }
     default:
       fail(`mock: unknown command ${cmd}`)

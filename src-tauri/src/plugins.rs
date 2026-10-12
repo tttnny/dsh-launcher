@@ -1,9 +1,12 @@
-// Profile plugins: per-instance/profile enable / disable / uninstall plumbing
-// over the profile manifest (package.json) and cordis.patch.yml, driven
-// through the instance's own `dsh plugin` CLI.
+// Profile plugins: the instance-native plugin commands (list / enable /
+// disable / remove) over the running instance's own `/api/pluginManager/*`
+// service, plus the profile-file preparation the launcher's own pnpm needs
+// (build scripts, peer policy, pnpm store pin). The launcher never writes
+// plugin state — the running DSH owns it (ADR-0001).
 
 use crate::AppState;
-use serde::{Deserialize, Serialize};
+use crate::native::NativeChangeResult;
+use serde::Deserialize;
 use tauri::State;
 
 /// Public OAuth App client id used to boost unauthenticated GitHub API quota
@@ -17,33 +20,6 @@ const GITHUB_CLIENT_ID: &str = "Ov23li6vtlVd83282YL6";
 pub(crate) fn github_api_url(path: &str) -> String {
     let sep = if path.contains('?') { '&' } else { '?' };
     format!("https://api.github.com{path}{sep}client_id={GITHUB_CLIENT_ID}")
-}
-
-// ---------------------------------------------------------------------------
-// Installed plugin (per instance/profile)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Serialize)]
-pub struct InstalledPlugin {
-    /// Package name / id (e.g. "@dsh-plugin/dsh-auxiliary").
-    pub id: String,
-    /// Installed version spec as recorded in the profile manifest.
-    pub version: Option<String>,
-    /// Whether the plugin is currently enabled (not disabled in cordis.patch.yml).
-    pub enabled: bool,
-    /// The cordis plugin id used in cordis.patch.yml (disables/insert rows).
-    pub cordis_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetPluginsEnabledInput {
-    #[serde(alias = "home_id")]
-    pub home_id: String,
-    pub profile: String,
-    #[serde(alias = "plugin_ids")]
-    pub plugin_ids: Vec<String>,
-    pub enabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +56,7 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 }
 
 // ---------------------------------------------------------------------------
-// Profile manifest helpers (read/write package.json + cordis.patch.yml)
+// Profile manifest helpers (read-only package.json + cordis.patch.yml)
 // ---------------------------------------------------------------------------
 
 /// cordis id for a package: bundles register under their unscoped short name
@@ -102,33 +78,15 @@ fn read_profile_manifest(dir: &std::path::Path) -> Result<serde_json::Value, Str
     serde_json::from_str(&raw).map_err(|e| format!("解析 package.json 失败: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Commands: installed plugin listing (per instance + profile)
-// ---------------------------------------------------------------------------
-
-/// Lists plugins installed into a HOME's profile, excluding core
-/// @deepseek-ai/* packages. Reads the profile manifest (dependencies +
-/// bundles) and cordis.patch.yml (disabled rows).
-#[tauri::command(rename_all = "snake_case")]
-pub async fn list_installed_plugins(
-    state: State<'_, AppState>,
-    home_id: String,
-    profile: String,
-) -> Result<Vec<InstalledPlugin>, String> {
-    let (home_path, _) = resolve_home_paths(&state, &home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &profile)?;
-    let manifest = read_profile_manifest(&dir)?;
-
-    let mut ids: Vec<String> = Vec::new();
-    let mut versions: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
+/// The packages a profile manifest declares, deduped and sorted: the
+/// `dependencies` map (with their version specs) plus any names in
+/// `dsh.profile.bundles` that no dependency already covered.
+fn profile_packages(manifest: &serde_json::Value) -> Vec<(String, Option<String>)> {
+    let mut packages: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     if let Some(deps) = manifest.get("dependencies").and_then(|d| d.as_object()) {
         for (name, spec) in deps {
-            if name.starts_with("@deepseek-ai/") {
-                continue;
-            }
-            ids.push(name.clone());
-            versions.insert(name.clone(), spec.as_str().unwrap_or("").to_string());
+            packages.insert(name.clone(), spec.as_str().map(str::to_string));
         }
     }
     if let Some(bundles) = manifest
@@ -137,282 +95,317 @@ pub async fn list_installed_plugins(
     {
         for b in bundles {
             if let Some(name) = b.as_str() {
-                if name.starts_with("@deepseek-ai/") || ids.iter().any(|i| i == name) {
-                    continue;
-                }
-                ids.push(name.to_string());
+                packages.entry(name.to_string()).or_insert(None);
             }
         }
     }
-    ids.sort();
-    ids.dedup();
+    let mut out: Vec<(String, Option<String>)> = packages.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
 
-    // Disabled set from cordis.patch.yml (`- id: <cordis-id>` + `disabled: true`).
+// ---------------------------------------------------------------------------
+// Commands: native plugin list (the instance's own plugin manager)
+// ---------------------------------------------------------------------------
+
+/// Lists the plugins of a profile of `(home_id, profile)`.
+///
+/// While an instance runs that profile, the list is the instance's own
+/// **native plugin manager** answer (`POST /api/pluginManager/*`) — the running
+/// DSH owns plugin state (ADR-0001), so the launcher does not read files to
+/// build the list nor report entries the instance does not.
+///
+/// With **no instance running** the page is still usable, but read-only: the
+/// list is read from the profile's own files (`package.json` + the patch
+/// document), every control is disabled and the `reason` tells the user to
+/// start the instance. That read path writes nothing — writing profile files is
+/// exactly what ADR-0001 removed. An **adopted** instance (no usable token) and
+/// an unreachable one take the same read-only path; their `reason` differs so
+/// the two are distinguishable.
+///
+/// The instance is resolved from the selectors: the same DSH_HOME, running
+/// the selected profile (see [`crate::process::running_for_profile`]). The
+/// credential is the running-table URL's one-time token; the launcher never
+/// reads `<DSH_HOME>/.credentials.yaml`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_plugins(
+    state: State<'_, AppState>,
+    home_id: String,
+    profile: String,
+) -> Result<crate::native::PluginView, String> {
+    list_plugins_for(state.inner(), &home_id, &profile).await
+}
+
+/// The body of [`list_plugins`], taking `&AppState` so tests can drive the
+/// read-only states without a Tauri runtime.
+async fn list_plugins_for(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Result<crate::native::PluginView, String> {
+    use crate::native::{NativeClient, PluginView, PluginViewMode};
+
+    // The three read-only reasons are distinct on purpose: the UI shows them
+    // verbatim, so each one has to say what happened and what to do.
+    const NOT_RUNNING: &str = "实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。";
+    const ADOPTED: &str =
+        "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理插件。请从启动器重启该实例。";
+
+    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+        // Nothing is running this profile: read the profile's files (a
+        // best-effort, read-only list) and tell the user how to manage.
+        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
+    };
+    // An adopted instance has no recoverable token, so it cannot be managed.
+    if entry.adopted {
+        return offline_view(state, home_id, profile, PluginViewMode::Adopted, ADOPTED);
+    }
+    let Some(url) = entry.url else {
+        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
+    };
+
+    // A refused session / unreachable instance is read-only rather than a
+    // command error: the page still renders with the instance's reason.
+    let client = match NativeClient::connect(&url).await {
+        Ok(client) => client,
+        Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
+    };
+    let plugins = client.list_plugins().await?;
+    let bundles = client.list_bundles().await?;
+    Ok(PluginView::managed(plugins, bundles))
+}
+
+/// A read-only view listing a profile's plugins from its own files.
+///
+/// This is deliberately **best-effort and file-scoped**: it reads the profile
+/// manifest (`dependencies` + `dsh.profile.bundles`) and the patch document's
+/// disables, so it shows what the profile *declares*, not the instance's live
+/// composition (no fiber phase, no availability, no error info — and the live
+/// list additionally hides a few built-in bundles). A read failure degrades to
+/// an empty list rather than erroring the page.
+///
+/// Core `@deepseek-ai/*` packages are **not** filtered out here. A blanket
+/// filter would make this view lie about a profile: it would hide whether a
+/// core bundle is even declared, which is a fact a read-only view has no
+/// business concealing. Their cordis id is usually the package's unscoped
+/// short name (`@deepseek-ai/dsh-base` → `dsh-base`), the same fallback the
+/// patch document uses to address them.
+fn offline_view(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+    mode: crate::native::PluginViewMode,
+    reason: &str,
+) -> Result<crate::native::PluginView, String> {
+    Ok(crate::native::PluginView::readonly_files(
+        mode,
+        reason,
+        offline_plugin_items(state, home_id, profile),
+    ))
+}
+
+/// The profile's plugin entries read from its files, sorted by cordis id.
+/// Unreadable files (or unknown HOME) yield an empty list — the read-only view
+/// renders regardless.
+fn offline_plugin_items(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Vec<crate::native::PluginItem> {
+    let Ok(home_path) = resolve_home_path(state, home_id) else {
+        return Vec::new();
+    };
+    let Ok(dir) = crate::profile::profile_dir(&home_path, profile) else {
+        return Vec::new();
+    };
+    let manifest = read_profile_manifest(&dir).unwrap_or_default();
     let disabled = crate::profile::read_disabled_ids(&dir);
 
-    let out = ids
+    let mut items: Vec<crate::native::PluginItem> = profile_packages(&manifest)
         .into_iter()
-        .map(|id| {
-            let cordis_id = cordis_id_of(&id);
-            let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&id);
-            InstalledPlugin {
-                version: versions.get(&id).cloned(),
+        .map(|(name, _version)| {
+            let cordis_id = cordis_id_of(&name);
+            let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&name);
+            crate::native::PluginItem {
+                entry_id: cordis_id.clone(),
+                module_name: name,
+                title: None,
+                description: None,
                 enabled,
-                cordis_id: Some(cordis_id),
-                id,
+                fiber_phase: None,
+                patch_id: None,
+                read_only_reason: None,
             }
         })
         .collect();
-    Ok(out)
+    items.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+    items
 }
 
-/// Resolve a HOME to (home_path, version_dir): plugin file edits need the
-/// HOME path; `dsh plugin remove` runs through a CLI binary, so any
-/// installed version serves (the newest installed one wins).
-pub(crate) fn resolve_home_paths(
-    state: &State<'_, AppState>,
-    home_id: &str,
-) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+/// The HOME path of `home_id` (or an error), without resolving a CLI version —
+/// the offline reader touches no CLI.
+fn resolve_home_path(state: &AppState, home_id: &str) -> Result<std::path::PathBuf, String> {
     let cfg = state.config.lock().unwrap();
-    let home = cfg
-        .homes
+    cfg.homes
         .iter()
         .find(|h| h.id == home_id)
-        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-    let version = cfg.versions.last().ok_or_else(|| "尚未安装任何 DSH 版本".to_string())?;
-    Ok((home.path.clone(), version.dir.clone()))
+        .map(|h| h.path.clone())
+        .ok_or_else(|| "DSH_HOME 不存在".to_string())
 }
 
 // ---------------------------------------------------------------------------
-// Commands: enable / disable (cordis.patch.yml disabled rows)
+// Commands: bundle (patch layer) enable / disable (native)
 // ---------------------------------------------------------------------------
 
-/// Sets plugins enabled/disabled in a profile's cordis.patch.yml by adding or
-/// removing `disabled: true` rows. Batch-capable via plugin_ids.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn set_plugins_enabled(
-    state: State<'_, AppState>,
-    input: SetPluginsEnabledInput,
-) -> Result<(), String> {
-    let (home_path, _) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
-    let patch_path = dir.join("cordis.patch.yml");
-
-    let mut raw = if patch_path.exists() {
-        std::fs::read_to_string(&patch_path)
-            .map_err(|e| format!("读取 cordis.patch.yml 失败: {e}"))?
-    } else {
-        String::new()
-    };
-
-    for package in &input.plugin_ids {
-        let cordis_id = cordis_id_of(package);
-        raw = crate::profile::set_disabled_row(&raw, &cordis_id, input.enabled);
-    }
-
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
-    std::fs::write(&patch_path, raw).map_err(|e| format!("写入 cordis.patch.yml 失败: {e}"))?;
-    Ok(())
-}
-
-/// Input for uninstalling a plugin from a profile.
-#[derive(Clone, Debug, serde::Deserialize)]
+/// Input for enabling/disabling a whole **Bundle（补丁层）**. The native
+/// argument is the bundle `name` (not a plugin-entry id).
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UninstallPluginInput {
+pub struct SetBundleEnabledInput {
     #[serde(alias = "home_id")]
     pub home_id: String,
     pub profile: String,
-    #[serde(alias = "plugin_id")]
-    pub plugin_id: String,
+    pub name: String,
+    pub enabled: bool,
 }
 
-/// Uninstalls a plugin from a HOME's profile through
-/// `dsh plugin --profile <name> remove <id>` (the CLI removes the dependency
-/// and reconciles dsh.profile.bundles), then drops the plugin's
-/// cordis.patch.yml rows (insert / disabled), which the CLI does not manage.
+/// Enables/disables one whole **Bundle（补丁层）** through the running
+/// instance's native plugin manager (`setBundleEnabled`), so the launcher never
+/// writes the profile manifest (`package.json`) or the patch document — the
+/// running DSH owns plugin state (ADR-0001).
+///
+/// The instance is resolved the same way as [`list_plugins`]; without one (or
+/// with an adopted one) the command is a plain `Err`. A **refusal** from the
+/// instance (`changed:false` + `error.code`) is *not* an error: it is returned
+/// as a [`ChangeOutcome`] carrying the raw `errorCode` and the localized reason
+/// in `diagnostic`, so the UI can explain "this can't be changed" rather than
+/// "something broke" (design §4b).
+///
+/// Note the native semantics the UI surfaces: disabling removes the whole layer
+/// (its entries and config disappear, dependencies remain); re-enabling
+/// **appends** the bundle to the end of the profile's ordered list, changing
+/// its priority.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn uninstall_plugin(
+pub async fn set_bundle_enabled(
     state: State<'_, AppState>,
-    input: UninstallPluginInput,
-) -> Result<(), String> {
-    let (home_path, version_dir) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
-    if !dir.exists() {
-        return Err(format!("Profile「{}」不存在", input.profile));
-    }
-
-    // `dsh plugin remove <id>` through an installed CLI: it removes the
-    // dependency and reconciles dsh.profile.bundles (a name that is no
-    // longer an installed bundle leaves the layer stack), so the manifest is
-    // never edited by hand here. The frontend shows its own progress state.
-    run_dsh_plugin(
-        &state,
-        &PluginCliTarget {
-            version_dir: &version_dir,
-            home_path: &home_path,
-            profile: &input.profile,
-        },
-        &PluginCliOp {
-            subcommand: "remove",
-            spec: &input.plugin_id,
-            loglevel: "warn",
-        },
+    input: SetBundleEnabledInput,
+) -> Result<ChangeOutcome, String> {
+    set_bundle_enabled_for(
+        state.inner(),
+        &input.home_id,
+        &input.profile,
+        &input.name,
+        input.enabled,
     )
-    .await?;
+    .await
+}
 
-    // 2. Drop the plugin's rows from cordis.patch.yml (insert rows mount the
-    //    plugin; disabled rows gate it) — owned by the profile module.
-    let patch_path = dir.join("cordis.patch.yml");
-    if patch_path.exists() {
-        let raw = std::fs::read_to_string(&patch_path)
-            .map_err(|e| format!("读取 cordis.patch.yml 失败: {e}"))?;
-        let cordis_id = cordis_id_of(&input.plugin_id);
-        let cleaned = crate::profile::strip_cordis_rows(&raw, &cordis_id, &input.plugin_id);
-        if cleaned != raw {
-            std::fs::write(&patch_path, &cleaned)
-                .map_err(|e| format!("写入 cordis.patch.yml 失败: {e}"))?;
+/// The body of [`set_bundle_enabled`], taking `&AppState` so tests drive the
+/// outcome branches without a Tauri runtime. Shares the write path
+/// ([`write_client`]) with T2/T4, and funnels the result through
+/// [`localize_refusal`] so every write command returns the same shape.
+pub(crate) async fn set_bundle_enabled_for(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<ChangeOutcome, String> {
+    let client = write_client(state, home_id, profile).await?;
+    let result = client.set_bundle_enabled(name, enabled).await?;
+    Ok(localize_refusal(ChangeOutcome::from(result)))
+}
+
+/// A write result handed to the frontend (design §4 frozen contract): the
+/// native `ChangeResult`'s stable subset, `application` passed through as the
+/// five-valued string, plus the native `errorCode` and the localized
+/// `diagnostic` for refusals.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutcome {
+    pub changed: bool,
+    /// applied | restart-required | overridden | failed | cancelled.
+    pub application: String,
+    /// enable | remove.
+    pub stage: String,
+    pub target: String,
+    /// The **raw** native `error.code` for a refusal (`changed:false`); logic,
+    /// not display — the localized reason rides in `diagnostic`.
+    pub error_code: Option<String>,
+    /// The localized reason a refusal gives, folded in by [`localize_refusal`];
+    /// the instance's own diagnostic otherwise. The UI shows it verbatim.
+    pub diagnostic: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+impl From<NativeChangeResult> for ChangeOutcome {
+    fn from(r: NativeChangeResult) -> Self {
+        // The raw code is kept as-is; the localized reason is added later by
+        // `localize_refusal`, the single place every write command funnels
+        // through (design §4d).
+        let (error_code, diagnostic) = match r.error {
+            Some(e) => (Some(e.code), e.diagnostic),
+            None => (None, None),
+        };
+        Self {
+            changed: r.changed,
+            application: r.application,
+            stage: r.stage,
+            target: r.target,
+            error_code,
+            diagnostic,
+            warnings: r.warnings,
         }
     }
-
-    Ok(())
 }
 
-/// Which instance/profile a `dsh plugin` invocation targets.
-struct PluginCliTarget<'a> {
-    version_dir: &'a std::path::Path,
-    home_path: &'a std::path::Path,
-    profile: &'a str,
+// ---------------------------------------------------------------------------
+// Commands: bundle (patch layer) removal (native)
+// ---------------------------------------------------------------------------
+
+/// Input for removing a whole **Bundle（补丁层）**. The native argument is the
+/// bundle `name` (not a plugin-entry id).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveBundleInput {
+    #[serde(alias = "home_id")]
+    pub home_id: String,
+    pub profile: String,
+    pub name: String,
 }
 
-/// What the invocation does: a pnpm subcommand (`add` / `remove`), its
-/// package spec, and the pnpm log level to forward.
-struct PluginCliOp<'a> {
-    subcommand: &'a str,
-    spec: &'a str,
-    loglevel: &'a str,
-}
-
-/// Runs one `dsh plugin --profile <name> <pnpm subcommand> <spec/id>` through
-/// the instance's own CLI.
+/// Removes one whole **Bundle（补丁层）** through the running instance's native
+/// plugin manager (`removeBundle`) — the same path the Web UI uses, so a plugin
+/// the Web UI can remove the launcher can too, and the launcher still never
+/// writes the profile manifest (`package.json`) or the patch document
+/// (ADR-0001).
 ///
-/// The launcher still prepares the two things the CLI does not: the
-/// build-scripts opt-in (pnpm ≥10 `onlyBuiltDependencies` / pnpm 11
-/// `allowBuilds`) and the profile `.npmrc` peer policy. When pnpm 11 blocks
-/// build scripts it writes `set this to true or false` placeholders and fails
-/// with ERR_PNPM_IGNORED_BUILDS; the placeholders are approved and the
-/// invocation is retried once so native deps (node-pty, koffi, esbuild,
-/// sharp…) actually build. The CLI prints the same advice for git-hosted
-/// plugins, which this automates.
-///
-/// Short-lived and interactive: errors surface directly to the caller (the
-/// frontend shows its own progress state and cancels by dropping the await).
-async fn run_dsh_plugin(
-    state: &State<'_, AppState>,
-    target: &PluginCliTarget<'_>,
-    op: &PluginCliOp<'_>,
-) -> Result<(), String> {
-    let (version_dir, home_path, profile) = (target.version_dir, target.home_path, target.profile);
-    let (subcommand, spec, loglevel) = (op.subcommand, op.spec, op.loglevel);
-    let dir = crate::profile::profile_dir(home_path, profile)?;
-    // No instance is in scope here, so the flag comes from the profile's own
-    // manifest: a `link:` dependency is exactly what needs it.
-    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
-    ensure_build_scripts_allowed(&dir)?;
-    // Never let a plugin's peers pull a second copy of a core package in.
-    ensure_profile_npmrc(&dir)?;
-    // Record the store this invocation will use. This path always drives pnpm
-    // with the launcher store (and relinks the profile onto it when it is
-    // linked elsewhere), so the pin names that store — never the profile's
-    // current one, which a relink a few lines below may replace.
-    let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    ensure_profile_store_pin(&dir, &store_dir)?;
-
-    let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let pnpm_prog = crate::toolchain::ensure_pnpm().await?;
-    let what = format!("dsh plugin {subcommand}");
-
-    // A node_modules tree linked from a *different* pnpm store makes pnpm
-    // fail with ERR_PNPM_UNEXPECTED_STORE; relink proactively like the
-    // installer path did.
-    if let Some(linked) = linked_store_dir(&dir) {
-        if !store_paths_match(&linked, &store_dir.to_string_lossy()) {
-            crate::log_info!("node_modules 链接自其他 pnpm store（{linked}），重新链接后重试");
-            relink_profile_store(state, target, &pnpm_prog).await?;
-        }
-    }
-
-    for attempt in 1..=2 {
-        let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
-        args.extend(forwarded_pnpm_flags(state, loglevel));
-        let cmd =
-            crate::launch::plugin_command(
-                &node,
-                version_dir,
-                home_path,
-                profile,
-                &args,
-                &pnpm_prog,
-                preserve_symlinks,
-            )?;
-        match run_command(cmd, &what).await {
-            Ok(()) => return Ok(()),
-            Err(out) if attempt == 1 && mentions_ignored_builds(&out) => {
-                crate::log_info!("pnpm 拦截了依赖构建脚本，批准 allowBuilds 后重试");
-                ensure_build_scripts_allowed(&dir)?;
-            }
-            Err(out) if attempt == 1 && mentions_unexpected_store(&out) => {
-                crate::log_info!("pnpm 报告 store 位置不一致，重新链接后重试");
-                relink_profile_store(state, target, &pnpm_prog).await?;
-            }
-            Err(out) => return Err(format!("{what} 失败: {}", summarize_output(&out))),
-        }
-    }
-    unreachable!("attempt loop covers both attempts")
+/// The instance is resolved the same way as [`list_plugins`]; without one (or
+/// with an adopted one) the command is a plain `Err`. A bundle that ships with
+/// DSH is **refused** by the instance (`changed:false` +
+/// `error.code:"not-removable"`): that is returned as a [`ChangeOutcome`] with
+/// the localized reason folded into `diagnostic`, so the page explains "this
+/// can't be removed" rather than "something broke" (design §4b). The UI
+/// disables the entry for `removable:false` bundles in the first place; this
+/// path is the truthful answer if a refusal still arrives.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_bundle(
+    state: State<'_, AppState>,
+    input: RemoveBundleInput,
+) -> Result<ChangeOutcome, String> {
+    remove_bundle_for(state.inner(), &input).await
 }
 
-/// Runs a piped child command, returning the FULL combined output on
-/// failure: retryable-error detection (store mismatch, ignored builds)
-/// matches markers like `ERR_PNPM_UNEXPECTED_STORE` that pnpm prints at the
-/// START of its diagnostics, so callers must see the whole output. Display
-/// sites compress it through [`summarize_output`].
-async fn run_command(mut cmd: tokio::process::Command, what: &str) -> Result<(), String> {
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| format!("{what} 启动失败: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if combined.trim().is_empty() {
-        Err(format!("退出码 {}", out.status))
-    } else {
-        Err(combined)
-    }
-}
-
-/// Compresses a command's full output into its last meaningful lines for
-/// error display.
-fn summarize_output(out: &str) -> String {
-    let tail: Vec<&str> = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    tail.iter().rev().take(3).rev().cloned().collect::<Vec<&str>>().join(" | ")
-}
-
-fn mentions_unexpected_store(out: &str) -> bool {
-    out.contains("ERR_PNPM_UNEXPECTED_STORE") || out.contains("Unexpected store location")
-}
-
-fn mentions_ignored_builds(out: &str) -> bool {
-    out.contains("ERR_PNPM_IGNORED_BUILDS") || out.contains("Ignored build scripts")
+/// The body of [`remove_bundle`], taking `&AppState` so tests drive the
+/// resolve branches without a Tauri runtime. Shares the write path
+/// ([`write_client`]) with T2/T3.
+pub(crate) async fn remove_bundle_for(
+    state: &AppState,
+    input: &RemoveBundleInput,
+) -> Result<ChangeOutcome, String> {
+    let client = write_client(state, &input.home_id, &input.profile).await?;
+    let result = client.remove_bundle(&input.name).await?;
+    Ok(localize_refusal(ChangeOutcome::from(result)))
 }
 
 /// Reads the store a profile's `node_modules` is currently linked from, via
@@ -559,70 +552,6 @@ pub(crate) fn ensure_profile_store_pin(
     std::fs::write(&path, out).map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))
 }
 
-/// Relinks a profile's `node_modules` onto the launcher's pinned store.
-/// pnpm's own remedy for ERR_PNPM_UNEXPECTED_STORE is a reinstall, but a
-/// plain `pnpm install` short-circuits with "Already up to date" when the
-/// lockfile and node_modules already satisfy package.json — it never
-/// re-links (verified against pnpm 11: `--force`, `--fix-lockfile`, even
-/// deleting `.modules.yaml` all keep the stale store). The only reliable
-/// relink is removing `node_modules` so pnpm must rebuild it from the
-/// lockfile against the new store. `pnpm-lock.yaml` is preserved, so the
-/// reinstall re-imports the same versions; it only costs the first
-/// re-download into the launcher's store. Routing through
-/// `dsh plugin install` keeps the CLI's bundle reconciliation in the loop.
-async fn relink_profile_store(
-    state: &State<'_, AppState>,
-    target: &PluginCliTarget<'_>,
-    pnpm_prog: &std::path::Path,
-) -> Result<(), String> {
-    let dir = crate::profile::profile_dir(target.home_path, target.profile)?;
-    let nm = dir.join("node_modules");
-    if nm.exists() {
-        std::fs::remove_dir_all(&nm)
-            .map_err(|e| format!("清理旧 node_modules 失败（{}）: {e}", nm.display()))?;
-    }
-    let mut args: Vec<String> = vec!["install".to_string()];
-    args.extend(forwarded_pnpm_flags(state, "warn"));
-    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
-    let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let cmd = crate::launch::plugin_command(
-        &node,
-        target.version_dir,
-        target.home_path,
-        target.profile,
-        &args,
-        pnpm_prog,
-        preserve_symlinks,
-    )?;
-    run_command(cmd, "dsh plugin install（重新链接 store）")
-        .await
-        .map_err(|e| {
-            format!(
-                "dsh plugin install（重新链接 store） 失败: {}",
-                summarize_output(&e)
-            )
-        })
-}
-
-
-/// Common pnpm flags forwarded through `dsh plugin`. `--prefix` is deliberately
-/// absent: the CLI already runs pnpm with cwd = the profile directory, and
-/// passing a prefix would break that contract.
-///
-/// The flag *set* lives in [`crate::toolchain::pnpm_store_flags`] so this path
-/// and the launcher's own installs can never drift apart; only the
-/// The network-robustness settings are deliberately NOT forwarded as flags:
-/// the `--config.fetch-*` spelling hangs pnpm 11 (see
-/// [`crate::toolchain::pnpm_network_env`]). They ride along as env vars
-/// instead, set on the CLI process by [`crate::launch::plugin_command`] so the
-/// `pnpm` it spawns inherits them -- which also means `pnpm remove` no longer
-/// needs special-casing, since env config is never rejected the way an
-/// unknown flag is.
-fn forwarded_pnpm_flags(state: &State<'_, AppState>, loglevel: &str) -> Vec<String> {
-    let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    crate::toolchain::pnpm_store_flags(&store_dir, loglevel)
-}
-
 /// Pins `auto-install-peers=false` in a profile's `.npmrc`.
 ///
 /// A DSH profile must resolve nothing from the `@deepseek-ai` core scope —
@@ -746,6 +675,110 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Commands: native plugin enable / disable (the instance's own plugin manager)
+// ---------------------------------------------------------------------------
+
+/// Input for toggling one **plugin entry** (native `setPluginEnabled`).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPluginEnabledInput {
+    #[serde(alias = "home_id")]
+    pub home_id: String,
+    pub profile: String,
+    /// The entry's `entryId` — the native id, never the old package name.
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Enables/disables one **plugin entry** through the instance's native plugin
+/// manager (`setPluginEnabled`), by the entry's `entryId`. Shared with T3/T4's
+/// write commands through [`set_plugin_enabled_for`].
+///
+/// The launcher never writes the profile here (ADR-0001): the running DSH owns
+/// plugin state. The instance's answer is returned **truthfully** — a refusal
+/// (`changed:false` + `error.code`) is a [`ChangeOutcome`], not
+/// an error; only a missing/unmanageable instance or a transport failure is
+/// `Err`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_plugin_enabled(
+    state: State<'_, AppState>,
+    input: SetPluginEnabledInput,
+) -> Result<ChangeOutcome, String> {
+    set_plugin_enabled_for(state.inner(), &input).await
+}
+
+/// The body of [`set_plugin_enabled`], taking `&AppState` so tests can drive
+/// the resolve/refuse branches without a Tauri runtime. This is the shared
+/// write path (design §4d): resolve the instance, connect, call, map.
+async fn set_plugin_enabled_for(
+    state: &AppState,
+    input: &SetPluginEnabledInput,
+) -> Result<ChangeOutcome, String> {
+    let client = write_client(state, &input.home_id, &input.profile).await?;
+    let result = client.set_plugin_enabled(&input.id, input.enabled).await?;
+    Ok(localize_refusal(ChangeOutcome::from(result)))
+}
+
+/// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a
+/// connected [`NativeClient`](crate::native::NativeClient). The refusal messages
+/// are the ones the page shows for the "cannot manage now" states.
+pub(crate) async fn write_client(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Result<crate::native::NativeClient, String> {
+    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    if entry.adopted {
+        return Err("该实例由系统接管，无法管理插件".to_string());
+    }
+    let Some(url) = entry.url else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    crate::native::NativeClient::connect(&url).await
+}
+
+/// Translates a native `error.code` refusal into the reason the page shows
+/// verbatim (design §4d). This is the **one** place codes become Chinese; the
+/// UI never maps them. An unlisted code is surfaced as-is, and an attached
+/// `diagnostic` is appended in parentheses.
+pub(crate) fn refusal_reason(code: &str, diagnostic: Option<&str>) -> String {
+    let base = match code {
+        "management-required" | "unaddressable" => "该条目由 DSH 自身管理，不能在这里改动",
+        "not-removable" => "该 Bundle 随 DSH 发布，只能停用不能删除",
+        "unknown-plugin" => "实例里找不到这个插件",
+        "" => "实例未说明原因",
+        other => other,
+    };
+    match diagnostic.filter(|d| !d.trim().is_empty()) {
+        Some(d) => format!("{base}（{d}）"),
+        None => base.to_string(),
+    }
+}
+
+/// Turns a refused write into the exact Chinese reason the page shows:
+/// `errorCode` stays for logic, and the localized reason rides in `diagnostic`
+/// (the frozen [`ChangeOutcome`] has no separate
+/// field) — so the UI shows it verbatim instead of guessing (design §4d).
+///
+/// Only a bare refusal (`changed:false` with a code) is rewritten; a
+/// `changed:true` + `failed` keeps the instance's own diagnostic (design §4b).
+pub(crate) fn localize_refusal(outcome: ChangeOutcome) -> ChangeOutcome {
+    if outcome.changed {
+        return outcome;
+    }
+    let Some(code) = outcome.error_code.clone() else {
+        return outcome;
+    };
+    let reason = refusal_reason(&code, outcome.diagnostic.as_deref());
+    ChangeOutcome {
+        diagnostic: Some(reason),
+        ..outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,17 +849,6 @@ mod tests {
             Some("/Users/x/Library/pnpm/store/v11")
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn summarize_output_keeps_last_three_meaningful_lines() {
-        let out = "ERR_PNPM_UNEXPECTED_STORE: some long diagnostic\nmiddle line\n\nlast line\n";
-        assert_eq!(
-            summarize_output(out),
-            "ERR_PNPM_UNEXPECTED_STORE: some long diagnostic | middle line | last line"
-        );
-        // Empty output stays empty.
-        assert_eq!(summarize_output("\n  \n"), "");
     }
 
     /// The regression this fix exists for: a profile installed through the
@@ -974,13 +996,6 @@ mod tests {
         assert_eq!(yaml_double_quoted("say \"hi\""), "\"say \\\"hi\\\"\"");
     }
 
-    
-    
-    
-    
-    
-    // Live network smoke tests (skipped by default; run with
-    // `cargo test plugins::tests::live_ -- --ignored`).
     #[test]
     fn ensure_build_scripts_allowed_converts_placeholders_and_adds_sections() {
         let dir = std::env::temp_dir().join(format!("dsh-plugins-test-{}", uuid::Uuid::new_v4()));
@@ -1058,5 +1073,562 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn app_state(
+        homes: Vec<crate::config::DshHome>,
+        instances: Vec<crate::config::DshInstance>,
+    ) -> AppState {
+        AppState {
+            config_path: std::path::PathBuf::new(),
+            data_dir: std::path::PathBuf::new(),
+            config: std::sync::Mutex::new(crate::config::Config {
+                homes,
+                versions: Vec::new(),
+                instances,
+                settings: Default::default(),
+            }),
+            running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// A scratch DSH_HOME under the repo's gitignored `tmp/` (never the system
+    /// temp dir). The unique name keeps parallel test processes apart.
+    fn scratch_home(tag: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("tmp");
+        let dir = root.join(format!("t5-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn home_with_path(id: &str, path: &std::path::Path) -> crate::config::DshHome {
+        crate::config::DshHome {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn instance_of(id: &str, home_id: &str) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: id.to_string(),
+            name: id.to_string(),
+            version_id: "v1".to_string(),
+            home_id: home_id.to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+            preserve_symlinks: false,
+        }
+    }
+
+    fn profile_json(deps: &[&str], bundles: &[&str]) -> String {
+        let deps: serde_json::Map<String, serde_json::Value> = deps
+            .iter()
+            .map(|d| (d.to_string(), serde_json::json!("^1.0.0")))
+            .collect();
+        serde_json::json!({
+            "private": true,
+            "dependencies": deps,
+            "dsh": { "profile": { "bundles": bundles } },
+        })
+        .to_string()
+    }
+
+    /// Writes a profile dir under a scratch HOME and returns (HOME, profile dir).
+    fn seeded_home(files: &[(&str, &str)], profile: &str) -> std::path::PathBuf {
+        let home = scratch_home("home");
+        let dir = crate::profile::profile_dir(&home, profile).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        home
+    }
+
+    /// No instance is running this profile: the page is read-only in
+    /// `not-running` mode, but it still lists what the profile has — read from
+    /// its files (dependencies + bundles), with no `@deepseek-ai/*` filter, and
+    /// the patch document's native **flow-style** disables understood.
+    #[tokio::test]
+    async fn list_plugins_for_profile_files_when_not_running() {
+        let home = seeded_home(
+            &[
+                (
+                    "package.json",
+                    &profile_json(
+                        &["@dsh-plugin/dsh-auxiliary", "@deepseek-ai/dsh-base"],
+                        &["@deepseek-ai/dsh-base", "@dsh-plugin/dsh-auxiliary"],
+                    ),
+                ),
+                (
+                    "cordis.patch.yml",
+                    "[ { id: dsh-auxiliary, disabled: true }, { id: dsh-base, disabled: false } ]\n",
+                ),
+            ],
+            "web",
+        );
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+
+        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+
+        assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
+        // The reason is distinct and tells the user what to do.
+        let reason = view.reason.expect("read-only reason");
+        assert!(reason.contains("启动该实例"), "reason: {reason}");
+
+        // Both the plugin package and the core package show (no blanket
+        // @deepseek-ai/* filter); deduped across dependencies + bundles, and
+        // sorted by the entry id the table shows.
+        let names: Vec<&str> = view.plugins.iter().map(|p| p.module_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["@dsh-plugin/dsh-auxiliary", "@deepseek-ai/dsh-base"],
+            "names: {names:?}"
+        );
+
+        let aux = view
+            .plugins
+            .iter()
+            .find(|p| p.module_name == "@dsh-plugin/dsh-auxiliary")
+            .unwrap();
+        // The flow-style disabled row was seen: the entry reads as off.
+        assert!(!aux.enabled, "dsh-auxiliary must read disabled: {aux:?}");
+        let base = view
+            .plugins
+            .iter()
+            .find(|p| p.module_name == "@deepseek-ai/dsh-base")
+            .unwrap();
+        assert!(base.enabled, "dsh-base must read enabled: {base:?}");
+    }
+
+    /// The read path writes nothing: every profile file is byte-identical and
+    /// untouched (mtime unchanged) across a read.
+    #[tokio::test]
+    async fn list_plugins_read_path_leaves_files_untouched() {
+        let home = seeded_home(
+            &[
+                (
+                    "package.json",
+                    &profile_json(&["@dsh-plugin/dsh-auxiliary"], &["@deepseek-ai/dsh-base"]),
+                ),
+                (
+                    "cordis.patch.yml",
+                    "[ { id: dsh-auxiliary, disabled: true } ]\n",
+                ),
+            ],
+            "web",
+        );
+        let dir = crate::profile::profile_dir(&home, "web").unwrap();
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+
+        let before: Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)> =
+            ["package.json", "cordis.patch.yml"]
+                .iter()
+                .map(|n| {
+                    let p = dir.join(n);
+                    let bytes = std::fs::read(&p).unwrap();
+                    let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+                    (p, bytes, mtime)
+                })
+                .collect();
+
+        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
+        // The directory listing is unchanged too (nothing created/removed).
+        let listing_before = dir.read_dir().unwrap().count();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
+
+        for (path, bytes, mtime) in before {
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "bytes changed: {path:?}");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                mtime,
+                "mtime changed: {path:?}"
+            );
+        }
+        assert_eq!(dir.read_dir().unwrap().count(), listing_before);
+    }
+
+    /// An adopted instance carries a bare URL and no token, so the view is
+    /// `adopted` — distinct from `not-running` — and its reason names the
+    /// adoption, not "start the instance".
+    #[tokio::test]
+    async fn list_plugins_marks_adopted_instances_readonly() {
+        let home = scratch_home("adopted");
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+        assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
+        assert!(view.plugins.is_empty());
+        let adopted_reason = view.reason.expect("adopted reason");
+        assert!(
+            adopted_reason.contains("接管"),
+            "adopted reason must name the adoption: {adopted_reason}"
+        );
+
+        // And it is distinguishable from the not-running message.
+        let not_running = crate::native::PluginView::readonly(
+            crate::native::PluginViewMode::NotRunning,
+            "实例未运行",
+        );
+        assert_ne!(Some(adopted_reason), not_running.reason);
+    }
+
+    /// Managing a bundle requires the profile's instance to be running: with
+    /// none, the command is a plain `Err` (not a refusal outcome) so the UI
+    /// re-syncs and tells the user to start the instance.
+    #[tokio::test]
+    async fn set_bundle_enabled_refuses_without_a_running_instance() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so its bundles cannot be
+    /// managed through the native API — a distinct message from "not running".
+    #[tokio::test]
+    async fn set_bundle_enabled_refuses_for_an_adopted_instance() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
+    }
+
+    fn one_home() -> Vec<crate::config::DshHome> {
+        vec![crate::config::DshHome {
+            id: "h1".to_string(),
+            name: "h1".to_string(),
+            path: std::path::PathBuf::from("/tmp/home"),
+        }]
+    }
+
+    fn one_instance() -> Vec<crate::config::DshInstance> {
+        vec![crate::config::DshInstance {
+            id: "i1".to_string(),
+            name: "i1".to_string(),
+            version_id: "v1".to_string(),
+            home_id: "h1".to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+            preserve_symlinks: false,
+        }]
+    }
+
+    fn plugin_input(id: &str, enabled: bool) -> SetPluginEnabledInput {
+        SetPluginEnabledInput {
+            home_id: "h1".to_string(),
+            profile: "web".to_string(),
+            id: id.to_string(),
+            enabled,
+        }
+    }
+
+    /// The refusal code becomes the reason the page shows verbatim; this is the
+    /// one place codes are translated (design §4d), never the UI.
+    #[test]
+    fn refusal_reason_translates_the_management_codes() {
+        assert_eq!(
+            refusal_reason("management-required", None),
+            "该条目由 DSH 自身管理，不能在这里改动"
+        );
+        assert_eq!(
+            refusal_reason("unaddressable", None),
+            "该条目由 DSH 自身管理，不能在这里改动"
+        );
+        assert_eq!(
+            refusal_reason("not-removable", None),
+            "该 Bundle 随 DSH 发布，只能停用不能删除"
+        );
+        assert_eq!(
+            refusal_reason("unknown-plugin", None),
+            "实例里找不到这个插件"
+        );
+        // An unlisted code is surfaced, never swallowed.
+        assert_eq!(refusal_reason("operation-error", None), "operation-error");
+        // A missing code still reads as a sentence, not an empty string.
+        assert_eq!(refusal_reason("", None), "实例未说明原因");
+        // The instance's diagnostic is attached when present.
+        assert_eq!(
+            refusal_reason("management-required", Some("managed by DSH")),
+            "该条目由 DSH 自身管理，不能在这里改动（managed by DSH）"
+        );
+    }
+
+    /// The frontend shape: the native error is lifted to `errorCode`/`diagnostic`
+    /// and serialization is camelCase, matching `src/api/types.ts::ChangeOutcome`.
+    /// The projection lives next to [`ChangeOutcome`] here, so its test does too.
+    #[test]
+    fn change_outcome_projects_the_error_and_serializes_camel_case() {
+        let native: crate::native::NativeChangeResult = serde_json::from_value(serde_json::json!({
+            "changed": false,
+            "application": "failed",
+            "stage": "enable",
+            "target": "include:llm",
+            "error": { "code": "unaddressable", "diagnostic": "root group" },
+            "warnings": [],
+        }))
+        .unwrap();
+        let outcome = ChangeOutcome::from(native);
+        // `errorCode` carries the **raw native code** (logic); the instance's
+        // own diagnostic rides alongside it untouched. The localized reason is
+        // folded in later, by `localize_refusal`, for every write command.
+        assert_eq!(outcome.error_code.as_deref(), Some("unaddressable"));
+        assert_eq!(outcome.diagnostic.as_deref(), Some("root group"));
+
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["errorCode"], "unaddressable");
+        assert_eq!(json["application"], "failed");
+        assert_eq!(json["stage"], "enable");
+        assert_eq!(json["target"], "include:llm");
+        assert_eq!(json["warnings"], serde_json::json!([]));
+    }
+
+    /// The shape every write command (`set_plugin_enabled`, `set_bundle_enabled`,
+    /// `remove_bundle`) returns for a bare refusal: the **raw** code in
+    /// `errorCode` plus the **localized** reason in `diagnostic` — the single
+    /// rule the frontend renders. Driven through the same two helpers all three
+    /// commands compose (`ChangeOutcome::from` + `localize_refusal`).
+    #[test]
+    fn write_commands_return_a_raw_code_and_a_localized_diagnostic() {
+        let refusal = |code: &str| -> NativeChangeResult {
+            serde_json::from_value(serde_json::json!({
+                "changed": false,
+                "application": "failed",
+                "stage": "enable",
+                "target": "ds-bot",
+                "error": { "code": code },
+                "warnings": [],
+            }))
+            .unwrap()
+        };
+
+        // Bundle toggle: `management-required` (the "ships with DSH" refusal).
+        let bundle = localize_refusal(ChangeOutcome::from(refusal("management-required")));
+        assert_eq!(bundle.error_code.as_deref(), Some("management-required"));
+        assert_eq!(
+            bundle.diagnostic.as_deref(),
+            Some("该条目由 DSH 自身管理，不能在这里改动")
+        );
+
+        // Bundle removal: `not-removable`.
+        let removed = localize_refusal(ChangeOutcome::from(refusal("not-removable")));
+        assert_eq!(removed.error_code.as_deref(), Some("not-removable"));
+        assert_eq!(
+            removed.diagnostic.as_deref(),
+            Some("该 Bundle 随 DSH 发布，只能停用不能删除")
+        );
+
+        // Plugin-entry toggle: `unknown-plugin`.
+        let entry = localize_refusal(ChangeOutcome::from(refusal("unknown-plugin")));
+        assert_eq!(entry.error_code.as_deref(), Some("unknown-plugin"));
+        assert_eq!(
+            entry.diagnostic.as_deref(),
+            Some("实例里找不到这个插件")
+        );
+
+        // An empty code still reads as a sentence, never an empty diagnostic.
+        let bare = localize_refusal(ChangeOutcome::from(refusal("")));
+        assert_eq!(bare.error_code.as_deref(), Some(""));
+        assert_eq!(bare.diagnostic.as_deref(), Some("实例未说明原因"));
+    }
+
+    /// A refusal is rewritten so the page shows the Chinese reason verbatim
+    /// (`diagnostic` carries it; the code stays for logic) — the UI never maps
+    /// codes. A real "changed but failed" keeps the instance's diagnostic.
+    #[test]
+    fn localize_refusal_folds_the_reason_into_the_outcome() {
+        let refused = ChangeOutcome {
+            changed: false,
+            application: "failed".to_string(),
+            stage: "enable".to_string(),
+            target: "include:llm".to_string(),
+            error_code: Some("management-required".to_string()),
+            diagnostic: None,
+            warnings: vec![],
+        };
+        let localized = localize_refusal(refused);
+        assert_eq!(
+            localized.diagnostic.as_deref(),
+            Some("该条目由 DSH 自身管理，不能在这里改动")
+        );
+        assert_eq!(localized.error_code.as_deref(), Some("management-required"));
+
+        // changed:true is the instance's own "changed but didn't take effect":
+        // its diagnostic must survive untouched.
+        let failed = ChangeOutcome {
+            changed: true,
+            application: "failed".to_string(),
+            stage: "enable".to_string(),
+            target: "include:llm".to_string(),
+            error_code: Some("operation-error".to_string()),
+            diagnostic: Some("port in use".to_string()),
+            warnings: vec![],
+        };
+        let localized = localize_refusal(failed);
+        assert_eq!(localized.diagnostic.as_deref(), Some("port in use"));
+    }
+
+    /// ADR-0001: a plugin operation needs the profile's instance running;
+    /// otherwise the command refuses with a clear Chinese reason.
+    #[tokio::test]
+    async fn set_plugin_enabled_refuses_without_a_running_instance() {
+        let state = app_state(one_home(), one_instance());
+        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("实例未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so it cannot be managed.
+    #[tokio::test]
+    async fn set_plugin_enabled_refuses_an_adopted_instance() {
+        let state = app_state(one_home(), one_instance());
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
+    }
+
+    fn remove_input(name: &str) -> RemoveBundleInput {
+        RemoveBundleInput {
+            home_id: "h1".to_string(),
+            profile: "web".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Removal needs the profile's instance running: the native plugin manager
+    /// owns plugin state (ADR-0001), so with none the command is a plain `Err`
+    /// (not a refusal outcome) so the UI re-syncs and tells the user to start.
+    #[tokio::test]
+    async fn remove_bundle_refuses_without_a_running_instance() {
+        let state = app_state(one_home(), one_instance());
+        let err = remove_bundle_for(&state, &remove_input("ds-bot"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so its bundles cannot be
+    /// removed through the native API — a distinct message from "not running".
+    #[tokio::test]
+    async fn remove_bundle_refuses_for_an_adopted_instance() {
+        let state = app_state(one_home(), one_instance());
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = remove_bundle_for(&state, &remove_input("ds-bot"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
     }
 }

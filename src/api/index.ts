@@ -4,21 +4,23 @@
 // test note.
 
 import type {
+  ChangeOutcome,
   DoctorReport,
   DshHome,
   DshInstance,
   DshVersion,
-  InstalledPlugin,
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
+  PluginView,
   RemoteVersion,
   RuntimeStatus,
-  SetPluginsEnabledInput,
+  SetBundleEnabledInput,
+  SetPluginEnabledInput,
+  RemoveBundleInput,
   TaskInfo,
   TaskLog,
   TaskProgress,
-  UninstallPluginInput,
 } from './types'
 import type { Listener } from './mock'
 import {
@@ -125,10 +127,31 @@ export const api = {
   },
 
   // Profile plugins (scoped by HOME + profile): list / enable / disable / uninstall.
-  listInstalledPlugins: (homeId: string, profile: string) =>
-    call<InstalledPlugin[]>('list_installed_plugins', { home_id: homeId, profile }),
-  setPluginsEnabled: (input: SetPluginsEnabledInput) => call<void>('set_plugins_enabled', { input }),
-  uninstallPlugin: (input: UninstallPluginInput) => call<void>('uninstall_plugin', { input }),
+  /** The instance's own plugin list (native plugin management, ADR-0001). */
+  listPlugins: (homeId: string, profile: string) =>
+    call<PluginView>('list_plugins', { home_id: homeId, profile }),
+  /**
+   * Enables/disables one whole Bundle（补丁层） through the running instance's
+   * native plugin manager. The launcher never writes the profile manifest
+   * (ADR-0001); a refusal comes back as a ChangeOutcome, not a thrown error.
+   */
+  setBundleEnabled: (input: SetBundleEnabledInput) => call<ChangeOutcome>('set_bundle_enabled', { input }),
+  /**
+   * Removes one whole Bundle（补丁层） through the instance's native plugin
+   * manager — the same path the Web UI uses. A bundle that ships with DSH
+   * (`removable:false`) is refused as an outcome carrying the raw `errorCode`
+   * and the localized reason in `diagnostic`, never a thrown error; the
+   * launcher never writes the profile files (ADR-0001).
+   */
+  removeBundle: (input: RemoveBundleInput) => call<ChangeOutcome>('remove_bundle', { input }),
+  /**
+   * Enables/disables one **plugin entry** through the instance's native plugin
+   * manager (`id` is the entryId). The result says truthfully whether it took
+   * effect; a refusal is an outcome carrying the raw `errorCode` and the
+   * localized reason in `diagnostic`, not a thrown error.
+   */
+  setPluginEnabled: (input: SetPluginEnabledInput) =>
+    call<ChangeOutcome>('set_plugin_enabled', { input }),
 
   // External terminal: opens Terminal.app / Ghostty for one instance.
   openInstanceTerminal: (instanceId: string) =>

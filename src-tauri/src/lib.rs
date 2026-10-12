@@ -5,6 +5,7 @@ mod config;
 mod doctor;
 mod icons;
 mod launch;
+mod native;
 mod plugins;
 mod process;
 mod profile;
@@ -207,9 +208,10 @@ pub fn run() {
             commands::update_settings,
             commands::open_instance_terminal,
             update::check_launcher_update,
-            plugins::list_installed_plugins,
-            plugins::set_plugins_enabled,
-            plugins::uninstall_plugin,
+            plugins::list_plugins,
+            plugins::set_bundle_enabled,
+            plugins::set_plugin_enabled,
+            plugins::remove_bundle,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

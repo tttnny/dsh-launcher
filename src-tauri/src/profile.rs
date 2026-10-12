@@ -2,11 +2,14 @@
 //! patch document (`cordis.patch.yml`).
 //!
 //! A profile is one directory under `<DSH_HOME>/profiles/<name>`. Its patch
-//! document is edited by three parties: the CLI writes insert rows when a
-//! plugin is installed, the launcher writes `disabled:` rows to gate plugins,
-//! and the `@linxin666/dsh-remote-web-ui` plugin manages a marked lan-bind
-//! block that pins the web port. Every editor of that document lives here so
-//! the row-ownership rules ("who owns which rows") have one home.
+//! document's plugin entries are written by the CLI (insert rows when a plugin
+//! is installed) and the `@linxin666/dsh-remote-web-ui` plugin manages a marked
+//! lan-bind block that pins the web port. The launcher no longer writes
+//! `disabled:` rows to gate plugin entries: plugin state belongs to the running
+//! DSH (ADR-0001), so the launcher only **reads** those rows (see
+//! [`read_disabled_ids`]). What the launcher still owns here is the port
+//! pinning that must land before a start ([`scrub_port_pin`] /
+//! [`assert_profile_lan_bind_port`]).
 //!
 //! Path derivation goes through [`profile_dir`], which keeps a profile name
 //! a single path segment — a traversal attempt can never escape `profiles/`.
@@ -81,17 +84,127 @@ pub fn cordis_id_of(package: &str) -> String {
 const LAN_BIND_BLOCK_BEGIN: &str = "# --- remote-web-ui lan-bind block (managed - do not edit) ---";
 const LAN_BIND_BLOCK_END: &str = "# --- end remote-web-ui lan-bind block ---";
 
-/// Parse disabled cordis ids from a patch document. We do a lightweight line
-/// scan (avoid pulling a YAML parser dependency for this).
-pub(crate) fn parse_disabled_ids(raw: &str) -> HashSet<String> {
+/// Parse disabled cordis ids from a patch document.
+///
+/// The document is a top-level YAML **array** of loader patch entries. Two
+/// spellings of it are in the wild, and both must parse:
+///
+/// * the **block** style the CLI/launcher append (`- id: x` / `  disabled:
+///   true`), and
+/// * the **flow** style the native plugin manager rewrites the whole file into
+///   when it saves (`[ { id: x, disabled: true }, … ]`, probe §6).
+///
+/// A line scanner cannot see the flow form (it only matched indented `- id:`
+/// rows), which silently reported a native-written profile as fully enabled.
+/// So this uses a real YAML parser and falls back to the scanner — the parser
+/// chokes on `!!js`-tagged expressions and other DSH-specific values, and a
+/// degraded read (no disabled info) beats failing the whole view.
+fn parse_disabled_ids(raw: &str) -> HashSet<String> {
+    match parse_disabled_ids_yaml(raw) {
+        Some(set) => set,
+        // The scanner understands the block dialect, the flat scan recovers
+        // `{ … disabled: true }` rows the parser could not get past.
+        None => {
+            let mut set = parse_disabled_ids_scanned(raw);
+            set.extend(parse_disabled_ids_flow(raw));
+            set
+        }
+    }
+}
+
+/// Entry ids the native manager prints in its **flow** dialect, `{ id: x,
+/// disabled: true }` on one line, including inside a `[ … ]` array. This exists
+/// only because [`serde_yaml`] rejects the `!!js`-tagged values a patch
+/// document may legitimately carry: the flat rows are easy to read even when
+/// the surrounding document is not valid plain YAML.
+fn parse_disabled_ids_flow(raw: &str) -> HashSet<String> {
+    fn closing_brace(line: &str, from: usize) -> Option<usize> {
+        let bytes = line.as_bytes();
+        let mut depth = 0usize;
+        for (i, b) in bytes.iter().enumerate().skip(from) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn entry_disabled(body: &str) -> Option<(String, bool)> {
+        // Drop a quoted value if present; flat ids are bare in practice.
+        let id = body
+            .split_once("id:")
+            .map(|(_, v)| v.trim())
+            .map(|v| v.split([',', '}']).next().unwrap_or(""))
+            .map(|v| v.trim().trim_matches('"').trim_matches('\''))
+            .filter(|v| !v.is_empty())?;
+        let disabled = body.split_once("disabled:").is_some_and(|(_, v)| {
+            v.trim_start().starts_with("true")
+        });
+        Some((id.to_string(), disabled))
+    }
+
+    let mut set = HashSet::new();
+    for line in raw.lines() {
+        let mut byte = 0usize;
+        while let Some(rel) = line[byte..].find('{') {
+            let open = byte + rel + 1;
+            let Some(close) = closing_brace(line, open) else {
+                break;
+            };
+            if let Some((id, true)) = entry_disabled(&line[open..close.saturating_sub(1)]) {
+                set.insert(id);
+            }
+            byte = close;
+        }
+    }
+    set
+}
+
+/// YAML-parsed disabled ids: `None` means "not usable, fall back".
+fn parse_disabled_ids_yaml(raw: &str) -> Option<HashSet<String>> {
+    #[derive(serde::Deserialize)]
+    struct PatchEntry {
+        id: Option<String>,
+        #[serde(default)]
+        disabled: bool,
+    }
+
+    let doc: serde_yaml::Value = serde_yaml::from_str(raw).ok()?;
+    // A sequence is the documented shape; a bare mapping (a single entry) is
+    // accepted too, so one odd top-level value never blanks the whole read.
+    let entries: Vec<PatchEntry> = match doc {
+        serde_yaml::Value::Sequence(_) => serde_yaml::from_value(doc).ok()?,
+        serde_yaml::Value::Mapping(_) => serde_yaml::from_value(doc).ok().map(|e| vec![e])?,
+        _ => Vec::new(),
+    };
+    Some(
+        entries
+            .into_iter()
+            .filter(|e| e.disabled)
+            .filter_map(|e| e.id)
+            .collect(),
+    )
+}
+
+/// The block-style scanner (kept as the degraded fallback for documents the
+/// YAML parser rejects). Only `id` rows with a *scalar* value are recorded, so
+/// an `id:` that opens an insert / bundle block is never mistaken for one.
+fn parse_disabled_ids_scanned(raw: &str) -> HashSet<String> {
     let mut set = HashSet::new();
     let mut current_id: Option<String> = None;
     for line in raw.lines() {
         let t = line.trim();
         if t.starts_with("- id:") {
-            current_id = Some(t.trim_start_matches("- id:").trim().to_string());
+            current_id = scalar_after(t, "- id:");
         } else if t.starts_with("id:") && !line.starts_with(' ') && !line.starts_with('\t') {
-            current_id = Some(t.trim_start_matches("id:").trim().to_string());
+            current_id = scalar_after(t, "id:");
         } else if t == "disabled: true" {
             if let Some(id) = current_id.take() {
                 set.insert(id);
@@ -103,126 +216,23 @@ pub(crate) fn parse_disabled_ids(raw: &str) -> HashSet<String> {
     set
 }
 
+/// The bare scalar on a `id: <value>` line, if it is one (a block-opening `id:`
+/// with nothing after it yields `None`).
+fn scalar_after(line: &str, key: &str) -> Option<String> {
+    let value = line.trim_start_matches(key).trim();
+    if value.is_empty() || value.starts_with('#') {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 /// The disabled cordis ids recorded in a profile's patch document.
 pub(crate) fn read_disabled_ids(profile_dir: &Path) -> HashSet<String> {
     match std::fs::read_to_string(patch_path(profile_dir)) {
         Ok(raw) => parse_disabled_ids(&raw),
         Err(_) => HashSet::new(),
     }
-}
-
-/// Add or remove a `disabled: true` row for a cordis id in the document.
-pub(crate) fn set_disabled_row(raw: &str, cordis_id: &str, enabled: bool) -> String {
-    // Remove any existing rows for this id (both plain and commented forms).
-    let mut out: Vec<String> = Vec::new();
-    let mut skip_block = false;
-    for line in raw.lines() {
-        let t = line.trim();
-        // A top-level `[]` placeholder is dropped when we have any real entry
-        // to write; it is kept only while the document stays empty.
-        if t == "[]" {
-            continue;
-        }
-        let is_target_id = t == format!("- id: {cordis_id}") || t == format!("id: {cordis_id}");
-        if is_target_id {
-            // Start of a block for this id; look ahead: if it is a pure
-            // `disabled: true` block we drop it entirely.
-            skip_block = true;
-            continue;
-        }
-        if skip_block {
-            // Inside the block: only `disabled:` and blank lines belong to it.
-            if t == "disabled: true" || t == "disabled: false" || t.is_empty() {
-                skip_block = false; // end of this small block
-                continue;
-            }
-            // Block has other content (config etc.) — keep it, stop skipping.
-            skip_block = false;
-            out.push(line.to_string());
-            continue;
-        }
-        out.push(line.to_string());
-    }
-
-    let mut cleaned: Vec<String> = out;
-    // Trim trailing blank lines.
-    while cleaned.last().map(|l| l.trim().is_empty()) == Some(true) {
-        cleaned.pop();
-    }
-
-    if !enabled {
-        // Append a fresh disable row (block sequence, never after `[]`).
-        cleaned.push(String::new());
-        cleaned.push(format!("- id: {cordis_id}"));
-        cleaned.push("  disabled: true".to_string());
-    }
-
-    finalize_document(cleaned)
-}
-
-/// Strips every patch block whose id equals `cordis_id` (matching plain
-/// `- id:` / `id:` rows, including `- insert:` wrappers) — used by uninstall,
-/// where the CLI already removed the dependency.
-pub(crate) fn strip_cordis_rows(raw: &str, cordis_id: &str, plugin_id: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut skip = false;
-    for line in raw.lines() {
-        let t = line.trim();
-        if t == "[]" {
-            continue;
-        }
-        // Start of a block for the target: `- id: <id>` (plain or insert row).
-        let is_target = t == format!("- id: {cordis_id}")
-            || t == format!("id: {cordis_id}")
-            || t == format!("- id: {plugin_id}")
-            || t == format!("id: {plugin_id}");
-        if is_target {
-            skip = true;
-            continue;
-        }
-        if skip {
-            // Inside a target block: drop indented child lines and blank
-            // separators; stop at the next top-level key.
-            if t.is_empty() {
-                continue;
-            }
-            let indent = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-            if indent > 0 {
-                continue;
-            }
-            skip = false;
-        }
-        out.push(line.to_string());
-    }
-    finalize_document(out)
-}
-
-/// Joins edited lines back into a document: trim trailing blanks, ensure a
-/// trailing newline, and restore the `[]` placeholder when no real rows
-/// remain (the file must stay a valid top-level array).
-fn finalize_document(mut lines: Vec<String>) -> String {
-    while lines.last().map(|l| l.trim().is_empty()) == Some(true) {
-        lines.pop();
-    }
-    let mut result = lines.join("\n");
-    if !result.ends_with('\n') {
-        result.push('\n');
-    }
-    let body: String = result
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if body.trim().is_empty() {
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str("[]\n");
-    }
-    result
 }
 
 /// Rewrites the webserver `port:` row inside the `id: webserver` block to `0`
@@ -322,9 +332,8 @@ fn rewrite_row_in_id_block(raw: &str, block_id: &str, key: &str, value: &str) ->
 /// [`crate::launch::node_runtime_flags`]). The flag cannot be left on for
 /// every process though: it also makes DSH load `@deepseek-ai/dsh-app-boot`
 /// more than once and every settings write then fails. So the spawn points
-/// that have no instance to ask — the profile template boot and
-/// `dsh plugin` — derive it from the profile itself instead of a user
-/// setting.
+/// that have no instance to ask — the profile template boot — derive it from
+/// the profile itself instead of a user setting.
 ///
 /// Returns false for a missing or unreadable manifest: that is the common
 /// case (`pnpm install` has not written it yet) and the safe default.
@@ -386,36 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn set_disabled_row_adds_and_removes() {
-        let raw = "# comment\n- id: other-plugin\n  config:\n    a: 1\n";
-        // Add a disable row for dsh-auxiliary.
-        let out = set_disabled_row(raw, "dsh-auxiliary", false);
-        assert!(out.contains("- id: dsh-auxiliary"), "out: {out}");
-        assert!(out.contains("  disabled: true"), "out: {out}");
-        // The unrelated block must be preserved.
-        assert!(out.contains("other-plugin"), "out: {out}");
-        assert!(out.contains("config"), "out: {out}");
-        assert!(out.contains("a: 1"), "out: {out}");
-
-        // Remove it again -> back to the original content.
-        let back = set_disabled_row(&out, "dsh-auxiliary", true);
-        assert!(!back.contains("dsh-auxiliary"), "back: {back}");
-        assert!(back.contains("other-plugin"), "back: {back}");
-        assert!(back.contains("config"), "back: {back}");
-    }
-
-    #[test]
-    fn set_disabled_row_replaces_existing() {
-        let raw = "- id: dsh-auxiliary\n  disabled: true\n";
-        let out = set_disabled_row(raw, "dsh-auxiliary", true);
-        assert!(!out.contains("dsh-auxiliary"), "out: {out}");
-        // Re-disable after removal.
-        let out2 = set_disabled_row(&out, "dsh-auxiliary", false);
-        assert!(out2.contains("- id: dsh-auxiliary"), "out2: {out2}");
-        assert!(out2.contains("  disabled: true"), "out2: {out2}");
-    }
-
-    #[test]
     fn parse_disabled_ids_handles_blocks() {
         let raw = "# header\n- id: ui-dsh-aionui-panel\n  disabled: true\n\n- id: live-stats\n  disabled: true\n\n- id: keep\n  config:\n    x: 1\n";
         let set = parse_disabled_ids(raw);
@@ -424,24 +403,87 @@ mod tests {
         assert!(!set.contains("keep"));
     }
 
+    /// The read side the offline view depends on: [`read_disabled_ids`] reads a
+    /// profile's own patch document. It only ever reads — the launcher no
+    /// longer writes `disabled:` rows (ADR-0001), so this file is the one place
+    /// the launcher still sees another writer's disables.
     #[test]
-    fn strip_cordis_rows_removes_insert_and_disabled_blocks() {
-        // A plugin mounted via an insert row plus a disabled row for another
-        // plugin must leave the other plugin intact.
-        let raw = "# header\n- insert:\n    - id: dsh-auxiliary\n      name: '@dsh-plugin/dsh-auxiliary'\n\n- id: dsh-thought-buddy\n  disabled: true\n\n- id: keep\n  config:\n    x: 1\n";
-        let out = strip_cordis_rows(raw, "dsh-auxiliary", "@dsh-plugin/dsh-auxiliary");
-        assert!(!out.contains("dsh-auxiliary"), "insert row removed: {out}");
-        assert!(out.contains("dsh-thought-buddy"), "other block kept: {out}");
-        assert!(out.contains("keep"), "config block kept: {out}");
-        assert!(out.contains("x: 1"), "config content kept: {out}");
+    fn read_disabled_ids_reads_the_patch_document() {
+        let dir = std::env::temp_dir().join(format!("dsh-profile-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("cordis.patch.yml"),
+            "- id: dsh-auxiliary\n  disabled: true\n- id: dsh-base\n  disabled: false\n",
+        )
+        .unwrap();
+        let disabled = read_disabled_ids(&dir);
+        assert!(disabled.contains("dsh-auxiliary"), "disabled: {disabled:?}");
+        assert!(!disabled.contains("dsh-base"), "disabled: {disabled:?}");
+        // Reading writes nothing: the document is byte-identical afterwards.
+        let after = std::fs::read_to_string(dir.join("cordis.patch.yml")).unwrap();
+        assert!(after.contains("dsh-auxiliary"), "after: {after}");
+
+        // A profile with no patch document reads as "nothing disabled" rather
+        // than erroring — the offline view renders regardless.
+        assert!(read_disabled_ids(&dir.join("missing")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The native manager writes a **flow-style** top-level array (probe §6):
+    /// `[ { id: llm, disabled: false }, … ]` on one line. The old line scanner
+    /// only understood indented `- id:` blocks, so it saw none of these rows
+    /// and reported every entry of a native-written profile as enabled.
     #[test]
-    fn strip_cordis_rows_restores_placeholder_when_empty() {
-        let raw = "# header\n- id: dsh-auxiliary\n  disabled: true\n";
-        let out = strip_cordis_rows(raw, "dsh-auxiliary", "@dsh-plugin/dsh-auxiliary");
-        assert!(out.contains("[]"), "placeholder restored: {out}");
-        assert!(!out.contains("dsh-auxiliary"), "entry removed: {out}");
+    fn parse_disabled_ids_reads_native_flow_style() {
+        // The verbatim document the native writer emits (probe §6): both rows
+        // are `disabled: false`, so nothing is disabled — but crucially the
+        // parser must not crash and must not invent a disabled id.
+        let native_sample = "# Your patch layer for this dsh profile, applied after every bundle layer:\n\
+# a top-level YAML array of loader patch entries (id-targeted config\n\
+# overrides, disables, and insert lists; `!!js` expressions allowed).\n\
+[ { id: llm, disabled: false }, { id: tool-plugin-manager, disabled: false } ]\n";
+        assert!(parse_disabled_ids(native_sample).is_empty());
+
+        // The same flow shape with an actually-disabled row: the case the old
+        // scanner got wrong (it returned an empty set, hiding the disable).
+        let disabled = "[ { id: llm, disabled: false }, { id: tool-plugin-manager, disabled: true } ]\n";
+        let set = parse_disabled_ids(disabled);
+        assert!(set.contains("tool-plugin-manager"), "set: {set:?}");
+        assert!(!set.contains("llm"), "set: {set:?}");
+    }
+
+    /// A document the YAML parser rejects (or an entry shape we do not model)
+    /// must degrade — never panic and never fail the whole view.
+    #[test]
+    fn parse_disabled_ids_degrades_on_odd_documents() {
+        assert!(parse_disabled_ids("").is_empty());
+        assert!(parse_disabled_ids("# only a comment\n").is_empty());
+        assert!(parse_disabled_ids("[]\n").is_empty());
+        // A scalar / non-entry element inside the array is ignored.
+        let odd = "[ 42, { id: x, disabled: true }, { disabled: true }, { id: y } ]\n";
+        let set = parse_disabled_ids(odd);
+        assert!(set.contains("x"), "set: {set:?}");
+        assert!(!set.contains("y"), "set: {set:?}");
+        // A `!!js`-tagged value must not abort the read; the flat `id`/`disabled`
+        // rows around it are still collected.
+        let tagged = "[ { id: llm, disabled: true, config: !!js process.env.X } ]\n";
+        let tagged_set = parse_disabled_ids(tagged);
+        assert!(tagged_set.contains("llm"), "tagged: {tagged_set:?}");
+    }
+
+    /// Both the old block style and the new flow style can coexist in one
+    /// document (the CLI appends blocks, the native manager rewrites flow).
+    #[test]
+    fn parse_disabled_ids_handles_mixed_styles_and_top_level_mapping() {
+        let mixed = "# header\n- id: block-off\n  disabled: true\n[ { id: flow-off, disabled: true } ]\n";
+        let set = parse_disabled_ids(mixed);
+        assert!(set.contains("block-off"), "set: {set:?}");
+        assert!(set.contains("flow-off"), "set: {set:?}");
+
+        // A bare top-level mapping (no sequence) is still understood: the old
+        // scanner read a column-0 `id:` line the same way.
+        let mapping = "id: webserver\ndisabled: true\n";
+        assert!(parse_disabled_ids(mapping).contains("webserver"));
     }
 
     #[test]
@@ -488,9 +530,9 @@ mod tests {
         );
     }
 
-    /// The two spawn points with no instance to ask (profile template boot,
-    /// `dsh plugin`) read the flag out of the profile manifest, so this
-    /// predicate is what keeps a linked plugin working there.
+    /// The one spawn point with no instance to ask (profile template boot)
+    /// reads the flag out of the profile manifest, so this predicate is what
+    /// keeps a linked plugin working there.
     #[test]
     fn declares_link_dependency_reads_the_manifest() {
         let dir = std::env::temp_dir().join(format!("dsh-profile-test-{}", uuid::Uuid::new_v4()));

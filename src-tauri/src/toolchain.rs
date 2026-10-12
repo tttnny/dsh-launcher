@@ -2,12 +2,11 @@
 //! registry, which network flags".
 //!
 //! Every pnpm/npm invocation the launcher drives (version installs, source
-//! builds, plugin management, version listings) derives its toolchain policy
-//! from here, so a policy change (a new pnpm major, different timeouts, a
-//! mirror variable) is made once and applies everywhere. Two entry flavors
-//! resolve the pnpm: background tasks get task-log notes and a percent nudge
-//! ([`ensure_pnpm_for_task`]); interactive paths just app-log
-//! ([`ensure_pnpm`]). They share the probe and bootstrap decisions.
+//! builds, version listings) derives its toolchain policy from here, so a
+//! policy change (a new pnpm major, different timeouts, a mirror variable) is
+//! made once and applies everywhere. The pnpm is resolved once by
+//! [`ensure_pnpm_for_task`]: background tasks get task-log notes and a percent
+//! nudge, sharing one probe and bootstrap decision.
 
 use crate::AppState;
 use std::path::{Path, PathBuf};
@@ -105,9 +104,8 @@ pub(crate) fn pnpm_network_env() -> [(&'static str, &'static str); 3] {
 /// Applies [`pnpm_network_env`] to a command that downloads through pnpm.
 ///
 /// Env is the only channel that carries these settings intact on pnpm 11 (see
-/// [`pnpm_network_env`]), and it survives being inherited: the `dsh plugin`
-/// path spawns pnpm itself, so the variables set on the CLI process are what
-/// reaches pnpm there.
+/// [`pnpm_network_env`]), and it survives being inherited: pnpm spawns its own
+/// helpers, so the variables set on the pnpm process are what reaches them.
 pub(crate) fn apply_pnpm_network_env(cmd: &mut tokio::process::Command) {
     for (key, value) in pnpm_network_env() {
         cmd.env(key, value);
@@ -117,13 +115,12 @@ pub(crate) fn apply_pnpm_network_env(cmd: &mut tokio::process::Command) {
 /// The full pnpm argument set for a command that writes to the launcher's
 /// shared store: store, log level, optional registry.
 ///
-/// This is the one place those choices are made. Three call sites used to
-/// assemble the same four pieces independently (npm version install, source
-/// build, plugin management through `dsh plugin`), which is exactly why the
-/// pnpm-12 flag migration had to be applied three times by hand. `fetch` is
-/// false for subcommands that reject the download flags outright (`pnpm
-/// remove` fails with "Unknown options: 'fetch-timeout'" before touching
-/// anything).
+/// This is the one place those choices are made. Call sites used to assemble
+/// the same four pieces independently (npm version install, source build),
+/// which is exactly why the pnpm-12 flag migration had to be applied by hand
+/// at each. `fetch` is false for subcommands that reject the download flags
+/// outright (`pnpm remove` fails with "Unknown options: 'fetch-timeout'"
+/// before touching anything).
 ///
 /// The network-robustness settings are NOT here: they must reach pnpm as
 /// `pnpm_config_*` env vars (see [`pnpm_network_env`]), which is a property of
@@ -208,27 +205,6 @@ pub(crate) fn pnpm_missing_error() -> String {
         "未找到可用的 pnpm（需要 {MIN_PNPM_MAJOR} 或更高版本）。\n\
          请在终端执行以下命令后，回到「设置 → 环境」点重新检测：\n\n  {PNPM_INSTALL_HINT}"
     )
-}
-
-/// Resolves a pnpm executable for interactive paths (plugin management); notes
-/// go to the app log.
-pub(crate) async fn ensure_pnpm() -> Result<PathBuf, String> {
-    let mut notes = Vec::new();
-    match resolve_pnpm(&mut |s| notes.push(s)).await {
-        Some((path, version)) => {
-            for note in notes {
-                crate::log_warn!("{note}");
-            }
-            crate::log_info!("使用系统 pnpm {}（{}）", version, path.display());
-            Ok(path)
-        }
-        None => {
-            for note in notes {
-                crate::log_warn!("{note}");
-            }
-            Err(pnpm_missing_error())
-        }
-    }
 }
 
 /// Resolves a pnpm executable for a background task: the same decision, with
