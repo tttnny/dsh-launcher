@@ -21,11 +21,12 @@ Thumbs.db
 *.local
 .idea/
 
-# AgentTeams runtime state
+# Agent tooling — kept local, never commit
 .agent-teams/
+.agents/
+.claude/
+.zcode/
+skills-lock.json
 
 # Parallel-dev worktrees (untracked, never commit)
 worktrees/
-
-# ZCode local state
-.zcode/
