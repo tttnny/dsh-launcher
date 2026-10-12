@@ -28,6 +28,13 @@ const healthLogsVisible = ref(false)
 
 <template>
   <div class="dl-page home-page">
+    <!-- Page heading: the instance wall is the app's front door, so the page
+         says what it is before showing the cards. -->
+    <header class="dl-page-head">
+      <h2>{{ t('home.pageTitle') }}</h2>
+      <p class="dl-page-sub">{{ t('home.pageDesc') }}</p>
+    </header>
+
     <!-- Apple-grade Toolbar -->
     <div class="home-toolbar">
       <div class="apple-search-wrapper">
@@ -148,7 +155,7 @@ const healthLogsVisible = ref(false)
 
     &:focus {
       border-color: rgb(var(--primary-6));
-      box-shadow: 0 0 0 2px rgb(var(--primary-6) / 20%);
+      box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.2);
     }
 
     &::placeholder {
@@ -197,12 +204,12 @@ const healthLogsVisible = ref(false)
   background: rgb(var(--primary-6));
   color: #fff;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgb(var(--primary-6) / 30%);
+  box-shadow: 0 1px 3px rgba(var(--primary-6), 0.3);
   transition: all 0.16s ease;
 
   &:hover {
     filter: brightness(1.06);
-    box-shadow: 0 2px 8px rgb(var(--primary-6) / 45%);
+    box-shadow: 0 2px 8px rgba(var(--primary-6), 0.45);
   }
 
   &:active {

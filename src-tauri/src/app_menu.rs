@@ -14,13 +14,14 @@
 //! | `menu-navigate` 载荷 | 菜单来源 |
 //! | --- | --- |
 //! | `/` | “显示”→首页 (Cmd+1) |
-//! | `/instances` | “显示”→实例管理 (Cmd+2) |
-//! | `/homes` | “显示”→HOME (Cmd+3) |
-//! | `/profiles` | “显示”→Profile (Cmd+4) |
-//! | `/plugins` | “显示”→插件 (Cmd+5) |
-//! | `/versions` | “显示”→版本 (Cmd+6) |
-//! | `/tasks` | “显示”→任务 (Cmd+7) |
+//! | `/homes` | “显示”→HOME (Cmd+2) |
+//! | `/profiles` | “显示”→Profile (Cmd+3) |
+//! | `/versions` | “显示”→版本 (Cmd+4) |
 //! | `/settings` | App 菜单→偏好设置 (Cmd+,) |
+//!
+//! 插件管理不再占一条顶级导航：它是 Profile 行上的动作，从 `/profiles` 进入。
+//! `/tasks` 保留为可用的历史链接，前端把它重定向到 `/versions`（安装进度
+//! 就显示在那个版本那一行上）。
 //!
 //! 非导航动作仍用各自事件（载荷为 `()`）：
 //!
@@ -51,9 +52,7 @@ const ID_QUIT: &str = "appmenu-quit";
 const ID_VIEW_HOME: &str = "appmenu-view-home";
 const ID_VIEW_HOMES: &str = "appmenu-view-homes";
 const ID_VIEW_PROFILES: &str = "appmenu-view-profiles";
-const ID_VIEW_PLUGINS: &str = "appmenu-view-plugins";
 const ID_VIEW_VERSIONS: &str = "appmenu-view-versions";
-const ID_VIEW_TASKS: &str = "appmenu-view-tasks";
 const ID_VIEW_SETTINGS: &str = "appmenu-view-settings";
 const ID_SHOW_MAIN: &str = "appmenu-show-main";
 const ID_CHECK_UPDATE: &str = "appmenu-check-update";
@@ -61,7 +60,7 @@ const ID_OPEN_HELP: &str = "appmenu-open-help";
 
 // ── 转发到前端的事件名（M3 收敛：导航只用 `menu-navigate`） ──
 /// 规范导航事件（`shortcuts.ts` 的 `MENU_NAVIGATE_EVENTS` 之首），
-/// 载荷为路由字符串（`/`、`/instances`、`/homes`、`/versions`、`/tasks`、`/settings`）。
+/// 载荷为路由字符串（`/`、`/homes`、`/profiles`、`/versions`、`/settings`）。
 pub const EVT_MENU_NAVIGATE: &str = "menu-navigate";
 /// 检查更新——前端建议调用 `check_launcher_update`。
 pub const EVT_CHECK_UPDATE: &str = "check-update";
@@ -128,6 +127,8 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )?;
 
     // ── 显示 (应用内导航快捷键→转发前端) ──────────────────
+    // 五项，对应侧栏的五项：插件与任务都不是顶级页面了（插件在 Profile 行上，
+    // 任务进度在版本那一行上），所以这里也不再各占一格。
     let view_home = MenuItem::with_id(app, ID_VIEW_HOME, "首页", true, Some("CmdOrCtrl+1"))?;
     let view_homes = MenuItem::with_id(app, ID_VIEW_HOMES, "HOME", true, Some("CmdOrCtrl+2"))?;
     let view_profiles = MenuItem::with_id(
@@ -137,21 +138,13 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+3"),
     )?;
-    let view_plugins = MenuItem::with_id(
-        app,
-        ID_VIEW_PLUGINS,
-        "插件",
-        true,
-        Some("CmdOrCtrl+4"),
-    )?;
     let view_versions = MenuItem::with_id(
         app,
         ID_VIEW_VERSIONS,
         "版本",
         true,
-        Some("CmdOrCtrl+5"),
+        Some("CmdOrCtrl+4"),
     )?;
-    let view_tasks = MenuItem::with_id(app, ID_VIEW_TASKS, "任务", true, Some("CmdOrCtrl+6"))?;
     // “设置”不重复占用 Cmd+,，加速键归偏好设置独占。
     let view_settings = MenuItem::with_id(app, ID_VIEW_SETTINGS, "设置", true, None::<&str>)?;
     let sep_v = PredefinedMenuItem::separator(app)?;
@@ -163,9 +156,7 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &view_home,
             &view_homes,
             &view_profiles,
-            &view_plugins,
             &view_versions,
-            &view_tasks,
             &sep_v,
             &view_settings,
         ],
@@ -236,9 +227,7 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         ID_VIEW_HOME => show_and_emit(app, "/"),
         ID_VIEW_HOMES => show_and_emit(app, "/homes"),
         ID_VIEW_PROFILES => show_and_emit(app, "/profiles"),
-        ID_VIEW_PLUGINS => show_and_emit(app, "/plugins"),
         ID_VIEW_VERSIONS => show_and_emit(app, "/versions"),
-        ID_VIEW_TASKS => show_and_emit(app, "/tasks"),
         ID_VIEW_SETTINGS | ID_PREFERENCES => show_and_emit(app, "/settings"),
         ID_CHECK_UPDATE => {
             if let Err(e) = app.emit(EVT_CHECK_UPDATE, ()) {

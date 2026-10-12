@@ -17,9 +17,7 @@ const MENU_QUICK_SUB: &str = "quick-entries";
 const MENU_QUICK_HOME: &str = "quick::home";
 const MENU_QUICK_HOMES: &str = "quick::homes";
 const MENU_QUICK_PROFILES: &str = "quick::profiles";
-const MENU_QUICK_PLUGINS: &str = "quick::plugins";
 const MENU_QUICK_VERSIONS: &str = "quick::versions";
-const MENU_QUICK_TASKS: &str = "quick::tasks";
 const MENU_START_ALL: &str = "start-all";
 const MENU_STOP_ALL: &str = "stop-all";
 const MENU_OPEN_DATA_DIR: &str = "open-data-dir";
@@ -63,12 +61,8 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_and_navigate(app, "/homes");
             } else if id == MENU_QUICK_PROFILES {
                 show_and_navigate(app, "/profiles");
-            } else if id == MENU_QUICK_PLUGINS {
-                show_and_navigate(app, "/plugins");
             } else if id == MENU_QUICK_VERSIONS {
                 show_and_navigate(app, "/versions");
-            } else if id == MENU_QUICK_TASKS {
-                show_and_navigate(app, "/tasks");
             } else if id == MENU_START_ALL {
                 start_all_instances(app);
             } else if id == MENU_STOP_ALL {
@@ -213,16 +207,13 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "回到首页", true, None::<&str>)?;
     let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "HOME", true, None::<&str>)?;
     let quick_profiles = MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;
-    let quick_plugins = MenuItem::with_id(app, MENU_QUICK_PLUGINS, "插件", true, None::<&str>)?;
     let quick_versions = MenuItem::with_id(app, MENU_QUICK_VERSIONS, "版本", true, None::<&str>)?;
-    let quick_tasks = MenuItem::with_id(app, MENU_QUICK_TASKS, "任务", true, None::<&str>)?;
+    // 插件与任务不再各占一格：插件管理在 Profile 行上，安装进度在版本那一行上。
     let quick_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![
         &quick_home,
         &quick_homes,
         &quick_profiles,
-        &quick_plugins,
         &quick_versions,
-        &quick_tasks,
     ];
     let quick_sub = Submenu::with_id_and_items(app, MENU_QUICK_SUB, "快捷入口", true, &quick_refs)?;
 

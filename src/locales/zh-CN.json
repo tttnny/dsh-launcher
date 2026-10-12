@@ -9,9 +9,7 @@
     "instances": "实例管理",
     "homes": "HOME",
     "profiles": "Profile",
-    "plugins": "插件",
     "versions": "版本",
-    "tasks": "任务",
     "toggleSider": "收起 / 展开侧栏"
   },
   "home": {
@@ -61,7 +59,9 @@
     "filterError": "错误",
     "filterWarn": "警告",
     "recheckHealth": "重新自检",
-    "noProfile": "该实例的 DSH_HOME 下没有可用 Profile"
+    "noProfile": "该实例的 DSH_HOME 下没有可用 Profile",
+    "pageTitle": "实例",
+    "pageDesc": "每个实例绑定一份 DSH 版本、一个 DSH_HOME 和一个 Profile。选好 Profile 就能启动，DSH 的 Web 界面会在系统浏览器里打开。"
   },
   "instances": {
     "title": "实例管理",
@@ -89,22 +89,6 @@
       "copy": "复制",
       "delete": "删除"
     }
-  },
-  "newInstance": {
-    "title": "新建实例",
-    "name": "实例名称",
-    "namePlaceholder": "例如：主实例",
-    "version": "DSH 版本",
-    "home": "DSH_HOME",
-    "dedicatedHome": "✦ 为此实例新建专属 DSH_HOME",
-    "dedicatedHomeHint": "将创建专属目录：{path}",
-    "defaultProfile": "默认 Profile",
-    "defaultProfilePlaceholder": "启动时默认选择的 Profile",
-    "create": "创建实例",
-    "taskAdded": "已添加后台创建任务，可在任务页查看进度",
-    "alreadyInstalled": "该版本已安装，将直接创建实例",
-    "willInstall": "将下载安装 DSH {version} 并创建实例",
-    "sourceBuildHint": "该版本仅在 GitHub 发布（未发布到 npm），将从源码克隆并构建，耗时明显更长（可能需要十几分钟），请耐心等待任务日志。"
   },
   "homes": {
     "title": "HOME",
@@ -153,7 +137,10 @@
     "noInstances": "暂无实例引用该 HOME",
     "defaultOf": "「{instance}」的默认",
     "noDefault": "未设置",
-    "managePlugins": "管理插件"
+    "managePlugins": "管理插件",
+    "pageTitle": "Profile",
+    "pageDesc": "Profile 是 DSH_HOME 下的一套插件组合。这里管理所选 HOME 的 Profile，并从某一行进入它的插件管理。",
+    "closePlugins": "收起"
   },
   "plugins": {
     "title": "插件",
@@ -179,7 +166,6 @@
     "pluginsBatchDisable": "批量禁用（{count}）",
     "pluginsBatchEnabled": "已启用 {count} 个插件",
     "pluginsBatchDisabled": "已禁用 {count} 个插件",
-
     "bundlesTitle": "补丁层（Bundle）",
     "bundlesLayerTag": "补丁层",
     "entriesLayerTag": "插件条目",
@@ -209,7 +195,6 @@
     "bundleRemoveNotRemovable": "该补丁层随 DSH 发布，只能停用不能卸载",
     "bundleRemoved": "已卸载补丁层「{name}」",
     "bundleRemovedRestart": "已卸载补丁层「{name}」，需重启实例后生效",
-
     "outcomeApplied": "已生效",
     "outcomeRestartRequired": "需重启该实例后生效",
     "outcomeOverridden": "已被更高优先级的层覆盖，本次改动不生效",
@@ -219,7 +204,15 @@
     "outcomeRefused": "未能改动：{reason}",
     "outcomeFor": "{name}：{message}",
     "outcomeBatch": "已处理 {total} 项：{parts}",
-    "outcomeBatchRefused": "未能改动"
+    "outcomeBatchRefused": "未能改动",
+    "pageTitle": "插件管理",
+    "pageDesc": "由运行中的实例回答这份清单：启用、禁用、补丁层的挂载与卸载都走 DSH 自己的插件管理，改动是否已生效以实例返回的结果为准。",
+    "filterAll": "全部",
+    "filterOn": "已启用",
+    "filterOff": "已禁用",
+    "filterProblem": "无法改动",
+    "pluginsFilteredEmpty": "当前筛选下没有插件",
+    "close": "关闭插件管理"
   },
   "versions": {
     "title": "版本管理",
@@ -244,7 +237,10 @@
     "installNow": "立即安装",
     "installTaskStarted": "已开始下载安装 DSH {version}",
     "alreadyInstalled": "版本 {version} 已经安装",
-    "newInstance": "新建实例"
+    "newInstance": "新建实例",
+    "cancelInstall": "取消安装",
+    "installing": "正在安装…",
+    "pageDesc": "这里管理 DSH 版本的安装与删除。点一个版本即开始安装，进度直接显示在那一行上，安装完成会自动建好对应的实例与专属目录。"
   },
   "settings": {
     "title": "设置",
@@ -281,11 +277,8 @@
       "goInstances": "前往实例管理",
       "goHomes": "前往 HOME",
       "goProfiles": "前往 Profile",
-      "goPlugins": "前往插件",
       "goVersions": "前往版本管理",
-      "goTasks": "前往任务页",
       "openSettings": "打开设置（偏好设置）",
-      "goTasksAlt": "前往任务页（备用快捷键）",
       "showMain": "显示主窗口",
       "quitApp": "退出启动器",
       "nativeTag": "原生",
@@ -381,24 +374,6 @@
     "cancel": "取消",
     "saved": "实例已保存",
     "notFound": "实例不存在"
-  },
-  "tasks": {
-    "title": "任务管理",
-    "fab": "任务",
-    "runningHint": "后台有 {count} 个任务进行中",
-    "idleHint": "无后台任务",
-    "empty": "暂无任务",
-    "noLogs": "暂无日志",
-    "installingHint": "正在安装依赖，请稍候…",
-    "cancel": "取消",
-    "remove": "移除",
-    "createdInstance": "已创建实例「{name}」",
-    "state": {
-      "running": "进行中",
-      "done": "已完成",
-      "error": "失败",
-      "cancelled": "已取消"
-    }
   },
   "setup": {
     "title": "环境检测",

@@ -188,6 +188,13 @@ export interface PluginItem {
   patchId?: string | null
   /** 'management-required' | 'unaddressable'. */
   readOnlyReason?: string | null
+  /**
+   * The version of the bundle（补丁层）this entry arrived in. The native
+   * inventory has no version for an entry, so the backend fills this in from
+   * the bundle providing the entry's package; entries no bundle claims have
+   * none.
+   */
+  version?: string | null
 }
 
 /** A Bundle（补丁层）. */

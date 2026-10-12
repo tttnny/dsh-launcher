@@ -6,14 +6,15 @@
  * event names and the route mapping so both sides stay in sync:
  *
  * - navigate events: `{ route: string }` or a plain route-name string.
- *   Accepted routes: home / instances / homes / versions / tasks / settings.
- * - refresh events: no payload; the frontend re-reads instance/task status.
+ *   Accepted routes: home / instances / homes / profiles / versions / settings.
+ *   `/plugins` is accepted as a legacy alias and lands on profiles.
+ * - refresh events: no payload; the frontend re-reads instance status.
  *
  * Multiple event names are accepted for forward/backward compatibility with
  * whichever name t3 finally emits (`menu-navigate` is canonical).
  */
 
-export type ShortcutRoute = 'home' | 'instances' | 'homes' | 'profiles' | 'plugins' | 'versions' | 'tasks' | 'settings'
+export type ShortcutRoute = 'home' | 'instances' | 'homes' | 'profiles' | 'versions' | 'settings'
 
 /** Canonical first, aliases after. */
 export const MENU_NAVIGATE_EVENTS = ['menu-navigate', 'navigate', 'app-navigate'] as const
@@ -39,11 +40,8 @@ export const SHORTCUT_DOCS: ShortcutDoc[] = [
   { labelKey: 'settings.shortcuts.goHome', keys: [MOD, '1'] },
   { labelKey: 'settings.shortcuts.goHomes', keys: [MOD, '2'] },
   { labelKey: 'settings.shortcuts.goProfiles', keys: [MOD, '3'] },
-  { labelKey: 'settings.shortcuts.goPlugins', keys: [MOD, '4'] },
-  { labelKey: 'settings.shortcuts.goVersions', keys: [MOD, '5'] },
-  { labelKey: 'settings.shortcuts.goTasks', keys: [MOD, '6'] },
+  { labelKey: 'settings.shortcuts.goVersions', keys: [MOD, '4'] },
   { labelKey: 'settings.shortcuts.openSettings', keys: [MOD, ','] },
-  { labelKey: 'settings.shortcuts.goTasksAlt', keys: [MOD, 'K'] },
   { labelKey: 'settings.shortcuts.showMain', keys: [MOD, '0'], native: true },
   { labelKey: 'settings.shortcuts.quitApp', keys: [MOD, 'Q'], native: true },
   { labelKey: 'settings.shortcuts.refresh', keys: [MOD, 'R'] },
@@ -55,16 +53,12 @@ const NAVIGATE_TARGETS: Record<string, ShortcutRoute> = {
   '/': 'home',
   settings: 'settings',
   '/settings': 'settings',
-  tasks: 'tasks',
-  '/tasks': 'tasks',
   instances: 'home',
   '/instances': 'home',
   homes: 'homes',
   '/homes': 'homes',
   profiles: 'profiles',
   '/profiles': 'profiles',
-  plugins: 'plugins',
-  '/plugins': 'plugins',
   versions: 'versions',
   '/versions': 'versions',
 }
@@ -87,8 +81,12 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   // instance-edit maps to the instance list.
   // t6: strip leading slashes first — backend emits full paths such as
   // `/instances/:id`, which otherwise miss the match.
-  const norm = key.replace(/^\/+/, '')
-  if (norm.startsWith('instance')) return 'instances'
+  const dir = key.replace(/^\/+/, '').replace(/\/+$/, '')
+  // `/plugins` is no longer a top-level page: the plugin manager is reached
+  // from a Profile's own row (and from the tray), so both the old in-app route
+  // and the tray/menu payload land on the Profile list that owns the button.
+  if (dir === 'plugins' || dir.startsWith('plugins/')) return 'profiles'
+  if (dir.startsWith('instance')) return 'instances'
   return null
 }
 
@@ -110,10 +108,9 @@ export function isEditableTarget(target: EventTarget | null): boolean {
  * Global keydown dispatcher for in-app shortcuts.
  *
  * Digit mapping mirrors the native menu (app_menu.rs "显示" submenu):
- * - Cmd/Ctrl+1 → home, Cmd/Ctrl+2 → instances, Cmd/Ctrl+3 → homes,
- *   Cmd/Ctrl+4 → versions, Cmd/Ctrl+5 → tasks
+ * - Cmd/Ctrl+1 → home, Cmd/Ctrl+2 → homes, Cmd/Ctrl+3 → profiles,
+ *   Cmd/Ctrl+4 → versions
  * - Cmd/Ctrl+, → settings (macOS Preferences convention)
- * - Cmd/Ctrl+K → tasks (legacy alias)
  * - Cmd/Ctrl+R → in-app status refresh (NOT a page reload)
  * - Esc → blur an input, otherwise navigate back
  *
@@ -154,21 +151,10 @@ export function handleAppKeydown(e: KeyboardEvent, actions: ShortcutActions): bo
         actions.go('profiles')
         return true
       case '4':
-        actions.go('plugins')
-        return true
-      case '5':
         actions.go('versions')
-        return true
-      case '6':
-      case '7':
-        actions.go('tasks')
         return true
       case ',':
         actions.go('settings')
-        return true
-      case 'k':
-      case 'K':
-        actions.go('tasks')
         return true
       case 'r':
       case 'R':

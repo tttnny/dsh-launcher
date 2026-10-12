@@ -3,7 +3,7 @@ import { computed } from 'vue'
 
 // DlEmpty: the launcher's single empty-state visual.
 //
-// Every list in the app (versions, plugins, tasks, profiles, homes) used Arco's
+// Every list in the app (versions, plugins, profiles, homes) used Arco's
 // `a-empty`, whose stock "inbox" illustration and gray palette read as a
 // different product. This renders one restrained macOS-style glyph instead:
 // a hairline icon in the muted text color, then the message. Keeping it in one
@@ -12,7 +12,7 @@ import { computed } from 'vue'
 const props = withDefaults(
   defineProps<{
     /** Which glyph to draw. Defaults to a neutral tray. */
-    icon?: 'tray' | 'search' | 'task' | 'profile' | 'plugin' | 'version'
+    icon?: 'tray' | 'search' | 'profile' | 'plugin' | 'version'
     description?: string
   }>(),
   { icon: 'tray' },
@@ -22,8 +22,6 @@ const PATH = computed(() => {
   switch (props.icon) {
     case 'search':
       return 'M11 11l7 7M6.5 12a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z'
-    case 'task':
-      return 'M12 8v4l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'
     case 'profile':
       return 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4.5 20a7.5 7.5 0 0 1 15 0'
     case 'plugin':
