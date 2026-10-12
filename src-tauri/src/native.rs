@@ -355,6 +355,54 @@ impl NativeClient {
         let value = self.call("listBundles", serde_json::json!({})).await?;
         serde_json::from_value(value).map_err(|e| format!("解析 Bundle 列表失败: {e}"))
     }
+
+    /// Enables/disables one whole **Bundle（补丁层）** by `name` (the native
+    /// argument is `name`, not `id`). Re-enabling appends the bundle to the
+    /// **end** of the profile's ordered bundle list, so its priority shifts.
+    ///
+    /// A refused operation (e.g. `removable:false` → `management-required`) is
+    /// returned as a [`NativeChangeResult`], not an `Err`; only transport-layer
+    /// failures and `ok:false` are errors.
+    pub async fn set_bundle_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<NativeChangeResult, String> {
+        let value = self
+            .call("setBundleEnabled", serde_json::json!({ "name": name, "enabled": enabled }))
+            .await?;
+        serde_json::from_value(value).map_err(|e| format!("解析改动结果失败: {e}"))
+    }
+}
+
+/// A write operation's result (the native `ChangeResult`'s stable subset),
+/// shared by every write method (`setPluginEnabled` / `setBundleEnabled` /
+/// `removeBundle`). The service answers **HTTP 200 + `ok:true` even when it
+/// refuses**, so a refusal arrives as an `application:"failed"` value with an
+/// [`NativeChangeError`] — not as a transport error (design §4b/§4d).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeChangeResult {
+    pub changed: bool,
+    /// applied | restart-required | overridden | failed | cancelled
+    pub application: String,
+    pub stage: String,
+    pub target: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub error: Option<NativeChangeError>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// A refused write operation: the native `ManagementError` code plus an
+/// optional diagnostic. The code is translated to a localized reason in
+/// `plugins.rs` (one place), never in the UI.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeChangeError {
+    pub code: String,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
 }
 
 /// Interprets a raw response: transport-layer failures (bad status, `not
@@ -854,6 +902,55 @@ mod tests {
         );
         assert!(headers.get(reqwest::header::ORIGIN).is_none());
         assert!(headers.get(reqwest::header::HOST).is_none());
+    }
+
+    /// `setBundleEnabled` sends the verified envelope: the bare method name
+    /// (the `pluginManager/` prefix is added in the envelope) and the flat
+    /// `{name, enabled}` args — the parameter is `name`, **not** `id`.
+    #[test]
+    fn set_bundle_enabled_sends_name_and_enabled() {
+        let (client, fake) = client_with(vec![ok_response(serde_json::json!({
+            "changed": true,
+            "application": "applied",
+            "stage": "enable",
+            "target": "@deepseek-ai/dsh-web-app"
+        }))]);
+        let outcome = block_on(client.set_bundle_enabled("@deepseek-ai/dsh-web-app", false)).unwrap();
+
+        let req = fake.last_sent();
+        assert_eq!(req.envelope.method, "pluginManager/setBundleEnabled");
+        assert_eq!(
+            req.url,
+            "http://127.0.0.1:34567/api/pluginManager/setBundleEnabled"
+        );
+        assert_eq!(
+            req.envelope.payload.args,
+            serde_json::json!({ "name": "@deepseek-ai/dsh-web-app", "enabled": false })
+        );
+        assert!(outcome.changed);
+        assert_eq!(outcome.application, "applied");
+        assert_eq!(outcome.stage, "enable");
+        assert_eq!(outcome.target, "@deepseek-ai/dsh-web-app");
+    }
+
+    /// A refused operation is HTTP 200 + `ok:true` with the refusal inside
+    /// `value`: it deserializes into a result (not an `Err`), carrying
+    /// `changed:false` and the `error.code` the UI translates.
+    #[test]
+    fn set_bundle_enabled_parses_a_refusal_as_a_result_not_an_error() {
+        let (client, _) = client_with(vec![ok_response(serde_json::json!({
+            "changed": false,
+            "application": "failed",
+            "stage": "enable",
+            "target": "@deepseek-ai/dsh-base",
+            "error": { "code": "management-required" },
+            "warnings": ["随 DSH 发布"]
+        }))]);
+        let outcome = block_on(client.set_bundle_enabled("@deepseek-ai/dsh-base", false)).unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(outcome.application, "failed");
+        assert_eq!(outcome.error.as_ref().unwrap().code, "management-required");
+        assert_eq!(outcome.warnings, vec!["随 DSH 发布".to_string()]);
     }
 
     /// The read-only snapshot carries the mode + localized reason and no rows,

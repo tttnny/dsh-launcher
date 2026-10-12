@@ -332,6 +332,131 @@ fn resolve_home_path(state: &AppState, home_id: &str) -> Result<std::path::PathB
 }
 
 // ---------------------------------------------------------------------------
+// Commands: bundle (patch layer) enable / disable (native)
+// ---------------------------------------------------------------------------
+
+/// Input for enabling/disabling a whole **Bundle（补丁层）**. The native
+/// argument is the bundle `name` (not a plugin-entry id).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetBundleEnabledInput {
+    #[serde(alias = "home_id")]
+    pub home_id: String,
+    pub profile: String,
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// Translates a native `ManagementError` code into a localized reason shown to
+/// the user (one place for the whole app — design §4d). Refused operations are
+/// not command errors; this explains *why* the instance would not change.
+fn bundle_error_reason(code: &str) -> String {
+    match code {
+        "management-required" | "unaddressable" => {
+            "该 Bundle 由 DSH 自身管理，不能在这里改动".to_string()
+        }
+        "not-removable" => "该 Bundle 随 DSH 发布，只能停用不能删除".to_string(),
+        "unknown-plugin" => "实例里找不到这个 Bundle".to_string(),
+        other => format!("实例拒绝了本次改动（{other}）"),
+    }
+}
+
+/// Enables/disables one whole **Bundle（补丁层）** through the running
+/// instance's native plugin manager (`setBundleEnabled`), so the launcher never
+/// writes the profile manifest (`package.json`) or the patch document — the
+/// running DSH owns plugin state (ADR-0001).
+///
+/// The instance is resolved the same way as [`list_plugins`]; without one (or
+/// with an adopted one) the command is a plain `Err`. A **refusal** from the
+/// instance (`changed:false` + `error.code`) is *not* an error: it is returned
+/// as a [`ChangeOutcome`] carrying the translated `errorCode`, so the UI can
+/// explain "this can't be changed" rather than "something broke" (design §4b).
+///
+/// Note the native semantics the UI surfaces: disabling removes the whole layer
+/// (its entries and config disappear, dependencies remain); re-enabling
+/// **appends** the bundle to the end of the profile's ordered list, changing
+/// its priority.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_bundle_enabled(
+    state: State<'_, AppState>,
+    input: SetBundleEnabledInput,
+) -> Result<ChangeOutcome, String> {
+    set_bundle_enabled_for(
+        state.inner(),
+        &input.home_id,
+        &input.profile,
+        &input.name,
+        input.enabled,
+    )
+    .await
+}
+
+/// The body of [`set_bundle_enabled`], taking `&AppState` so tests drive the
+/// outcome branches without a Tauri runtime.
+pub(crate) async fn set_bundle_enabled_for(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<ChangeOutcome, String> {
+    use crate::native::NativeClient;
+
+    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    if entry.adopted {
+        return Err("该实例由系统接管，无法管理插件".to_string());
+    }
+    let Some(url) = entry.url else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    // connect / transport / ok:false failures are real errors — the caller
+    // re-syncs the list and shows the message.
+    let client = NativeClient::connect(&url).await?;
+    let result = client.set_bundle_enabled(name, enabled).await?;
+    Ok(ChangeOutcome::from(result))
+}
+
+/// A write result handed to the frontend (design §4 frozen contract): the
+/// native `ChangeResult`'s stable subset, `application` passed through as the
+/// five-valued string, plus a localized `errorCode` reason for refusals.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutcome {
+    pub changed: bool,
+    /// applied | restart-required | overridden | failed | cancelled.
+    pub application: String,
+    /// enable | remove.
+    pub stage: String,
+    pub target: String,
+    /// Localized reason for a refusal (`changed:false` + `error.code`); the UI
+    /// shows it instead of a raw code.
+    pub error_code: Option<String>,
+    /// The instance's own diagnostic, when it reported one.
+    pub diagnostic: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+impl From<crate::native::NativeChangeResult> for ChangeOutcome {
+    fn from(r: crate::native::NativeChangeResult) -> Self {
+        let (error_code, diagnostic) = match r.error {
+            Some(e) => (Some(bundle_error_reason(&e.code)), e.diagnostic),
+            None => (None, None),
+        };
+        Self {
+            changed: r.changed,
+            application: r.application,
+            stage: r.stage,
+            target: r.target,
+            error_code,
+            diagnostic,
+            warnings: r.warnings,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Commands: enable / disable (cordis.patch.yml disabled rows)
 // ---------------------------------------------------------------------------
 
@@ -1427,5 +1552,80 @@ mod tests {
             "实例未运行",
         );
         assert_ne!(Some(adopted_reason), not_running.reason);
+    }
+
+    /// Managing a bundle requires the profile's instance to be running: with
+    /// none, the command is a plain `Err` (not a refusal outcome) so the UI
+    /// re-syncs and tells the user to start the instance.
+    #[tokio::test]
+    async fn set_bundle_enabled_refuses_without_a_running_instance() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so its bundles cannot be
+    /// managed through the native API — a distinct message from "not running".
+    #[tokio::test]
+    async fn set_bundle_enabled_refuses_for_an_adopted_instance() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
     }
 }

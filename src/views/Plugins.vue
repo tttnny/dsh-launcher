@@ -5,7 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
-import type { PluginItem, PluginView } from '@/api/types'
+import type { BundleItem, PluginItem, PluginView } from '@/api/types'
 import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
@@ -149,6 +149,72 @@ watch(statusTick, (now, before) => {
   if (now !== before) void loadPlugins()
 })
 
+// --- Patch layers (bundles) --------------------------------------------------
+// A separate layer from the plugin entries below: a bundle is a whole patch
+// layer (GLOSSARY: Bundle（补丁层）) that mounts/unmounts as a unit, while a
+// plugin entry is one addressable node in the composition tree. The two switch
+// the instance's native manager through different methods and mean different
+// things, so they live in separate cards with their own labels.
+
+const bundles = computed<BundleItem[]>(() => pluginView.value?.bundles ?? [])
+// Mounted layers first (in the instance's order = priority), then the rest.
+const mountedBundles = computed(() => bundles.value.filter((b) => b.enabled))
+const availableBundles = computed(() => bundles.value.filter((b) => !b.enabled))
+const showAvailable = ref(false)
+// Per-bundle in-flight flag so a slow toggle only disables its own row.
+const bundlePending = ref<Record<string, boolean>>({})
+
+/** Display name: the instance's localized title, falling back to the name. */
+function bundleName(b: BundleItem): string {
+  return b.title?.trim() || b.name
+}
+
+/** One bundle toggle. Refusals come back as an outcome, not a thrown error. */
+async function onToggleBundle(b: BundleItem, enabled: boolean) {
+  if (!selectedHomeId.value || !selectedProfile.value) return
+  bundlePending.value = { ...bundlePending.value, [b.name]: true }
+  try {
+    const outcome = await api.setBundleEnabled({
+      homeId: selectedHomeId.value,
+      profile: selectedProfile.value,
+      name: b.name,
+      enabled,
+    })
+    // changed:false = the instance refused (a reason, not a failure); the
+    // localized reason is in errorCode.
+    if (!outcome.changed) {
+      Message.warning(outcome.errorCode || t('plugins.outcomeFailed'))
+      return
+    }
+    if (outcome.application === 'applied') {
+      Message.success(t('plugins.bundleApplied', { name: bundleName(b) }))
+    } else if (outcome.application === 'restart-required') {
+      Message.success(t('plugins.bundleAppliedRestart', { name: bundleName(b) }))
+    } else if (outcome.application === 'overridden') {
+      Message.warning(t('plugins.outcomeOverridden'))
+    } else if (outcome.application === 'failed') {
+      Message.warning(
+        outcome.diagnostic
+          ? `${t('plugins.outcomeFailed')}：${outcome.diagnostic}`
+          : t('plugins.outcomeFailed'),
+      )
+    } else {
+      Message.info(t('plugins.outcomeCancelled'))
+    }
+    // Re-sync: the entries the layer brought in appear/disappear, and the
+    // order reflects the instance's list (a re-mounted layer is appended last).
+    await loadPlugins()
+  } catch (e) {
+    // Transport-layer failure: surface it and re-sync so the UI is not stale.
+    Message.error(String(e))
+    await loadPlugins()
+  } finally {
+    const next = { ...bundlePending.value }
+    delete next[b.name]
+    bundlePending.value = next
+  }
+}
+
 const pluginColumns = computed(() => [
   { title: t('plugins.pluginName'), slotName: 'pname' },
   { title: t('plugins.pluginEntry'), slotName: 'pentry', width: 320 },
@@ -193,11 +259,92 @@ const pluginColumns = computed(() => [
       </div>
     </div>
 
+    <!-- Patch layers (bundles) card — a layer ABOVE the plugin entries.
+         The switch here is a bundle-layer switch; the switch in the entry
+         table below is a single-plugin-entry switch. Kept separate so the
+         user can tell which layer they are touching. -->
+    <div
+      v-if="selectedHomeId && selectedProfile && (managed || bundles.length > 0)"
+      class="dl-card bundles-card"
+    >
+      <div class="dl-card-title">
+        <div class="title-with-pill">
+          <h3>{{ t('plugins.bundlesTitle') }}</h3>
+          <span class="layer-tag bundle-layer-tag">{{ t('plugins.bundlesLayerTag') }}</span>
+          <span v-if="selectedHome" class="scope-pill">{{ selectedHome.name }} / {{ selectedProfile }}</span>
+        </div>
+      </div>
+      <p class="dl-card-desc">{{ t('plugins.bundlesDesc') }}</p>
+      <p class="bundle-order-hint">{{ t('plugins.bundleOrderHint') }}</p>
+
+      <!-- Mounted layers, in the instance's order (top = highest priority). -->
+      <div v-if="mountedBundles.length" class="bundle-group">
+        <div class="bundle-group-label">{{ t('plugins.bundlesMounted') }}</div>
+        <div v-for="b in mountedBundles" :key="b.name" class="bundle-row">
+          <div class="bundle-row-main">
+            <div class="bundle-row-head">
+              <span class="bundle-row-name">{{ bundleName(b) }}</span>
+              <span v-if="b.version" class="bundle-row-version tnum">{{ b.version }}</span>
+              <span v-if="b.optional" class="bundle-chip">{{ t('plugins.bundleOptional') }}</span>
+              <span v-if="!b.removable" class="bundle-chip bundle-chip-muted">{{ t('plugins.bundleReadonly') }}</span>
+              <span v-if="b.availability === 'missing'" class="bundle-chip bundle-chip-warn">{{ t('plugins.bundleMissing') }}</span>
+            </div>
+            <div class="bundle-row-name-sub tnum">{{ b.name }}</div>
+            <div class="bundle-row-state">{{ t('plugins.bundleStateActive') }}</div>
+          </div>
+          <a-switch
+            :model-value="b.enabled"
+            :loading="!!bundlePending[b.name]"
+            :checked-text="t('plugins.bundleOn')"
+            :unchecked-text="t('plugins.bundleOff')"
+            size="small"
+            @change="(value) => onToggleBundle(b, Boolean(value))"
+          />
+        </div>
+      </div>
+      <div v-else class="bundle-empty">{{ t('plugins.bundlesEmpty') }}</div>
+
+      <!-- Available (disabled) layers — most bundles ship disabled, so they
+           stay collapsed and never bury the active layers above. -->
+      <div v-if="availableBundles.length" class="bundle-group">
+        <button class="bundle-toggle" type="button" @click="showAvailable = !showAvailable">
+          {{ showAvailable
+            ? t('plugins.bundlesHideAvailable')
+            : t('plugins.bundlesShowAvailable', { count: availableBundles.length }) }}
+        </button>
+        <template v-if="showAvailable">
+          <div v-for="b in availableBundles" :key="b.name" class="bundle-row bundle-row-off">
+            <div class="bundle-row-main">
+              <div class="bundle-row-head">
+                <span class="bundle-row-name">{{ bundleName(b) }}</span>
+                <span v-if="b.version" class="bundle-row-version tnum">{{ b.version }}</span>
+                <span v-if="b.optional" class="bundle-chip">{{ t('plugins.bundleOptional') }}</span>
+                <span v-if="!b.removable" class="bundle-chip bundle-chip-muted">{{ t('plugins.bundleReadonly') }}</span>
+                <span v-if="b.availability === 'missing'" class="bundle-chip bundle-chip-warn">{{ t('plugins.bundleMissing') }}</span>
+              </div>
+              <div class="bundle-row-name-sub tnum">{{ b.name }}</div>
+              <div class="bundle-row-state">{{ t('plugins.bundleStateInactive') }}</div>
+            </div>
+            <a-switch
+              :model-value="b.enabled"
+              :loading="!!bundlePending[b.name]"
+              :disabled="b.availability === 'missing'"
+              :checked-text="t('plugins.bundleOn')"
+              :unchecked-text="t('plugins.bundleOff')"
+              size="small"
+              @change="(value) => onToggleBundle(b, Boolean(value))"
+            />
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- Plugins Table Card -->
     <div v-if="selectedHomeId && selectedProfile" class="dl-card plugins-card">
       <div class="dl-card-title">
         <div class="title-with-pill">
           <h3>{{ t('plugins.pluginsTitle') }}</h3>
+          <span class="layer-tag entry-layer-tag">{{ t('plugins.entriesLayerTag') }}</span>
           <span v-if="selectedHome" class="scope-pill">{{ selectedHome.name }} / {{ selectedProfile }}</span>
         </div>
       </div>
@@ -314,6 +461,138 @@ const pluginColumns = computed(() => [
   background: rgb(var(--primary-6) / 10%);
   color: rgb(var(--primary-6));
   border: 1px solid rgb(var(--primary-6) / 20%);
+}
+
+/* Layer tag: tells the user which kind of switch a card holds — a whole
+   patch layer (bundle) vs a single plugin entry. */
+.layer-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.bundle-layer-tag {
+  color: #ad6800;
+  background: #fff7e6;
+  border-color: #ffe7ba;
+}
+
+.entry-layer-tag {
+  color: var(--color-text-3);
+  background: var(--apple-group-bg);
+  border-color: var(--apple-card-border);
+}
+
+.bundles-card .bundle-order-hint {
+  margin: -4px 0 14px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.bundle-group {
+  & + .bundle-group {
+    margin-top: 14px;
+  }
+}
+
+.bundle-group-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-2);
+  margin-bottom: 8px;
+}
+
+.bundle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--apple-group-bg);
+  border: 1px solid var(--apple-card-border);
+
+  & + .bundle-row {
+    margin-top: 8px;
+  }
+}
+
+.bundle-row-off {
+  opacity: 0.82;
+}
+
+.bundle-row-main {
+  min-width: 0;
+}
+
+.bundle-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bundle-row-name {
+  font-weight: 500;
+  color: var(--color-text-1);
+}
+
+.bundle-row-version {
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.bundle-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--color-text-3);
+  background: var(--color-fill-2);
+}
+
+.bundle-chip-muted {
+  color: var(--color-text-4);
+}
+
+.bundle-chip-warn {
+  color: #ad6800;
+  background: #fff7e6;
+}
+
+.bundle-row-name-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+
+.bundle-row-state {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-4);
+}
+
+.bundle-empty {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--color-text-3);
+}
+
+.bundle-toggle {
+  padding: 0;
+  margin-bottom: 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: rgb(var(--primary-6));
+
+  &:hover {
+    text-decoration: underline;
+  }
 }
 
 .plugins-readonly-banner {
