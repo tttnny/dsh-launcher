@@ -38,8 +38,8 @@ function seedDb(): MockDb {
       { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab' },
     ],
     versions: [
-      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6' },
-      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5' },
+      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6' },
+      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5' },
     ],
     instances: [
       {
@@ -92,6 +92,12 @@ function loadDb(): MockDb {
       db.settings.no_proxy = db.settings.no_proxy ?? '127.0.0.1,localhost,::1'
       db.settings.proxy_apply_dsh = db.settings.proxy_apply_dsh ?? false
       db.settings.terminal = db.settings.terminal ?? 'system'
+      // Backfill the dedicated DSH_HOME added with the version-delete change.
+      for (const v of db.versions) {
+        v.dedicated_home =
+          v.dedicated_home ??
+          `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${v.version}`
+      }
       return db
     }
   } catch {
@@ -265,6 +271,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
             id: mockNewId('v'),
             version,
             dir: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\${version}`,
+            dedicated_home: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${version}`,
           }
           cur.versions.push(ver)
         }

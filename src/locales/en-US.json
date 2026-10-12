@@ -190,7 +190,7 @@
     "emptyInstalled": "No DSH versions installed yet",
     "noData": "No data",
     "deleteVersion": "Delete",
-    "confirmDeleteVersion": "Delete version {version}? Its associated instance will also be removed (data directory preserved).",
+    "confirmDeleteVersion": "Delete version {version}? Its associated instance will also be removed, and its dedicated DSH_HOME \"{path}\" will be deleted — it contains session history and credentials and cannot be recovered.",
     "versionDeleted": "Version {version} deleted",
     "usedBy": "{count} instance(s)",
     "sourceBuildTag": "Source build",
