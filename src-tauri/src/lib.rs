@@ -210,6 +210,7 @@ pub fn run() {
             update::check_launcher_update,
             plugins::list_plugins,
             plugins::set_bundle_enabled,
+            plugins::set_plugin_enabled,
             plugins::list_installed_plugins,
             plugins::set_plugins_enabled,
             plugins::uninstall_plugin,

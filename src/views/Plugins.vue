@@ -5,7 +5,8 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
-import type { BundleItem, PluginItem, PluginView } from '@/api/types'
+import { useAction } from '@/composables/useAction'
+import type { BundleItem, ChangeOutcome, PluginItem, PluginView } from '@/api/types'
 import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
@@ -116,6 +117,7 @@ function pluginName(p: PluginItem): string {
 
 async function loadPlugins() {
   pluginView.value = null
+  selectedEntries.value = []
   if (!selectedHomeId.value || !selectedProfile.value) return
   pluginsLoading.value = true
   try {
@@ -130,6 +132,113 @@ async function loadPlugins() {
 watch([selectedHomeId, selectedProfile], () => {
   void loadPlugins()
 })
+
+// --- Enable / disable one plugin entry through the instance's native API ------
+// The toggle sends the entry's `entryId`; the outcome is reported truthfully
+// (applied / restart-required / overridden / failed / cancelled), never a fixed
+// "restart to take effect". Batch enable/disable goes through the same path.
+
+const selectedEntries = ref<string[]>([])
+
+/** The message for one write outcome, from the instance's own answer. */
+function outcomeMessage(o: ChangeOutcome): string {
+  if (!o.changed) {
+    // A refusal: the backend folds the localized reason into `diagnostic`.
+    return t('plugins.outcomeRefused', { reason: o.diagnostic ?? o.errorCode ?? '' })
+  }
+  return applicationMessage(o.application)
+}
+
+/** The message for one `application` value (five possible, not three). */
+function applicationMessage(application: string): string {
+  switch (application) {
+    case 'applied':
+      return t('plugins.outcomeApplied')
+    case 'restart-required':
+      return t('plugins.outcomeRestartRequired')
+    case 'overridden':
+      return t('plugins.outcomeOverridden')
+    case 'failed':
+      return t('plugins.outcomeFailed')
+    case 'cancelled':
+      return t('plugins.outcomeCancelled')
+    default:
+      return t('plugins.outcomeUnknown', { application })
+  }
+}
+
+async function onTogglePlugin(record: PluginItem, enabled: boolean) {
+  const homeId = selectedHomeId.value
+  const profile = selectedProfile.value
+  if (!homeId || !profile || !managed.value) return
+  const outcomes = await toggleAction.run(homeId, profile, [{ id: record.entryId, enabled }])
+  if (outcomes?.length) reportOutcomes([{ name: pluginName(record), outcome: outcomes[0] }])
+  // Success, refusal or a transport failure all leave the list re-synced to
+  // the instance's true state.
+  await loadPlugins()
+}
+
+async function applyBatch(enabled: boolean) {
+  const homeId = selectedHomeId.value
+  const profile = selectedProfile.value
+  const keys = [...selectedEntries.value]
+  if (!homeId || !profile || !managed.value || keys.length === 0) return
+  const items = keys.map((id) => ({ id, enabled }))
+  const outcomes = await toggleAction.run(homeId, profile, items)
+  if (outcomes?.length) {
+    reportOutcomes(
+      outcomes.map((outcome, i) => ({
+        name: plugins.value.find((p) => p.entryId === keys[i])?.moduleName ?? keys[i],
+        outcome,
+      })),
+    )
+  }
+  selectedEntries.value = []
+  await loadPlugins()
+}
+
+/**
+ * Reports what the instance actually did. Success, refusal and "changed but did
+ * not take effect" are all separate answers — a single fixed hint would be
+ * wrong (the official web template hot-reloads).
+ */
+function reportOutcomes(results: { name: string; outcome: ChangeOutcome }[]) {
+  if (results.length === 1) {
+    const { name, outcome } = results[0]
+    const text = t('plugins.outcomeFor', { name, message: outcomeMessage(outcome) })
+    outcome.changed ? Message.success(text) : Message.warning(text)
+    return
+  }
+  // A batch may mix results; count each answer instead of flattening them.
+  const summary = results.reduce<Record<string, number>>((acc, r) => {
+    const key = r.outcome.changed ? r.outcome.application : 'refused'
+    acc[key] = (acc[key] ?? 0) + 1
+    return acc
+  }, {})
+  const parts = Object.entries(summary).map(([key, count]) => {
+    const label = key === 'refused' ? t('plugins.outcomeBatchRefused') : applicationMessage(key)
+    return `${label} ${count}`
+  })
+  Message.info(t('plugins.outcomeBatch', { total: results.length, parts: parts.join('，') }))
+}
+
+const toggleAction = useAction(
+  async (homeId: string, profile: string, items: { id: string; enabled: boolean }[]) => {
+    // Sequential: the batch reuses the single-entry write path, so every item
+    // is one native call and the instance's per-entry answers stay truthful.
+    const outcomes: ChangeOutcome[] = []
+    for (const item of items) {
+      outcomes.push(
+        await api.setPluginEnabled({ homeId, profile, id: item.id, enabled: item.enabled }),
+      )
+    }
+    return outcomes
+  },
+)
+
+// Every plugin control is disabled while any toggle is in flight (the busy
+// semantics the page already had).
+const pluginsBusy = computed(() => toggleAction.busy['*'] === true)
 
 // Once the instance starts (or stops), the page must switch between managed and
 // read-only without an app restart. The backend resolves the HOME+Profile to a
@@ -356,6 +465,27 @@ const pluginColumns = computed(() => [
         {{ viewReason }}
       </div>
 
+      <!-- Batch enable/disable: the same native path as a single toggle. Only
+           meaningful while the instance is manageable. -->
+      <div v-if="managed && plugins.length > 0" class="plugins-batch-row">
+        <div class="batch-btns">
+          <button
+            class="mac-action-pill"
+            :disabled="selectedEntries.length === 0 || pluginsBusy"
+            @click="applyBatch(true)"
+          >
+            {{ t('plugins.pluginsBatchEnable', { count: selectedEntries.length }) }}
+          </button>
+          <button
+            class="mac-action-pill"
+            :disabled="selectedEntries.length === 0 || pluginsBusy"
+            @click="applyBatch(false)"
+          >
+            {{ t('plugins.pluginsBatchDisable', { count: selectedEntries.length }) }}
+          </button>
+        </div>
+      </div>
+
       <!-- The table renders whenever the instance gave us entries (managed), or
            the offline read produced a file-sourced list; a pure read-only page
            with nothing to show has only the banner, not a contradictory empty
@@ -367,7 +497,18 @@ const pluginColumns = computed(() => [
         :loading="pluginsLoading"
         :pagination="false"
         row-key="entryId"
+        :row-selection="
+          managed
+            ? {
+                type: 'checkbox',
+                showCheckedAll: true,
+                onlyCurrent: true,
+                selectedRowKeys: selectedEntries,
+              }
+            : undefined
+        "
         class="apple-styled-table"
+        @selection-change="(keys: (string | number)[]) => (selectedEntries = keys.map(String))"
       >
         <template #pname="{ record }">
           <span class="plugin-cell-name">{{ pluginName(record) }}</span>
@@ -380,14 +521,16 @@ const pluginColumns = computed(() => [
           <span v-else class="plugin-no-version">-</span>
         </template>
         <template #pstatus="{ record }">
-          <!-- The instance owns the state; the toggle is wired to the native
-               writer by T2. Until then it reflects the instance's value. -->
+          <!-- The instance owns the state: the toggle is wired to the native
+               writer. The switch reflects the instance's value (the row is
+               re-synced after every write, and on failure too). -->
           <a-switch
             :model-value="record.enabled"
-            disabled
+            :disabled="!managed || pluginsBusy"
             :checked-text="t('plugins.pluginOn')"
             :unchecked-text="t('plugins.pluginOff')"
             size="small"
+            @change="(v: string | number | boolean) => onTogglePlugin(record, v === true)"
           />
         </template>
         <template #empty>
@@ -448,6 +591,18 @@ const pluginColumns = computed(() => [
 
   h3 {
     margin: 0;
+  }
+}
+
+.plugins-batch-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+
+  .batch-btns {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 }
 

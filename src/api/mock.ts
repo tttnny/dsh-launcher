@@ -16,6 +16,7 @@ import type {
   RemoteVersion,
   RuntimeStatus,
   SetBundleEnabledInput,
+  SetPluginEnabledInput,
   SetPluginsEnabledInput,
   TaskInfo,
   TaskProgress,
@@ -781,6 +782,54 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         application: 'applied',
         stage: 'enable',
         target: input.name,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
+    }
+    case 'set_plugin_enabled': {
+      const input = args?.input as SetPluginEnabledInput
+      // Mirror the backend: resolve HOME+Profile to a running instance; a
+      // missing one is a command error, not an outcome.
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === input.homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === input.profile,
+      )
+      const view = nativeViewFor(input.homeId, input.profile, running)
+      if (view.mode !== 'managed') fail(String(view.reason ?? '实例未在运行，请先启动实例'))
+      const entry = view.plugins.find((p) => p.entryId === input.id)
+      if (!entry) {
+        return {
+          changed: false,
+          application: 'failed',
+          stage: 'enable',
+          target: input.id,
+          errorCode: 'unknown-plugin',
+          diagnostic: null,
+          warnings: [],
+        } as T
+      }
+      // A read-only entry is refused by the instance — an outcome carrying the
+      // code, never a thrown error (design §4b).
+      if (entry.readOnlyReason) {
+        return {
+          changed: false,
+          application: 'failed',
+          stage: 'enable',
+          target: input.id,
+          errorCode: entry.readOnlyReason,
+          diagnostic: null,
+          warnings: [],
+        } as T
+      }
+      entry.enabled = input.enabled
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'enable',
+        target: input.id,
         errorCode: null,
         diagnostic: null,
         warnings: [],

@@ -161,7 +161,7 @@
     "pluginName": "插件",
     "pluginEntry": "插件条目",
     "pluginPhase": "运行阶段",
-    "pluginsDesc": "管理该 Profile 下的插件：启用 / 禁用 / 卸载。插件在实例启动时挂载，改动后需重启引用该 HOME 的实例才会生效。",
+    "pluginsDesc": "管理该 Profile 下的插件条目：启用 / 禁用。改动是否已生效由实例返回的结果决定。",
     "selectHome": "选择 DSH_HOME",
     "selectProfile": "选择 Profile",
     "pluginsPickProfile": "请先选择一个 Profile 以查看其中的插件",
@@ -174,7 +174,6 @@
     "pluginEnabled": "已启用 {name}",
     "pluginDisabled": "已禁用 {name}",
     "pluginUninstalled": "已卸载 {name}",
-    "pluginRestartHint": "插件在实例启动时挂载，改动后需重启引用该 HOME 的实例才会生效",
     "pluginUninstallConfirm": "确定卸载插件「{name}」？",
     "pluginsBatchEnable": "批量启用（{count}）",
     "pluginsBatchDisable": "批量禁用（{count}）",
@@ -208,7 +207,12 @@
     "outcomeRestartRequired": "需重启该实例后生效",
     "outcomeOverridden": "已被更高优先级的层覆盖，本次改动不生效",
     "outcomeFailed": "改动已记录但未能生效",
-    "outcomeCancelled": "已取消"
+    "outcomeCancelled": "已取消",
+    "outcomeUnknown": "实例返回了未知结果：{application}",
+    "outcomeRefused": "未能改动：{reason}",
+    "outcomeFor": "{name}：{message}",
+    "outcomeBatch": "已处理 {total} 项：{parts}",
+    "outcomeBatchRefused": "未能改动"
   },
   "versions": {
     "title": "版本管理",

@@ -17,6 +17,7 @@ import type {
   RemoteVersion,
   RuntimeStatus,
   SetBundleEnabledInput,
+  SetPluginEnabledInput,
   SetPluginsEnabledInput,
   TaskInfo,
   TaskLog,
@@ -137,6 +138,13 @@ export const api = {
    * (ADR-0001); a refusal comes back as a ChangeOutcome, not a thrown error.
    */
   setBundleEnabled: (input: SetBundleEnabledInput) => call<ChangeOutcome>('set_bundle_enabled', { input }),
+  /**
+   * Enables/disables one **plugin entry** through the instance's native plugin
+   * manager (`id` is the entryId). The result says truthfully whether it took
+   * effect; a refusal is an outcome with `errorCode`, not a thrown error.
+   */
+  setPluginEnabled: (input: SetPluginEnabledInput) =>
+    call<ChangeOutcome>('set_plugin_enabled', { input }),
   listInstalledPlugins: (homeId: string, profile: string) =>
     call<InstalledPlugin[]>('list_installed_plugins', { home_id: homeId, profile }),
   setPluginsEnabled: (input: SetPluginsEnabledInput) => call<void>('set_plugins_enabled', { input }),

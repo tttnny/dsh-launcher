@@ -161,7 +161,7 @@
     "pluginName": "Plugin",
     "pluginEntry": "Plugin entry",
     "pluginPhase": "Phase",
-    "pluginsDesc": "Manage plugins in this profile: enable / disable / uninstall. Plugins mount at instance start; restart the instances referencing this HOME for changes to take effect.",
+    "pluginsDesc": "Manage this profile's plugin entries: enable / disable. Whether a change took effect is decided by the instance's own answer.",
     "selectHome": "Select DSH_HOME",
     "selectProfile": "Select Profile",
     "pluginsPickProfile": "Select a profile to view its plugins",
@@ -174,7 +174,6 @@
     "pluginEnabled": "Enabled {name}",
     "pluginDisabled": "Disabled {name}",
     "pluginUninstalled": "Uninstalled {name}",
-    "pluginRestartHint": "Plugins mount at instance start; restart the instances referencing this HOME for changes to take effect",
     "pluginUninstallConfirm": "Uninstall plugin \"{name}\"?",
     "pluginsBatchEnable": "Enable ({count})",
     "pluginsBatchDisable": "Disable ({count})",
@@ -208,7 +207,12 @@
     "outcomeRestartRequired": "Restart this instance to apply",
     "outcomeOverridden": "Overridden by a higher-priority layer; this change has no effect",
     "outcomeFailed": "Change recorded but did not take effect",
-    "outcomeCancelled": "Cancelled"
+    "outcomeCancelled": "Cancelled",
+    "outcomeUnknown": "The instance returned an unknown result: {application}",
+    "outcomeRefused": "Could not change: {reason}",
+    "outcomeFor": "{name}: {message}",
+    "outcomeBatch": "Handled {total}: {parts}",
+    "outcomeBatchRefused": "could not change"
   },
   "versions": {
     "title": "Versions",
