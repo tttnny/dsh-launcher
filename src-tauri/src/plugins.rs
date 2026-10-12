@@ -1,10 +1,12 @@
-// Profile plugins: per-instance/profile enable / disable / uninstall plumbing
-// over the profile manifest (package.json) and cordis.patch.yml, driven
-// through the instance's own `dsh plugin` CLI.
+// Profile plugins: the instance-native plugin commands (list / enable /
+// disable / remove) over the running instance's own `/api/pluginManager/*`
+// service, plus the profile-file preparation the launcher's own pnpm needs
+// (build scripts, peer policy, pnpm store pin). The launcher never writes
+// plugin state — the running DSH owns it (ADR-0001).
 
 use crate::AppState;
 use crate::native::NativeChangeResult;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::State;
 
 /// Public OAuth App client id used to boost unauthenticated GitHub API quota
@@ -18,33 +20,6 @@ const GITHUB_CLIENT_ID: &str = "Ov23li6vtlVd83282YL6";
 pub(crate) fn github_api_url(path: &str) -> String {
     let sep = if path.contains('?') { '&' } else { '?' };
     format!("https://api.github.com{path}{sep}client_id={GITHUB_CLIENT_ID}")
-}
-
-// ---------------------------------------------------------------------------
-// Installed plugin (per instance/profile)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Serialize)]
-pub struct InstalledPlugin {
-    /// Package name / id (e.g. "@dsh-plugin/dsh-auxiliary").
-    pub id: String,
-    /// Installed version spec as recorded in the profile manifest.
-    pub version: Option<String>,
-    /// Whether the plugin is currently enabled (not disabled in cordis.patch.yml).
-    pub enabled: bool,
-    /// The cordis plugin id used in cordis.patch.yml (disables/insert rows).
-    pub cordis_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetPluginsEnabledInput {
-    #[serde(alias = "home_id")]
-    pub home_id: String,
-    pub profile: String,
-    #[serde(alias = "plugin_ids")]
-    pub plugin_ids: Vec<String>,
-    pub enabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,60 +105,6 @@ fn profile_packages(manifest: &serde_json::Value) -> Vec<(String, Option<String>
 }
 
 // ---------------------------------------------------------------------------
-// Commands: installed plugin listing (per instance + profile)
-// ---------------------------------------------------------------------------
-
-/// Lists plugins installed into a HOME's profile, excluding core
-/// @deepseek-ai/* packages. Reads the profile manifest (dependencies +
-/// bundles) and cordis.patch.yml (disabled rows).
-#[tauri::command(rename_all = "snake_case")]
-pub async fn list_installed_plugins(
-    state: State<'_, AppState>,
-    home_id: String,
-    profile: String,
-) -> Result<Vec<InstalledPlugin>, String> {
-    let (home_path, _) = resolve_home_paths(&state, &home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &profile)?;
-    let manifest = read_profile_manifest(&dir)?;
-
-    // Disabled set from cordis.patch.yml (`- id: <cordis-id>` + `disabled: true`).
-    let disabled = crate::profile::read_disabled_ids(&dir);
-
-    let out = profile_packages(&manifest)
-        .into_iter()
-        .filter(|(name, _)| !name.starts_with("@deepseek-ai/"))
-        .map(|(id, version)| {
-            let cordis_id = cordis_id_of(&id);
-            let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&id);
-            InstalledPlugin {
-                version,
-                enabled,
-                cordis_id: Some(cordis_id),
-                id,
-            }
-        })
-        .collect();
-    Ok(out)
-}
-
-/// Resolve a HOME to (home_path, version_dir): plugin file edits need the
-/// HOME path; `dsh plugin remove` runs through a CLI binary, so any
-/// installed version serves (the newest installed one wins).
-pub(crate) fn resolve_home_paths(
-    state: &State<'_, AppState>,
-    home_id: &str,
-) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
-    let cfg = state.config.lock().unwrap();
-    let home = cfg
-        .homes
-        .iter()
-        .find(|h| h.id == home_id)
-        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-    let version = cfg.versions.last().ok_or_else(|| "尚未安装任何 DSH 版本".to_string())?;
-    Ok((home.path.clone(), version.dir.clone()))
-}
-
-// ---------------------------------------------------------------------------
 // Commands: native plugin list (the instance's own plugin manager)
 // ---------------------------------------------------------------------------
 
@@ -263,12 +184,12 @@ async fn list_plugins_for(
 /// list additionally hides a few built-in bundles). A read failure degrades to
 /// an empty list rather than erroring the page.
 ///
-/// Unlike [`list_installed_plugins`], core `@deepseek-ai/*` packages are
-/// **not** filtered out here. The blanket filter made this view lie about a
-/// profile: it hid whether a core bundle is even declared, which is a fact a
-/// read-only view has no business concealing. Their cordis id is usually the
-/// package's unscoped short name (`@deepseek-ai/dsh-base` → `dsh-base`), the
-/// same fallback the patch document uses to address them.
+/// Core `@deepseek-ai/*` packages are **not** filtered out here. A blanket
+/// filter would make this view lie about a profile: it would hide whether a
+/// core bundle is even declared, which is a fact a read-only view has no
+/// business concealing. Their cordis id is usually the package's unscoped
+/// short name (`@deepseek-ai/dsh-base` → `dsh-base`), the same fallback the
+/// patch document uses to address them.
 fn offline_view(
     state: &AppState,
     home_id: &str,
@@ -506,238 +427,6 @@ pub(crate) async fn remove_bundle_for(
     Ok(localize_refusal(ChangeOutcome::from(result)))
 }
 
-// ---------------------------------------------------------------------------
-// Commands: enable / disable (cordis.patch.yml disabled rows)
-// ---------------------------------------------------------------------------
-
-/// Sets plugins enabled/disabled in a profile's cordis.patch.yml by adding or
-/// removing `disabled: true` rows. Batch-capable via plugin_ids.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn set_plugins_enabled(
-    state: State<'_, AppState>,
-    input: SetPluginsEnabledInput,
-) -> Result<(), String> {
-    let (home_path, _) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
-    let patch_path = dir.join("cordis.patch.yml");
-
-    let mut raw = if patch_path.exists() {
-        std::fs::read_to_string(&patch_path)
-            .map_err(|e| format!("读取 cordis.patch.yml 失败: {e}"))?
-    } else {
-        String::new()
-    };
-
-    for package in &input.plugin_ids {
-        let cordis_id = cordis_id_of(package);
-        raw = crate::profile::set_disabled_row(&raw, &cordis_id, input.enabled);
-    }
-
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
-    std::fs::write(&patch_path, raw).map_err(|e| format!("写入 cordis.patch.yml 失败: {e}"))?;
-    Ok(())
-}
-
-/// Input for uninstalling a plugin from a profile.
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UninstallPluginInput {
-    #[serde(alias = "home_id")]
-    pub home_id: String,
-    pub profile: String,
-    #[serde(alias = "plugin_id")]
-    pub plugin_id: String,
-}
-
-/// Uninstalls a plugin from a HOME's profile through
-/// `dsh plugin --profile <name> remove <id>` (the CLI removes the dependency
-/// and reconciles dsh.profile.bundles), then drops the plugin's
-/// cordis.patch.yml rows (insert / disabled), which the CLI does not manage.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn uninstall_plugin(
-    state: State<'_, AppState>,
-    input: UninstallPluginInput,
-) -> Result<(), String> {
-    let (home_path, version_dir) = resolve_home_paths(&state, &input.home_id)?;
-    let dir = crate::profile::profile_dir(&home_path, &input.profile)?;
-    if !dir.exists() {
-        return Err(format!("Profile「{}」不存在", input.profile));
-    }
-
-    // `dsh plugin remove <id>` through an installed CLI: it removes the
-    // dependency and reconciles dsh.profile.bundles (a name that is no
-    // longer an installed bundle leaves the layer stack), so the manifest is
-    // never edited by hand here. The frontend shows its own progress state.
-    run_dsh_plugin(
-        &state,
-        &PluginCliTarget {
-            version_dir: &version_dir,
-            home_path: &home_path,
-            profile: &input.profile,
-        },
-        &PluginCliOp {
-            subcommand: "remove",
-            spec: &input.plugin_id,
-            loglevel: "warn",
-        },
-    )
-    .await?;
-
-    // 2. Drop the plugin's rows from cordis.patch.yml (insert rows mount the
-    //    plugin; disabled rows gate it) — owned by the profile module.
-    let patch_path = dir.join("cordis.patch.yml");
-    if patch_path.exists() {
-        let raw = std::fs::read_to_string(&patch_path)
-            .map_err(|e| format!("读取 cordis.patch.yml 失败: {e}"))?;
-        let cordis_id = cordis_id_of(&input.plugin_id);
-        let cleaned = crate::profile::strip_cordis_rows(&raw, &cordis_id, &input.plugin_id);
-        if cleaned != raw {
-            std::fs::write(&patch_path, &cleaned)
-                .map_err(|e| format!("写入 cordis.patch.yml 失败: {e}"))?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Which instance/profile a `dsh plugin` invocation targets.
-struct PluginCliTarget<'a> {
-    version_dir: &'a std::path::Path,
-    home_path: &'a std::path::Path,
-    profile: &'a str,
-}
-
-/// What the invocation does: a pnpm subcommand (`add` / `remove`), its
-/// package spec, and the pnpm log level to forward.
-struct PluginCliOp<'a> {
-    subcommand: &'a str,
-    spec: &'a str,
-    loglevel: &'a str,
-}
-
-/// Runs one `dsh plugin --profile <name> <pnpm subcommand> <spec/id>` through
-/// the instance's own CLI.
-///
-/// The launcher still prepares the two things the CLI does not: the
-/// build-scripts opt-in (pnpm ≥10 `onlyBuiltDependencies` / pnpm 11
-/// `allowBuilds`) and the profile `.npmrc` peer policy. When pnpm 11 blocks
-/// build scripts it writes `set this to true or false` placeholders and fails
-/// with ERR_PNPM_IGNORED_BUILDS; the placeholders are approved and the
-/// invocation is retried once so native deps (node-pty, koffi, esbuild,
-/// sharp…) actually build. The CLI prints the same advice for git-hosted
-/// plugins, which this automates.
-///
-/// Short-lived and interactive: errors surface directly to the caller (the
-/// frontend shows its own progress state and cancels by dropping the await).
-async fn run_dsh_plugin(
-    state: &State<'_, AppState>,
-    target: &PluginCliTarget<'_>,
-    op: &PluginCliOp<'_>,
-) -> Result<(), String> {
-    let (version_dir, home_path, profile) = (target.version_dir, target.home_path, target.profile);
-    let (subcommand, spec, loglevel) = (op.subcommand, op.spec, op.loglevel);
-    let dir = crate::profile::profile_dir(home_path, profile)?;
-    // No instance is in scope here, so the flag comes from the profile's own
-    // manifest: a `link:` dependency is exactly what needs it.
-    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
-    ensure_build_scripts_allowed(&dir)?;
-    // Never let a plugin's peers pull a second copy of a core package in.
-    ensure_profile_npmrc(&dir)?;
-    // Record the store this invocation will use. This path always drives pnpm
-    // with the launcher store (and relinks the profile onto it when it is
-    // linked elsewhere), so the pin names that store — never the profile's
-    // current one, which a relink a few lines below may replace.
-    let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    ensure_profile_store_pin(&dir, &store_dir)?;
-
-    let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let pnpm_prog = crate::toolchain::ensure_pnpm().await?;
-    let what = format!("dsh plugin {subcommand}");
-
-    // A node_modules tree linked from a *different* pnpm store makes pnpm
-    // fail with ERR_PNPM_UNEXPECTED_STORE; relink proactively like the
-    // installer path did.
-    if let Some(linked) = linked_store_dir(&dir) {
-        if !store_paths_match(&linked, &store_dir.to_string_lossy()) {
-            crate::log_info!("node_modules 链接自其他 pnpm store（{linked}），重新链接后重试");
-            relink_profile_store(state, target, &pnpm_prog).await?;
-        }
-    }
-
-    for attempt in 1..=2 {
-        let mut args: Vec<String> = vec![subcommand.to_string(), spec.to_string()];
-        args.extend(forwarded_pnpm_flags(state, loglevel));
-        let cmd =
-            crate::launch::plugin_command(
-                &node,
-                version_dir,
-                home_path,
-                profile,
-                &args,
-                &pnpm_prog,
-                preserve_symlinks,
-            )?;
-        match run_command(cmd, &what).await {
-            Ok(()) => return Ok(()),
-            Err(out) if attempt == 1 && mentions_ignored_builds(&out) => {
-                crate::log_info!("pnpm 拦截了依赖构建脚本，批准 allowBuilds 后重试");
-                ensure_build_scripts_allowed(&dir)?;
-            }
-            Err(out) if attempt == 1 && mentions_unexpected_store(&out) => {
-                crate::log_info!("pnpm 报告 store 位置不一致，重新链接后重试");
-                relink_profile_store(state, target, &pnpm_prog).await?;
-            }
-            Err(out) => return Err(format!("{what} 失败: {}", summarize_output(&out))),
-        }
-    }
-    unreachable!("attempt loop covers both attempts")
-}
-
-/// Runs a piped child command, returning the FULL combined output on
-/// failure: retryable-error detection (store mismatch, ignored builds)
-/// matches markers like `ERR_PNPM_UNEXPECTED_STORE` that pnpm prints at the
-/// START of its diagnostics, so callers must see the whole output. Display
-/// sites compress it through [`summarize_output`].
-async fn run_command(mut cmd: tokio::process::Command, what: &str) -> Result<(), String> {
-    let out = cmd
-        .output()
-        .await
-        .map_err(|e| format!("{what} 启动失败: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if combined.trim().is_empty() {
-        Err(format!("退出码 {}", out.status))
-    } else {
-        Err(combined)
-    }
-}
-
-/// Compresses a command's full output into its last meaningful lines for
-/// error display.
-fn summarize_output(out: &str) -> String {
-    let tail: Vec<&str> = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    tail.iter().rev().take(3).rev().cloned().collect::<Vec<&str>>().join(" | ")
-}
-
-fn mentions_unexpected_store(out: &str) -> bool {
-    out.contains("ERR_PNPM_UNEXPECTED_STORE") || out.contains("Unexpected store location")
-}
-
-fn mentions_ignored_builds(out: &str) -> bool {
-    out.contains("ERR_PNPM_IGNORED_BUILDS") || out.contains("Ignored build scripts")
-}
-
 /// Reads the store a profile's `node_modules` is currently linked from, via
 /// the `storeDir` entry pnpm records in `node_modules/.modules.yaml`. Older
 /// pnpm wrote YAML (`storeDir: /path`); pnpm 10+ writes JSON, so both
@@ -880,70 +569,6 @@ pub(crate) fn ensure_profile_store_pin(
     let mut out = lines.join("\n");
     out.push('\n');
     std::fs::write(&path, out).map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))
-}
-
-/// Relinks a profile's `node_modules` onto the launcher's pinned store.
-/// pnpm's own remedy for ERR_PNPM_UNEXPECTED_STORE is a reinstall, but a
-/// plain `pnpm install` short-circuits with "Already up to date" when the
-/// lockfile and node_modules already satisfy package.json — it never
-/// re-links (verified against pnpm 11: `--force`, `--fix-lockfile`, even
-/// deleting `.modules.yaml` all keep the stale store). The only reliable
-/// relink is removing `node_modules` so pnpm must rebuild it from the
-/// lockfile against the new store. `pnpm-lock.yaml` is preserved, so the
-/// reinstall re-imports the same versions; it only costs the first
-/// re-download into the launcher's store. Routing through
-/// `dsh plugin install` keeps the CLI's bundle reconciliation in the loop.
-async fn relink_profile_store(
-    state: &State<'_, AppState>,
-    target: &PluginCliTarget<'_>,
-    pnpm_prog: &std::path::Path,
-) -> Result<(), String> {
-    let dir = crate::profile::profile_dir(target.home_path, target.profile)?;
-    let nm = dir.join("node_modules");
-    if nm.exists() {
-        std::fs::remove_dir_all(&nm)
-            .map_err(|e| format!("清理旧 node_modules 失败（{}）: {e}", nm.display()))?;
-    }
-    let mut args: Vec<String> = vec!["install".to_string()];
-    args.extend(forwarded_pnpm_flags(state, "warn"));
-    let preserve_symlinks = crate::profile::declares_link_dependency(&dir);
-    let node = crate::runtime::node_for_spawn_checked(state).await?;
-    let cmd = crate::launch::plugin_command(
-        &node,
-        target.version_dir,
-        target.home_path,
-        target.profile,
-        &args,
-        pnpm_prog,
-        preserve_symlinks,
-    )?;
-    run_command(cmd, "dsh plugin install（重新链接 store）")
-        .await
-        .map_err(|e| {
-            format!(
-                "dsh plugin install（重新链接 store） 失败: {}",
-                summarize_output(&e)
-            )
-        })
-}
-
-
-/// Common pnpm flags forwarded through `dsh plugin`. `--prefix` is deliberately
-/// absent: the CLI already runs pnpm with cwd = the profile directory, and
-/// passing a prefix would break that contract.
-///
-/// The flag *set* lives in [`crate::toolchain::pnpm_store_flags`] so this path
-/// and the launcher's own installs can never drift apart; only the
-/// The network-robustness settings are deliberately NOT forwarded as flags:
-/// the `--config.fetch-*` spelling hangs pnpm 11 (see
-/// [`crate::toolchain::pnpm_network_env`]). They ride along as env vars
-/// instead, set on the CLI process by [`crate::launch::plugin_command`] so the
-/// `pnpm` it spawns inherits them -- which also means `pnpm remove` no longer
-/// needs special-casing, since env config is never rejected the way an
-/// unknown flag is.
-fn forwarded_pnpm_flags(state: &State<'_, AppState>, loglevel: &str) -> Vec<String> {
-    let store_dir = crate::toolchain::store_dir(&state.data_dir);
-    crate::toolchain::pnpm_store_flags(&store_dir, loglevel)
 }
 
 /// Pins `auto-install-peers=false` in a profile's `.npmrc`.
@@ -1243,17 +868,6 @@ mod tests {
             Some("/Users/x/Library/pnpm/store/v11")
         );
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn summarize_output_keeps_last_three_meaningful_lines() {
-        let out = "ERR_PNPM_UNEXPECTED_STORE: some long diagnostic\nmiddle line\n\nlast line\n";
-        assert_eq!(
-            summarize_output(out),
-            "ERR_PNPM_UNEXPECTED_STORE: some long diagnostic | middle line | last line"
-        );
-        // Empty output stays empty.
-        assert_eq!(summarize_output("\n  \n"), "");
     }
 
     /// The regression this fix exists for: a profile installed through the
