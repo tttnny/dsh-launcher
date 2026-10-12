@@ -240,7 +240,7 @@ const onRemove = removeAction.run
         </div>
         <span class="used-by-pill tnum">{{ t('versions.usedBy', { count: usedByCount(v.id) }) }}</span>
         <a-popconfirm
-          :content="t('versions.confirmDeleteVersion', { version: v.version })"
+          :content="t('versions.confirmDeleteVersion', { version: v.version, path: v.dedicated_home })"
           @ok="onRemove(v.id, v.version)"
         >
           <button class="mac-action-pill danger">{{ t('versions.deleteVersion') }}</button>

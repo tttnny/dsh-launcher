@@ -1,6 +1,5 @@
 use crate::config::{
-    new_id, sanitize_name, DshHome, DshInstance, DshVersion, LauncherSettings, RemoteVersion,
-    SettingsPatch,
+    new_id, sanitize_name, DshHome, DshInstance, LauncherSettings, RemoteVersion, SettingsPatch,
 };
 use crate::{process, AppState};
 use std::collections::BTreeMap;
@@ -71,12 +70,39 @@ pub fn default_dedicated_home_path(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<String, String> {
-    Ok(state
-        .data_dir
-        .join("homes")
-        .join(sanitize_name(&name))
+    Ok(dedicated_home_path(&state.data_dir, &name)
         .to_string_lossy()
         .to_string())
+}
+
+/// The dedicated DSH_HOME for a version: `<数据目录>/homes/<版本名>`.
+///
+/// One version, one directory — the contract the installer enforces
+/// (`migrate_instances_to_dedicated_homes`, `start_create_instance_task`). The
+/// derivation must stay identical to theirs (including [`sanitize_name`]) so
+/// that the path a deletion removes is provably the path the launcher created,
+/// and can never resolve to `~/.dsh` or a user-specified HOME (ADR-0002).
+pub(crate) fn dedicated_home_path(data_dir: &std::path::Path, version: &str) -> std::path::PathBuf {
+    data_dir.join("homes").join(sanitize_name(version))
+}
+
+/// Removes one version's dedicated DSH_HOME, judged by path alone. A path that
+/// no longer exists (already cleaned by hand) is not an error. Removal is
+/// best-effort: a failure is logged but never aborts the version deletion —
+/// the version record and its instances are already gone by then.
+pub(crate) fn remove_dedicated_home(
+    data_dir: &std::path::Path,
+    version: &str,
+) -> Result<(), String> {
+    let home = dedicated_home_path(data_dir, version);
+    match std::fs::remove_dir_all(&home) {
+        Ok(()) => {
+            crate::log_info!("已删除版本 {} 的专属 DSH_HOME {}", version, home.display());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除专属 DSH_HOME 失败: {e}")),
+    }
 }
 
 #[tauri::command]
@@ -93,9 +119,33 @@ pub fn remove_home(state: State<'_, AppState>, id: String) -> Result<(), String>
 // DSH versions
 // ---------------------------------------------------------------------------
 
+/// A version as the frontend sees it: the stored record plus its 专属
+/// DSH_HOME, derived here (where `data_dir` is known) so the delete dialog can
+/// name the exact path it removes and no second implementation of the path
+/// rule exists on the JS side.
+#[derive(serde::Serialize)]
+pub struct DshVersionView {
+    pub id: String,
+    pub version: String,
+    pub dir: std::path::PathBuf,
+    pub dedicated_home: String,
+}
+
 #[tauri::command]
-pub fn list_versions(state: State<'_, AppState>) -> Result<Vec<DshVersion>, String> {
-    Ok(state.config.lock().unwrap().versions.clone())
+pub fn list_versions(state: State<'_, AppState>) -> Result<Vec<DshVersionView>, String> {
+    let cfg = state.config.lock().unwrap();
+    Ok(cfg
+        .versions
+        .iter()
+        .map(|v| DshVersionView {
+            id: v.id.clone(),
+            version: v.version.clone(),
+            dir: v.dir.clone(),
+            dedicated_home: dedicated_home_path(&state.data_dir, &v.version)
+                .to_string_lossy()
+                .to_string(),
+        })
+        .collect())
 }
 
 /// Queries the npm registry for available @deepseek-ai/dsh versions with
@@ -257,6 +307,17 @@ pub async fn remove_version(
 
     // Best-effort removal of the install directory.
     let _ = std::fs::remove_dir_all(&version.dir);
+
+    // The version's 专属 DSH_HOME goes with it, judged by path alone
+    // (ADR-0002): `<数据目录>/homes/<版本名>` is the one path the launcher can
+    // prove it created, so `~/.dsh` and any user-specified HOME — which are
+    // also DSH_HOMEs, possibly pointed at by an instance — are never touched.
+    // This runs after the state save: the state is the source of truth, and a
+    // HOME left behind by a save-then-fail is recoverable, unlike the reverse.
+    // Best-effort, so a foreign file inside the HOME cannot block the delete.
+    if let Err(e) = remove_dedicated_home(&state.data_dir, &version.version) {
+        crate::log_warn!("删除版本 {} 的专属 DSH_HOME 失败，忽略: {e}", version.version);
+    }
     Ok(())
 }
 
@@ -1170,4 +1231,89 @@ pub(crate) fn save_state(
     cfg: &crate::config::Config,
 ) -> Result<(), String> {
     crate::config::save_config(&state.config_path, cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch data dir under the OS temp dir (the existing test style),
+    /// removed on drop so a failed assert never leaves debris behind.
+    struct ScratchDir(std::path::PathBuf);
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn dedicated_home_path_uses_homes_dir_and_sanitized_name() {
+        let data_dir = std::path::Path::new("/data/launcher");
+        assert_eq!(
+            dedicated_home_path(data_dir, "0.1.0-rc.6"),
+            std::path::Path::new("/data/launcher/homes/0.1.0-rc.6"),
+        );
+        // The name is sanitized with the SAME rule the installer used, so the
+        // path deleted is provably the path created.
+        assert_eq!(
+            dedicated_home_path(data_dir, "a/b c"),
+            std::path::Path::new("/data/launcher/homes/a_b c"),
+        );
+    }
+
+    #[test]
+    fn remove_dedicated_home_deletes_the_dedicated_path() {
+        let data = ScratchDir::new("t7-dedicated");
+        let home = dedicated_home_path(data.path(), "0.1.0-rc.6");
+        std::fs::create_dir_all(home.join("storages")).unwrap();
+        std::fs::write(home.join("storages/session.json"), "{}").unwrap();
+
+        remove_dedicated_home(data.path(), "0.1.0-rc.6").unwrap();
+
+        assert!(!home.exists(), "专属 DSH_HOME 应被删除");
+    }
+
+    #[test]
+    fn remove_dedicated_home_missing_path_is_not_an_error() {
+        let data = ScratchDir::new("t7-missing");
+        // The dedicated path was never created (or was cleaned by hand):
+        // deletion must still complete without error.
+        assert!(!dedicated_home_path(data.path(), "0.1.0-rc.6").exists());
+        remove_dedicated_home(data.path(), "0.1.0-rc.6").unwrap();
+    }
+
+    #[test]
+    fn remove_dedicated_home_leaves_other_paths_alone() {
+        let data = ScratchDir::new("t7-only-by-path");
+        // A stand-in for the user's `~/.dsh` (the launcher auto-adopts it and
+        // an instance may point at it) and a user-specified HOME. Both are
+        // DSH_HOMEs, but neither is the version's 专属 DSH_HOME.
+        let user_dsh = data.path().join(".dsh");
+        let user_home = data.path().join("user-specified-home");
+        std::fs::create_dir_all(user_dsh.join("sessions")).unwrap();
+        std::fs::create_dir_all(user_home.join("sessions")).unwrap();
+        // The version whose HOME we delete...
+        let target = dedicated_home_path(data.path(), "0.1.0-rc.6");
+        std::fs::create_dir_all(&target).unwrap();
+        // ...and a sibling version's dedicated HOME, which must also survive.
+        let sibling = dedicated_home_path(data.path(), "0.1.0-rc.5");
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        remove_dedicated_home(data.path(), "0.1.0-rc.6").unwrap();
+
+        assert!(!target.exists());
+        assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
+        assert!(user_dsh.join("sessions").is_dir(), "~/.dsh 不受影响");
+        assert!(user_home.join("sessions").is_dir(), "用户指定的 HOME 不受影响");
+    }
 }

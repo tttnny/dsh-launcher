@@ -193,7 +193,7 @@
     "emptyInstalled": "尚未安装任何 DSH 版本",
     "noData": "暂无数据",
     "deleteVersion": "删除",
-    "confirmDeleteVersion": "确定删除版本 {version}？对应的实例也将一并移除（专属数据目录保留）。",
+    "confirmDeleteVersion": "确定删除版本 {version}？对应的实例将一并移除，专属 DSH_HOME「{path}」也会被删除——其中包含会话历史与凭据，删除后不可恢复。",
     "versionDeleted": "版本 {version} 已删除",
     "usedBy": "{count} 个实例引用",
     "sourceBuildTag": "源码构建",

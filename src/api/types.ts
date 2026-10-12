@@ -10,6 +10,12 @@ export interface DshVersion {
   id: string
   version: string
   dir: string
+  /**
+   * The version's 专属 DSH_HOME (`<数据目录>/homes/<版本名>`), derived
+   * backend-side so the delete-confirmation dialog can name the exact path it
+   * will remove. Deleting a version removes this path — and only this one.
+   */
+  dedicated_home: string
 }
 
 export interface DshInstance {
