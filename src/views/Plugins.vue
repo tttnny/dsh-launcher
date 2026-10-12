@@ -102,6 +102,12 @@ const plugins = computed<PluginItem[]>(() => pluginView.value?.plugins ?? [])
 const viewMode = computed(() => pluginView.value?.mode ?? 'not-running')
 const viewReason = computed(() => pluginView.value?.reason ?? null)
 const managed = computed(() => viewMode.value === 'managed')
+// When the read-only list came from the profile's own files, the UI says so:
+// the file-sourced list is a best-effort projection, not the instance's answer.
+const viewFiles = computed(() => pluginView.value?.files ?? false)
+const filesNote = computed(() =>
+  viewFiles.value && plugins.value.length > 0 ? t('plugins.readonlyFilesNote') : '',
+)
 
 /** Display name: the instance's localized title, falling back to the module. */
 function pluginName(p: PluginItem): string {
@@ -123,6 +129,24 @@ async function loadPlugins() {
 
 watch([selectedHomeId, selectedProfile], () => {
   void loadPlugins()
+})
+
+// Once the instance starts (or stops), the page must switch between managed and
+// read-only without an app restart. The backend resolves the HOME+Profile to a
+// running instance, so a change to any instance status of the selected HOME is
+// what re-reads the view.
+const statusTick = computed(() => {
+  if (!selectedHomeId.value) return ''
+  return store.instances
+    .filter((i) => i.home_id === selectedHomeId.value)
+    .map((i) => {
+      const st = store.statusOf(i.id)
+      return `${i.id}:${st.state}:${st.profile ?? ''}`
+    })
+    .join('|')
+})
+watch(statusTick, (now, before) => {
+  if (now !== before) void loadPlugins()
 })
 
 const pluginColumns = computed(() => [
@@ -186,8 +210,9 @@ const pluginColumns = computed(() => [
       </div>
 
       <!-- The table renders whenever the instance gave us entries (managed), or
-           a later ticket supplies an offline list; a pure read-only page shows
-           only the banner, not a contradictory empty table. -->
+           the offline read produced a file-sourced list; a pure read-only page
+           with nothing to show has only the banner, not a contradictory empty
+           table. -->
       <a-table
         v-if="managed || plugins.length > 0"
         :columns="pluginColumns"
@@ -222,6 +247,9 @@ const pluginColumns = computed(() => [
           <DlEmpty icon="plugin" :description="t('plugins.pluginsEmpty')" />
         </template>
       </a-table>
+      <!-- Read-only list read from the profile files: the offline content is a
+           best-effort projection, so say how it differs from the instance's. -->
+      <p v-if="filesNote" class="plugins-files-note">{{ filesNote }}</p>
     </div>
 
     <!-- Empty Selection Card -->
@@ -314,5 +342,11 @@ const pluginColumns = computed(() => [
 
 .plugin-no-version {
   color: var(--color-text-4);
+}
+
+.plugins-files-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-text-3);
 }
 </style>
