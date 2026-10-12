@@ -324,6 +324,78 @@ async function onToggleBundle(b: BundleItem, enabled: boolean) {
   }
 }
 
+/**
+ * Whether a removable bundle's delete entry is now actionable: only while the
+ * profile is manageable and this row has no write in flight. A bundle that
+ * ships with DSH (`removable:false`) never qualifies.
+ */
+function canRemove(b: BundleItem): boolean {
+  return managed.value && b.removable && !bundlePending.value[b.name]
+}
+
+/**
+ * Why a bundle that ships with DSH (`removable:false`) cannot be removed,
+ * shown as a tooltip on its disabled delete button. This is the **common**
+ * case, not an edge case: every bundle shipped with the install reports
+ * `removable:false`, including the base and web-app layers.
+ */
+function removeBlockedReason(b: BundleItem): string {
+  return b.readOnlyReason === 'management-required'
+    ? t('plugins.bundleRemoveManaged')
+    : t('plugins.bundleRemoveNotRemovable')
+}
+
+/**
+ * Removes a whole Bundle（补丁层） through the instance's native plugin manager
+ * — the same path the Web UI uses, so a plugin the Web UI can remove the
+ * launcher can too. `removable:false` bundles never reach here (their button is
+ * disabled); the outcome is still reported truthfully if the instance refuses.
+ */
+async function onRemoveBundle(b: BundleItem) {
+  if (!selectedHomeId.value || !selectedProfile.value) return
+  bundlePending.value = { ...bundlePending.value, [b.name]: true }
+  try {
+    const outcome = await api.removeBundle({
+      homeId: selectedHomeId.value,
+      profile: selectedProfile.value,
+      name: b.name,
+    })
+    // changed:false = the instance refused (a reason, not a failure); the
+    // localized reason is in errorCode (the backend folds it in).
+    if (!outcome.changed) {
+      Message.warning(outcome.errorCode || t('plugins.outcomeFailed'))
+      return
+    }
+    if (outcome.application === 'applied') {
+      Message.success(t('plugins.bundleRemoved', { name: bundleName(b) }))
+    } else if (outcome.application === 'restart-required') {
+      Message.success(t('plugins.bundleRemovedRestart', { name: bundleName(b) }))
+    } else if (outcome.application === 'overridden') {
+      Message.warning(t('plugins.outcomeOverridden'))
+    } else if (outcome.application === 'failed') {
+      Message.warning(
+        outcome.diagnostic
+          ? `${t('plugins.outcomeFailed')}：${outcome.diagnostic}`
+          : t('plugins.outcomeFailed'),
+      )
+    } else {
+      Message.info(t('plugins.outcomeCancelled'))
+    }
+    // Re-sync so the list matches the instance's true state — the bundle and
+    // the entries it brought in must really be gone.
+    await loadPlugins()
+  } catch (e) {
+    // Transport-layer failure: the removal did not happen; surface it and
+    // re-sync so the UI is not stale.
+    Message.error(String(e))
+    await loadPlugins()
+  } finally {
+    const next = { ...bundlePending.value }
+    delete next[b.name]
+    bundlePending.value = next
+  }
+}
+
 const pluginColumns = computed(() => [
   { title: t('plugins.pluginName'), slotName: 'pname' },
   { title: t('plugins.pluginEntry'), slotName: 'pentry', width: 320 },
@@ -401,14 +473,40 @@ const pluginColumns = computed(() => [
             <div class="bundle-row-name-sub tnum">{{ b.name }}</div>
             <div class="bundle-row-state">{{ t('plugins.bundleStateActive') }}</div>
           </div>
-          <a-switch
-            :model-value="b.enabled"
-            :loading="!!bundlePending[b.name]"
-            :checked-text="t('plugins.bundleOn')"
-            :unchecked-text="t('plugins.bundleOff')"
-            size="small"
-            @change="(value) => onToggleBundle(b, Boolean(value))"
-          />
+          <div class="bundle-row-actions">
+            <a-switch
+              :model-value="b.enabled"
+              :loading="!!bundlePending[b.name]"
+              :checked-text="t('plugins.bundleOn')"
+              :unchecked-text="t('plugins.bundleOff')"
+              size="small"
+              @change="(value) => onToggleBundle(b, Boolean(value))"
+            />
+            <!-- Removal goes through the instance's native API. A bundle that
+                 ships with DSH (`removable:false`) is the common case: the
+                 button is disabled and its reason is shown on hover. -->
+            <a-popconfirm
+              v-if="canRemove(b)"
+              :content="t('plugins.bundleRemoveConfirm', { name: bundleName(b) })"
+              :ok-text="t('plugins.bundleRemoveOk')"
+              @ok="onRemoveBundle(b)"
+            >
+              <button class="mac-micro-btn danger">{{ t('plugins.bundleRemove') }}</button>
+            </a-popconfirm>
+            <!-- A bundle that ships with DSH cannot be removed at all: the
+                 button is disabled and its reason is shown. A disabled button
+                 receives no hover events, so the reason rides a wrapper the
+                 tooltip can bind to. -->
+            <a-tooltip v-else-if="!b.removable" :content="removeBlockedReason(b)">
+              <span class="bundle-remove-disabled">
+                <button class="mac-micro-btn danger" disabled>{{ t('plugins.bundleRemove') }}</button>
+              </span>
+            </a-tooltip>
+            <!-- Removable, but a write for this row is in flight. -->
+            <button v-else class="mac-micro-btn danger" disabled>
+              {{ t('plugins.bundleRemove') }}
+            </button>
+          </div>
         </div>
       </div>
       <div v-else class="bundle-empty">{{ t('plugins.bundlesEmpty') }}</div>
@@ -434,15 +532,33 @@ const pluginColumns = computed(() => [
               <div class="bundle-row-name-sub tnum">{{ b.name }}</div>
               <div class="bundle-row-state">{{ t('plugins.bundleStateInactive') }}</div>
             </div>
-            <a-switch
-              :model-value="b.enabled"
-              :loading="!!bundlePending[b.name]"
-              :disabled="b.availability === 'missing'"
-              :checked-text="t('plugins.bundleOn')"
-              :unchecked-text="t('plugins.bundleOff')"
-              size="small"
-              @change="(value) => onToggleBundle(b, Boolean(value))"
-            />
+            <div class="bundle-row-actions">
+              <a-switch
+                :model-value="b.enabled"
+                :loading="!!bundlePending[b.name]"
+                :disabled="b.availability === 'missing'"
+                :checked-text="t('plugins.bundleOn')"
+                :unchecked-text="t('plugins.bundleOff')"
+                size="small"
+                @change="(value) => onToggleBundle(b, Boolean(value))"
+              />
+              <a-popconfirm
+                v-if="canRemove(b)"
+                :content="t('plugins.bundleRemoveConfirm', { name: bundleName(b) })"
+                :ok-text="t('plugins.bundleRemoveOk')"
+                @ok="onRemoveBundle(b)"
+              >
+                <button class="mac-micro-btn danger">{{ t('plugins.bundleRemove') }}</button>
+              </a-popconfirm>
+              <a-tooltip v-else-if="!b.removable" :content="removeBlockedReason(b)">
+                <span class="bundle-remove-disabled">
+                  <button class="mac-micro-btn danger" disabled>{{ t('plugins.bundleRemove') }}</button>
+                </span>
+              </a-tooltip>
+              <button v-else class="mac-micro-btn danger" disabled>
+                {{ t('plugins.bundleRemove') }}
+              </button>
+            </div>
           </div>
         </template>
       </div>
@@ -682,6 +798,27 @@ const pluginColumns = computed(() => [
 
 .bundle-row-main {
   min-width: 0;
+}
+
+/* Row controls: the mount/unmount switch and the remove button. Kept in one
+   group so a row stays a single line whatever the bundle's removable state. */
+.bundle-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+
+  /* A disabled remove button must *read* as disabled — the shared
+     .mac-micro-btn keeps its colour when disabled, so dim it here. */
+  .mac-micro-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+/* The tooltip binds to this wrapper: a disabled button emits no hover events. */
+.bundle-remove-disabled {
+  display: inline-flex;
 }
 
 .bundle-row-head {

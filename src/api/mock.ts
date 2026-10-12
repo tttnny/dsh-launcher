@@ -15,6 +15,7 @@ import type {
   PluginView,
   RemoteVersion,
   RuntimeStatus,
+  RemoveBundleInput,
   SetBundleEnabledInput,
   SetPluginEnabledInput,
   SetPluginsEnabledInput,
@@ -781,6 +782,56 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         changed: true,
         application: 'applied',
         stage: 'enable',
+        target: input.name,
+        errorCode: null,
+        diagnostic: null,
+        warnings: [],
+      } as T
+    }
+    case 'remove_bundle': {
+      const input = args?.input as RemoveBundleInput
+      const homeId = input.homeId
+      const profile = input.profile
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      // No instance → a plain error (mirrors the backend Err), not a refusal.
+      if (!running) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, true)
+      const index = view.bundles.findIndex((b) => b.name === input.name)
+      if (index < 0) {
+        // The instance answers a refusal (not an error) with the code only.
+        return {
+          changed: false,
+          application: 'failed',
+          stage: 'remove',
+          target: input.name,
+          errorCode: '实例里找不到这个 Bundle',
+          diagnostic: null,
+          warnings: [],
+        } as T
+      }
+      // Bundles that ship with DSH can only be disabled, never removed — the
+      // instance refuses with `not-removable` (HTTP 200, changed:false).
+      if (!view.bundles[index].removable) {
+        return {
+          changed: false,
+          application: 'failed',
+          stage: 'remove',
+          target: input.name,
+          errorCode: '该 Bundle 随 DSH 发布，只能停用不能删除',
+          diagnostic: null,
+          warnings: [],
+        } as T
+      }
+      view.bundles.splice(index, 1)
+      return {
+        changed: true,
+        application: 'applied',
+        stage: 'remove',
         target: input.name,
         errorCode: null,
         diagnostic: null,

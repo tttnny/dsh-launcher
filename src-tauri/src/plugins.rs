@@ -458,6 +458,55 @@ impl From<NativeChangeResult> for ChangeOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Commands: bundle (patch layer) removal (native)
+// ---------------------------------------------------------------------------
+
+/// Input for removing a whole **Bundle（补丁层）**. The native argument is the
+/// bundle `name` (not a plugin-entry id).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveBundleInput {
+    #[serde(alias = "home_id")]
+    pub home_id: String,
+    pub profile: String,
+    pub name: String,
+}
+
+/// Removes one whole **Bundle（补丁层）** through the running instance's native
+/// plugin manager (`removeBundle`) — the same path the Web UI uses, so a plugin
+/// the Web UI can remove the launcher can too, and the launcher still never
+/// writes the profile manifest (`package.json`) or the patch document
+/// (ADR-0001).
+///
+/// The instance is resolved the same way as [`list_plugins`]; without one (or
+/// with an adopted one) the command is a plain `Err`. A bundle that ships with
+/// DSH is **refused** by the instance (`changed:false` +
+/// `error.code:"not-removable"`): that is returned as a [`ChangeOutcome`] with
+/// the localized reason folded into `diagnostic`, so the page explains "this
+/// can't be removed" rather than "something broke" (design §4b). The UI
+/// disables the entry for `removable:false` bundles in the first place; this
+/// path is the truthful answer if a refusal still arrives.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn remove_bundle(
+    state: State<'_, AppState>,
+    input: RemoveBundleInput,
+) -> Result<ChangeOutcome, String> {
+    remove_bundle_for(state.inner(), &input).await
+}
+
+/// The body of [`remove_bundle`], taking `&AppState` so tests drive the
+/// resolve branches without a Tauri runtime. Shares the write path
+/// ([`write_client`]) with T2/T3.
+pub(crate) async fn remove_bundle_for(
+    state: &AppState,
+    input: &RemoveBundleInput,
+) -> Result<ChangeOutcome, String> {
+    let client = write_client(state, &input.home_id, &input.profile).await?;
+    let result = client.remove_bundle(&input.name).await?;
+    Ok(localize_refusal(ChangeOutcome::from(result)))
+}
+
+// ---------------------------------------------------------------------------
 // Commands: enable / disable (cordis.patch.yml disabled rows)
 // ---------------------------------------------------------------------------
 
@@ -1896,6 +1945,53 @@ mod tests {
             );
         }
         let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
+    }
+
+    fn remove_input(name: &str) -> RemoveBundleInput {
+        RemoveBundleInput {
+            home_id: "h1".to_string(),
+            profile: "web".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Removal needs the profile's instance running: the native plugin manager
+    /// owns plugin state (ADR-0001), so with none the command is a plain `Err`
+    /// (not a refusal outcome) so the UI re-syncs and tells the user to start.
+    #[tokio::test]
+    async fn remove_bundle_refuses_without_a_running_instance() {
+        let state = app_state(one_home(), one_instance());
+        let err = remove_bundle_for(&state, &remove_input("ds-bot"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so its bundles cannot be
+    /// removed through the native API — a distinct message from "not running".
+    #[tokio::test]
+    async fn remove_bundle_refuses_for_an_adopted_instance() {
+        let state = app_state(one_home(), one_instance());
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = remove_bundle_for(&state, &remove_input("ds-bot"))
             .await
             .unwrap_err();
         assert!(err.contains("接管"), "err: {err}");

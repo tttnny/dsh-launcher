@@ -211,6 +211,7 @@ pub fn run() {
             plugins::list_plugins,
             plugins::set_bundle_enabled,
             plugins::set_plugin_enabled,
+            plugins::remove_bundle,
             plugins::list_installed_plugins,
             plugins::set_plugins_enabled,
             plugins::uninstall_plugin,

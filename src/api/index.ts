@@ -18,6 +18,7 @@ import type {
   RuntimeStatus,
   SetBundleEnabledInput,
   SetPluginEnabledInput,
+  RemoveBundleInput,
   SetPluginsEnabledInput,
   TaskInfo,
   TaskLog,
@@ -138,6 +139,13 @@ export const api = {
    * (ADR-0001); a refusal comes back as a ChangeOutcome, not a thrown error.
    */
   setBundleEnabled: (input: SetBundleEnabledInput) => call<ChangeOutcome>('set_bundle_enabled', { input }),
+  /**
+   * Removes one whole Bundle（补丁层） through the instance's native plugin
+   * manager — the same path the Web UI uses. A bundle that ships with DSH
+   * (`removable:false`) is refused as an outcome with `errorCode`, never a
+   * thrown error; the launcher never writes the profile files (ADR-0001).
+   */
+  removeBundle: (input: RemoveBundleInput) => call<ChangeOutcome>('remove_bundle', { input }),
   /**
    * Enables/disables one **plugin entry** through the instance's native plugin
    * manager (`id` is the entryId). The result says truthfully whether it took
