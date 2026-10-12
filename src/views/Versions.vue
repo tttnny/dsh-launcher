@@ -61,9 +61,7 @@ const installAction = useAction(
 
 /** The install running for one remote version row, if any. */
 function installOf(version: string): TaskInfo | null {
-  return (
-    Object.values(store.installingVersions).find((task) => task.version === version) ?? null
-  )
+  return store.installingVersions[version] ?? null
 }
 
 function onSelectVersion(row: RemoteVersion) {

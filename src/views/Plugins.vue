@@ -58,9 +58,7 @@ type StatusFilter = 'all' | 'on' | 'off' | 'problem'
 
 const statusFilter = ref<StatusFilter>('all')
 
-const problemCount = computed(
-  () => plugins.value.filter((p) => p.readOnlyReason === 'unaddressable').length,
-)
+const problemCount = computed(() => plugins.value.filter(isProblem).length)
 
 /** A row the instance cannot address through the profile patch. `management-required`
  *  entries (the manager's own core entries) are normal, not problems. */
@@ -971,9 +969,6 @@ const pluginColumns = computed(() => [
   color: var(--color-text-1);
 }
 
-/* The module an entry actually loads. Shown under the title so a renamed
-   entry's real package is never a mystery, and dimmed so it reads as identity,
-   not as a second name. */
 /* Identity under the title: the module specifier and the version, on one line
    so a row's technical facts stay a unit instead of stacking three deep. */
 .plugin-cell-sub {

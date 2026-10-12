@@ -113,8 +113,9 @@ pub async fn start_install_version_task(
 
 /// Enqueues a background task that installs the given DSH version (if not
 /// installed yet) and then creates the instance. Returns the task id.
-/// Internal: only reachable through `start_install_version_task` — installing
-/// a version IS creating its 1:1 instance (see ADR-0001).
+/// Internal: only reachable through `start_install_version_task`. Installing a
+/// version acquires its directory; the dedicated HOME and the 1:1 instance are
+/// recorded by the task body only after the install succeeds.
 async fn start_create_instance_task(
     app: AppHandle,
     state: State<'_, AppState>,

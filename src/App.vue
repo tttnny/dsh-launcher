@@ -224,7 +224,7 @@ watch(
 
 // --- Sidebar navigation -------------------------------------------------------
 
-type NavKey = 'home' | 'homes' | 'profiles' | 'versions' | 'tasks' | 'settings'
+type NavKey = 'home' | 'homes' | 'profiles' | 'versions' | 'settings'
 
 const siderCollapsed = ref(localStorage.getItem('dsh-launcher.siderCollapsed') === '1')
 
@@ -245,7 +245,6 @@ const navSelected = computed<NavKey>(() => {
   // home is Profiles.
   if (name === 'profiles' || name === 'plugins') return 'profiles'
   if (name === 'versions') return 'versions'
-  if (name === 'tasks') return 'tasks'
   if (name === 'settings') return 'settings'
   return 'home'
 })
@@ -263,9 +262,6 @@ function navGo(key: NavKey) {
       break
     case 'versions':
       void router.push({ name: 'versions' }).catch(() => undefined)
-      break
-    case 'tasks':
-      void router.push({ name: 'tasks' }).catch(() => undefined)
       break
     case 'settings':
       void router.push({ name: 'settings' }).catch(() => undefined)

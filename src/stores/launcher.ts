@@ -23,6 +23,17 @@ export interface HealthLogItem {
   message: string
 }
 
+/**
+ * The install ledger: versions an install task is currently fetching, keyed by
+ * version (a version has at most one install running). Accepts the full task
+ * list, so both the initial fetch and a re-read build it the same way.
+ */
+function installLedger(tasks: TaskInfo[]): Record<string, TaskInfo> {
+  return Object.fromEntries(
+    tasks.filter((t) => t.kind === 'install-version' && t.state === 'running').map((t) => [t.version, t]),
+  )
+}
+
 interface LauncherState {
   homes: DshHome[]
   versions: DshVersion[]
@@ -30,14 +41,15 @@ interface LauncherState {
   settings: LauncherSettings
   statusById: Record<string, InstanceStatus>
   /**
-   * Versions an install task is currently fetching, so the Versions page can
-   * show the progress where the version itself lives. The launcher installs
-   * nothing else, and `instance_id` is no longer read by any view: a finished
-   * install's outcome is the instance that appears in the list.
+   * Versions an install task is currently fetching, keyed by version, so the
+   * Versions page can show the progress where the version itself lives. The
+   * launcher installs nothing else, and `instance_id` is no longer read by any
+   * view: a finished install's outcome is the instance that appears in the list.
    */
   installingVersions: Record<string, TaskInfo>
-  /** Install calls whose task the backend has not listed yet, by task id. */
-  pendingInstallTasks: Record<string, string>
+  /** Install calls whose task the backend has not listed yet, by task id. A
+   *  null version means the task was never claimed by this launcher. */
+  pendingInstallTasks: Record<string, string | null>
   remoteVersions: RemoteVersion[]
   remoteLoading: boolean
   runtime: RuntimeStatus | null
@@ -132,9 +144,7 @@ export const useLauncherStore = defineStore('launcher', {
       this.settings = settings
       this.statusById = Object.fromEntries(statuses.map((st) => [st.id, st]))
       this.runtime = runtime
-      this.installingVersions = Object.fromEntries(
-        tasks.filter((t) => t.kind === 'install-version' && t.state === 'running').map((t) => [t.id, t]),
-      )
+      this.installingVersions = installLedger(tasks)
       this.loaded = true
       live = true
       pending.forEach(applyStatus)
@@ -142,21 +152,22 @@ export const useLauncherStore = defineStore('launcher', {
       // Only install progress is tracked, and only while it runs: an install
       // whose event never arrived is recovered by `watchInstallTask` when the
       // Versions page starts one, and one that finished without an event is
-      // retired on the next refresh. Nothing here invents an instance — the
-      // backend owns that, and the list below is re-read once it says so.
+      // retired on the next refresh. A running task already in the ledger is
+      // overwritten with the event's fuller record.
       await api.onTaskProgress((p) => {
-        const existing = this.installingVersions[p.id]
-        if (existing) {
-          if (p.state === 'running') {
-            existing.percent = p.percent
-            existing.message = p.message
+        if (p.state === 'running') {
+          // Keyed by version, so adoption needs the version the row is under:
+          // from the claim `watchInstallTask` left, or from the task the
+          // backend just listed.
+          const version = this.pendingInstallTasks[p.id] ?? this.installingVersions[p.id]?.version
+          delete this.pendingInstallTasks[p.id]
+          if (version == null) {
+            // Not ours to show, but the backend knows it by id: keep watching
+            // so it lands here if the row ever appears.
+            if (this.pendingInstallTasks[p.id] === undefined) this.pendingInstallTasks[p.id] = null
             return
           }
-          delete this.installingVersions[p.id]
-        } else if (p.state === 'running' && this.pendingInstallTasks[p.id] !== undefined) {
-          const version = this.pendingInstallTasks[p.id]
-          delete this.pendingInstallTasks[p.id]
-          this.installingVersions[p.id] = {
+          this.installingVersions[version] = {
             id: p.id,
             kind: 'install-version',
             label: version,
@@ -170,21 +181,19 @@ export const useLauncherStore = defineStore('launcher', {
             logs: [],
           }
           return
-        } else {
-          // A task this launcher is not showing — an instance being launched
-          // from elsewhere, or one this process list missed. Keep watching it
-          // (the backend answered with its id) so its progress still lands.
-          this.pendingInstallTasks[p.id] = ''
         }
-        // An install that finished may have created an instance and a version
-        // directory: re-read both, then retire the progress row.
-        this.refreshInstances()
-        this.refreshVersions()
-        this.refreshHomes()
+        // Terminal: it may have created an instance and a version directory.
+        // Re-read both, but only when the event names an instance — otherwise
+        // every install's progress tick would trigger three full re-reads.
+        if (p.instance_id) {
+          this.refreshInstances()
+          this.refreshVersions()
+          this.refreshHomes()
+        }
       })
 
       await api.onTaskLog((l) => {
-        const existing = this.installingVersions[l.id]
+        const existing = Object.values(this.installingVersions).find((t) => t.id === l.id)
         if (!existing) return
         if (existing.logs.length >= 1000) existing.logs.shift()
         existing.logs.push(l.line)
@@ -202,10 +211,7 @@ export const useLauncherStore = defineStore('launcher', {
     },
     /** Re-reads the install ledger the Versions page renders. */
     async refreshInstallTasks() {
-      const tasks = await api.listTasks()
-      this.installingVersions = Object.fromEntries(
-        tasks.filter((t) => t.kind === 'install-version' && t.state === 'running').map((t) => [t.id, t]),
-      )
+      this.installingVersions = installLedger(await api.listTasks())
     },
 
     /**
@@ -217,7 +223,7 @@ export const useLauncherStore = defineStore('launcher', {
       const tasks = await api.listTasks()
       const task = tasks.find((t) => t.id === taskId)
       if (task) {
-        this.installingVersions[taskId] = task
+        this.installingVersions[version] = task
         return
       }
       this.pendingInstallTasks[taskId] = version
