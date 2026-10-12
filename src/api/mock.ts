@@ -169,11 +169,20 @@ function nativePlugin(
 /** Seed a native view on first read, so the Plugins page is usable. */
 function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
   if (!running) {
+    // Mirror the backend's offline branch: read-only, list from the profile's
+    // files (best-effort, includes core entries), distinct reason.
     return {
       mode: 'not-running',
       reason:
-        '实例未运行：插件列表与管理需要该 Profile 的实例正在运行，请先启动实例。',
-      plugins: [],
+        '实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。',
+      files: true,
+      plugins: [
+        // Core entries are shown offline too (the old reader's blanket
+        // @deepseek-ai/* filter is gone), sourced from the profile files.
+        nativePlugin('dsh-base', '@deepseek-ai/dsh-base', 'DSH 基础', true, null, null),
+        nativePlugin('dsh-auxiliary', '@dsh-plugin/dsh-auxiliary', '辅助工具', true, null, null),
+        nativePlugin('ds-bot', '@canglongcl/ds-bot', 'ds-bot', false, null, null),
+      ],
       bundles: [],
     }
   }
@@ -182,6 +191,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
     mockNativeStore[key] = {
       mode: 'managed',
       reason: null,
+      files: false,
       plugins: [
         // Core entries the launcher's old reader dropped: they must show up.
         nativePlugin(

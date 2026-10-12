@@ -166,6 +166,7 @@
     "selectProfile": "选择 Profile",
     "pluginsPickProfile": "请先选择一个 Profile 以查看其中的插件",
     "pluginsEmpty": "该 Profile 下没有插件",
+    "readonlyFilesNote": "实例未运行时，列表从该 Profile 的文件读出，是尽力而为的结果：按作用域列出 Profile 声明的插件，不含实例的实时状态与错误信息。",
     "pluginVersion": "版本",
     "pluginStatus": "状态",
     "pluginOn": "启用",
