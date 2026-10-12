@@ -4,6 +4,7 @@
 // test note.
 
 import type {
+  ChangeOutcome,
   DoctorReport,
   DshHome,
   DshInstance,
@@ -15,6 +16,7 @@ import type {
   PluginView,
   RemoteVersion,
   RuntimeStatus,
+  SetPluginEnabledInput,
   SetPluginsEnabledInput,
   TaskInfo,
   TaskLog,
@@ -129,6 +131,13 @@ export const api = {
   /** The instance's own plugin list (native plugin management, ADR-0001). */
   listPlugins: (homeId: string, profile: string) =>
     call<PluginView>('list_plugins', { home_id: homeId, profile }),
+  /**
+   * Enables/disables one **plugin entry** through the instance's native plugin
+   * manager (`id` is the entryId). The result says truthfully whether it took
+   * effect; a refusal is an outcome with `errorCode`, not a thrown error.
+   */
+  setPluginEnabled: (input: SetPluginEnabledInput) =>
+    call<ChangeOutcome>('set_plugin_enabled', { input }),
   listInstalledPlugins: (homeId: string, profile: string) =>
     call<InstalledPlugin[]>('list_installed_plugins', { home_id: homeId, profile }),
   setPluginsEnabled: (input: SetPluginsEnabledInput) => call<void>('set_plugins_enabled', { input }),

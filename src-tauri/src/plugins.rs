@@ -808,6 +808,112 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Commands: native plugin enable / disable (the instance's own plugin manager)
+// ---------------------------------------------------------------------------
+
+/// Input for toggling one **plugin entry** (native `setPluginEnabled`).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPluginEnabledInput {
+    #[serde(alias = "home_id")]
+    pub home_id: String,
+    pub profile: String,
+    /// The entry's `entryId` — the native id, never the old package name.
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Enables/disables one **plugin entry** through the instance's native plugin
+/// manager (`setPluginEnabled`), by the entry's `entryId`. Shared with T3/T4's
+/// write commands through [`set_plugin_enabled_for`].
+///
+/// The launcher never writes the profile here (ADR-0001): the running DSH owns
+/// plugin state. The instance's answer is returned **truthfully** — a refusal
+/// (`changed:false` + `error.code`) is a [`crate::native::ChangeOutcome`], not
+/// an error; only a missing/unmanageable instance or a transport failure is
+/// `Err`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_plugin_enabled(
+    state: State<'_, AppState>,
+    input: SetPluginEnabledInput,
+) -> Result<crate::native::ChangeOutcome, String> {
+    set_plugin_enabled_for(state.inner(), &input).await
+}
+
+/// The body of [`set_plugin_enabled`], taking `&AppState` so tests can drive
+/// the resolve/refuse branches without a Tauri runtime. This is the shared
+/// write path (design §4d): resolve the instance, connect, call, map.
+async fn set_plugin_enabled_for(
+    state: &AppState,
+    input: &SetPluginEnabledInput,
+) -> Result<crate::native::ChangeOutcome, String> {
+    use crate::native::ChangeOutcome;
+
+    let client = write_client(state, &input.home_id, &input.profile).await?;
+    let result = client.set_plugin_enabled(&input.id, input.enabled).await?;
+    Ok(localize_refusal(ChangeOutcome::from(result)))
+}
+
+/// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a
+/// connected [`NativeClient`](crate::native::NativeClient). The refusal messages
+/// are the ones the page shows for the "cannot manage now" states.
+pub(crate) async fn write_client(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Result<crate::native::NativeClient, String> {
+    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    if entry.adopted {
+        return Err("该实例由系统接管，无法管理插件".to_string());
+    }
+    let Some(url) = entry.url else {
+        return Err("实例未在运行，请先启动实例".to_string());
+    };
+    crate::native::NativeClient::connect(&url).await
+}
+
+/// Translates a native `error.code` refusal into the reason the page shows
+/// verbatim (design §4d). This is the **one** place codes become Chinese; the
+/// UI never maps them. An unlisted code is surfaced as-is, and an attached
+/// `diagnostic` is appended in parentheses.
+pub(crate) fn refusal_reason(code: &str, diagnostic: Option<&str>) -> String {
+    let base = match code {
+        "management-required" | "unaddressable" => "该条目由 DSH 自身管理，不能在这里改动",
+        "not-removable" => "该 Bundle 随 DSH 发布，只能停用不能删除",
+        "unknown-plugin" => "实例里找不到这个插件",
+        "" => "实例未说明原因",
+        other => other,
+    };
+    match diagnostic.filter(|d| !d.trim().is_empty()) {
+        Some(d) => format!("{base}（{d}）"),
+        None => base.to_string(),
+    }
+}
+
+/// Turns a refused write into the exact Chinese reason the page shows:
+/// `errorCode` stays for logic, and the localized reason rides in `diagnostic`
+/// (the frozen [`ChangeOutcome`](crate::native::ChangeOutcome) has no separate
+/// field) — so the UI shows it verbatim instead of guessing (design §4d).
+///
+/// Only a bare refusal (`changed:false` with a code) is rewritten; a
+/// `changed:true` + `failed` keeps the instance's own diagnostic (design §4b).
+pub(crate) fn localize_refusal(outcome: crate::native::ChangeOutcome) -> crate::native::ChangeOutcome {
+    if outcome.changed {
+        return outcome;
+    }
+    let Some(code) = outcome.error_code.clone() else {
+        return outcome;
+    };
+    let reason = refusal_reason(&code, outcome.diagnostic.as_deref());
+    crate::native::ChangeOutcome {
+        diagnostic: Some(reason),
+        ..outcome
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,5 +1318,143 @@ mod tests {
         let view = list_plugins_for(&state, "h1", "web").await.unwrap();
         assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
         assert!(view.plugins.is_empty());
+    }
+
+    fn one_home() -> Vec<crate::config::DshHome> {
+        vec![crate::config::DshHome {
+            id: "h1".to_string(),
+            name: "h1".to_string(),
+            path: std::path::PathBuf::from("/tmp/home"),
+        }]
+    }
+
+    fn one_instance() -> Vec<crate::config::DshInstance> {
+        vec![crate::config::DshInstance {
+            id: "i1".to_string(),
+            name: "i1".to_string(),
+            version_id: "v1".to_string(),
+            home_id: "h1".to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+            preserve_symlinks: false,
+        }]
+    }
+
+    fn plugin_input(id: &str, enabled: bool) -> SetPluginEnabledInput {
+        SetPluginEnabledInput {
+            home_id: "h1".to_string(),
+            profile: "web".to_string(),
+            id: id.to_string(),
+            enabled,
+        }
+    }
+
+    /// The refusal code becomes the reason the page shows verbatim; this is the
+    /// one place codes are translated (design §4d), never the UI.
+    #[test]
+    fn refusal_reason_translates_the_management_codes() {
+        assert_eq!(
+            refusal_reason("management-required", None),
+            "该条目由 DSH 自身管理，不能在这里改动"
+        );
+        assert_eq!(
+            refusal_reason("unaddressable", None),
+            "该条目由 DSH 自身管理，不能在这里改动"
+        );
+        assert_eq!(
+            refusal_reason("not-removable", None),
+            "该 Bundle 随 DSH 发布，只能停用不能删除"
+        );
+        assert_eq!(
+            refusal_reason("unknown-plugin", None),
+            "实例里找不到这个插件"
+        );
+        // An unlisted code is surfaced, never swallowed.
+        assert_eq!(refusal_reason("operation-error", None), "operation-error");
+        // A missing code still reads as a sentence, not an empty string.
+        assert_eq!(refusal_reason("", None), "实例未说明原因");
+        // The instance's diagnostic is attached when present.
+        assert_eq!(
+            refusal_reason("management-required", Some("managed by DSH")),
+            "该条目由 DSH 自身管理，不能在这里改动（managed by DSH）"
+        );
+    }
+
+    /// A refusal is rewritten so the page shows the Chinese reason verbatim
+    /// (`diagnostic` carries it; the code stays for logic) — the UI never maps
+    /// codes. A real "changed but failed" keeps the instance's diagnostic.
+    #[test]
+    fn localize_refusal_folds_the_reason_into_the_outcome() {
+        use crate::native::ChangeOutcome;
+
+        let refused = ChangeOutcome {
+            changed: false,
+            application: "failed".to_string(),
+            stage: "enable".to_string(),
+            target: "include:llm".to_string(),
+            error_code: Some("management-required".to_string()),
+            diagnostic: None,
+            warnings: vec![],
+        };
+        let localized = localize_refusal(refused);
+        assert_eq!(
+            localized.diagnostic.as_deref(),
+            Some("该条目由 DSH 自身管理，不能在这里改动")
+        );
+        assert_eq!(localized.error_code.as_deref(), Some("management-required"));
+
+        // changed:true is the instance's own "changed but didn't take effect":
+        // its diagnostic must survive untouched.
+        let failed = ChangeOutcome {
+            changed: true,
+            application: "failed".to_string(),
+            stage: "enable".to_string(),
+            target: "include:llm".to_string(),
+            error_code: Some("operation-error".to_string()),
+            diagnostic: Some("port in use".to_string()),
+            warnings: vec![],
+        };
+        let localized = localize_refusal(failed);
+        assert_eq!(localized.diagnostic.as_deref(), Some("port in use"));
+    }
+
+    /// ADR-0001: a plugin operation needs the profile's instance running;
+    /// otherwise the command refuses with a clear Chinese reason.
+    #[tokio::test]
+    async fn set_plugin_enabled_refuses_without_a_running_instance() {
+        let state = app_state(one_home(), one_instance());
+        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("实例未在运行"), "err: {err}");
+    }
+
+    /// An adopted instance has no recoverable token, so it cannot be managed.
+    #[tokio::test]
+    async fn set_plugin_enabled_refuses_an_adopted_instance() {
+        let state = app_state(one_home(), one_instance());
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
+            .await
+            .unwrap_err();
+        assert!(err.contains("接管"), "err: {err}");
     }
 }

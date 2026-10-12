@@ -209,6 +209,7 @@ pub fn run() {
             commands::open_instance_terminal,
             update::check_launcher_update,
             plugins::list_plugins,
+            plugins::set_plugin_enabled,
             plugins::list_installed_plugins,
             plugins::set_plugins_enabled,
             plugins::uninstall_plugin,

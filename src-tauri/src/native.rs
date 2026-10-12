@@ -119,6 +119,37 @@ pub struct NativeBundleError {
     pub diagnostic: Option<serde_json::Value>,
 }
 
+/// The native `ChangeResult` — the answer to a write method, narrowed to the
+/// stable subset the launcher shows. **A refused operation still returns HTTP
+/// 200 + `result.ok:true`**: the refusal arrives here as `changed:false` plus
+/// an `error.code`, which is "this cannot be changed", not a transport error
+/// (design §4b). Shared by T2/T3/T4 — there is exactly one definition.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeChangeResult {
+    pub changed: bool,
+    /// `applied` | `restart-required` | `overridden` | `failed` | `cancelled`.
+    /// Carried through as a string: the set has five members, not three.
+    pub application: String,
+    /// `install` | `enable` | `remove`.
+    pub stage: String,
+    pub target: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub error: Option<NativeChangeError>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Why a write was refused (`ManagementError`): the `code` (`management-required`
+/// | `unaddressable` | `not-removable` | …) plus an optional `diagnostic`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeChangeError {
+    pub code: String,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
+}
+
 /// One unary request the service strictly validates: **every field is
 /// required**; extra or missing fields are rejected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -355,6 +386,26 @@ impl NativeClient {
         let value = self.call("listBundles", serde_json::json!({})).await?;
         serde_json::from_value(value).map_err(|e| format!("解析 Bundle 列表失败: {e}"))
     }
+
+    /// Enables/disables one **plugin entry** by its `entryId` (the `id`
+    /// argument the service expects — never the old package name).
+    ///
+    /// Returns the instance's own [`NativeChangeResult`]: a refusal
+    /// (`changed:false` + `error.code`) is a normal answer, not an error. Only
+    /// the transport layer (`call`) can fail.
+    pub async fn set_plugin_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<NativeChangeResult, String> {
+        let value = self
+            .call(
+                "setPluginEnabled",
+                serde_json::json!({ "id": id, "enabled": enabled }),
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| format!("解析插件启停结果失败: {e}"))
+    }
 }
 
 /// Interprets a raw response: transport-layer failures (bad status, `not
@@ -569,6 +620,41 @@ impl From<NativeBundle> for BundleItem {
             availability: b.availability,
             read_only_reason: b.read_only_reason,
             error_code: b.error.and_then(|e| e.code),
+        }
+    }
+}
+
+/// The result of a write, handed to the Plugins page (design §4). Mirrors
+/// [`NativeChangeResult`] with the error lifted to `error_code` /
+/// `diagnostic`; `application` is carried through verbatim so the page can
+/// report 已生效 / 需重启 / 被覆盖 truthfully. T2/T3/T4 share this one shape.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeOutcome {
+    pub changed: bool,
+    /// `applied` | `restart-required` | `overridden` | `failed` | `cancelled`.
+    pub application: String,
+    pub stage: String,
+    pub target: String,
+    pub error_code: Option<String>,
+    pub diagnostic: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+impl From<NativeChangeResult> for ChangeOutcome {
+    fn from(r: NativeChangeResult) -> Self {
+        let (error_code, diagnostic) = match r.error {
+            Some(e) => (Some(e.code), e.diagnostic),
+            None => (None, None),
+        };
+        Self {
+            changed: r.changed,
+            application: r.application,
+            stage: r.stage,
+            target: r.target,
+            error_code,
+            diagnostic,
+            warnings: r.warnings,
         }
     }
 }
@@ -871,5 +957,110 @@ mod tests {
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["plugins"][0]["entryId"], "include:llm");
         assert_eq!(json["mode"], "managed");
+    }
+
+    /// A native `ChangeResult` value as the service answers it.
+    fn change_result(
+        application: &str,
+        changed: bool,
+        error: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "changed": changed,
+            "application": application,
+            "stage": "enable",
+            "target": "include:llm",
+            "warnings": [],
+        });
+        if let Some(err) = error {
+            value["error"] = err;
+        }
+        value
+    }
+
+    /// Toggling a **plugin entry** addresses it by `entryId` — never the old
+    /// package name — with the native `{id, enabled}` args, on the
+    /// `setPluginEnabled` method.
+    #[test]
+    fn set_plugin_enabled_sends_entry_id_and_enabled_args() {
+        let (client, fake) = client_with(vec![ok_response(change_result("applied", true, None))]);
+        block_on(client.set_plugin_enabled("include:llm", false)).unwrap();
+
+        let req = fake.last_sent();
+        assert_eq!(
+            req.url,
+            "http://127.0.0.1:34567/api/pluginManager/setPluginEnabled"
+        );
+        assert_eq!(req.envelope.method, "pluginManager/setPluginEnabled");
+        assert_eq!(
+            req.envelope.payload.args,
+            serde_json::json!({ "id": "include:llm", "enabled": false })
+        );
+    }
+
+    /// A refusal is HTTP 200 + `result.ok:true` with `changed:false` and an
+    /// `error.code` — "this cannot be changed", not a transport failure — so it
+    /// must come back as an ordinary result carrying the code, never an `Err`.
+    #[test]
+    fn set_plugin_enabled_surfaces_a_refusal_as_a_change_result() {
+        let (client, _) = client_with(vec![ok_response(change_result(
+            "failed",
+            false,
+            Some(serde_json::json!({
+                "code": "management-required",
+                "diagnostic": "managed by DSH",
+            })),
+        ))]);
+        let out = block_on(client.set_plugin_enabled("include:llm", false)).unwrap();
+        assert!(!out.changed);
+        assert_eq!(out.application, "failed");
+        assert_eq!(out.error.as_ref().unwrap().code, "management-required");
+        assert_eq!(
+            out.error.as_ref().unwrap().diagnostic.as_deref(),
+            Some("managed by DSH")
+        );
+    }
+
+    /// `application` has five values, not three: each is carried through
+    /// verbatim so the page can tell 已生效 / 需重启 / 被覆盖 / 失败 / 取消 apart.
+    #[test]
+    fn set_plugin_enabled_keeps_every_application_value() {
+        for application in [
+            "applied",
+            "restart-required",
+            "overridden",
+            "failed",
+            "cancelled",
+        ] {
+            let mut value = change_result(application, true, None);
+            value["warnings"] = serde_json::json!(["w1"]);
+            let (client, _) = client_with(vec![ok_response(value)]);
+            let out = block_on(client.set_plugin_enabled("include:llm", true)).unwrap();
+            assert_eq!(out.application, application);
+            assert_eq!(out.enabled, None);
+            assert_eq!(out.warnings, vec!["w1".to_string()]);
+        }
+    }
+
+    /// The frontend shape: the error is lifted to `errorCode`/`diagnostic` and
+    /// serialization is camelCase, matching `src/api/types.ts::ChangeOutcome`.
+    #[test]
+    fn change_outcome_projects_the_error_and_serializes_camel_case() {
+        let native: NativeChangeResult = serde_json::from_value(change_result(
+            "failed",
+            false,
+            Some(serde_json::json!({ "code": "unaddressable", "diagnostic": "root group" })),
+        ))
+        .unwrap();
+        let outcome = ChangeOutcome::from(native);
+        assert_eq!(outcome.error_code.as_deref(), Some("unaddressable"));
+        assert_eq!(outcome.diagnostic.as_deref(), Some("root group"));
+
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["errorCode"], "unaddressable");
+        assert_eq!(json["application"], "failed");
+        assert_eq!(json["stage"], "enable");
+        assert_eq!(json["target"], "include:llm");
+        assert_eq!(json["warnings"], serde_json::json!([]));
     }
 }
