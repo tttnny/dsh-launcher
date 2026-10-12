@@ -10,6 +10,8 @@ import type {
   InstalledPlugin,
   InstanceStatus,
   LauncherSettings,
+  PluginItem,
+  PluginView,
   RemoteVersion,
   RuntimeStatus,
   SetPluginsEnabledInput,
@@ -131,6 +133,115 @@ const mockTasks = new Map<string, TaskInfo>()
 const mockProfiles: Record<string, string[]> = {}
 // Mock plugin lists per `homeId:profile` (mirrors the backend's HOME+profile scope).
 const mockPluginStore: Record<string, InstalledPlugin[]> = {}
+// Mock native plugin views per `homeId:profile` (mirrors the instance's own
+// /api/pluginManager lists; includes the @deepseek-ai/* core entries the old
+// file reader filtered out, so the two are visibly different).
+const mockNativeStore: Record<string, PluginView> = {}
+
+/** One native entry with only the fields the mock needs; the rest default. */
+function nativePlugin(
+  entryId: string,
+  moduleName: string,
+  title: string,
+  enabled: boolean,
+  patchId: string | null,
+  readOnlyReason: string | null,
+): PluginItem {
+  return {
+    entryId,
+    moduleName,
+    title,
+    description: null,
+    enabled,
+    fiberPhase: enabled ? 'active' : 'pending',
+    patchId,
+    readOnlyReason,
+  }
+}
+
+/** Seed a native view on first read, so the Plugins page is usable. */
+function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
+  if (!running) {
+    return {
+      mode: 'not-running',
+      reason:
+        '实例未运行：插件列表与管理需要该 Profile 的实例正在运行，请先启动实例。',
+      plugins: [],
+      bundles: [],
+    }
+  }
+  const key = `${homeId}:${profile}`
+  if (!mockNativeStore[key]) {
+    mockNativeStore[key] = {
+      mode: 'managed',
+      reason: null,
+      plugins: [
+        // Core entries the launcher's old reader dropped: they must show up.
+        nativePlugin(
+          'include:plugin-manager',
+          '@deepseek-ai/dsh-plugin-manager',
+          '插件管理',
+          true,
+          null,
+          'management-required',
+        ),
+        nativePlugin(
+          'include:llm',
+          '@deepseek-ai/dsh-llm',
+          'LLM',
+          true,
+          'p1',
+          null,
+        ),
+        nativePlugin(
+          'include:plugin:dsh-auxiliary',
+          '@dsh-plugin/dsh-auxiliary',
+          '辅助工具',
+          true,
+          'p2',
+          null,
+        ),
+        nativePlugin(
+          'include:plugin:dsh-better-sidebar',
+          'dsh-better-sidebar',
+          '侧边栏增强',
+          false,
+          'p3',
+          null,
+        ),
+      ],
+      bundles: [
+        {
+          name: '@deepseek-ai/dsh-base',
+          title: 'DSH 基础',
+          description: null,
+          version: '0.2.1-alpha.2',
+          enabled: true,
+          installed: true,
+          removable: false,
+          optional: false,
+          availability: 'installation',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+        {
+          name: '@canglongcl/ds-bot',
+          title: 'ds-bot',
+          description: null,
+          version: '^0.9.4',
+          enabled: true,
+          installed: true,
+          removable: true,
+          optional: true,
+          availability: 'profile',
+          readOnlyReason: null,
+          errorCode: null,
+        },
+      ],
+    }
+  }
+  return mockNativeStore[key]
+}
 
 function mockNewId(prefix: string): string {
   return `${prefix}-${uuid()}`
@@ -548,6 +659,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         url: dev ? 'https://github.com/tttnny/dsh-launcher/releases' : null,
         published_at: dev ? new Date().toISOString() : null,
       } as T
+    }
+    case 'list_plugins': {
+      const homeId = String(args?.home_id)
+      const profile = String(args?.profile ?? 'web')
+      // Mirror the backend: the view is managed only while an instance of this
+      // HOME is running this profile (the launcher resolves HOME+Profile to an
+      // instance), otherwise the read-only not-running stub.
+      const running = db.instances.some(
+        (i) =>
+          i.home_id === homeId &&
+          db.running[i.id]?.state === 'running' &&
+          db.running[i.id]?.profile === profile,
+      )
+      return nativeViewFor(homeId, profile, running) as T
     }
     case 'list_installed_plugins': {
       const homeId = String(args?.home_id)

@@ -5,8 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
-import type { InstalledPlugin } from '@/api/types'
-import { useAction } from '@/composables/useAction'
+import type { PluginItem, PluginView } from '@/api/types'
 import DlEmpty from '@/components/DlEmpty.vue'
 
 const { t } = useI18n()
@@ -15,6 +14,8 @@ const router = useRouter()
 const store = useLauncherStore()
 
 // --- Selectors: HOME & Profile -----------------------------------------------
+// The selectors stay (HOME, Profile); the backend resolves them to the
+// instance running that profile (design §4).
 
 const selectedHomeId = ref<string | undefined>(undefined)
 const selectedProfile = ref<string | undefined>(undefined)
@@ -89,28 +90,30 @@ function onSelectProfile(p: unknown) {
   })
 }
 
-// --- Plugins of (selectedHomeId, selectedProfile) ----------------------------
+// --- The plugin view of (selectedHomeId, selectedProfile) ---------------------
+// One snapshot from the running instance's native plugin manager. `mode`
+// decides whether the page manages or only displays; `reason` is shown
+// verbatim (the backend localizes it).
 
-const installedPlugins = ref<InstalledPlugin[]>([])
+const pluginView = ref<PluginView | null>(null)
 const pluginsLoading = ref(false)
-const setEnabledBusy = ref(false)
-const selectedPlugins = ref<string[]>([])
 
-function displayVersion(raw?: string): string {
-  if (!raw) return '-'
-  return raw.replace(/^[\^~>=<\s]+/, '')
+const plugins = computed<PluginItem[]>(() => pluginView.value?.plugins ?? [])
+const viewMode = computed(() => pluginView.value?.mode ?? 'not-running')
+const viewReason = computed(() => pluginView.value?.reason ?? null)
+const managed = computed(() => viewMode.value === 'managed')
+
+/** Display name: the instance's localized title, falling back to the module. */
+function pluginName(p: PluginItem): string {
+  return p.title?.trim() || p.moduleName
 }
 
 async function loadPlugins() {
-  installedPlugins.value = []
-  selectedPlugins.value = []
+  pluginView.value = null
   if (!selectedHomeId.value || !selectedProfile.value) return
   pluginsLoading.value = true
   try {
-    installedPlugins.value = await api.listInstalledPlugins(
-      selectedHomeId.value,
-      selectedProfile.value,
-    )
+    pluginView.value = await api.listPlugins(selectedHomeId.value, selectedProfile.value)
   } catch (e) {
     Message.error(String(e))
   } finally {
@@ -122,94 +125,11 @@ watch([selectedHomeId, selectedProfile], () => {
   void loadPlugins()
 })
 
-async function onTogglePlugin(p: InstalledPlugin, enabled: boolean) {
-  if (!selectedHomeId.value || !selectedProfile.value) return
-  setEnabledBusy.value = true
-  try {
-    await api.setPluginsEnabled({
-      homeId: selectedHomeId.value,
-      profile: selectedProfile.value,
-      pluginIds: [p.id],
-      enabled,
-    })
-    p.enabled = enabled
-    Message.success(
-      enabled
-        ? t('plugins.pluginEnabled', { name: p.id })
-        : t('plugins.pluginDisabled', { name: p.id }),
-    )
-    Message.info(t('plugins.pluginRestartHint'))
-  } catch (e) {
-    Message.error(String(e))
-    await loadPlugins()
-  } finally {
-    setEnabledBusy.value = false
-  }
-}
-
-const uninstallAction = useAction(async (p: InstalledPlugin) => {
-  await api.uninstallPlugin({
-    homeId: selectedHomeId.value!,
-    profile: selectedProfile.value!,
-    pluginId: p.id,
-  })
-  return p.id
-}, {
-  success: (name) => t('plugins.pluginUninstalled', { name }),
-})
-
-async function onUninstallPlugin(p: InstalledPlugin) {
-  if (!selectedHomeId.value || !selectedProfile.value) return
-  const uninstalled = await uninstallAction.run(p)
-  if (uninstalled === undefined) return
-  Message.info(t('plugins.pluginRestartHint'))
-  await loadPlugins()
-}
-
-// onTogglePlugin / batchSetEnabled stay manual: their catch re-syncs the list
-// via loadPlugins(), which useAction's catch cannot express. This union keeps
-// every plugin control disabled while any operation is in flight.
-const pluginsBusy = computed(() => setEnabledBusy.value || uninstallAction.busy['*'])
-
-async function batchSetEnabled(enabled: boolean) {
-  if (
-    !selectedHomeId.value ||
-    !selectedProfile.value ||
-    selectedPlugins.value.length === 0
-  )
-    return
-  setEnabledBusy.value = true
-  const ids = [...selectedPlugins.value]
-  try {
-    await api.setPluginsEnabled({
-      homeId: selectedHomeId.value,
-      profile: selectedProfile.value,
-      pluginIds: ids,
-      enabled,
-    })
-    for (const p of installedPlugins.value) {
-      if (ids.includes(p.id)) p.enabled = enabled
-    }
-    selectedPlugins.value = []
-    Message.success(
-      enabled
-        ? t('plugins.pluginsBatchEnabled', { count: ids.length })
-        : t('plugins.pluginsBatchDisabled', { count: ids.length }),
-    )
-    Message.info(t('plugins.pluginRestartHint'))
-  } catch (e) {
-    Message.error(String(e))
-    await loadPlugins()
-  } finally {
-    setEnabledBusy.value = false
-  }
-}
-
 const pluginColumns = computed(() => [
-  { title: 'ID', slotName: 'pid', width: 320 },
-  { title: t('plugins.pluginVersion'), slotName: 'pver', width: 140 },
+  { title: t('plugins.pluginName'), slotName: 'pname' },
+  { title: t('plugins.pluginEntry'), slotName: 'pentry', width: 320 },
+  { title: t('plugins.pluginPhase'), slotName: 'pphase', width: 130 },
   { title: t('plugins.pluginStatus'), slotName: 'pstatus', width: 120 },
-  { title: t('instances.table.actions'), slotName: 'pact', width: 90, align: 'right' as const },
 ])
 </script>
 
@@ -259,70 +179,44 @@ const pluginColumns = computed(() => [
       </div>
       <p class="dl-card-desc">{{ t('plugins.pluginsDesc') }}</p>
 
-      <!-- Batch Actions Row -->
-      <div v-if="installedPlugins.length > 0" class="plugins-batch-row">
-        <div class="batch-btns">
-          <button
-            class="mac-action-pill"
-            :disabled="selectedPlugins.length === 0 || pluginsBusy"
-            @click="batchSetEnabled(true)"
-          >
-            {{ t('plugins.pluginsBatchEnable', { count: selectedPlugins.length }) }}
-          </button>
-          <button
-            class="mac-action-pill"
-            :disabled="selectedPlugins.length === 0 || pluginsBusy"
-            @click="batchSetEnabled(false)"
-          >
-            {{ t('plugins.pluginsBatchDisable', { count: selectedPlugins.length }) }}
-          </button>
-        </div>
-        <span v-if="selectedPlugins.length > 0" class="batch-count-hint">
-          已选择 {{ selectedPlugins.length }} 个插件
-        </span>
+      <!-- Read-only banner: no instance running this profile, adopted instance,
+           or an unreachable instance. The reason is backend-localized. -->
+      <div v-if="!managed && viewReason" class="plugins-readonly-banner">
+        {{ viewReason }}
       </div>
 
+      <!-- The table renders whenever the instance gave us entries (managed), or
+           a later ticket supplies an offline list; a pure read-only page shows
+           only the banner, not a contradictory empty table. -->
       <a-table
+        v-if="managed || plugins.length > 0"
         :columns="pluginColumns"
-        :data="installedPlugins"
+        :data="plugins"
         :loading="pluginsLoading"
         :pagination="false"
-        row-key="id"
-        :row-selection="{
-          type: 'checkbox',
-          showCheckedAll: true,
-          onlyCurrent: true,
-          selectedRowKeys: selectedPlugins,
-        }"
+        row-key="entryId"
         class="apple-styled-table"
-        @selection-change="(keys: (string | number)[]) => (selectedPlugins = keys.map(String))"
       >
-        <template #pid="{ record }">
-          <span class="plugin-cell-id tnum">{{ record.id }}</span>
+        <template #pname="{ record }">
+          <span class="plugin-cell-name">{{ pluginName(record) }}</span>
         </template>
-        <template #pver="{ record }">
-          <span v-if="record.version" class="tnum">{{ displayVersion(record.version) }}</span>
+        <template #pentry="{ record }">
+          <span class="plugin-cell-id tnum">{{ record.entryId }}</span>
+        </template>
+        <template #pphase="{ record }">
+          <span v-if="record.fiberPhase" class="plugin-phase">{{ record.fiberPhase }}</span>
           <span v-else class="plugin-no-version">-</span>
         </template>
         <template #pstatus="{ record }">
+          <!-- The instance owns the state; the toggle is wired to the native
+               writer by T2. Until then it reflects the instance's value. -->
           <a-switch
             :model-value="record.enabled"
-            :disabled="pluginsBusy"
+            disabled
             :checked-text="t('plugins.pluginOn')"
             :unchecked-text="t('plugins.pluginOff')"
             size="small"
-            @change="(v: string | number | boolean) => onTogglePlugin(record, v === true)"
           />
-        </template>
-        <template #pact="{ record }">
-          <a-popconfirm
-            :content="t('plugins.pluginUninstallConfirm', { name: record.id })"
-            @ok="onUninstallPlugin(record)"
-          >
-            <button class="mac-action-pill danger" :disabled="pluginsBusy">
-              {{ t('instances.table.delete') }}
-            </button>
-          </a-popconfirm>
         </template>
         <template #empty>
           <DlEmpty icon="plugin" :description="t('plugins.pluginsEmpty')" />
@@ -394,65 +288,31 @@ const pluginColumns = computed(() => [
   border: 1px solid rgb(var(--primary-6) / 20%);
 }
 
-.plugins-batch-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.plugins-readonly-banner {
   margin-bottom: 12px;
-
-  .batch-btns {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .batch-count-hint {
-    font-size: 12px;
-    color: var(--color-text-3);
-  }
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--color-text-2);
+  background: var(--apple-group-bg);
+  border: 1px solid var(--apple-card-border);
 }
 
-.plugin-cell-id {
+.plugin-cell-name {
   font-weight: 500;
   color: var(--color-text-1);
 }
 
-.plugin-no-version {
-  color: var(--color-text-4);
+.plugin-cell-id {
+  color: var(--color-text-3);
 }
 
-.mac-action-pill {
-  border: 1px solid var(--apple-card-border);
-  background: var(--apple-card-bg);
-  color: var(--color-text-2);
-  border-radius: 6px;
-  padding: 3px 9px;
+.plugin-phase {
   font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
+  color: var(--color-text-3);
+}
 
-  &:hover:not(:disabled) {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
-  }
-
-  &.danger {
-    color: rgb(var(--red-6));
-
-    &:hover:not(:disabled) {
-      background: rgb(var(--red-6) / 10%);
-      border-color: rgb(var(--red-6) / 25%);
-    }
-  }
-
-  &:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  &:active:not(:disabled) {
-    transform: scale(var(--apple-active-scale));
-  }
+.plugin-no-version {
+  color: var(--color-text-4);
 }
 </style>

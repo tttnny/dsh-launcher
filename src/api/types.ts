@@ -183,3 +183,87 @@ export interface UninstallPluginInput {
   profile: string
   pluginId: string
 }
+
+// ---------------------------------------------------------------------------
+// Native plugin management (frozen contract — design §4; T2–T5 consume, don't
+// rename). Values come from the running instance's own plugin manager over
+// /api/pluginManager/*; the launcher never reads the profile files.
+// ---------------------------------------------------------------------------
+
+/** How the Plugins page may treat the snapshot: managed, or a reason it can't. */
+export type PluginViewMode = 'managed' | 'not-running' | 'adopted' | 'unreachable'
+
+/** A native plugin entry (the stable subset of PluginInfo). */
+export interface PluginItem {
+  /** Row key; the `id` argument of `setPluginEnabled`. */
+  entryId: string
+  moduleName: string
+  /** From `meta.title`; the UI falls back to `moduleName` when absent. */
+  title?: string | null
+  description?: string | null
+  enabled: boolean
+  fiberPhase?: string | null
+  patchId?: string | null
+  /** 'management-required' | 'unaddressable'. */
+  readOnlyReason?: string | null
+}
+
+/** A Bundle（补丁层）. */
+export interface BundleItem {
+  /** The `name` argument of `setBundleEnabled` / `removeBundle`. */
+  name: string
+  title?: string | null
+  description?: string | null
+  version?: string | null
+  enabled: boolean
+  installed: boolean
+  /** false = can only be disabled, never removed. */
+  removable: boolean
+  optional: boolean
+  /** 'installation' | 'profile' | 'missing'. */
+  availability?: string | null
+  readOnlyReason?: string | null
+  errorCode?: string | null
+}
+
+/** One snapshot of the Plugins page; `mode` picks managed vs read-only. */
+export interface PluginView {
+  mode: PluginViewMode
+  /** Read-only explanation, already localized by the backend; shown verbatim. */
+  reason?: string | null
+  plugins: PluginItem[]
+  bundles: BundleItem[]
+}
+
+/** A write result, mirroring the native ChangeResult. */
+export interface ChangeOutcome {
+  changed: boolean
+  /** applied | restart-required | overridden | failed | cancelled. */
+  application: string
+  /** enable | remove. */
+  stage: string
+  target: string
+  errorCode?: string | null
+  diagnostic?: string | null
+  warnings: string[]
+}
+
+export interface SetPluginEnabledInput {
+  homeId: string
+  profile: string
+  id: string
+  enabled: boolean
+}
+
+export interface SetBundleEnabledInput {
+  homeId: string
+  profile: string
+  name: string
+  enabled: boolean
+}
+
+export interface RemoveBundleInput {
+  homeId: string
+  profile: string
+  name: string
+}
