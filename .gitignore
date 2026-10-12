@@ -30,3 +30,6 @@ skills-lock.json
 
 # Parallel-dev worktrees (untracked, never commit)
 worktrees/
+
+# Scratch space for intermediate results
+tmp/
