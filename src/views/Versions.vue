@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
@@ -8,9 +7,8 @@ import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
 import DlEmpty from '@/components/DlEmpty.vue'
 import DlRefreshButton from '@/components/DlRefreshButton.vue'
-import type { RemoteVersion } from '@/api/types'
+import type { RemoteVersion, TaskInfo } from '@/api/types'
 
-const router = useRouter()
 const { t } = useI18n()
 const store = useLauncherStore()
 
@@ -18,6 +16,9 @@ const loading = computed(() => store.remoteLoading)
 
 onMounted(() => {
   store.refreshRemoteVersions()
+  // An install started in an earlier session (or another window) still has a
+  // row to fill here.
+  store.refreshInstallTasks()
 })
 
 const collator = new Intl.Collator('en', { numeric: true })
@@ -49,14 +50,21 @@ function formatDate(iso: string | null): string {
 
 const installAction = useAction(
   async (version: string) => {
-    await api.startInstallVersionTask(version)
-    return version
+    const taskId = await api.startInstallVersionTask(version)
+    return { taskId, version }
   },
   {
     key: (version) => version,
-    success: (version) => t('versions.installTaskStarted', { version }),
+    success: ({ version }) => t('versions.installTaskStarted', { version }),
   },
 )
+
+/** The install running for one remote version row, if any. */
+function installOf(version: string): TaskInfo | null {
+  return (
+    Object.values(store.installingVersions).find((task) => task.version === version) ?? null
+  )
+}
 
 function onSelectVersion(row: RemoteVersion) {
   if (installedSet.value.has(row.version)) {
@@ -72,11 +80,21 @@ function onSelectVersion(row: RemoteVersion) {
     okText: t('versions.installNow'),
     cancelText: t('common.cancel'),
     onOk: async () => {
-      const res = await installAction.run(row.version)
-      if (res === undefined) return
-      void router.push('/tasks')
+      const started = await installAction.run(row.version)
+      if (started === undefined) return
+      // Show the progress on the row that was clicked: the install belongs to
+      // this version, so this is where the user looks for it — no page of its
+      // own, and no tab switch away from the list they are working in.
+      await store.watchInstallTask(started.taskId, row.version)
     },
   })
+}
+
+const cancelAction = useAction((id: string) => api.cancelTask(id), { key: (id) => id })
+
+async function onCancelInstall(taskId: string) {
+  await cancelAction.run(taskId)
+  await store.refreshInstallTasks()
 }
 
 const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).length
@@ -97,6 +115,12 @@ const onRemove = removeAction.run
 
 <template>
   <div class="dl-page versions-page" v-loading="loading">
+    <!-- Page heading -->
+    <header class="dl-page-head">
+      <h2>{{ t('versions.title') }}</h2>
+      <p class="dl-page-sub">{{ t('versions.pageDesc') }}</p>
+    </header>
+
     <!-- Latest Card -->
     <div class="dl-card version-card">
       <div class="dl-card-title">
@@ -118,6 +142,7 @@ const onRemove = removeAction.run
           v-for="row in latest"
           :key="row.v.version"
           class="version-row"
+          :class="{ 'is-installing': installOf(row.v.version) }"
           @click="onSelectVersion(row.v)"
         >
           <div class="version-icon" :class="{ pre: isPrerelease(row.v.version) }">
@@ -140,6 +165,22 @@ const onRemove = removeAction.run
             </div>
             <div class="version-sub">
               {{ row.label }}<template v-if="row.v.released_at">，{{ t('versions.releasedAt', { date: formatDate(row.v.released_at) }) }}</template>
+            </div>
+            <!-- An install of this version in flight: the progress belongs to
+                 the version, so it is shown here rather than on a task page. -->
+            <div v-if="installOf(row.v.version)" class="install-row" @click.stop>
+              <a-progress
+                :percent="(installOf(row.v.version)?.percent ?? 0) / 100"
+                size="small"
+                :show-text="true"
+              />
+              <button
+                class="mac-action-pill warning"
+                :disabled="!!cancelAction.busy[installOf(row.v.version)?.id ?? '']"
+                @click="onCancelInstall(installOf(row.v.version)!.id)"
+              >
+                {{ t('versions.cancelInstall') }}
+              </button>
             </div>
           </div>
           <div class="version-arrow-wrap">
@@ -327,7 +368,7 @@ const onRemove = removeAction.run
     color: rgb(var(--red-6));
 
     &:hover {
-      background: rgb(var(--red-6) / 12%);
+      background: rgba(var(--red-6), 0.12);
     }
   }
 
@@ -395,7 +436,7 @@ const onRemove = removeAction.run
   font-size: 11px;
   font-weight: 600;
   border-radius: 5px;
-  background: rgb(var(--orange-6) / 14%);
+  background: rgba(var(--orange-6), 0.14);
   color: rgb(var(--orange-6));
 }
 
@@ -404,7 +445,7 @@ const onRemove = removeAction.run
   font-size: 11px;
   font-weight: 600;
   border-radius: 5px;
-  background: rgb(var(--green-6) / 14%);
+  background: rgba(var(--green-6), 0.14);
   color: rgb(var(--green-6));
 }
 
