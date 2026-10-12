@@ -102,6 +102,32 @@ fn read_profile_manifest(dir: &std::path::Path) -> Result<serde_json::Value, Str
     serde_json::from_str(&raw).map_err(|e| format!("解析 package.json 失败: {e}"))
 }
 
+/// The packages a profile manifest declares, deduped and sorted: the
+/// `dependencies` map (with their version specs) plus any names in
+/// `dsh.profile.bundles` that no dependency already covered.
+fn profile_packages(manifest: &serde_json::Value) -> Vec<(String, Option<String>)> {
+    let mut packages: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    if let Some(deps) = manifest.get("dependencies").and_then(|d| d.as_object()) {
+        for (name, spec) in deps {
+            packages.insert(name.clone(), spec.as_str().map(str::to_string));
+        }
+    }
+    if let Some(bundles) = manifest
+        .pointer("/dsh/profile/bundles")
+        .and_then(|b| b.as_array())
+    {
+        for b in bundles {
+            if let Some(name) = b.as_str() {
+                packages.entry(name.to_string()).or_insert(None);
+            }
+        }
+    }
+    let mut out: Vec<(String, Option<String>)> = packages.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Commands: installed plugin listing (per instance + profile)
 // ---------------------------------------------------------------------------
@@ -119,44 +145,17 @@ pub async fn list_installed_plugins(
     let dir = crate::profile::profile_dir(&home_path, &profile)?;
     let manifest = read_profile_manifest(&dir)?;
 
-    let mut ids: Vec<String> = Vec::new();
-    let mut versions: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-    if let Some(deps) = manifest.get("dependencies").and_then(|d| d.as_object()) {
-        for (name, spec) in deps {
-            if name.starts_with("@deepseek-ai/") {
-                continue;
-            }
-            ids.push(name.clone());
-            versions.insert(name.clone(), spec.as_str().unwrap_or("").to_string());
-        }
-    }
-    if let Some(bundles) = manifest
-        .pointer("/dsh/profile/bundles")
-        .and_then(|b| b.as_array())
-    {
-        for b in bundles {
-            if let Some(name) = b.as_str() {
-                if name.starts_with("@deepseek-ai/") || ids.iter().any(|i| i == name) {
-                    continue;
-                }
-                ids.push(name.to_string());
-            }
-        }
-    }
-    ids.sort();
-    ids.dedup();
-
     // Disabled set from cordis.patch.yml (`- id: <cordis-id>` + `disabled: true`).
     let disabled = crate::profile::read_disabled_ids(&dir);
 
-    let out = ids
+    let out = profile_packages(&manifest)
         .into_iter()
-        .map(|id| {
+        .filter(|(name, _)| !name.starts_with("@deepseek-ai/"))
+        .map(|(id, version)| {
             let cordis_id = cordis_id_of(&id);
             let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&id);
             InstalledPlugin {
-                version: versions.get(&id).cloned(),
+                version,
                 enabled,
                 cordis_id: Some(cordis_id),
                 id,
@@ -187,18 +186,25 @@ pub(crate) fn resolve_home_paths(
 // Commands: native plugin list (the instance's own plugin manager)
 // ---------------------------------------------------------------------------
 
-/// Lists the plugins of the instance running `(home_id, profile)` through the
-/// instance's **native plugin manager** (`POST /api/pluginManager/*`) — the
-/// running DSH owns plugin state (ADR-0001), so the launcher neither reads
-/// files to build the list nor reports entries the instance does not.
+/// Lists the plugins of a profile of `(home_id, profile)`.
+///
+/// While an instance runs that profile, the list is the instance's own
+/// **native plugin manager** answer (`POST /api/pluginManager/*`) — the running
+/// DSH owns plugin state (ADR-0001), so the launcher does not read files to
+/// build the list nor report entries the instance does not.
+///
+/// With **no instance running** the page is still usable, but read-only: the
+/// list is read from the profile's own files (`package.json` + the patch
+/// document), every control is disabled and the `reason` tells the user to
+/// start the instance. That read path writes nothing — writing profile files is
+/// exactly what ADR-0001 removed. An **adopted** instance (no usable token) and
+/// an unreachable one take the same read-only path; their `reason` differs so
+/// the two are distinguishable.
 ///
 /// The instance is resolved from the selectors: the same DSH_HOME, running
 /// the selected profile (see [`crate::process::running_for_profile`]). The
 /// credential is the running-table URL's one-time token; the launcher never
 /// reads `<DSH_HOME>/.credentials.yaml`.
-///
-/// Read-only when no instance is running: the view is `not-running` with
-/// empty lists (T5 fills that branch in and this signature does not change).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_plugins(
     state: State<'_, AppState>,
@@ -217,25 +223,27 @@ async fn list_plugins_for(
 ) -> Result<crate::native::PluginView, String> {
     use crate::native::{NativeClient, PluginView, PluginViewMode};
 
-    const NOT_RUNNING: &str =
-        "实例未运行：插件列表与管理需要该 Profile 的实例正在运行，请先启动实例。";
+    // The three read-only reasons are distinct on purpose: the UI shows them
+    // verbatim, so each one has to say what happened and what to do.
+    const NOT_RUNNING: &str = "实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。";
+    const ADOPTED: &str =
+        "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理插件。请从启动器重启该实例。";
 
     let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
-        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
+        // Nothing is running this profile: read the profile's files (a
+        // best-effort, read-only list) and tell the user how to manage.
+        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
     };
     // An adopted instance has no recoverable token, so it cannot be managed.
     if entry.adopted {
-        return Ok(PluginView::readonly(
-            PluginViewMode::Adopted,
-            "该实例由外部进程接管（DSH 自行重启），启动 token 不可用，无法管理插件。请从启动器重启该实例。",
-        ));
+        return offline_view(state, home_id, profile, PluginViewMode::Adopted, ADOPTED);
     }
     let Some(url) = entry.url else {
-        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
+        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
     };
 
     // A refused session / unreachable instance is read-only rather than a
-    // command error: the page still renders (T5 adds content).
+    // command error: the page still renders with the instance's reason.
     let client = match NativeClient::connect(&url).await {
         Ok(client) => client,
         Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
@@ -243,6 +251,84 @@ async fn list_plugins_for(
     let plugins = client.list_plugins().await?;
     let bundles = client.list_bundles().await?;
     Ok(PluginView::managed(plugins, bundles))
+}
+
+/// A read-only view listing a profile's plugins from its own files.
+///
+/// This is deliberately **best-effort and file-scoped**: it reads the profile
+/// manifest (`dependencies` + `dsh.profile.bundles`) and the patch document's
+/// disables, so it shows what the profile *declares*, not the instance's live
+/// composition (no fiber phase, no availability, no error info — and the live
+/// list additionally hides a few built-in bundles). A read failure degrades to
+/// an empty list rather than erroring the page.
+///
+/// Unlike [`list_installed_plugins`], core `@deepseek-ai/*` packages are
+/// **not** filtered out here. The blanket filter made this view lie about a
+/// profile: it hid whether a core bundle is even declared, which is a fact a
+/// read-only view has no business concealing. Their cordis id is usually the
+/// package's unscoped short name (`@deepseek-ai/dsh-base` → `dsh-base`), the
+/// same fallback the patch document uses to address them.
+fn offline_view(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+    mode: crate::native::PluginViewMode,
+    reason: &str,
+) -> Result<crate::native::PluginView, String> {
+    Ok(crate::native::PluginView::readonly_files(
+        mode,
+        reason,
+        offline_plugin_items(state, home_id, profile),
+    ))
+}
+
+/// The profile's plugin entries read from its files, sorted by cordis id.
+/// Unreadable files (or unknown HOME) yield an empty list — the read-only view
+/// renders regardless.
+fn offline_plugin_items(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Vec<crate::native::PluginItem> {
+    let Ok(home_path) = resolve_home_path(state, home_id) else {
+        return Vec::new();
+    };
+    let Ok(dir) = crate::profile::profile_dir(&home_path, profile) else {
+        return Vec::new();
+    };
+    let manifest = read_profile_manifest(&dir).unwrap_or_default();
+    let disabled = crate::profile::read_disabled_ids(&dir);
+
+    let mut items: Vec<crate::native::PluginItem> = profile_packages(&manifest)
+        .into_iter()
+        .map(|(name, _version)| {
+            let cordis_id = cordis_id_of(&name);
+            let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&name);
+            crate::native::PluginItem {
+                entry_id: cordis_id.clone(),
+                module_name: name,
+                title: None,
+                description: None,
+                enabled,
+                fiber_phase: None,
+                patch_id: None,
+                read_only_reason: None,
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+    items
+}
+
+/// The HOME path of `home_id` (or an error), without resolving a CLI version —
+/// the offline reader touches no CLI.
+fn resolve_home_path(state: &AppState, home_id: &str) -> Result<std::path::PathBuf, String> {
+    let cfg = state.config.lock().unwrap();
+    cfg.homes
+        .iter()
+        .find(|h| h.id == home_id)
+        .map(|h| h.path.clone())
+        .ok_or_else(|| "DSH_HOME 不存在".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,59 +1226,176 @@ mod tests {
         }
     }
 
-    /// No instance is running this profile: the view is the read-only
-    /// `not-running` stub with empty lists (T5 fills it in), not an error.
+    /// A scratch DSH_HOME under the repo's gitignored `tmp/` (never the system
+    /// temp dir). The unique name keeps parallel test processes apart.
+    fn scratch_home(tag: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("tmp");
+        let dir = root.join(format!("t5-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn home_with_path(id: &str, path: &std::path::Path) -> crate::config::DshHome {
+        crate::config::DshHome {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn instance_of(id: &str, home_id: &str) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: id.to_string(),
+            name: id.to_string(),
+            version_id: "v1".to_string(),
+            home_id: home_id.to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+            preserve_symlinks: false,
+        }
+    }
+
+    fn profile_json(deps: &[&str], bundles: &[&str]) -> String {
+        let deps: serde_json::Map<String, serde_json::Value> = deps
+            .iter()
+            .map(|d| (d.to_string(), serde_json::json!("^1.0.0")))
+            .collect();
+        serde_json::json!({
+            "private": true,
+            "dependencies": deps,
+            "dsh": { "profile": { "bundles": bundles } },
+        })
+        .to_string()
+    }
+
+    /// Writes a profile dir under a scratch HOME and returns (HOME, profile dir).
+    fn seeded_home(files: &[(&str, &str)], profile: &str) -> std::path::PathBuf {
+        let home = scratch_home("home");
+        let dir = crate::profile::profile_dir(&home, profile).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        home
+    }
+
+    /// No instance is running this profile: the page is read-only in
+    /// `not-running` mode, but it still lists what the profile has — read from
+    /// its files (dependencies + bundles), with no `@deepseek-ai/*` filter, and
+    /// the patch document's native **flow-style** disables understood.
     #[tokio::test]
-    async fn list_plugins_returns_not_running_without_an_instance() {
-        let state = app_state(
-            vec![crate::config::DshHome {
-                id: "h1".to_string(),
-                name: "h1".to_string(),
-                path: std::path::PathBuf::from("/tmp/home"),
-            }],
-            vec![crate::config::DshInstance {
-                id: "i1".to_string(),
-                name: "i1".to_string(),
-                version_id: "v1".to_string(),
-                home_id: "h1".to_string(),
-                env_overrides: Default::default(),
-                default_profile: None,
-                last_profile: None,
-                icon: None,
-                port: None,
-                preserve_symlinks: false,
-            }],
+    async fn list_plugins_for_profile_files_when_not_running() {
+        let home = seeded_home(
+            &[
+                (
+                    "package.json",
+                    &profile_json(
+                        &["@dsh-plugin/dsh-auxiliary", "@deepseek-ai/dsh-base"],
+                        &["@deepseek-ai/dsh-base", "@dsh-plugin/dsh-auxiliary"],
+                    ),
+                ),
+                (
+                    "cordis.patch.yml",
+                    "[ { id: dsh-auxiliary, disabled: true }, { id: dsh-base, disabled: false } ]\n",
+                ),
+            ],
+            "web",
         );
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+
         let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+
         assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
-        assert!(view.reason.is_some());
-        assert!(view.plugins.is_empty());
-        assert!(view.bundles.is_empty());
+        // The reason is distinct and tells the user what to do.
+        let reason = view.reason.expect("read-only reason");
+        assert!(reason.contains("启动该实例"), "reason: {reason}");
+
+        // Both the plugin package and the core package show (no blanket
+        // @deepseek-ai/* filter); deduped across dependencies + bundles, and
+        // sorted by the entry id the table shows.
+        let names: Vec<&str> = view.plugins.iter().map(|p| p.module_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["@dsh-plugin/dsh-auxiliary", "@deepseek-ai/dsh-base"],
+            "names: {names:?}"
+        );
+
+        let aux = view
+            .plugins
+            .iter()
+            .find(|p| p.module_name == "@dsh-plugin/dsh-auxiliary")
+            .unwrap();
+        // The flow-style disabled row was seen: the entry reads as off.
+        assert!(!aux.enabled, "dsh-auxiliary must read disabled: {aux:?}");
+        let base = view
+            .plugins
+            .iter()
+            .find(|p| p.module_name == "@deepseek-ai/dsh-base")
+            .unwrap();
+        assert!(base.enabled, "dsh-base must read enabled: {base:?}");
+    }
+
+    /// The read path writes nothing: every profile file is byte-identical and
+    /// untouched (mtime unchanged) across a read.
+    #[tokio::test]
+    async fn list_plugins_read_path_leaves_files_untouched() {
+        let home = seeded_home(
+            &[
+                (
+                    "package.json",
+                    &profile_json(&["@dsh-plugin/dsh-auxiliary"], &["@deepseek-ai/dsh-base"]),
+                ),
+                (
+                    "cordis.patch.yml",
+                    "[ { id: dsh-auxiliary, disabled: true } ]\n",
+                ),
+            ],
+            "web",
+        );
+        let dir = crate::profile::profile_dir(&home, "web").unwrap();
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+
+        let before: Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)> =
+            ["package.json", "cordis.patch.yml"]
+                .iter()
+                .map(|n| {
+                    let p = dir.join(n);
+                    let bytes = std::fs::read(&p).unwrap();
+                    let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+                    (p, bytes, mtime)
+                })
+                .collect();
+
+        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
+        // The directory listing is unchanged too (nothing created/removed).
+        let listing_before = dir.read_dir().unwrap().count();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
+
+        for (path, bytes, mtime) in before {
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "bytes changed: {path:?}");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                mtime,
+                "mtime changed: {path:?}"
+            );
+        }
+        assert_eq!(dir.read_dir().unwrap().count(), listing_before);
     }
 
     /// An adopted instance carries a bare URL and no token, so the view is
-    /// `adopted` (distinct from `not-running`), not an attempted connection.
+    /// `adopted` — distinct from `not-running` — and its reason names the
+    /// adoption, not "start the instance".
     #[tokio::test]
     async fn list_plugins_marks_adopted_instances_readonly() {
-        let state = app_state(
-            vec![crate::config::DshHome {
-                id: "h1".to_string(),
-                name: "h1".to_string(),
-                path: std::path::PathBuf::from("/tmp/home"),
-            }],
-            vec![crate::config::DshInstance {
-                id: "i1".to_string(),
-                name: "i1".to_string(),
-                version_id: "v1".to_string(),
-                home_id: "h1".to_string(),
-                env_overrides: Default::default(),
-                default_profile: None,
-                last_profile: None,
-                icon: None,
-                port: None,
-                preserve_symlinks: false,
-            }],
-        );
+        let home = scratch_home("adopted");
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
         {
             let mut running = state.running.lock().await;
             running.insert(
@@ -1212,5 +1415,17 @@ mod tests {
         let view = list_plugins_for(&state, "h1", "web").await.unwrap();
         assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
         assert!(view.plugins.is_empty());
+        let adopted_reason = view.reason.expect("adopted reason");
+        assert!(
+            adopted_reason.contains("接管"),
+            "adopted reason must name the adoption: {adopted_reason}"
+        );
+
+        // And it is distinguishable from the not-running message.
+        let not_running = crate::native::PluginView::readonly(
+            crate::native::PluginViewMode::NotRunning,
+            "实例未运行",
+        );
+        assert_ne!(Some(adopted_reason), not_running.reason);
     }
 }

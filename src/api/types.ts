@@ -237,6 +237,12 @@ export interface PluginView {
   mode: PluginViewMode
   /** Read-only explanation, already localized by the backend; shown verbatim. */
   reason?: string | null
+  /**
+   * True when the list was read from the profile's own files (instance not
+   * running) instead of answered by the instance. The offline list is a
+   * best-effort, scope-wide projection, so the UI says so.
+   */
+  files: boolean
   plugins: PluginItem[]
   bundles: BundleItem[]
 }

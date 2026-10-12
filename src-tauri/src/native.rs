@@ -512,6 +512,11 @@ pub struct BundleItem {
 pub struct PluginView {
     pub mode: PluginViewMode,
     pub reason: Option<String>,
+    /// `true` when the list was read from the profile's own files for a
+    /// read-only view rather than answered by a running instance. The offline
+    /// content genuinely differs (best-effort by scope, no liveness/error
+    /// info); the UI uses this to say so.
+    pub files: bool,
     pub plugins: Vec<PluginItem>,
     pub bundles: Vec<BundleItem>,
 }
@@ -522,6 +527,7 @@ impl PluginView {
         Self {
             mode: PluginViewMode::Managed,
             reason: None,
+            files: false,
             plugins: plugins.into_iter().map(PluginItem::from).collect(),
             bundles: bundles.into_iter().map(BundleItem::from).collect(),
         }
@@ -532,7 +538,26 @@ impl PluginView {
         Self {
             mode,
             reason: Some(reason.into()),
+            files: false,
             plugins: Vec::new(),
+            bundles: Vec::new(),
+        }
+    }
+
+    /// A read-only snapshot whose list was read from the profile's files
+    /// (instance not running). The list is best-effort: it is a scope-wide
+    /// projection of the profile manifest + patch document, not the instance's
+    /// own answer.
+    pub fn readonly_files(
+        mode: PluginViewMode,
+        reason: impl Into<String>,
+        plugins: Vec<PluginItem>,
+    ) -> Self {
+        Self {
+            mode,
+            reason: Some(reason.into()),
+            files: true,
+            plugins,
             bundles: Vec::new(),
         }
     }
@@ -838,8 +863,34 @@ mod tests {
         let view = PluginView::readonly(PluginViewMode::NotRunning, "实例未运行");
         assert_eq!(view.mode, PluginViewMode::NotRunning);
         assert_eq!(view.reason.as_deref(), Some("实例未运行"));
+        assert!(!view.files);
         assert!(view.plugins.is_empty());
         assert!(view.bundles.is_empty());
+    }
+
+    /// The offline read-only snapshot carries a file-sourced list and flags it,
+    /// so the UI can tell the user the list came from the profile files.
+    #[test]
+    fn readonly_files_view_flags_the_file_sourced_list() {
+        let plugin: NativePlugin = serde_json::from_value(serde_json::json!({
+            "entryId": "dsh-auxiliary",
+            "moduleName": "@dsh-plugin/dsh-auxiliary",
+            "enabled": false,
+        }))
+        .unwrap();
+        let view = PluginView::readonly_files(
+            PluginViewMode::NotRunning,
+            "实例未在运行",
+            vec![PluginItem::from(plugin)],
+        );
+        assert_eq!(view.mode, PluginViewMode::NotRunning);
+        assert!(view.files);
+        assert_eq!(view.plugins.len(), 1);
+        assert!(!view.plugins[0].enabled);
+
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["files"], true);
+        assert_eq!(json["plugins"][0]["moduleName"], "@dsh-plugin/dsh-auxiliary");
     }
 
     /// Projection: `meta.title` becomes `title`, and a bundle's error code

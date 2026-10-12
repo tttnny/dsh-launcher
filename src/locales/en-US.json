@@ -166,6 +166,7 @@
     "selectProfile": "Select Profile",
     "pluginsPickProfile": "Select a profile to view its plugins",
     "pluginsEmpty": "No plugins in this profile",
+    "readonlyFilesNote": "While the instance is not running, the list is read from this profile's files. It is a best-effort projection: it lists what the profile declares, without the instance's live state or error info.",
     "pluginVersion": "Version",
     "pluginStatus": "Status",
     "pluginOn": "Enabled",
