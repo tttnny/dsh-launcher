@@ -8,7 +8,6 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
-  InstalledPlugin,
   InstanceStatus,
   LauncherSettings,
   PluginItem,
@@ -18,11 +17,9 @@ import type {
   RemoveBundleInput,
   SetBundleEnabledInput,
   SetPluginEnabledInput,
-  SetPluginsEnabledInput,
   TaskInfo,
   TaskProgress,
   TaskLog,
-  UninstallPluginInput,
 } from './types'
 
 export type Listener<T> = (payload: T) => void
@@ -141,8 +138,6 @@ function emitTaskLog(l: TaskLog) {
 const mockTasks = new Map<string, TaskInfo>()
 // Mock profiles created at runtime per home id.
 const mockProfiles: Record<string, string[]> = {}
-// Mock plugin lists per `homeId:profile` (mirrors the backend's HOME+profile scope).
-const mockPluginStore: Record<string, InstalledPlugin[]> = {}
 // Mock native plugin views per `homeId:profile` (mirrors the instance's own
 // /api/pluginManager lists; includes the @deepseek-ai/* core entries the old
 // file reader filtered out, so the two are visibly different).
@@ -885,36 +880,6 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         diagnostic: null,
         warnings: [],
       } as T
-    }
-    case 'list_installed_plugins': {
-      const homeId = String(args?.home_id)
-      const profile = String(args?.profile ?? 'web')
-      const key = `${homeId}:${profile}`
-      // Seed a realistic set on first read so the Plugins page is usable.
-      if (!mockPluginStore[key]) {
-        mockPluginStore[key] = [
-          { id: '@dsh-plugin/dsh-auxiliary', version: '^0.3.1', enabled: true, cordis_id: 'dsh-auxiliary' },
-          { id: 'dsh-better-sidebar', version: '^1.2.0', enabled: false, cordis_id: 'dsh-better-sidebar' },
-          { id: '@canglongcl/dsh-web-review', version: '^0.9.4', enabled: true, cordis_id: 'dsh-web-review' },
-        ]
-      }
-      return mockPluginStore[key] as T
-    }
-    case 'set_plugins_enabled': {
-      const input = args?.input as SetPluginsEnabledInput
-      const key = `${input.homeId}:${input.profile}`
-      const list = mockPluginStore[key] ?? []
-      for (const p of list) {
-        if (input.pluginIds.includes(p.id)) p.enabled = input.enabled
-      }
-      mockPluginStore[key] = list
-      return undefined as T
-    }
-    case 'uninstall_plugin': {
-      const input = args?.input as UninstallPluginInput
-      const key = `${input.homeId}:${input.profile}`
-      mockPluginStore[key] = (mockPluginStore[key] ?? []).filter((p) => p.id !== input.pluginId)
-      return undefined as T
     }
     default:
       fail(`mock: unknown command ${cmd}`)

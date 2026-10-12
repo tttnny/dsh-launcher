@@ -212,9 +212,6 @@ pub fn run() {
             plugins::set_bundle_enabled,
             plugins::set_plugin_enabled,
             plugins::remove_bundle,
-            plugins::list_installed_plugins,
-            plugins::set_plugins_enabled,
-            plugins::uninstall_plugin,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

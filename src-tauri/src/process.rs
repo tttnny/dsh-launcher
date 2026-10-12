@@ -338,6 +338,15 @@ pub async fn start_instance_process(
                 if let Err(e) = crate::plugins::ensure_profile_store_pin(&dir, &store) {
                     crate::log_warn!("固定 profile pnpm store 失败（{}）: {e}", dir.display());
                 }
+                // The same bare pnpm installs into the profile: with
+                // auto-install-peers on, a plugin whose peers include a core
+                // package would drag a duplicate copy of it in (doctor reports
+                // the duplicated-Symbol failure). Pin the peer policy too, so
+                // the Web UI's own installs stay independent of the user's
+                // global pnpm config.
+                if let Err(e) = crate::plugins::ensure_profile_npmrc(&dir) {
+                    crate::log_warn!("固定 profile peer 策略失败（{}）: {e}", dir.display());
+                }
             }
             Err(e) => crate::log_warn!("解析 profile 目录失败，跳过 store 固定: {e}"),
         }

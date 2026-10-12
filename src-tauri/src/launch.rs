@@ -1,7 +1,7 @@
 //! Launch spec module — the single owner of "how the launcher invokes DSH".
 //!
-//! Four call shapes drive a DSH CLI, and each carries rules that used to be
-//! documented (or not) at one call site while the other three silently
+//! Three call shapes drive a DSH CLI, and each carries rules that used to be
+//! documented (or not) at one call site while the other two silently
 //! depended on them:
 //!
 //! * **Instance run** ([`instance_command`]): `node [flags] bin
@@ -11,9 +11,6 @@
 //! * **Template boot** ([`template_boot_command`]): the ONE invocation allowed
 //!   to pass `--host 127.0.0.1` — a short-lived throwaway boot whose host is
 //!   the launcher's own decision.
-//! * **Plugin management** ([`plugin_command`]): `dsh plugin --profile P
-//!   <pnpm args>` with `CI=true` (no TTY) and the pinned pnpm prepended to
-//!   PATH so the CLI's own `spawnSync("pnpm")` inherits the pin.
 //! * **Terminal** ([`ensure_terminal_dsh_wrapper`] + [`terminal_env_pairs`]):
 //!   a `/bin/sh` wrapper for `node_modules/.bin/dsh` plus the exported
 //!   environment, so a bare `dsh` in an instance terminal behaves like the
@@ -21,9 +18,9 @@
 //!
 //! The environment policy ("what env does a spawned DSH-related process get")
 //! lives here too: DSH_HOME is reserved everywhere, overrides apply to
-//! instances and terminals but not to `dsh plugin`, and PATH filtering is
-//! terminal-only. Version-on-disk layout (npm tree vs source checkout) is
-//! owned by [`is_repo_checkout`]/[`version_bin`]/[`web_app_supports_no_open`].
+//! instances and terminals, and PATH filtering is terminal-only.
+//! Version-on-disk layout (npm tree vs source checkout) is owned by
+//! [`is_repo_checkout`]/[`version_bin`]/[`web_app_supports_no_open`].
 
 use crate::config::Config;
 use std::path::{Path, PathBuf};
@@ -132,7 +129,7 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 ///
 /// It is passed as an argument rather than via `NODE_OPTIONS` on purpose: an
 /// argument applies to the DSH process alone, while `NODE_OPTIONS` would leak
-/// into the `pnpm` child that `dsh plugin` spawns.
+/// into every child process DSH spawns.
 ///
 /// It is OFF unless the caller asks, because it breaks the Web UI for everyone
 /// who does not need it: preserving symlinks lets Node reach one package
@@ -147,9 +144,8 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 /// Who decides the flag:
 /// * an **instance** carries its own `preserve_symlinks` (Instance settings —
 ///   the escape hatch for a linked plugin);
-/// * the **profile template boot** and **`dsh plugin`** have no instance and
-///   derive it from the profile manifest via
-///   [`crate::profile::declares_link_dependency`];
+/// * the **profile template boot** has no instance and derives it from the
+///   profile manifest via [`crate::profile::declares_link_dependency`];
 /// * the **instance terminal** follows the instance it belongs to.
 pub fn node_runtime_flags(preserve_symlinks: bool) -> &'static [&'static str] {
     if preserve_symlinks {
@@ -288,75 +284,6 @@ pub fn template_boot_command(
         .arg(port.to_string())
         .env("DSH_HOME", home_path)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    Ok(cmd)
-}
-
-// ---------------------------------------------------------------------------
-// Plugin management (through the instance's own CLI)
-// ---------------------------------------------------------------------------
-
-/// A `dsh plugin --profile <name> <pnpm args…>` invocation for an instance's
-/// own CLI version.
-///
-/// Profile plugin management is a CLI-private flow: `dsh plugin` initializes
-/// the profile when needed, forwards the remaining arguments to pnpm with
-/// cwd = the profile directory, and then reconciles `dsh.profile.bundles`
-/// against the *installed* state (a dependency whose package declares
-/// `dsh.bundle.patch` joins the layer stack; one that no longer does leaves
-/// it). Driving pnpm ourselves would produce a tree the CLI does not expect
-/// and would leave the layer list to be guessed at, so every install and
-/// removal goes through the CLI of the version that instance runs.
-///
-/// The CLI resolves pnpm from PATH, so the resolved pnpm's directory is
-/// prepended to PATH: that choice then also applies inside the CLI's own pnpm
-/// invocation.
-pub fn plugin_command(
-    node: &Path,
-    version_dir: &Path,
-    home_path: &Path,
-    profile: &str,
-    pnpm_args: &[String],
-    pnpm_prog: &Path,
-    preserve_symlinks: bool,
-) -> Result<Command, String> {
-    let mut cmd = dsh_base(node, version_dir, preserve_symlinks)?;
-    cmd.arg("plugin")
-        .arg("--profile")
-        .arg(profile)
-        .args(pnpm_args)
-        .env("DSH_HOME", home_path)
-        // The launcher can never answer an interactive prompt: pnpm aborts
-        // with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY when it needs to
-        // purge a modules dir (store/virtual-store relink) without a TTY.
-        // CI=true makes pnpm treat the run as non-interactive instead.
-        .env("CI", "true");
-
-    // The CLI spawns pnpm itself for plugin installs, so the network-robustness
-    // settings have to be inherited rather than passed on the CLI's argv. This
-    // is also the only spelling pnpm 11 honours: --config.fetch-* hangs it (see
-    // crate::toolchain::pnpm_network_env).
-    crate::toolchain::apply_pnpm_network_env(&mut cmd);
-
-    // Prepend the pinned pnpm's directory so the CLI's `spawnSync("pnpm")`
-    // picks it up instead of whatever major is on the user's PATH.
-    if let Some(pnpm_dir) = pnpm_prog.parent() {
-        if !pnpm_dir.as_os_str().is_empty() {
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            let mut entries = vec![pnpm_dir.to_path_buf()];
-            entries.extend(std::env::split_paths(&existing));
-            match std::env::join_paths(entries) {
-                Ok(joined) => {
-                    cmd.env("PATH", joined);
-                }
-                Err(e) => {
-                    crate::log_warn!("拼接 PATH 失败，沿用系统 PATH: {e}");
-                }
-            }
-        }
-    }
-
-    cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     Ok(cmd)
 }

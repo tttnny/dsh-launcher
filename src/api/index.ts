@@ -9,7 +9,6 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
-  InstalledPlugin,
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
@@ -19,11 +18,9 @@ import type {
   SetBundleEnabledInput,
   SetPluginEnabledInput,
   RemoveBundleInput,
-  SetPluginsEnabledInput,
   TaskInfo,
   TaskLog,
   TaskProgress,
-  UninstallPluginInput,
 } from './types'
 import type { Listener } from './mock'
 import {
@@ -153,10 +150,6 @@ export const api = {
    */
   setPluginEnabled: (input: SetPluginEnabledInput) =>
     call<ChangeOutcome>('set_plugin_enabled', { input }),
-  listInstalledPlugins: (homeId: string, profile: string) =>
-    call<InstalledPlugin[]>('list_installed_plugins', { home_id: homeId, profile }),
-  setPluginsEnabled: (input: SetPluginsEnabledInput) => call<void>('set_plugins_enabled', { input }),
-  uninstallPlugin: (input: UninstallPluginInput) => call<void>('uninstall_plugin', { input }),
 
   // External terminal: opens Terminal.app / Ghostty for one instance.
   openInstanceTerminal: (instanceId: string) =>

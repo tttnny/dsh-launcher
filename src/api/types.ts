@@ -167,30 +167,6 @@ export interface RemoteVersion {
 }
 
 // ---------------------------------------------------------------------------
-// Profile plugins (scoped by HOME + profile)
-// ---------------------------------------------------------------------------
-
-export interface InstalledPlugin {
-  id: string
-  version?: string
-  enabled: boolean
-  cordis_id?: string
-}
-
-export interface SetPluginsEnabledInput {
-  homeId: string
-  profile: string
-  pluginIds: string[]
-  enabled: boolean
-}
-
-export interface UninstallPluginInput {
-  homeId: string
-  profile: string
-  pluginId: string
-}
-
-// ---------------------------------------------------------------------------
 // Native plugin management (frozen contract — design §4; T2–T5 consume, don't
 // rename). Values come from the running instance's own plugin manager over
 // /api/pluginManager/*; the launcher never reads the profile files.
