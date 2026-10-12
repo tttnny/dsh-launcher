@@ -662,6 +662,54 @@ pub async fn list_statuses(state: &State<'_, AppState>) -> Vec<InstanceStatus> {
         .collect()
 }
 
+/// What the running table says about one instance, as needed by callers that
+/// only want to know where an instance lives and whether it can be managed.
+pub struct RunningEntry {
+    /// The instance URL; for a spawned instance it carries the one-time start
+    /// token (`...?token=...`), for an adopted one it is bare (`http://host:port`).
+    pub url: Option<String>,
+    /// Adopted from an external process (DSH restarted itself): the token is
+    /// unrecoverable, so the instance is not manageable.
+    pub adopted: bool,
+}
+
+/// Resolves the running instance that is executing `profile` of `home_id`:
+/// the same DSH_HOME and the running profile equal to `profile`; the first
+/// match wins (design §4). This is the instance the Plugins page talks to.
+///
+/// Returns `Err` only when the DSH_HOME itself is unknown — "no running
+/// instance" is `Ok(None)`, which is a normal state (ADR-0001), not an error.
+pub async fn running_for_profile(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Result<Option<RunningEntry>, String> {
+    let instance_ids: Vec<String> = {
+        let cfg = state.config.lock().unwrap();
+        if !cfg.homes.iter().any(|h| h.id == home_id) {
+            return Err("DSH_HOME 不存在".to_string());
+        }
+        // Instances that belong to this HOME, in registration order.
+        cfg.instances
+            .iter()
+            .filter(|i| i.home_id == home_id)
+            .map(|i| i.id.clone())
+            .collect()
+    };
+    let running = state.running.lock().await;
+    for id in instance_ids {
+        if let Some(entry) = running.get(&id) {
+            if entry.profile == profile {
+                return Ok(Some(RunningEntry {
+                    url: entry.url.clone(),
+                    adopted: entry.adopted.is_some(),
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
 async fn log_line(log: &Arc<Mutex<std::fs::File>>, line: &str) {
     let mut f = log.lock().await;
     let _ = writeln!(f, "{line}");
@@ -770,6 +818,117 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    
-    
+    fn app_state(
+        homes: Vec<crate::config::DshHome>,
+        instances: Vec<crate::config::DshInstance>,
+    ) -> AppState {
+        AppState {
+            config_path: std::path::PathBuf::new(),
+            data_dir: std::path::PathBuf::new(),
+            config: std::sync::Mutex::new(crate::config::Config {
+                homes,
+                versions: Vec::new(),
+                instances,
+                settings: Default::default(),
+            }),
+            running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
+
+    fn instance(id: &str, home_id: &str) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: id.to_string(),
+            name: id.to_string(),
+            version_id: "v1".to_string(),
+            home_id: home_id.to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+            preserve_symlinks: false,
+        }
+    }
+
+    fn home(id: &str) -> crate::config::DshHome {
+        crate::config::DshHome {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: std::path::PathBuf::from("/tmp/home"),
+        }
+    }
+
+    fn running_entry(profile: &str, url: Option<&str>) -> RunningInstance {
+        RunningInstance {
+            kill: Arc::new(Notify::new()),
+            profile: profile.to_string(),
+            url: url.map(str::to_string),
+            adopted: None,
+        }
+    }
+
+    /// The Plugins page resolves (HOME, Profile) to the instance actually
+    /// running that profile: same HOME, equal profile, first match wins.
+    #[tokio::test]
+    async fn running_for_profile_matches_home_and_profile() {
+        let state = app_state(
+            vec![home("h1"), home("h2")],
+            vec![
+                instance("i1", "h1"),
+                instance("i2", "h1"),
+                instance("i3", "h2"),
+            ],
+        );
+        {
+            let mut running = state.running.lock().await;
+            // i1 runs a different profile; i2 and i3 run "web".
+            running.insert(
+                "i1".to_string(),
+                running_entry("bot", Some("http://127.0.0.1:1/?token=a")),
+            );
+            running.insert(
+                "i2".to_string(),
+                running_entry("web", Some("http://127.0.0.1:2/?token=b")),
+            );
+            running.insert(
+                "i3".to_string(),
+                running_entry("web", Some("http://127.0.0.1:3/?token=c")),
+            );
+        }
+
+        let hit = running_for_profile(&state, "h1", "web").await.unwrap().unwrap();
+        assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
+        assert!(!hit.adopted);
+
+        // A different HOME never borrows another HOME's instance.
+        let other = running_for_profile(&state, "h2", "web").await.unwrap().unwrap();
+        assert_eq!(other.url.as_deref(), Some("http://127.0.0.1:3/?token=c"));
+
+        // Instance registered but not started -> no running entry.
+        assert!(running_for_profile(&state, "h1", "demo").await.unwrap().is_none());
+        // Unknown HOME is an error, distinct from "not running".
+        assert!(running_for_profile(&state, "nope", "web").await.is_err());
+    }
+
+    /// An adopted instance has a bare URL and no token: it must surface as
+    /// adopted so the caller can refuse to manage it.
+    #[tokio::test]
+    async fn running_for_profile_reports_adopted_instances() {
+        let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);
+        {
+            let mut running = state.running.lock().await;
+            running.insert("i1".to_string(), running_entry("web", Some("http://127.0.0.1:3089")));
+            if let Some(entry) = running.get_mut("i1") {
+                entry.adopted = Some(Adopted {
+                    pid: 42,
+                    port: 3089,
+                    host: "127.0.0.1".to_string(),
+                });
+            }
+        }
+        let hit = running_for_profile(&state, "h1", "web").await.unwrap().unwrap();
+        assert!(hit.adopted);
+        assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:3089"));
+    }
+}

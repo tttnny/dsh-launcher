@@ -158,6 +158,9 @@
   "plugins": {
     "title": "Plugins",
     "pluginsTitle": "Plugins",
+    "pluginName": "Plugin",
+    "pluginEntry": "Plugin entry",
+    "pluginPhase": "Phase",
     "pluginsDesc": "Manage plugins in this profile: enable / disable / uninstall. Plugins mount at instance start; restart the instances referencing this HOME for changes to take effect.",
     "selectHome": "Select DSH_HOME",
     "selectProfile": "Select Profile",

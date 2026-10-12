@@ -157,7 +157,10 @@
   },
   "plugins": {
     "title": "插件",
-    "pluginsTitle": "已安装插件",
+    "pluginsTitle": "插件列表",
+    "pluginName": "插件",
+    "pluginEntry": "插件条目",
+    "pluginPhase": "运行阶段",
     "pluginsDesc": "管理该 Profile 下的插件：启用 / 禁用 / 卸载。插件在实例启动时挂载，改动后需重启引用该 HOME 的实例才会生效。",
     "selectHome": "选择 DSH_HOME",
     "selectProfile": "选择 Profile",

@@ -5,6 +5,7 @@ mod config;
 mod doctor;
 mod icons;
 mod launch;
+mod native;
 mod plugins;
 mod process;
 mod profile;
@@ -207,6 +208,7 @@ pub fn run() {
             commands::update_settings,
             commands::open_instance_terminal,
             update::check_launcher_update,
+            plugins::list_plugins,
             plugins::list_installed_plugins,
             plugins::set_plugins_enabled,
             plugins::uninstall_plugin,

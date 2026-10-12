@@ -12,6 +12,7 @@ import type {
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
+  PluginView,
   RemoteVersion,
   RuntimeStatus,
   SetPluginsEnabledInput,
@@ -125,6 +126,9 @@ export const api = {
   },
 
   // Profile plugins (scoped by HOME + profile): list / enable / disable / uninstall.
+  /** The instance's own plugin list (native plugin management, ADR-0001). */
+  listPlugins: (homeId: string, profile: string) =>
+    call<PluginView>('list_plugins', { home_id: homeId, profile }),
   listInstalledPlugins: (homeId: string, profile: string) =>
     call<InstalledPlugin[]>('list_installed_plugins', { home_id: homeId, profile }),
   setPluginsEnabled: (input: SetPluginsEnabledInput) => call<void>('set_plugins_enabled', { input }),

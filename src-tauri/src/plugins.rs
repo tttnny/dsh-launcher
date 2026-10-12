@@ -184,6 +184,68 @@ pub(crate) fn resolve_home_paths(
 }
 
 // ---------------------------------------------------------------------------
+// Commands: native plugin list (the instance's own plugin manager)
+// ---------------------------------------------------------------------------
+
+/// Lists the plugins of the instance running `(home_id, profile)` through the
+/// instance's **native plugin manager** (`POST /api/pluginManager/*`) — the
+/// running DSH owns plugin state (ADR-0001), so the launcher neither reads
+/// files to build the list nor reports entries the instance does not.
+///
+/// The instance is resolved from the selectors: the same DSH_HOME, running
+/// the selected profile (see [`crate::process::running_for_profile`]). The
+/// credential is the running-table URL's one-time token; the launcher never
+/// reads `<DSH_HOME>/.credentials.yaml`.
+///
+/// Read-only when no instance is running: the view is `not-running` with
+/// empty lists (T5 fills that branch in and this signature does not change).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_plugins(
+    state: State<'_, AppState>,
+    home_id: String,
+    profile: String,
+) -> Result<crate::native::PluginView, String> {
+    list_plugins_for(state.inner(), &home_id, &profile).await
+}
+
+/// The body of [`list_plugins`], taking `&AppState` so tests can drive the
+/// read-only states without a Tauri runtime.
+async fn list_plugins_for(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Result<crate::native::PluginView, String> {
+    use crate::native::{NativeClient, PluginView, PluginViewMode};
+
+    const NOT_RUNNING: &str =
+        "实例未运行：插件列表与管理需要该 Profile 的实例正在运行，请先启动实例。";
+
+    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
+    };
+    // An adopted instance has no recoverable token, so it cannot be managed.
+    if entry.adopted {
+        return Ok(PluginView::readonly(
+            PluginViewMode::Adopted,
+            "该实例由外部进程接管（DSH 自行重启），启动 token 不可用，无法管理插件。请从启动器重启该实例。",
+        ));
+    }
+    let Some(url) = entry.url else {
+        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
+    };
+
+    // A refused session / unreachable instance is read-only rather than a
+    // command error: the page still renders (T5 adds content).
+    let client = match NativeClient::connect(&url).await {
+        Ok(client) => client,
+        Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
+    };
+    let plugins = client.list_plugins().await?;
+    let bundles = client.list_bundles().await?;
+    Ok(PluginView::managed(plugins, bundles))
+}
+
+// ---------------------------------------------------------------------------
 // Commands: enable / disable (cordis.patch.yml disabled rows)
 // ---------------------------------------------------------------------------
 
@@ -1058,5 +1120,97 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn app_state(
+        homes: Vec<crate::config::DshHome>,
+        instances: Vec<crate::config::DshInstance>,
+    ) -> AppState {
+        AppState {
+            config_path: std::path::PathBuf::new(),
+            data_dir: std::path::PathBuf::new(),
+            config: std::sync::Mutex::new(crate::config::Config {
+                homes,
+                versions: Vec::new(),
+                instances,
+                settings: Default::default(),
+            }),
+            running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// No instance is running this profile: the view is the read-only
+    /// `not-running` stub with empty lists (T5 fills it in), not an error.
+    #[tokio::test]
+    async fn list_plugins_returns_not_running_without_an_instance() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+        assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
+        assert!(view.reason.is_some());
+        assert!(view.plugins.is_empty());
+        assert!(view.bundles.is_empty());
+    }
+
+    /// An adopted instance carries a bare URL and no token, so the view is
+    /// `adopted` (distinct from `not-running`), not an attempted connection.
+    #[tokio::test]
+    async fn list_plugins_marks_adopted_instances_readonly() {
+        let state = app_state(
+            vec![crate::config::DshHome {
+                id: "h1".to_string(),
+                name: "h1".to_string(),
+                path: std::path::PathBuf::from("/tmp/home"),
+            }],
+            vec![crate::config::DshInstance {
+                id: "i1".to_string(),
+                name: "i1".to_string(),
+                version_id: "v1".to_string(),
+                home_id: "h1".to_string(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+                preserve_symlinks: false,
+            }],
+        );
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    url: Some("http://127.0.0.1:3089".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 3089,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+        assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
+        assert!(view.plugins.is_empty());
     }
 }
