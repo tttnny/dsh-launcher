@@ -13,15 +13,19 @@
 //!
 //! | `menu-navigate` 载荷 | 菜单来源 |
 //! | --- | --- |
-//! | `/` | “显示”→首页 (Cmd+1) |
-//! | `/homes` | “显示”→HOME (Cmd+2) |
-//! | `/profiles` | “显示”→Profile (Cmd+3) |
-//! | `/versions` | “显示”→版本 (Cmd+4) |
+//! | `/` | “显示”→实例 (Cmd+1) |
+//! | `/library?tab=versions` | “显示”→DSH 版本 (Cmd+2) |
+//! | `/library?tab=homes` | “显示”→DSH_HOME (Cmd+3) |
+//! | `/library?tab=profiles` | “显示”→Profile (Cmd+4) |
 //! | `/settings` | App 菜单→偏好设置 (Cmd+,) |
 //!
-//! 插件管理不再占一条顶级导航：它是 Profile 行上的动作，从 `/profiles` 进入。
-//! `/tasks` 保留为可用的历史链接，前端把它重定向到 `/versions`（安装进度
-//! 就显示在那个版本那一行上）。
+//! 插件管理不占顶级导航：它属于运行中的实例，入口只在实例侧两处（详情页头部
+//! 按钮与实例行展开卡片里的按钮），跳转带 `?instanceId=` 以便返回。`/tasks` 保留
+//! 为可用的历史链接，前端把它重定向到 `/versions`（安装进度就显示在那个版本那
+//! 一行上）。
+//!
+//! 刷新没有菜单项：实例状态由后端事件推送，`⌘R` 走前端 `handleAppKeydown`，
+//! 用于「在启动器外面改了什么」的少数场景。
 //!
 //! 非导航动作仍用各自事件（载荷为 `()`）：
 //!
@@ -127,21 +131,22 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )?;
 
     // ── 显示 (应用内导航快捷键→转发前端) ──────────────────
-    // 五项，对应侧栏的五项：插件与任务都不是顶级页面了（插件在 Profile 行上，
-    // 任务进度在版本那一行上），所以这里也不再各占一格。
-    let view_home = MenuItem::with_id(app, ID_VIEW_HOME, "首页", true, Some("CmdOrCtrl+1"))?;
-    let view_homes = MenuItem::with_id(app, ID_VIEW_HOMES, "HOME", true, Some("CmdOrCtrl+2"))?;
+    // 顶层只有三个目的地（实例 / 资源库 / 设置）；资源库的三个标签页各占一格，
+    // 所以 DSH 版本 / DSH_HOME / Profile 仍然一键直达。插件管理不占位：它属于
+    // 运行中的实例，入口在实例页那一行展开的卡片里。
+    let view_home = MenuItem::with_id(app, ID_VIEW_HOME, "实例", true, Some("CmdOrCtrl+1"))?;
+    let view_versions = MenuItem::with_id(
+        app,
+        ID_VIEW_VERSIONS,
+        "DSH 版本",
+        true,
+        Some("CmdOrCtrl+2"),
+    )?;
+    let view_homes = MenuItem::with_id(app, ID_VIEW_HOMES, "DSH_HOME", true, Some("CmdOrCtrl+3"))?;
     let view_profiles = MenuItem::with_id(
         app,
         ID_VIEW_PROFILES,
         "Profile",
-        true,
-        Some("CmdOrCtrl+3"),
-    )?;
-    let view_versions = MenuItem::with_id(
-        app,
-        ID_VIEW_VERSIONS,
-        "版本",
         true,
         Some("CmdOrCtrl+4"),
     )?;
@@ -225,9 +230,9 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         ID_SHOW_MAIN => crate::windows::show_or_create_main(app),
         ID_VIEW_HOME => show_and_emit(app, "/"),
-        ID_VIEW_HOMES => show_and_emit(app, "/homes"),
-        ID_VIEW_PROFILES => show_and_emit(app, "/profiles"),
-        ID_VIEW_VERSIONS => show_and_emit(app, "/versions"),
+        ID_VIEW_VERSIONS => show_and_emit(app, "/library?tab=versions"),
+        ID_VIEW_HOMES => show_and_emit(app, "/library?tab=homes"),
+        ID_VIEW_PROFILES => show_and_emit(app, "/library?tab=profiles"),
         ID_VIEW_SETTINGS | ID_PREFERENCES => show_and_emit(app, "/settings"),
         ID_CHECK_UPDATE => {
             if let Err(e) = app.emit(EVT_CHECK_UPDATE, ()) {

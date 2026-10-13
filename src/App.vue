@@ -2,18 +2,17 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
 import type { ThemeMode } from '@/api/types'
 import { api } from '@/api'
-import { Message } from '@arco-design/web-vue'
 import {
   MENU_NAVIGATE_EVENTS,
-  MENU_REFRESH_EVENTS,
   handleAppKeydown,
   resolveMenuRoute,
   type ShortcutRoute,
 } from '@/shortcuts'
-import DlRefreshButton from '@/components/DlRefreshButton.vue'
+import DlIcon from '@/components/DlIcon.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -25,13 +24,26 @@ const isTauri = api.isTauri
 
 const themeMedia = window.matchMedia('(prefers-color-scheme: dark)')
 
-/** Applies the effective Arco theme to <body> (body[arco-theme='dark']). */
+/**
+ * Applies the effective Arco theme to <body> (body[arco-theme='dark']) and
+ * keeps the native window in step. The title bar is drawn by macOS, not by the
+ * page: without the native half, a dark app under a light OS keeps a white
+ * title bar and the chrome contradicts the content.
+ */
 function applyTheme(mode: ThemeMode) {
   const dark = mode === 'dark' || (mode === 'system' && themeMedia.matches)
-  if (dark) {
-    document.body.setAttribute('arco-theme', 'dark')
-  } else {
-    document.body.removeAttribute('arco-theme')
+  if (dark) document.body.setAttribute('arco-theme', 'dark')
+  else document.body.removeAttribute('arco-theme')
+  void applyNativeTheme(mode)
+}
+
+async function applyNativeTheme(mode: ThemeMode) {
+  if (!appWindow) return
+  try {
+    const win = await appWindow
+    await win.setTheme(mode === 'system' ? null : mode)
+  } catch {
+    // Older runtimes or a non-Tauri context: the page theme still applies.
   }
 }
 
@@ -44,52 +56,75 @@ onMounted(async () => {
   locale.value = store.settings.locale || 'zh-CN'
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
-  // Land on the environment check when the toolchain is incomplete. pnpm is
-  // included because it is a hard requirement for installing a version and for
-  // plugin management, and the launcher no longer installs one itself — being
-  // sent here is the only place the user learns that. Navigation stays open
-  // (the sidebar is untouched) so a network-restricted user can still reach
-  // Settings and configure a proxy.
-  const runtimeIncomplete =
-    !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
+
+  // Land on the environment check when the toolchain is incomplete: pnpm is a
+  // hard requirement for installing a version and for plugin management, and
+  // the launcher no longer installs one itself. Navigation stays open, so a
+  // network-restricted user can still reach Settings and configure a proxy.
+  const runtimeIncomplete = !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
   if (runtimeIncomplete && route.name !== 'setup') {
-    router.push({ name: 'setup' })
+    void router.push({ name: 'setup' })
   }
+
   await setupLaunchDeepLink()
   window.addEventListener('keydown', onAppKeydown)
   await setupMenuListeners()
 })
 
-// --- In-app shortcuts: Cmd/Ctrl+1/2/3/4, Cmd+, R, Esc -------------------------
+// --- Shortcuts ----------------------------------------------------------------
+
+function pushLibrary(tab: 'versions' | 'homes' | 'profiles' | undefined) {
+  const query = tab ? { tab } : {}
+  if (route.name === 'library') {
+    void router.replace({ name: 'library', query })
+    return
+  }
+  void router.push({ name: 'library', query })
+}
 
 function goShortcut(name: ShortcutRoute) {
-  if (name === 'instances' && route.name === 'instance-edit') return
-  if (route.name === name) return
-  void router.push({ name }).catch(() => undefined)
+  switch (name) {
+    case 'instances':
+      if (route.name === 'instance-detail') return
+      void router.push({ name: 'instances' }).catch(() => undefined)
+      return
+    case 'library':
+      pushLibrary(undefined)
+      return
+    case 'library:versions':
+      pushLibrary('versions')
+      return
+    case 'library:homes':
+      pushLibrary('homes')
+      return
+    case 'library:profiles':
+      pushLibrary('profiles')
+      return
+    case 'settings':
+      void router.push({ name: 'settings' }).catch(() => undefined)
+      return
+  }
 }
 
 async function refreshAll() {
   await Promise.allSettled([store.refreshInstances(), store.refreshVersions(), store.checkRuntime()])
 }
 
-function refreshShortcut() {
-  void refreshAll()
-}
-
-function backShortcut() {
-  if (route.name === 'home') return
-  router.back()
-}
-
 function onAppKeydown(e: KeyboardEvent) {
-  if (handleAppKeydown(e, { go: goShortcut, refresh: refreshShortcut, back: backShortcut })) {
+  if (handleAppKeydown(e, { go: goShortcut, refresh: () => void refreshAll(), back: backShortcut })) {
     e.preventDefault()
   }
 }
 
+function backShortcut() {
+  if (route.name === 'instances') return
+  router.back()
+}
+
+// --- Backend menu events ------------------------------------------------------
+
 let unlistenMenu: (() => void)[] = []
 
-/** Backend menu events (Rust menu) drive the same routes as shortcuts. */
 async function setupMenuListeners() {
   if (!isTauri) return
   try {
@@ -99,10 +134,6 @@ async function setupMenuListeners() {
         const target = resolveMenuRoute(event.payload)
         if (target) goShortcut(target)
       })
-      unlistenMenu.push(un)
-    }
-    for (const name of MENU_REFRESH_EVENTS) {
-      const un = await listen(name, () => refreshShortcut())
       unlistenMenu.push(un)
     }
     unlistenMenu.push(await listen('check-update', () => void onMenuCheckUpdate()))
@@ -119,9 +150,8 @@ async function onMenuCheckUpdate() {
   checkingMenuUpdate = true
   try {
     const info = await api.checkLauncherUpdate('dev')
-    if (info.up_to_date) {
-      Message.success(t('settings.update.upToDate'))
-    } else {
+    if (info.up_to_date) Message.success(t('settings.update.upToDate'))
+    else {
       Message.info(t('settings.update.available', { version: info.latest ?? '' }))
       if (info.url) await api.openExternal(info.url)
     }
@@ -140,7 +170,7 @@ async function onMenuOpenHelp() {
   }
 }
 
-// --- Launch deep link: dsh-launcher://launch → start instance ---------
+// --- Launch deep link: dsh-launcher://launch → start instance -----------------
 
 let unlistenDeepLink: (() => void) | undefined
 
@@ -156,9 +186,7 @@ function handleDeepLink(raw: string) {
   try {
     const u = new URL(raw)
     if (u.protocol !== 'dsh-launcher:') return
-    if (u.host === 'launch') {
-      void launchFromDeepLink(u)
-    }
+    if (u.host === 'launch') void launchFromDeepLink(u)
   } catch {
     // Ignore invalid protocol
   }
@@ -222,9 +250,9 @@ watch(
   },
 )
 
-// --- Sidebar navigation -------------------------------------------------------
+// --- Sidebar ------------------------------------------------------------------
 
-type NavKey = 'home' | 'homes' | 'profiles' | 'versions' | 'settings'
+type NavKey = 'instances' | 'library' | 'settings'
 
 const siderCollapsed = ref(localStorage.getItem('dsh-launcher.siderCollapsed') === '1')
 
@@ -239,87 +267,26 @@ function toggleSider() {
 
 const navSelected = computed<NavKey>(() => {
   const name = route.name as string
-  if (name === 'instance-edit') return 'home'
-  if (name === 'homes') return 'homes'
-  // The plugin manager is a second-level page under a Profile row, so its nav
-  // home is Profiles.
-  if (name === 'profiles' || name === 'plugins') return 'profiles'
-  if (name === 'versions') return 'versions'
-  if (name === 'settings') return 'settings'
-  return 'home'
+  if (name === 'library') return 'library'
+  if (name === 'settings' || name === 'setup') return 'settings'
+  return 'instances'
 })
 
-function navGo(key: NavKey) {
-  switch (key) {
-    case 'home':
-      void router.push({ name: 'home' }).catch(() => undefined)
-      break
-    case 'homes':
-      void router.push({ name: 'homes' }).catch(() => undefined)
-      break
-    case 'profiles':
-      void router.push({ name: 'profiles' }).catch(() => undefined)
-      break
-    case 'versions':
-      void router.push({ name: 'versions' }).catch(() => undefined)
-      break
-    case 'settings':
-      void router.push({ name: 'settings' }).catch(() => undefined)
-      break
-  }
-}
+const navGo = goShortcut
 
-const runningInstanceCount = computed(
+const runningCount = computed(
   () => store.instances.filter((i) => store.statusOf(i.id).state === 'running').length,
 )
 
-const pageTitle = computed(() => {
-  const name = route.name as string
-  switch (name) {
-    case 'home':
-      return t('nav.home')
-    case 'instances':
-      return t('instances.title')
-    case 'instance-edit':
-      return t('instanceEdit.titleEdit')
-    case 'homes':
-      return t('homes.title')
-    case 'profiles':
-      return t('profiles.title')
-    case 'plugins':
-      return t('plugins.pageTitle')
-    case 'versions':
-      return t('versions.title')
-    case 'settings':
-      return t('settings.title')
-    case 'setup':
-      return t('setup.title')
-    default:
-      return t('app.title')
-  }
-})
+const envOk = computed(
+  () => !!store.runtime?.node?.installed && !!store.runtime?.pnpm?.installed,
+)
 
-// --- Back button targets ------------------------------------------------------
-// Only the instance editor has a literal parent. The plugin manager is opened
-// from a Profile row but switches its Profile in place, so its back button
-// returns to the Profile list it belongs to instead of replaying history.
-const backTarget = computed<string | null>(() => {
-  const name = route.name as string
-  if (name === 'instance-edit') return null
-  if (name === 'plugins') return 'profiles'
-  return null
-})
+// --- Header -------------------------------------------------------------------
 
-const showBack = computed(() => {
-  const name = route.name as string
-  return name === 'instance-edit' || name === 'plugins'
-})
+const showBack = computed(() => route.name === 'instance-detail' || route.name === 'setup')
 
 function onHeaderBack() {
-  if (backTarget.value) {
-    void router.push({ name: backTarget.value }).catch(() => undefined)
-    return
-  }
   router.back()
 }
 
@@ -334,8 +301,8 @@ async function loadWindowApi() {
 }
 
 // --- Title bar drag & double-click zoom ---------------------------------------
-// startDragging() enters a native drag loop that swallows the pending click,
-// so only start dragging once the pointer moves past a small threshold — fast
+// startDragging() enters a native drag loop that swallows the pending click, so
+// only start dragging once the pointer moves past a small threshold — fast
 // clicks then complete normally and dblclick (zoom) still reaches the webview.
 
 let dragArmed: { x: number; y: number; started: boolean } | null = null
@@ -343,7 +310,7 @@ let dragArmed: { x: number; y: number; started: boolean } | null = null
 function onHeaderMouseDown(e: MouseEvent) {
   if (!isTauri || e.button !== 0) return
   const el = e.target as HTMLElement | null
-  if (el?.closest('.nav-item, a, button, input, [data-no-drag]')) return
+  if (el?.closest('.dl-nav-item, a, button, input, [data-no-drag]')) return
   dragArmed = { x: e.screenX, y: e.screenY, started: false }
   window.addEventListener('mousemove', onDragThresholdMove)
   window.addEventListener('mouseup', onDragFinish, { once: true })
@@ -368,22 +335,12 @@ function onDragFinish() {
 async function onHeaderDoubleClick(e: MouseEvent) {
   if (!isTauri || e.button !== 0) return
   const el = e.target as HTMLElement | null
-  if (el?.closest('.nav-item, a, button, input, [data-no-drag]')) return
-  await toggleWindowZoom()
-}
-
-// --- Window zoom: the native traffic lights own close / minimize / zoom, but
-// double-clicking the custom header strip still zooms the window. ---
-
-async function toggleWindowZoom() {
+  if (el?.closest('.dl-nav-item, a, button, input, [data-no-drag]')) return
   try {
     const w = await appWindow
     if (!w) return
-    if (await w.isMaximized()) {
-      await w.unmaximize()
-    } else {
-      await w.maximize()
-    }
+    if (await w.isMaximized()) await w.unmaximize()
+    else await w.maximize()
   } catch {
     // Advisory only
   }
@@ -391,289 +348,183 @@ async function toggleWindowZoom() {
 </script>
 
 <template>
-  <div class="apple-window">
-    <!-- Unified Sidebar: spans full vertical height -->
-    <aside class="apple-sider" :class="{ collapsed: siderCollapsed }">
-      <!-- Sidebar Header: a bare drag strip. The native traffic lights draw
-           over its left end, exactly as they do over Finder's sidebar; the
-           sidebar toggle lives in the main toolbar (see .header-left). -->
+  <div class="dl-app">
+    <aside class="dl-sidebar" :class="{ 'is-collapsed': siderCollapsed }">
+      <!-- Drag strip: the native traffic lights draw over its left end. -->
       <div
-        class="sider-traffic-header"
+        class="dl-sidebar-drag"
         @mousedown="onHeaderMouseDown"
         @dblclick="onHeaderDoubleClick"
       />
 
-      <!-- Navigation List -->
-      <nav class="sider-nav">
+      <nav class="dl-nav">
         <button
-          class="nav-item"
-          :class="{ active: navSelected === 'home' }"
-          :title="siderCollapsed ? t('nav.home') : ''"
-          @click="navGo('home')"
+          class="dl-nav-item"
+          :class="{ 'is-active': navSelected === 'instances' }"
+          :title="siderCollapsed ? t('nav.instances') : ''"
+          @click="navGo('instances')"
         >
-          <span class="nav-icon">
-            <!-- Home: a grid of instance tiles, not a play triangle (which reads
-                 as a media control and clashed with the HOME house icon). -->
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="7.5" height="7.5" rx="1.8" />
-              <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.8" />
-              <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.8" />
-              <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.8" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.home') }}</span>
-          <span v-if="!siderCollapsed && runningInstanceCount > 0" class="nav-pill-badge">
-            {{ runningInstanceCount }}
-          </span>
+          <DlIcon name="instances" :size="17" />
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.instances') }}</span>
+          <span v-if="!siderCollapsed && runningCount > 0" class="dl-nav-badge">{{ runningCount }}</span>
         </button>
 
         <button
-          class="nav-item"
-          :class="{ active: navSelected === 'homes' }"
-          :title="siderCollapsed ? t('nav.homes') : ''"
-          @click="navGo('homes')"
+          class="dl-nav-item"
+          :class="{ 'is-active': navSelected === 'library' }"
+          :title="siderCollapsed ? t('nav.library') : ''"
+          @click="navGo('library')"
         >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.homes') }}</span>
+          <DlIcon name="library" :size="17" />
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.library') }}</span>
         </button>
 
         <button
-          class="nav-item"
-          :class="{ active: navSelected === 'profiles' }"
-          :title="siderCollapsed ? t('nav.profiles') : ''"
-          @click="navGo('profiles')"
-        >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.profiles') }}</span>
-        </button>
-
-        <button
-          class="nav-item"
-          :class="{ active: navSelected === 'versions' }"
-          :title="siderCollapsed ? t('nav.versions') : ''"
-          @click="navGo('versions')"
-        >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="16.5" y1="9.4" x2="7.5" y2="4.21" />
-              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-              <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-              <line x1="12" y1="22.08" x2="12" y2="12" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.versions') }}</span>
-        </button>
-
-        <button
-          class="nav-item"
-          :class="{ active: navSelected === 'settings' }"
+          class="dl-nav-item"
+          :class="{ 'is-active': navSelected === 'settings' }"
           :title="siderCollapsed ? t('nav.settings') : ''"
           @click="navGo('settings')"
         >
-          <span class="nav-icon">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </span>
-          <span v-if="!siderCollapsed" class="nav-label">{{ t('nav.settings') }}</span>
+          <DlIcon name="settings" :size="17" />
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.settings') }}</span>
         </button>
       </nav>
+
+      <div class="dl-sidebar-foot">
+        <button
+          v-if="store.healthTotalCount > 0"
+          class="dl-foot-row"
+          :class="store.healthErrorCount > 0 ? 'is-danger' : 'is-warn'"
+          :title="t('home.healthLogs')"
+          @click="navGo('instances')"
+        >
+          <DlIcon name="health" :size="15" />
+          <span v-if="!siderCollapsed" class="dl-foot-label">{{ t('home.healthLogs') }}</span>
+          <span v-if="!siderCollapsed" class="dl-foot-count">{{ store.healthTotalCount }}</span>
+        </button>
+
+        <button
+          class="dl-foot-row"
+          :class="{ 'is-danger': !envOk }"
+          :title="t('setup.title')"
+          @click="router.push({ name: 'setup' })"
+        >
+          <DlIcon name="terminal" :size="15" />
+          <span v-if="!siderCollapsed" class="dl-foot-label">
+            {{ envOk ? t('nav.envReady') : t('nav.envMissing') }}
+          </span>
+        </button>
+      </div>
     </aside>
 
-    <!-- Main Window Area -->
-    <main class="apple-main">
-      <!-- Unified Header Toolbar -->
-      <header class="apple-header" @mousedown="onHeaderMouseDown" @dblclick="onHeaderDoubleClick">
-        <div class="header-left">
-          <button
-            class="header-mac-btn"
-            :title="t('nav.toggleSider')"
-            data-no-drag
-            @click="toggleSider"
-          >
-            <!-- SF-Symbol-like sidebar toggle: a window frame with the sidebar
-                 rail filled when it is open, and hollow when collapsed. -->
-            <svg
-              viewBox="0 0 16 16"
-              width="15"
-              height="15"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.5" />
-              <line x1="6.25" y1="2.75" x2="6.25" y2="13.25" />
-              <rect
-                v-if="!siderCollapsed"
-                x="2.5"
-                y="3.5"
-                width="3"
-                height="9"
-                rx="1.4"
-                fill="currentColor"
-                stroke="none"
-                opacity="0.28"
-              />
-            </svg>
-          </button>
-          <button v-if="showBack" class="header-mac-btn" :title="t('common.back')" data-no-drag @click="onHeaderBack">
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10 13L5 8l5-5" />
-            </svg>
-          </button>
-          <span class="header-title">{{ pageTitle }}</span>
-          <span v-if="!isTauri" class="header-mock-chip">{{ t('app.mockBadge') }}</span>
-        </div>
+    <main class="dl-main">
+      <header class="dl-toolbar" @mousedown="onHeaderMouseDown" @dblclick="onHeaderDoubleClick">
+        <button class="dl-icon-btn" :title="t('nav.toggleSider')" data-no-drag @click="toggleSider">
+          <DlIcon name="sidebar" :size="15" />
+        </button>
+        <button v-if="showBack" class="dl-icon-btn" :title="t('common.back')" data-no-drag @click="onHeaderBack">
+          <DlIcon name="back" :size="15" />
+        </button>
 
-        <div class="header-spacer" />
+        <span v-if="!isTauri" class="dl-tag dl-tag--muted" style="margin-left: 4px">
+          {{ t('app.mockBadge') }}
+        </span>
 
-        <div class="header-actions">
-          <DlRefreshButton
-            class="header-mac-btn"
-            :title="t('common.refresh')"
-            :action="refreshAll"
-          />
-        </div>
+        <span class="dl-toolbar-spacer" />
       </header>
 
-      <!-- Content Scroll Container -->
-      <div class="apple-content">
-        <a-scrollbar
-          type="track"
-          outer-style="height: 100%"
-          style="height: 100%; overflow-y: auto"
-        >
-          <router-view />
-        </a-scrollbar>
+      <div class="dl-content">
+        <!-- Keyed by route name only: switching a Library tab is a query change
+             on the same page, and the panes react to it without a remount. -->
+        <router-view :key="String(route.name)" />
       </div>
     </main>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.apple-window {
+.dl-app {
+  display: flex;
   height: 100%;
   width: 100%;
-  display: flex;
-  flex-direction: row;
   overflow: hidden;
-  background-color: var(--apple-content-bg);
+  background: var(--dl-canvas);
 }
 
-// Unified Sidebar
-.apple-sider {
-  width: var(--dl-sider-width);
-  flex-shrink: 0;
+// --- Sidebar -----------------------------------------------------------------
+
+.dl-sidebar {
   display: flex;
   flex-direction: column;
-  background: var(--apple-sidebar-bg);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border-right: 1px solid var(--apple-sidebar-border);
-  transition: width var(--apple-duration) var(--apple-spring-curve);
-  z-index: 10;
+  width: var(--dl-sidebar);
+  flex-shrink: 0;
+  background: var(--dl-surface);
+  border-right: 1px solid var(--dl-line);
+  transition: width var(--dl-slow) var(--dl-ease);
 
-  &.collapsed {
-    width: var(--dl-sider-collapsed-width);
-
-    .nav-item {
-      justify-content: center;
-      padding: 9px 0;
-    }
+  &.is-collapsed {
+    width: var(--dl-sidebar-collapsed);
   }
 }
 
-// Window Traffic Area in Sidebar.
-// A bare drag strip: the native traffic lights draw over its left end, and
-// the sidebar toggle lives in the main toolbar. onHeaderMouseDown makes the
-// rest of the strip draggable.
-.sider-traffic-header {
-  height: var(--dl-header-height);
+.dl-sidebar-drag {
+  height: var(--dl-header);
   flex-shrink: 0;
-  border-bottom: 1px solid var(--apple-separator);
-  -webkit-app-region: drag;
   user-select: none;
 }
 
-// Sidebar Navigation
-.sider-nav {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px 10px;
+.dl-nav {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
+  padding: 6px 10px;
 }
 
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--color-text-2);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  text-align: left;
+.dl-nav-item {
   position: relative;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease,
-    transform 0.12s ease-out;
-
-  &:hover {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
-  }
-
-  &.active {
-    background: rgba(var(--primary-6), 0.14);
-    color: rgb(var(--primary-6));
-    font-weight: 600;
-
-    .nav-icon svg {
-      stroke: rgb(var(--primary-6));
-    }
-  }
-
-  &:active {
-    transform: scale(var(--apple-active-scale));
-  }
-}
-
-.nav-icon {
-  width: 20px;
-  height: 20px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--dl-r-ctl);
+  background: transparent;
+  color: var(--dl-ink-2);
+  font-family: inherit;
+  font-size: var(--dl-text-md);
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
 
-  svg {
-    stroke: currentColor;
-    transition: stroke 0.15s ease;
+  &:hover:not(.is-active) {
+    background: var(--dl-surface-2);
+    color: var(--dl-ink);
+  }
+
+  &.is-active {
+    background: var(--dl-signal-soft);
+    color: var(--dl-signal-ink);
+  }
+
+  // The active rail is the app's one structural marker in the sidebar.
+  &.is-active::before {
+    content: '';
+    position: absolute;
+    left: -10px;
+    top: 50%;
+    width: 3px;
+    height: 16px;
+    border-radius: 0 2px 2px 0;
+    background: var(--dl-signal);
+    transform: translateY(-50%);
   }
 }
 
-.nav-label {
+.dl-nav-label {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -681,97 +532,104 @@ async function toggleWindowZoom() {
   white-space: nowrap;
 }
 
-.nav-pill-badge {
-  padding: 1px 7px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 10px;
-  background: rgba(var(--green-6), 0.16);
-  color: rgb(var(--green-6));
+.dl-nav-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--dl-run-soft);
+  color: var(--dl-run);
+  font-size: var(--dl-text-xs);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
 
-// Main Window Area
-.apple-main {
+.dl-sidebar-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 10px;
+  border-top: 1px solid var(--dl-line);
+}
+
+.dl-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--dl-r-ctl);
+  background: transparent;
+  color: var(--dl-ink-3);
+  font-family: inherit;
+  font-size: var(--dl-text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
+
+  &:hover {
+    background: var(--dl-surface-2);
+    color: var(--dl-ink);
+  }
+
+  &.is-warn {
+    color: var(--dl-warn);
+  }
+
+  &.is-danger {
+    color: var(--dl-danger);
+  }
+}
+
+.dl-foot-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-foot-count {
+  padding: 0 6px;
+  border-radius: 6px;
+  background: currentColor;
+  color: var(--dl-surface);
+  font-size: var(--dl-text-xs);
+  font-weight: 650;
+}
+
+// --- Main --------------------------------------------------------------------
+
+.dl-main {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-width: 0;
   height: 100%;
-  display: flex;
-  flex-direction: column;
-  position: relative;
 }
 
-// Unified Header
-.apple-header {
-  height: var(--dl-header-height);
-  flex-shrink: 0;
+.dl-toolbar {
   display: flex;
   align-items: center;
-  padding: 0 24px;
-  border-bottom: 1px solid var(--apple-separator);
-  background: var(--apple-content-bg);
-  -webkit-app-region: drag;
+  gap: 4px;
+  height: var(--dl-header);
+  flex-shrink: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--dl-line);
+  background: var(--dl-surface);
   user-select: none;
 }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.header-title {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  color: var(--color-text-1);
-}
-
-.header-mock-chip {
-  padding: 2px 7px;
-  font-size: 11px;
-  font-weight: 600;
-  border-radius: 6px;
-  background: rgba(var(--orange-6), 0.14);
-  color: rgb(var(--orange-6));
-}
-
-.header-spacer {
+.dl-toolbar-spacer {
   flex: 1;
 }
 
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.header-mac-btn {
-  border: none;
-  background: transparent;
-  color: var(--color-text-2);
-  border-radius: 7px;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
-
-  &:hover {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
-  }
-
-  &:active {
-    transform: scale(var(--apple-active-scale));
-  }
-}
-
-.apple-content {
+.dl-content {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
-  background-color: var(--apple-content-bg);
+  overflow-y: auto;
 }
 </style>

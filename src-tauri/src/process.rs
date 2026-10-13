@@ -98,10 +98,15 @@ fn pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
 }
 
-/// Register an externally-owned DSH process (DSH restarted itself in-place)
-/// as the instance's running entry: bare-URL (the token is in-memory in the
-/// owning process and unrecoverable, but the 30-day browser cookie keeps the
-/// existing browser session working), then start the liveness watcher.
+/// Register an externally-owned DSH process (DSH restarted itself in-place, or
+/// the launcher was replaced while the instance kept running) as the
+/// instance's running entry, then start the liveness watcher.
+///
+/// The token is in-memory in the owning process, but that process is usually
+/// still the one that printed the URL we remembered — so the remembered URL is
+/// tried first and adopted with it when the instance still accepts it (plugin
+/// management keeps working). Only when there is no working reminder does the
+/// entry degrade to the bare URL the page calls "由系统接管".
 async fn adopt_external_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -111,7 +116,19 @@ async fn adopt_external_process(
     host: &str,
     pid: i32,
 ) {
-    let url = format!("http://{host}:{port}");
+    let data_dir = state.data_dir.clone();
+    let bare = format!("http://{host}:{port}");
+    let remembered = match recall_url(&data_dir, instance_id) {
+        Some(url) if crate::native::NativeClient::connect(&url).await.is_ok() => Some(url),
+        Some(_) => {
+            // The process that printed it is gone (DSH restarted itself): the
+            // new one minted its own token, so the reminder is dead weight.
+            forget_url(&data_dir, instance_id);
+            None
+        }
+        None => None,
+    };
+    let url = remembered.clone().unwrap_or(bare);
     {
         let mut running = state.running.lock().await;
         if running.contains_key(instance_id) {
@@ -127,9 +144,15 @@ async fn adopt_external_process(
             },
         );
     }
-    crate::log_info!(
-        "实例 {instance_id} 端口 {host}:{port} 被 DSH 自身重启的外部进程占用（pid {pid}），已收养为运行中"
-    );
+    if remembered.is_some() {
+        crate::log_info!(
+            "实例 {instance_id} 端口 {host}:{port} 被仍在运行的外部进程占用（pid {pid}），已收养为运行中并沿用上次的启动 token"
+        );
+    } else {
+        crate::log_info!(
+            "实例 {instance_id} 端口 {host}:{port} 被 DSH 自身重启的外部进程占用（pid {pid}），已收养为运行中（无可用 token）"
+        );
+    }
     emit_status(
         app,
         &InstanceStatus {
@@ -188,6 +211,162 @@ async fn adopt_external_process(
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"dsh web: (https?://[^\s]+)").unwrap())
+}
+
+/// The port of an instance URL (`http://127.0.0.1:3088/?token=…` → 3088), for
+/// finding an instance whose port was not pinned.
+fn port_of_url(url: &str) -> Option<u16> {
+    reqwest::Url::parse(url.trim()).ok()?.port()
+}
+
+/// Starts one background pass that adopts the instances this launcher session
+/// did *not* spawn.
+///
+/// A launcher that is replaced (app update) or force-quit leaves its DSH
+/// processes running: they are not reaped, and nothing notices until the user
+/// starts one again — which is exactly when the card says "已停止" while the
+/// port is taken, and the plugins page degrades to a file listing. The pinned
+/// port, or the port in the URL we remembered, is where to look.
+pub async fn adopt_surviving_instances(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let data_dir = state.data_dir.clone();
+    struct Candidate {
+        id: String,
+        profile: String,
+        host: String,
+        port: u16,
+        remembered: Option<String>,
+        /// A user-configured port is evidence by itself; a random one is only
+        /// believed if the URL we remembered still authenticates.
+        pinned: bool,
+    }
+    let candidates: Vec<Candidate> = {
+        let cfg = state.config.lock().unwrap();
+        cfg.instances
+            .iter()
+            .filter_map(|inst| {
+                let remembered = recall_url(&data_dir, &inst.id);
+                let port = inst.port.or_else(|| remembered.as_deref().and_then(port_of_url))?;
+                // The remembered profile is what it was actually started with;
+                // the stored defaults are the best guess after that.
+                let profile = recall_profile(&data_dir, &inst.id)
+                    .or_else(|| inst.last_profile.clone())
+                    .or_else(|| inst.default_profile.clone())
+                    .unwrap_or_else(|| "web".to_string());
+                Some(Candidate {
+                    id: inst.id.clone(),
+                    profile,
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    pinned: inst.port.is_some(),
+                    remembered,
+                })
+            })
+            .collect()
+    };
+    for c in candidates {
+        let Some(owner) = probe_port_owner(c.port).await else {
+            continue;
+        };
+        if !looks_like_dsh(&owner.command) {
+            continue;
+        }
+        if !c.pinned {
+            let authenticates = match c.remembered.as_deref() {
+                Some(url) => crate::native::NativeClient::connect(url).await.is_ok(),
+                None => false,
+            };
+            if !authenticates {
+                continue;
+            }
+        }
+        adopt_external_process(app, &state, &c.id, &c.profile, c.port, &c.host, owner.pid).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remembered launch URLs
+//
+// DSH's launch token lives in the process and is unrecoverable from outside —
+// but the *URL that carries it* is ours: the instance prints it on its own
+// stdout. Persisting it is what lets a later launcher session adopt a DSH
+// process that outlived us (an app update, a quit-and-reopen) **and still
+// manage its plugins**, instead of degrading to the dead-end "由系统接管"
+// state for the rest of that process's life.
+//
+// The file is a hint, never an authority: a remembered token is only trusted
+// after the instance accepts it, and it is dropped the moment it does not
+// (DSH restarted itself in place, which mints a new token).
+// ---------------------------------------------------------------------------
+
+/// `<data_dir>/running.json` — remembered launch URLs, keyed by instance id.
+fn remembered_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("running.json")
+}
+
+fn read_remembered(data_dir: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(remembered_path(data_dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_remembered(
+    data_dir: &std::path::Path,
+    map: &serde_json::Map<String, serde_json::Value>,
+) {
+    let path = remembered_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    let Ok(raw) = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone())) else {
+        return;
+    };
+    if std::fs::write(&tmp, raw).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Records the URL an instance printed when it became ready.
+pub(crate) fn remember_url(data_dir: &std::path::Path, instance_id: &str, url: &str, profile: &str) {
+    let mut map = read_remembered(data_dir);
+    map.insert(
+        instance_id.to_string(),
+        serde_json::json!({ "url": url, "profile": profile }),
+    );
+    write_remembered(data_dir, &map);
+}
+
+/// Forgets an instance's remembered URL (stopped, exited, or a stale token).
+pub(crate) fn forget_url(data_dir: &std::path::Path, instance_id: &str) {
+    let mut map = read_remembered(data_dir);
+    if map.remove(instance_id).is_some() {
+        write_remembered(data_dir, &map);
+    }
+}
+
+/// The URL we last saw this instance print, if we ever did.
+pub(crate) fn recall_url(data_dir: &std::path::Path, instance_id: &str) -> Option<String> {
+    read_remembered(data_dir)
+        .get(instance_id)
+        .and_then(|v| v.get("url"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// The profile that instance was running when it printed that URL.
+pub(crate) fn recall_profile(data_dir: &std::path::Path, instance_id: &str) -> Option<String> {
+    read_remembered(data_dir)
+        .get(instance_id)
+        .and_then(|v| v.get("profile"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// The URL the launcher can actually authenticate with, if any. An entry
+/// without a token (an adopted process we never saw print one) is *running* but
+/// not manageable; the reverse — adopted with a token — is both.
+pub(crate) fn manageable_url(entry: &RunningEntry) -> Option<&str> {
+    entry.url.as_deref().filter(|u| u.contains("token="))
 }
 
 pub fn npm() -> &'static str {
@@ -360,12 +539,17 @@ pub async fn start_instance_process(
     // The launch spec module owns the argv: node_runtime_flags order,
     // --profile, per-instance --port, --no-open feature detection, and the
     // deliberate absence of --host (the profile layer owns the bind host).
+    // `--preserve-symlinks` is read out of the profile this instance is
+    // starting with, not out of a per-instance switch.
+    let preserve_symlinks = home_path
+        .as_deref()
+        .is_some_and(|hp| crate::profile::preserve_symlinks_for(hp, profile));
     let mut cmd = crate::launch::instance_command(
         &node,
         &version.dir,
         profile,
         is_web.then(|| inst.port.unwrap_or(0)),
-        inst.preserve_symlinks,
+        preserve_symlinks,
     )?;
 
     let env = build_env(&cfg, instance_id)?;
@@ -523,6 +707,9 @@ pub async fn start_instance_process(
                 if let Some(cap) = url_re().captures(&line) {
                     let url = cap[1].to_string();
                     crate::log_info!("实例 {reader_id} 已就绪：{url}");
+                    // Keep the URL (token included) across launcher restarts:
+                    // see `remember_url`.
+                    remember_url(&state.data_dir, &reader_id, &url, &reader_profile);
                     {
                         let mut running = state.running.lock().await;
                         if let Some(entry) = running.get_mut(&reader_id) {
@@ -674,11 +861,14 @@ pub async fn list_statuses(state: &State<'_, AppState>) -> Vec<InstanceStatus> {
 /// What the running table says about one instance, as needed by callers that
 /// only want to know where an instance lives and whether it can be managed.
 pub struct RunningEntry {
-    /// The instance URL; for a spawned instance it carries the one-time start
-    /// token (`...?token=...`), for an adopted one it is bare (`http://host:port`).
+    /// The instance URL; when it carries the one-time start token
+    /// (`...?token=...`) the launcher can authenticate, otherwise it is bare
+    /// (`http://host:port`) and only good for opening in a browser.
     pub url: Option<String>,
-    /// Adopted from an external process (DSH restarted itself): the token is
-    /// unrecoverable, so the instance is not manageable.
+    /// Adopted from an external process rather than spawned by this launcher
+    /// session. Adoption alone no longer means "unmanageable" — that is
+    /// decided by [`manageable_url`] — but it is what tells the caller to stop
+    /// it by pid instead of by handle.
     pub adopted: bool,
 }
 
@@ -760,6 +950,9 @@ async fn unregister_running(
     status: InstanceStatus,
 ) {
     state.running.lock().await.remove(id);
+    // The process is gone, so the token it printed is worthless: drop the
+    // reminder rather than handing a stale URL to the next adoption.
+    forget_url(&state.data_dir, id);
     emit_status(app, &status);
     crate::tray::rebuild_tray_menu(app).await;
 }
@@ -856,7 +1049,6 @@ mod tests {
             last_profile: None,
             icon: None,
             port: None,
-            preserve_symlinks: false,
         }
     }
 
@@ -875,6 +1067,63 @@ mod tests {
             url: url.map(str::to_string),
             adopted: None,
         }
+    }
+
+    /// The URL an instance prints is the only thing that lets a *later*
+    /// launcher session manage a process it did not spawn, so it has to
+    /// survive the session — and be dropped when the process is gone.
+    #[test]
+    fn remembered_urls_round_trip_and_forget() {
+        let dir = std::env::temp_dir().join(format!("dsh-remembered-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(remembered_path(&dir));
+
+        assert_eq!(recall_url(&dir, "i1"), None);
+        remember_url(&dir, "i1", "http://127.0.0.1:3088/?token=abc", "web");
+        remember_url(&dir, "i2", "http://127.0.0.1:3089/?token=def", "web");
+        assert_eq!(
+            recall_url(&dir, "i1").as_deref(),
+            Some("http://127.0.0.1:3088/?token=abc")
+        );
+        // A restart re-reads the same file: same answer, no state in memory.
+        assert_eq!(
+            recall_url(&dir, "i2").as_deref(),
+            Some("http://127.0.0.1:3089/?token=def")
+        );
+
+        forget_url(&dir, "i1");
+        assert_eq!(recall_url(&dir, "i1"), None);
+        assert!(recall_url(&dir, "i2").is_some(), "forget must be per instance");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Manageability is the token's business, not the entry's origin.
+    #[test]
+    fn manageable_url_requires_a_token() {
+        let spawned = RunningEntry {
+            url: Some("http://127.0.0.1:1/?token=a".to_string()),
+            adopted: false,
+        };
+        assert!(manageable_url(&spawned).is_some());
+
+        // Adopted, but we remembered the token it printed: manageable.
+        let adopted_with_token = RunningEntry {
+            url: Some("http://127.0.0.1:1/?token=a".to_string()),
+            adopted: true,
+        };
+        assert!(manageable_url(&adopted_with_token).is_some());
+
+        let adopted_bare = RunningEntry {
+            url: Some("http://127.0.0.1:1".to_string()),
+            adopted: true,
+        };
+        assert!(manageable_url(&adopted_bare).is_none());
+
+        let unknown = RunningEntry {
+            url: None,
+            adopted: false,
+        };
+        assert!(manageable_url(&unknown).is_none());
     }
 
     /// The Plugins page resolves (HOME, Profile) to the instance actually

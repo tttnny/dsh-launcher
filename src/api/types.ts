@@ -30,12 +30,6 @@ export interface DshInstance {
   icon?: string | null
   /** Preferred web port (1-65535); null/undefined = random free port. */
   port?: number | null
-  /**
-   * Pass --preserve-symlinks to this instance's DSH process. Only needed when
-   * the profile depends on a `link:`-ed plugin; off by default because it
-   * breaks DSH's settings writes (the Web UI wedges on the first-run notice).
-   */
-  preserve_symlinks?: boolean
 }
 
 export interface LauncherSettings {
@@ -175,32 +169,16 @@ export interface RemoteVersion {
 /** How the Plugins page may treat the snapshot: managed, or a reason it can't. */
 export type PluginViewMode = 'managed' | 'not-running' | 'adopted' | 'unreachable'
 
-/** A native plugin entry (the stable subset of PluginInfo). */
-export interface PluginItem {
-  /** Row key; the `id` argument of `setPluginEnabled`. */
-  entryId: string
-  moduleName: string
-  /** From `meta.title`; the UI falls back to `moduleName` when absent. */
-  title?: string | null
-  description?: string | null
-  enabled: boolean
-  fiberPhase?: string | null
-  patchId?: string | null
-  /** 'management-required' | 'unaddressable'. */
-  readOnlyReason?: string | null
-  /**
-   * The version of the bundle（补丁层）this entry arrived in. The native
-   * inventory has no version for an entry, so the backend fills this in from
-   * the bundle providing the entry's package; entries no bundle claims have
-   * none.
-   */
-  version?: string | null
-}
-
-/** A Bundle（补丁层）. */
+/**
+ * A Bundle（补丁层）— the unit this page manages: what a profile selects and
+ * what DSH mounts as one patch layer. The rows inside it are DSH's own
+ * composition detail, reported as a count rather than a control surface.
+ */
 export interface BundleItem {
   /** The `name` argument of `setBundleEnabled` / `removeBundle`. */
   name: string
+  /** How many composition-tree rows this layer contributes. */
+  rowCount: number
   title?: string | null
   description?: string | null
   version?: string | null
@@ -221,12 +199,10 @@ export interface PluginView {
   /** Read-only explanation, already localized by the backend; shown verbatim. */
   reason?: string | null
   /**
-   * True when the list was read from the profile's own files (instance not
-   * running) instead of answered by the instance. The offline list is a
-   * best-effort, scope-wide projection, so the UI says so.
+   * The instance's own bundle list. Empty in every read-only mode: the launcher
+   * does not guess a layer list from files, so without a running instance there
+   * is nothing to show.
    */
-  files: boolean
-  plugins: PluginItem[]
   bundles: BundleItem[]
 }
 
@@ -243,13 +219,6 @@ export interface ChangeOutcome {
   /** The localized refusal reason; the UI shows this verbatim. */
   diagnostic?: string | null
   warnings: string[]
-}
-
-export interface SetPluginEnabledInput {
-  homeId: string
-  profile: string
-  id: string
-  enabled: boolean
 }
 
 export interface SetBundleEnabledInput {

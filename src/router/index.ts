@@ -1,33 +1,43 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+// Three top-level pages, matching the three things a user actually does:
+// run an instance (instances), prepare what instances run (library), and
+// configure the launcher (settings). Everything that used to be its own page
+// — HOME directories, profiles, plugin management — lives inside Library,
+// because they are all "what an instance can be pointed at".
+//
+// Legacy paths stay as redirects: they are real hash links in old docs, the
+// tray menu, and the native menu bar.
 const router = createRouter({
-  // Hash history keeps the Tauri webview happy without server rewrites.
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'home', component: () => import('@/views/Home.vue') },
-    { path: '/instances', redirect: '/' },
-    { path: '/instances/:id', name: 'instance-edit', component: () => import('@/views/InstanceEdit.vue') },
-    { path: '/homes', name: 'homes', component: () => import('@/views/Homes.vue') },
-    { path: '/profiles', name: 'profiles', component: () => import('@/views/Profiles.vue') },
-    // The plugin manager is not a page of its own any more (spec: no top-level
-    // nav entry) — it lives inside the Profile list, as the action on the row
-    // it manages. It is still a real route, because opening it is a real
-    // navigation and a hash link must not lie about which page it shows; what
-    // that route renders is the Profile list with the named Profile's manager
-    // open, which is exactly the state the page would be in had the row been
-    // clicked. There is no second copy of the list: the route reuses the view.
+    { path: '/', name: 'instances', component: () => import('@/views/Instances.vue') },
+    { path: '/instances/:id', name: 'instance-detail', component: () => import('@/views/InstanceDetail.vue') },
+
+    // Library: versions / HOME directories / profiles, chosen by `tab`.
+    {
+      path: '/library',
+      name: 'library',
+      component: () => import('@/views/Library.vue'),
+    },
+    // The plugin manager is a page of its own — it is what a Profile's row
+    // opens, and it needs the full width for the entry table. It carries the
+    // (HOME, Profile) pair it manages in its query so the link is honest.
     {
       path: '/plugins',
       name: 'plugins',
-      component: () => import('@/views/Profiles.vue'),
+      component: () => import('@/views/library/PluginManager.vue'),
     },
-    { path: '/versions', name: 'versions', component: () => import('@/views/Versions.vue') },
-    // Task progress is not a page: installing a version is the only long task
-    // and its progress belongs to the version it installs (see Versions.vue).
-    // The route stays so `/tasks` remains a working legacy link.
-    { path: '/tasks', redirect: '/versions' },
     { path: '/settings', name: 'settings', component: () => import('@/views/Settings.vue') },
     { path: '/setup', name: 'setup', component: () => import('@/views/Setup.vue') },
+
+    // --- Legacy paths -------------------------------------------------------
+    { path: '/home', redirect: '/' },
+    { path: '/homes', redirect: { name: 'library', query: { tab: 'homes' } } },
+    { path: '/profiles', redirect: { name: 'library', query: { tab: 'profiles' } } },
+    { path: '/versions', redirect: { name: 'library', query: { tab: 'versions' } } },
+    { path: '/tasks', redirect: { name: 'library', query: { tab: 'versions' } } },
+    { path: '/instances', redirect: '/' },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

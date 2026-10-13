@@ -27,10 +27,11 @@ function read(rel) {
 /** The `v-if` condition on the guide block whose heading is `i18nKey`. */
 function guideBlockCondition(src, i18nKey) {
   const re = new RegExp(
-    `<div v-if="([^"]*)" class="guide-block">\\s*<h4>\\{\\{\\s*t\\('${i18nKey}'\\)\\s*\\}\\}</h4>`,
+    `<div v-if="([^"]*)" class="dl-surface guide">\\s*<div class="guide-head">\\s*` +
+      `<span class="guide-title">\\{\\{\\s*t\\('${i18nKey}'\\)\\s*\\}\\}</span>`,
   )
   const m = re.exec(src)
-  assert.ok(m, `no guide block found for ${i18nKey}`);
+  assert.ok(m, `no guide block found for ${i18nKey}`)
   return m[1]
 }
 

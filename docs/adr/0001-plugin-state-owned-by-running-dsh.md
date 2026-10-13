@@ -28,7 +28,10 @@
 - 启动器挑「最新版本 CLI」的隐患随之消失——不再需要挑。
 - Cookie 绑在 `host:port` 上，每个实例每次启动都要重新换一次，不能跨端口复用。
 - 请求信封是严格校验的，得照抄：
-  `{"type":"client-request","rpcId":"…","method":"pluginManager/setPluginEnabled","payload":{"args":{…}}}`。
+  `{"type":"client-request","rpcId":"…","method":"pluginManager/setBundleEnabled","payload":{"args":{…}}}`。
+- 启动器的控制面停在**补丁层（Bundle）**：挂载 / 停用 / 卸载。层里的插件条目由实例
+  自己报个数（`BundleItem.rowCount`），页面不再逐条开关——条目是 200+ 量级，逐条开关
+  既没有意义也放不下，那是 DSH 自己界面的活。
 - 卸载时原生**不会**清理 `cordis.patch.yml` 里引用被删插件的行。那些行是**惰性的**
   ——bundle 一摘，引用它的行就不再参与组合。启动器**故意不补这一步**：一补就又把
   「启动器也写 profile 文件」这个口子打开了，而那正是本 bug 的成因。

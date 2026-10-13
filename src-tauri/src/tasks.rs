@@ -456,7 +456,6 @@ async fn do_create_instance(
             last_profile: None,
             icon: None,
             port: None,
-            preserve_symlinks: false,
         };
         cfg.instances.push(inst.clone());
         crate::commands::save_state(state, &cfg)?;

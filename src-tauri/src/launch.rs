@@ -141,12 +141,13 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
 /// entry`. The welcome notice's 继续 button is a settings write and its dialog
 /// offers no way out, so the Web UI opens permanently stuck on 内测声明.
 ///
-/// Who decides the flag:
-/// * an **instance** carries its own `preserve_symlinks` (Instance settings —
-///   the escape hatch for a linked plugin);
-/// * the **profile template boot** has no instance and derives it from the
-///   profile manifest via [`crate::profile::declares_link_dependency`];
-/// * the **instance terminal** follows the instance it belongs to.
+/// Who decides the flag: every spawn point derives it from the profile
+/// manifest via [`crate::profile::preserve_symlinks_for`] — an instance from
+/// the profile it is started with, the profile template boot from the template
+/// it is generating, and the instance terminal from the instance's profile.
+/// There is deliberately no user-facing switch: the flag is a fact about the
+/// profile, and a switch the user must keep in sync with that fact would be
+/// wrong in exactly the cases where being wrong is expensive.
 pub fn node_runtime_flags(preserve_symlinks: bool) -> &'static [&'static str] {
     if preserve_symlinks {
         &["--preserve-symlinks"]

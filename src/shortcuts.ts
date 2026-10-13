@@ -1,32 +1,33 @@
 /**
- * In-app keyboard shortcuts + backend menu-event contract (t4).
+ * In-app keyboard shortcuts + the backend menu-event contract.
  *
- * The Rust side (t3, Mac native menu / global shortcuts) emits Tauri events
- * to drive the frontend; this module is the single place that defines the
- * event names and the route mapping so both sides stay in sync:
+ * The Rust side (native menu bar, tray) emits Tauri events carrying a route
+ * payload; this module is the single place that defines the event names and
+ * the payload → route mapping, so the two sides cannot drift.
  *
- * - navigate events: `{ route: string }` or a plain route-name string.
- *   Accepted routes: home / instances / homes / profiles / versions / settings.
- *   `/plugins` is accepted as a legacy alias and lands on profiles.
- * - refresh events: no payload; the frontend re-reads instance status.
- *
- * Multiple event names are accepted for forward/backward compatibility with
- * whichever name t3 finally emits (`menu-navigate` is canonical).
+ * The app has three top-level pages now, so the digits address pages and
+ * Library tabs:
+ *   ⌘1 instances · ⌘2 library/versions · ⌘3 homes · ⌘4 profiles · ⌘, settings
+ * Legacy payloads (`/homes`, `/profiles`, `/versions`, `/plugins`) keep
+ * working — they land on the matching Library tab.
  */
 
-export type ShortcutRoute = 'home' | 'instances' | 'homes' | 'profiles' | 'versions' | 'settings'
+export type ShortcutRoute =
+  | 'instances'
+  | 'library'
+  | 'library:versions'
+  | 'library:homes'
+  | 'library:profiles'
+  | 'settings'
 
 /** Canonical first, aliases after. */
 export const MENU_NAVIGATE_EVENTS = ['menu-navigate', 'navigate', 'app-navigate'] as const
 
-export const MENU_REFRESH_EVENTS = ['menu-refresh', 'app-refresh'] as const
-
 /**
- * Single source of truth for the Settings shortcut card (t14).
- * `labelKey` is a vue-i18n key under `settings.shortcuts`; `keys` are the
- * display chips. Rows marked `native` are handled by the OS/Rust menu
- * (app_menu.rs) rather than `handleAppKeydown`, but are listed so the card
- * documents the full table and cannot drift from it.
+ * Single source of truth for the Settings shortcut card. `labelKey` is a
+ * vue-i18n key under `settings.shortcuts`; `keys` are the display chips. Rows
+ * marked `native` are handled by the OS/Rust menu rather than
+ * `handleAppKeydown`, but are listed so the card cannot drift from the table.
  */
 export interface ShortcutDoc {
   labelKey: string
@@ -37,33 +38,18 @@ export interface ShortcutDoc {
 const MOD = '\u2318 / Ctrl'
 
 export const SHORTCUT_DOCS: ShortcutDoc[] = [
-  { labelKey: 'settings.shortcuts.goHome', keys: [MOD, '1'] },
-  { labelKey: 'settings.shortcuts.goHomes', keys: [MOD, '2'] },
-  { labelKey: 'settings.shortcuts.goProfiles', keys: [MOD, '3'] },
-  { labelKey: 'settings.shortcuts.goVersions', keys: [MOD, '4'] },
+  { labelKey: 'settings.shortcuts.goInstances', keys: [MOD, '1'] },
+  { labelKey: 'settings.shortcuts.goVersions', keys: [MOD, '2'] },
+  { labelKey: 'settings.shortcuts.goHomes', keys: [MOD, '3'] },
+  { labelKey: 'settings.shortcuts.goProfiles', keys: [MOD, '4'] },
   { labelKey: 'settings.shortcuts.openSettings', keys: [MOD, ','] },
-  { labelKey: 'settings.shortcuts.showMain', keys: [MOD, '0'], native: true },
-  { labelKey: 'settings.shortcuts.quitApp', keys: [MOD, 'Q'], native: true },
   { labelKey: 'settings.shortcuts.refresh', keys: [MOD, 'R'] },
   { labelKey: 'settings.shortcuts.back', keys: ['Esc'] },
+  { labelKey: 'settings.shortcuts.showMain', keys: [MOD, '0'], native: true },
+  { labelKey: 'settings.shortcuts.quitApp', keys: [MOD, 'Q'], native: true },
 ]
 
-const NAVIGATE_TARGETS: Record<string, ShortcutRoute> = {
-  home: 'home',
-  '/': 'home',
-  settings: 'settings',
-  '/settings': 'settings',
-  instances: 'home',
-  '/instances': 'home',
-  homes: 'homes',
-  '/homes': 'homes',
-  profiles: 'profiles',
-  '/profiles': 'profiles',
-  versions: 'versions',
-  '/versions': 'versions',
-}
-
-/** Normalises a menu-event payload to a known route, or null when unknown. */
+/** Backend route payload → the route this app should render. */
 export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   let raw: unknown = payload
   if (
@@ -75,19 +61,36 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
     raw = obj.route ?? obj.name
   }
   if (typeof raw !== 'string') return null
-  const key = raw.trim()
-  const direct = NAVIGATE_TARGETS[key]
-  if (direct) return direct
-  // instance-edit maps to the instance list.
-  // t6: strip leading slashes first — backend emits full paths such as
-  // `/instances/:id`, which otherwise miss the match.
-  const dir = key.replace(/^\/+/, '').replace(/\/+$/, '')
-  // `/plugins` is no longer a top-level page: the plugin manager is reached
-  // from a Profile's own row (and from the tray), so both the old in-app route
-  // and the tray/menu payload land on the Profile list that owns the button.
-  if (dir === 'plugins' || dir.startsWith('plugins/')) return 'profiles'
-  if (dir.startsWith('instance')) return 'instances'
-  return null
+
+  // Strip any query the backend appended (`/library?tab=homes`).
+  const [path, query] = raw.trim().split('?')
+  const key = path.replace(/^\/+/, '').replace(/\/+$/, '')
+  const tab = new URLSearchParams(query ?? '').get('tab')
+  if (tab === 'versions' || tab === 'homes' || tab === 'profiles') {
+    return `library:${tab}` as ShortcutRoute
+  }
+
+  switch (key) {
+    case '':
+    case 'instances':
+    case 'home':
+      return 'instances'
+    case 'homes':
+      return 'library:homes'
+    case 'profiles':
+    case 'plugins':
+      return 'library:profiles'
+    case 'versions':
+    case 'tasks':
+      return 'library:versions'
+    case 'library':
+      return 'library'
+    case 'settings':
+      return 'settings'
+    default:
+      // `instances/:id` and anything else instance-shaped lands on the list.
+      return key.startsWith('instance') ? 'instances' : null
+  }
 }
 
 export interface ShortcutActions {
@@ -107,16 +110,9 @@ export function isEditableTarget(target: EventTarget | null): boolean {
 /**
  * Global keydown dispatcher for in-app shortcuts.
  *
- * Digit mapping mirrors the native menu (app_menu.rs "显示" submenu):
- * - Cmd/Ctrl+1 → home, Cmd/Ctrl+2 → homes, Cmd/Ctrl+3 → profiles,
- *   Cmd/Ctrl+4 → versions
- * - Cmd/Ctrl+, → settings (macOS Preferences convention)
- * - Cmd/Ctrl+R → in-app status refresh (NOT a page reload)
- * - Esc → blur an input, otherwise navigate back
- *
- * Editing keys inside inputs are never hijacked: every combo above requires
- * Cmd/Ctrl except Esc, and Esc inside a field only blurs instead of
- * navigating. Returns true when the event was handled.
+ * Every combo requires the platform modifier except Esc, so plain typing is
+ * never hijacked; Esc inside a field only blurs instead of navigating. Returns
+ * true when the event was handled.
  */
 export function handleAppKeydown(e: KeyboardEvent, actions: ShortcutActions): boolean {
   if (e.defaultPrevented) return false
@@ -136,31 +132,28 @@ export function handleAppKeydown(e: KeyboardEvent, actions: ShortcutActions): bo
   }
 
   const mod = e.metaKey || e.ctrlKey
-  if (!mod || e.altKey) return false
-  // Shift+Cmd+digit produces symbols on some layouts; only bare combos count.
-  if (e.shiftKey) return false
+  if (!mod || e.altKey || e.shiftKey) return false
 
-    switch (e.key) {
-      case '1':
-        actions.go('home')
-        return true
-      case '2':
-        actions.go('homes')
-        return true
-      case '3':
-        actions.go('profiles')
-        return true
-      case '4':
-        actions.go('versions')
-        return true
-      case ',':
-        actions.go('settings')
-        return true
-      case 'r':
-      case 'R':
-        actions.refresh()
-        return true
-      default:
-        return false
-    }
+  switch (e.key.toLowerCase()) {
+    case '1':
+      actions.go('instances')
+      return true
+    case '2':
+      actions.go('library:versions')
+      return true
+    case '3':
+      actions.go('library:homes')
+      return true
+    case '4':
+      actions.go('library:profiles')
+      return true
+    case ',':
+      actions.go('settings')
+      return true
+    case 'r':
+      actions.refresh()
+      return true
+    default:
+      return false
+  }
 }

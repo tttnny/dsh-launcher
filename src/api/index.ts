@@ -16,7 +16,6 @@ import type {
   RemoteVersion,
   RuntimeStatus,
   SetBundleEnabledInput,
-  SetPluginEnabledInput,
   RemoveBundleInput,
   TaskInfo,
   TaskLog,
@@ -62,6 +61,11 @@ export const api = {
   cancelTask: (id: string) => call<void>('cancel_task', { id }),
 
   listInstances: () => call<DshInstance[]>('list_instances'),
+  /** Binds an already-installed version to a DSH_HOME as a new instance. */
+  createInstance: (name: string, versionId: string, homeId: string) =>
+    call<DshInstance>('create_instance', { name, versionId, homeId }),
+  /** Removes one instance record (stops it first); version and HOME stay. */
+  deleteInstance: (id: string) => call<void>('delete_instance', { id }),
   updateInstance: (input: DshInstance) => call<DshInstance>('update_instance', { input }),
   /** Sets the instance's web port; null or out-of-range = random port. */
   setInstancePort: (instanceId: string, port: number | null) =>
@@ -144,15 +148,6 @@ export const api = {
    * launcher never writes the profile files (ADR-0001).
    */
   removeBundle: (input: RemoveBundleInput) => call<ChangeOutcome>('remove_bundle', { input }),
-  /**
-   * Enables/disables one **plugin entry** through the instance's native plugin
-   * manager (`id` is the entryId). The result says truthfully whether it took
-   * effect; a refusal is an outcome carrying the raw `errorCode` and the
-   * localized reason in `diagnostic`, not a thrown error.
-   */
-  setPluginEnabled: (input: SetPluginEnabledInput) =>
-    call<ChangeOutcome>('set_plugin_enabled', { input }),
-
   // External terminal: opens Terminal.app / Ghostty for one instance.
   openInstanceTerminal: (instanceId: string) =>
     call<string>('open_instance_terminal', { instanceId }),

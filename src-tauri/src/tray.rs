@@ -57,12 +57,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_launcher(app);
             } else if id == MENU_QUICK_HOME {
                 show_and_navigate(app, "/");
-            } else if id == MENU_QUICK_HOMES {
-                show_and_navigate(app, "/homes");
-            } else if id == MENU_QUICK_PROFILES {
-                show_and_navigate(app, "/profiles");
             } else if id == MENU_QUICK_VERSIONS {
-                show_and_navigate(app, "/versions");
+                show_and_navigate(app, "/library?tab=versions");
+            } else if id == MENU_QUICK_HOMES {
+                show_and_navigate(app, "/library?tab=homes");
+            } else if id == MENU_QUICK_PROFILES {
+                show_and_navigate(app, "/library?tab=profiles");
             } else if id == MENU_START_ALL {
                 start_all_instances(app);
             } else if id == MENU_STOP_ALL {
@@ -204,11 +204,12 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
 
     // Launcher page shortcuts: show the main window and ask the frontend to
     // navigate (event is a no-op until the frontend listens).
-    let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "回到首页", true, None::<&str>)?;
-    let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "HOME", true, None::<&str>)?;
+    let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "实例", true, None::<&str>)?;
+    // DSH 版本 / DSH_HOME / Profile 都是资源库的标签页，点进去直达对应那一页。
+    // 插件管理不占格：它是 Profile 行上的动作（ADR-0001）。
+    let quick_versions = MenuItem::with_id(app, MENU_QUICK_VERSIONS, "DSH 版本", true, None::<&str>)?;
+    let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "DSH_HOME", true, None::<&str>)?;
     let quick_profiles = MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;
-    let quick_versions = MenuItem::with_id(app, MENU_QUICK_VERSIONS, "版本", true, None::<&str>)?;
-    // 插件与任务不再各占一格：插件管理在 Profile 行上，安装进度在版本那一行上。
     let quick_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![
         &quick_home,
         &quick_homes,

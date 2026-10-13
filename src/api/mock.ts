@@ -10,13 +10,11 @@ import type {
   DshVersion,
   InstanceStatus,
   LauncherSettings,
-  PluginItem,
   PluginView,
   RemoteVersion,
   RuntimeStatus,
   RemoveBundleInput,
   SetBundleEnabledInput,
-  SetPluginEnabledInput,
   TaskInfo,
   TaskProgress,
   TaskLog,
@@ -143,30 +141,6 @@ const mockProfiles: Record<string, string[]> = {}
 // file reader filtered out, so the two are visibly different).
 const mockNativeStore: Record<string, PluginView> = {}
 
-/** One native entry with only the fields the mock needs; the rest default. */
-function nativePlugin(
-  entryId: string,
-  moduleName: string,
-  title: string,
-  enabled: boolean,
-  patchId: string | null,
-  readOnlyReason: string | null,
-  /** The providing bundle's version, as the real backend fills it in. */
-  version: string | null = null,
-): PluginItem {
-  return {
-    entryId,
-    moduleName,
-    title,
-    description: null,
-    enabled,
-    fiberPhase: enabled ? 'active' : 'pending',
-    patchId,
-    readOnlyReason,
-    version,
-  }
-}
-
 /**
  * A refusal, shaped exactly like the backend's `ChangeOutcome` (design §4d/§4b):
  * `errorCode` carries the **raw** native code and `diagnostic` carries the
@@ -193,23 +167,12 @@ function mockRefusal(stage: string, target: string, code: string): ChangeOutcome
 /** Seed a native view on first read, so the Plugins page is usable. */
 function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
   if (!running) {
-    // Mirror the backend's offline branch: read-only, list from the profile's
-    // files (best-effort, includes core entries), distinct reason.
+    // No instance, no layer list: the bundles are the *instance's* answer, so
+    // the read-only view states the mode and the reason and shows nothing.
     return {
       mode: 'not-running',
       reason:
-        '实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。',
-      files: true,
-      plugins: [
-        // Core entries are shown offline too (the old reader's blanket
-        // @deepseek-ai/* filter is gone), sourced from the profile files.
-        // The offline read has the manifest's version spec, not an installed
-        // version, so these rows state none — same as the real backend, which
-        // leaves `version` empty on the file-sourced path.
-        nativePlugin('dsh-base', '@deepseek-ai/dsh-base', 'DSH 基础', true, null, null),
-        nativePlugin('dsh-auxiliary', '@dsh-plugin/dsh-auxiliary', '辅助工具', true, null, null),
-        nativePlugin('ds-bot', '@canglongcl/ds-bot', 'ds-bot', false, null, null),
-      ],
+        '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
       bundles: [],
     }
   }
@@ -218,51 +181,10 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
     mockNativeStore[key] = {
       mode: 'managed',
       reason: null,
-      files: false,
-      plugins: [
-        // Core entries the launcher's old reader dropped: they must show up.
-        // The version is the providing bundle's, exactly as the real backend
-        // fills it in from `listBundles` (see plugins::attach_entry_versions).
-        nativePlugin(
-          'include:plugin-manager',
-          '@deepseek-ai/dsh-plugin-manager',
-          '插件管理',
-          true,
-          null,
-          'management-required',
-          '0.2.1-alpha.2',
-        ),
-        nativePlugin(
-          'include:llm',
-          '@deepseek-ai/dsh-llm',
-          'LLM',
-          true,
-          'p1',
-          null,
-          '0.2.1-alpha.2',
-        ),
-        nativePlugin(
-          'include:plugin:dsh-auxiliary',
-          '@dsh-plugin/dsh-auxiliary',
-          '辅助工具',
-          true,
-          'p2',
-          null,
-          '0.2.1-alpha.2',
-        ),
-        nativePlugin(
-          'include:plugin:dsh-better-sidebar',
-          'dsh-better-sidebar',
-          '侧边栏增强',
-          false,
-          'p3',
-          null,
-          null,
-        ),
-      ],
       bundles: [
         {
           name: '@deepseek-ai/dsh-base',
+          rowCount: 9,
           title: 'DSH 基础',
           description: null,
           version: '0.2.1-alpha.2',
@@ -276,6 +198,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         },
         {
           name: '@deepseek-ai/dsh-web-app',
+          rowCount: 3,
           title: 'DSH Web App',
           description: null,
           version: '0.2.1-alpha.2',
@@ -289,6 +212,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         },
         {
           name: '@canglongcl/ds-bot',
+          rowCount: 1,
           title: 'ds-bot',
           description: null,
           version: '^0.9.4',
@@ -303,6 +227,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         // Disabled layers the user could re-mount; most bundles ship this way.
         {
           name: '@deepseek-ai/dsh-llm-anthropic',
+          rowCount: 2,
           title: 'Anthropic LLM',
           description: null,
           version: '0.2.1-alpha.2',
@@ -316,6 +241,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         },
         {
           name: 'ds-better-sidebar',
+          rowCount: 1,
           title: '侧边栏增强',
           description: null,
           version: '^1.2.0',
@@ -330,6 +256,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
         // A bundle whose package files cannot be read.
         {
           name: '@example/dsh-missing',
+          rowCount: 0,
           title: '缺失的层',
           description: null,
           version: null,
@@ -494,7 +421,6 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           env_overrides: {},
           default_profile: null,
           last_profile: null,
-          preserve_symlinks: false,
         }
         cur.instances.push(inst)
         saveDb(cur)
@@ -554,6 +480,36 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'list_instances':
       return db.instances as T
+    case 'create_instance': {
+      const name = String(args?.name ?? '').trim()
+      const versionId = String(args?.versionId ?? '')
+      const homeId = String(args?.homeId ?? '')
+      if (!name) fail('实例名称不能为空')
+      if (db.instances.some((i) => i.name === name)) fail('同名实例已存在')
+      if (!db.versions.some((v) => v.id === versionId)) fail('DSH 版本不存在')
+      if (!db.homes.some((h) => h.id === homeId)) fail('DSH_HOME 不存在')
+      const inst: DshInstance = {
+        id: mockNewId('i'),
+        name,
+        version_id: versionId,
+        home_id: homeId,
+        env_overrides: {},
+        default_profile: null,
+        last_profile: null,
+      }
+      db.instances.push(inst)
+      saveDb(db)
+      return inst as T
+    }
+    case 'delete_instance': {
+      const id = String(args?.id)
+      if (!db.instances.some((i) => i.id === id)) fail('实例不存在')
+      db.instances = db.instances.filter((i) => i.id !== id)
+      delete db.running[id]
+      if (db.settings.last_instance_id === id) db.settings.last_instance_id = null
+      saveDb(db)
+      return undefined as T
+    }
     case 'update_instance': {
       const input = args?.input as DshInstance
       if (db.instances.some((i) => i.name === input.name && i.id !== input.id)) fail('同名实例已存在')
@@ -842,38 +798,6 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         application: 'applied',
         stage: 'remove',
         target: input.name,
-        errorCode: null,
-        diagnostic: null,
-        warnings: [],
-      } as T
-    }
-    case 'set_plugin_enabled': {
-      const input = args?.input as SetPluginEnabledInput
-      // Mirror the backend: resolve HOME+Profile to a running instance; a
-      // missing one is a command error, not an outcome.
-      const running = db.instances.some(
-        (i) =>
-          i.home_id === input.homeId &&
-          db.running[i.id]?.state === 'running' &&
-          db.running[i.id]?.profile === input.profile,
-      )
-      const view = nativeViewFor(input.homeId, input.profile, running)
-      if (view.mode !== 'managed') fail(String(view.reason ?? '实例未在运行，请先启动实例'))
-      const entry = view.plugins.find((p) => p.entryId === input.id)
-      if (!entry) {
-        return mockRefusal('enable', input.id, 'unknown-plugin') as T
-      }
-      // A read-only entry is refused by the instance — an outcome carrying the
-      // code, never a thrown error (design §4b).
-      if (entry.readOnlyReason) {
-        return mockRefusal('enable', input.id, entry.readOnlyReason) as T
-      }
-      entry.enabled = input.enabled
-      return {
-        changed: true,
-        application: 'applied',
-        stage: 'enable',
-        target: input.id,
         errorCode: null,
         diagnostic: null,
         warnings: [],

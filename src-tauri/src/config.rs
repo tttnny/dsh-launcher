@@ -41,18 +41,6 @@ pub struct DshInstance {
     /// a random free port (`--port 0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Pass `--preserve-symlinks` to this instance's DSH process.
-    ///
-    /// Needed only when a profile depends on a `link:`-ed plugin: the flag
-    /// keeps that plugin's module URL on its profile path, which is what DSH's
-    /// kernel-package routing keys on. Off by default because it makes Node
-    /// resolve one package through several distinct paths, so
-    /// `@deepseek-ai/dsh-app-boot` gets loaded more than once and every DSH
-    /// settings write fails with `profile reload requires the root Include
-    /// entry` — which bricks the Web UI's first-run notice and the whole
-    /// Settings surface.
-    #[serde(default)]
-    pub preserve_symlinks: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -427,7 +415,6 @@ pub fn migrate_instances_to_dedicated_homes(data_dir: &Path, cfg: &mut Config) -
                 last_profile: None,
                 icon: None,
                 port: None,
-                preserve_symlinks: false,
             });
             modified = true;
         }

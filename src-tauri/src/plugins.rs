@@ -59,72 +59,28 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 // Profile manifest helpers (read-only package.json + cordis.patch.yml)
 // ---------------------------------------------------------------------------
 
-/// cordis id for a package: bundles register under their unscoped short name
-/// (dsh-auxiliary) unless the package declares otherwise. We default to the
-/// last path segment without the scope.
-pub use crate::profile::cordis_id_of;
-
-/// Read the profile package.json (dsh.profile.bundles + dependencies).
-fn read_profile_manifest(dir: &std::path::Path) -> Result<serde_json::Value, String> {
-    let path = dir.join("package.json");
-    if !path.exists() {
-        return Ok(serde_json::json!({
-            "private": true,
-            "dependencies": {},
-            "dsh": { "profile": { "bundles": [] } },
-        }));
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("解析 package.json 失败: {e}"))
-}
-
-/// The packages a profile manifest declares, deduped and sorted: the
-/// `dependencies` map (with their version specs) plus any names in
-/// `dsh.profile.bundles` that no dependency already covered.
-fn profile_packages(manifest: &serde_json::Value) -> Vec<(String, Option<String>)> {
-    let mut packages: std::collections::HashMap<String, Option<String>> =
-        std::collections::HashMap::new();
-    if let Some(deps) = manifest.get("dependencies").and_then(|d| d.as_object()) {
-        for (name, spec) in deps {
-            packages.insert(name.clone(), spec.as_str().map(str::to_string));
-        }
-    }
-    if let Some(bundles) = manifest
-        .pointer("/dsh/profile/bundles")
-        .and_then(|b| b.as_array())
-    {
-        for b in bundles {
-            if let Some(name) = b.as_str() {
-                packages.entry(name.to_string()).or_insert(None);
-            }
-        }
-    }
-    let mut out: Vec<(String, Option<String>)> = packages.into_iter().collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Commands: native plugin list (the instance's own plugin manager)
 // ---------------------------------------------------------------------------
 
-/// Lists the plugins of a profile of `(home_id, profile)`.
+/// Lists the **bundles（补丁层）** of one profile of `(home_id, profile)`.
 ///
-/// While an instance runs that profile, the list is the instance's own
-/// **native plugin manager** answer (`POST /api/pluginManager/*`) — the running
-/// DSH owns plugin state (ADR-0001), so the launcher does not read files to
-/// build the list nor report entries the instance does not.
+/// The bundles are the whole answer: a bundle is what the profile selects and
+/// what DSH mounts as one patch layer, and it is the only unit that carries a
+/// version, an availability and a removal rule. The composition rows inside a
+/// layer are DSH's own detail, not a control surface the launcher hands out one
+/// switch at a time — the page states how many rows a layer contributes and
+/// manages the layer.
 ///
-/// With **no instance running** the page is still usable, but read-only: the
-/// list is read from the profile's own files (`package.json` + the patch
-/// document), every control is disabled and the `reason` tells the user to
-/// start the instance. That read path writes nothing — writing profile files is
-/// exactly what ADR-0001 removed. An **adopted** instance (no usable token) and
-/// an unreachable one take the same read-only path; their `reason` differs so
-/// the two are distinguishable.
+/// While an instance runs that profile the list is the instance's own
+/// **native plugin manager** answer (`POST /api/pluginManager/listBundles`) —
+/// the running DSH owns plugin state (ADR-0001), so the launcher neither reads
+/// files to build this list nor writes one to change it. An **adopted** process
+/// with no usable token and an unreachable one take the read-only path; their
+/// `reason` differs so the two are distinguishable, and so is "not running".
 ///
-/// The instance is resolved from the selectors: the same DSH_HOME, running
-/// the selected profile (see [`crate::process::running_for_profile`]). The
+/// The instance is resolved from the selectors: the same DSH_HOME, running the
+/// selected profile (see [`crate::process::running_for_profile`]). The
 /// credential is the running-table URL's one-time token; the launcher never
 /// reads `<DSH_HOME>/.credentials.yaml`.
 #[tauri::command(rename_all = "snake_case")]
@@ -145,24 +101,29 @@ async fn list_plugins_for(
 ) -> Result<crate::native::PluginView, String> {
     use crate::native::{NativeClient, PluginView, PluginViewMode};
 
-    // The three read-only reasons are distinct on purpose: the UI shows them
+    // The read-only reasons are distinct on purpose: the UI shows them
     // verbatim, so each one has to say what happened and what to do.
-    const NOT_RUNNING: &str = "实例未在运行：启动该实例后即可在此管理插件；下面是该 Profile 的插件（只读，从 Profile 文件读出）。";
+    const NOT_RUNNING: &str =
+        "实例未在运行：启动该实例后即可在这里管理它的补丁层。";
     const ADOPTED: &str =
-        "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理插件。请从启动器重启该实例。";
+        "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理补丁层。请从启动器重启该实例。";
 
     let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
-        // Nothing is running this profile: read the profile's files (a
-        // best-effort, read-only list) and tell the user how to manage.
-        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
+        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
     };
-    // An adopted instance has no recoverable token, so it cannot be managed.
-    if entry.adopted {
-        return offline_view(state, home_id, profile, PluginViewMode::Adopted, ADOPTED);
-    }
-    let Some(url) = entry.url else {
-        return offline_view(state, home_id, profile, PluginViewMode::NotRunning, NOT_RUNNING);
+    // What decides is the token, not how we came to own the entry: an adopted
+    // process whose launch URL we remembered is as manageable as a child of
+    // ours, and the bare URL of one we cannot authenticate is not.
+    let Some(url) = crate::process::manageable_url(&entry) else {
+        let mode = if entry.adopted {
+            PluginViewMode::Adopted
+        } else {
+            PluginViewMode::NotRunning
+        };
+        let reason = if entry.adopted { ADOPTED } else { NOT_RUNNING };
+        return Ok(PluginView::readonly(mode, reason));
     };
+    let url = url.to_string();
 
     // A refused session / unreachable instance is read-only rather than a
     // command error: the page still renders with the instance's reason.
@@ -170,134 +131,15 @@ async fn list_plugins_for(
         Ok(client) => client,
         Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
     };
-    let plugins = client.list_plugins().await?;
     let bundles = client.list_bundles().await?;
-    // The two halves of the page agree on one vocabulary: a plugin entry is
-    // part of the bundle it arrived in, so it carries that bundle's version.
-    // Applied before the view model is built, so the wire version is a
-    // property of the entry itself.
-    let versions = entry_versions_from_bundles(&bundles);
-    let mut plugins = plugins;
-    attach_entry_versions(&mut plugins, &versions);
-    Ok(PluginView::managed(plugins, bundles))
+    Ok(PluginView::managed(bundles, &ui_locale(state)))
 }
 
-/// Bundle name → its version, for the entries those bundles bring in.
-fn entry_versions_from_bundles(bundles: &[crate::native::NativeBundle]) -> Vec<(String, String)> {
-    bundles
-        .iter()
-        .filter_map(|b| b.version.clone().map(|v| (b.name.clone(), v)))
-        .collect()
-}
-
-/// Fills each entry's `version` from the bundle that provides it.
-///
-/// The native inventory lists plugin **entries** and carries no version for
-/// them — the unit that has a version is the bundle（补丁层）a package ships.
-/// For the common case they are the same package (the bundle's own entry is
-/// the package it names), so the entry takes its bundle's version. When two
-/// bundles could claim the same entry, the first match wins: bundle order is
-/// the instance's own priority order, and a stable answer beats a clever one.
-///
-/// Entries no bundle claims — a plugin the profile added directly — keep no
-/// version rather than borrowing an unrelated one; the UI adds nothing then.
-fn attach_entry_versions(
-    plugins: &mut [crate::native::NativePlugin],
-    versions: &[(String, String)],
-) {
-    if versions.is_empty() {
-        return;
-    }
-    for plugin in plugins.iter_mut() {
-        let Some((_, version)) = versions
-            .iter()
-            .find(|(name, _)| *name == plugin.module_name)
-        else {
-            continue;
-        };
-        plugin.version = Some(version.clone());
-    }
-}
-
-/// A read-only view listing a profile's plugins from its own files.
-///
-/// This is deliberately **best-effort and file-scoped**: it reads the profile
-/// manifest (`dependencies` + `dsh.profile.bundles`) and the patch document's
-/// disables, so it shows what the profile *declares*, not the instance's live
-/// composition (no fiber phase, no availability, no error info — and the live
-/// list additionally hides a few built-in bundles). A read failure degrades to
-/// an empty list rather than erroring the page.
-///
-/// Core `@deepseek-ai/*` packages are **not** filtered out here. A blanket
-/// filter would make this view lie about a profile: it would hide whether a
-/// core bundle is even declared, which is a fact a read-only view has no
-/// business concealing. Their cordis id is usually the package's unscoped
-/// short name (`@deepseek-ai/dsh-base` → `dsh-base`), the same fallback the
-/// patch document uses to address them.
-fn offline_view(
-    state: &AppState,
-    home_id: &str,
-    profile: &str,
-    mode: crate::native::PluginViewMode,
-    reason: &str,
-) -> Result<crate::native::PluginView, String> {
-    Ok(crate::native::PluginView::readonly_files(
-        mode,
-        reason,
-        offline_plugin_items(state, home_id, profile),
-    ))
-}
-
-/// The profile's plugin entries read from its files, sorted by cordis id.
-/// Unreadable files (or unknown HOME) yield an empty list — the read-only view
-/// renders regardless.
-fn offline_plugin_items(
-    state: &AppState,
-    home_id: &str,
-    profile: &str,
-) -> Vec<crate::native::PluginItem> {
-    let Ok(home_path) = resolve_home_path(state, home_id) else {
-        return Vec::new();
-    };
-    let Ok(dir) = crate::profile::profile_dir(&home_path, profile) else {
-        return Vec::new();
-    };
-    let manifest = read_profile_manifest(&dir).unwrap_or_default();
-    let disabled = crate::profile::read_disabled_ids(&dir);
-
-    let mut items: Vec<crate::native::PluginItem> = profile_packages(&manifest)
-        .into_iter()
-        .map(|(name, _version)| {
-            let cordis_id = cordis_id_of(&name);
-            let enabled = !disabled.contains(&cordis_id) && !disabled.contains(&name);
-            crate::native::PluginItem {
-                entry_id: cordis_id.clone(),
-                module_name: name,
-                title: None,
-                description: None,
-                enabled,
-                fiber_phase: None,
-                patch_id: None,
-                read_only_reason: None,
-                // The offline read has the manifest's own version spec, not an
-                // installed version; leaving it empty keeps the row honest.
-                version: None,
-            }
-        })
-        .collect();
-    items.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
-    items
-}
-
-/// The HOME path of `home_id` (or an error), without resolving a CLI version —
-/// the offline reader touches no CLI.
-fn resolve_home_path(state: &AppState, home_id: &str) -> Result<std::path::PathBuf, String> {
-    let cfg = state.config.lock().unwrap();
-    cfg.homes
-        .iter()
-        .find(|h| h.id == home_id)
-        .map(|h| h.path.clone())
-        .ok_or_else(|| "DSH_HOME 不存在".to_string())
+/// The launcher's own UI language. The service localizes its metadata
+/// (`meta.title` may be a `{en, zh}` map), so the projection needs to know
+/// which language this app is showing.
+pub(crate) fn ui_locale(state: &AppState) -> String {
+    state.config.lock().unwrap().settings.locale.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +202,7 @@ pub(crate) async fn set_bundle_enabled_for(
 ) -> Result<ChangeOutcome, String> {
     let client = write_client(state, home_id, profile).await?;
     let result = client.set_bundle_enabled(name, enabled).await?;
-    Ok(localize_refusal(ChangeOutcome::from(result)))
+    Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
 }
 
 /// A write result handed to the frontend (design §4 frozen contract): the
@@ -385,13 +227,18 @@ pub struct ChangeOutcome {
     pub warnings: Vec<String>,
 }
 
-impl From<NativeChangeResult> for ChangeOutcome {
-    fn from(r: NativeChangeResult) -> Self {
+impl ChangeOutcome {
+    /// Projects one native write result, resolving the instance's localized
+    /// diagnostic with the launcher's own UI locale.
+    pub(crate) fn from_native(r: NativeChangeResult, locale: &str) -> Self {
         // The raw code is kept as-is; the localized reason is added later by
         // `localize_refusal`, the single place every write command funnels
         // through (design §4d).
         let (error_code, diagnostic) = match r.error {
-            Some(e) => (Some(e.code), e.diagnostic),
+            Some(e) => (
+                Some(e.code),
+                e.diagnostic.as_ref().and_then(|d| d.pick_opt(locale)),
+            ),
             None => (None, None),
         };
         Self {
@@ -452,7 +299,7 @@ pub(crate) async fn remove_bundle_for(
 ) -> Result<ChangeOutcome, String> {
     let client = write_client(state, &input.home_id, &input.profile).await?;
     let result = client.remove_bundle(&input.name).await?;
-    Ok(localize_refusal(ChangeOutcome::from(result)))
+    Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
 }
 
 /// Reads the store a profile's `node_modules` is currently linked from, via
@@ -722,51 +569,6 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Commands: native plugin enable / disable (the instance's own plugin manager)
-// ---------------------------------------------------------------------------
-
-/// Input for toggling one **plugin entry** (native `setPluginEnabled`).
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetPluginEnabledInput {
-    #[serde(alias = "home_id")]
-    pub home_id: String,
-    pub profile: String,
-    /// The entry's `entryId` — the native id, never the old package name.
-    pub id: String,
-    pub enabled: bool,
-}
-
-/// Enables/disables one **plugin entry** through the instance's native plugin
-/// manager (`setPluginEnabled`), by the entry's `entryId`. Shared with T3/T4's
-/// write commands through [`set_plugin_enabled_for`].
-///
-/// The launcher never writes the profile here (ADR-0001): the running DSH owns
-/// plugin state. The instance's answer is returned **truthfully** — a refusal
-/// (`changed:false` + `error.code`) is a [`ChangeOutcome`], not
-/// an error; only a missing/unmanageable instance or a transport failure is
-/// `Err`.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn set_plugin_enabled(
-    state: State<'_, AppState>,
-    input: SetPluginEnabledInput,
-) -> Result<ChangeOutcome, String> {
-    set_plugin_enabled_for(state.inner(), &input).await
-}
-
-/// The body of [`set_plugin_enabled`], taking `&AppState` so tests can drive
-/// the resolve/refuse branches without a Tauri runtime. This is the shared
-/// write path (design §4d): resolve the instance, connect, call, map.
-async fn set_plugin_enabled_for(
-    state: &AppState,
-    input: &SetPluginEnabledInput,
-) -> Result<ChangeOutcome, String> {
-    let client = write_client(state, &input.home_id, &input.profile).await?;
-    let result = client.set_plugin_enabled(&input.id, input.enabled).await?;
-    Ok(localize_refusal(ChangeOutcome::from(result)))
-}
-
 /// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a
 /// connected [`NativeClient`](crate::native::NativeClient). The refusal messages
 /// are the ones the page shows for the "cannot manage now" states.
@@ -778,13 +580,16 @@ pub(crate) async fn write_client(
     let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
         return Err("实例未在运行，请先启动实例".to_string());
     };
-    if entry.adopted {
-        return Err("该实例由系统接管，无法管理插件".to_string());
-    }
-    let Some(url) = entry.url else {
-        return Err("实例未在运行，请先启动实例".to_string());
+    // Same rule as the read path: a token is what makes the instance
+    // addressable, however the entry came to exist.
+    let Some(url) = crate::process::manageable_url(&entry) else {
+        return Err(if entry.adopted {
+            "该实例由系统接管，无法管理插件".to_string()
+        } else {
+            "实例未在运行，请先启动实例".to_string()
+        });
     };
-    crate::native::NativeClient::connect(&url).await
+    crate::native::NativeClient::connect(url).await
 }
 
 /// Translates a native `error.code` refusal into the reason the page shows
@@ -831,45 +636,6 @@ mod tests {
     use super::*;
 
     /// The entry a bundle ships takes that bundle's version, so the profile's
-    /// plugin rows and its patch-layer rows state versions the same way.
-    #[test]
-    fn entry_versions_come_from_the_bundle_that_provides_the_package() {
-        let mut plugins = vec![
-            plugin("@deepseek-ai/dsh-base"),
-            // Added to the profile directly: no bundle names this package, so
-            // it borrows nothing and says nothing.
-            plugin("@dsh-plugin/loose-plugin"),
-        ];
-        attach_entry_versions(&mut plugins, &[("@deepseek-ai/dsh-base".into(), "0.2.1".into())]);
-        assert_eq!(plugins[0].version.as_deref(), Some("0.2.1"));
-        assert!(plugins[1].version.is_none());
-    }
-
-    /// A bundle whose entry is a different module still versions the package it
-    /// declares, and a bundle with no version never invents one.
-    #[test]
-    fn entry_versions_ignore_bundles_without_a_version() {
-        let mut plugins = vec![plugin("@deepseek-ai/dsh-base")];
-        attach_entry_versions(&mut plugins, &[]);
-        assert!(plugins[0].version.is_none());
-    }
-
-    fn plugin(module_name: &str) -> crate::native::NativePlugin {
-        crate::native::NativePlugin {
-            entry_id: module_name.to_string(),
-            module_name: module_name.to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn cordis_id_of_strips_scope_and_org() {
-        assert_eq!(cordis_id_of("@dsh-plugin/dsh-auxiliary"), "dsh-auxiliary");
-        assert_eq!(cordis_id_of("@dsh-external/dsh-sidechain"), "dsh-sidechain");
-        assert_eq!(cordis_id_of("dsh-better-sidebar"), "dsh-better-sidebar");
-        assert_eq!(cordis_id_of("@canglongcl/dsh-web-review"), "dsh-web-review");
-    }
-
     #[test]
     fn store_paths_match_handles_versioned_subdir_and_slashes() {
         let base = "/Users/x/Library/Application Support/in.dsh-plug.dsh-launcher/.pnpm-store";
@@ -1203,7 +969,6 @@ mod tests {
             last_profile: None,
             icon: None,
             port: None,
-            preserve_symlinks: false,
         }
     }
 
@@ -1232,11 +997,11 @@ mod tests {
     }
 
     /// No instance is running this profile: the page is read-only in
-    /// `not-running` mode, but it still lists what the profile has — read from
-    /// its files (dependencies + bundles), with no `@deepseek-ai/*` filter, and
-    /// the patch document's native **flow-style** disables understood.
+    /// Without a running instance the page is read-only: the reason says what
+    /// to do, and there is nothing to manage until one is up — the bundle list
+    /// is the *instance's* answer, so the launcher does not guess it from files.
     #[tokio::test]
-    async fn list_plugins_for_profile_files_when_not_running() {
+    async fn list_plugins_is_read_only_and_empty_when_not_running() {
         let home = seeded_home(
             &[
                 (
@@ -1258,81 +1023,10 @@ mod tests {
         let view = list_plugins_for(&state, "h1", "web").await.unwrap();
 
         assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
+        assert!(view.bundles.is_empty(), "no instance, no bundle list");
         // The reason is distinct and tells the user what to do.
         let reason = view.reason.expect("read-only reason");
         assert!(reason.contains("启动该实例"), "reason: {reason}");
-
-        // Both the plugin package and the core package show (no blanket
-        // @deepseek-ai/* filter); deduped across dependencies + bundles, and
-        // sorted by the entry id the table shows.
-        let names: Vec<&str> = view.plugins.iter().map(|p| p.module_name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["@dsh-plugin/dsh-auxiliary", "@deepseek-ai/dsh-base"],
-            "names: {names:?}"
-        );
-
-        let aux = view
-            .plugins
-            .iter()
-            .find(|p| p.module_name == "@dsh-plugin/dsh-auxiliary")
-            .unwrap();
-        // The flow-style disabled row was seen: the entry reads as off.
-        assert!(!aux.enabled, "dsh-auxiliary must read disabled: {aux:?}");
-        let base = view
-            .plugins
-            .iter()
-            .find(|p| p.module_name == "@deepseek-ai/dsh-base")
-            .unwrap();
-        assert!(base.enabled, "dsh-base must read enabled: {base:?}");
-    }
-
-    /// The read path writes nothing: every profile file is byte-identical and
-    /// untouched (mtime unchanged) across a read.
-    #[tokio::test]
-    async fn list_plugins_read_path_leaves_files_untouched() {
-        let home = seeded_home(
-            &[
-                (
-                    "package.json",
-                    &profile_json(&["@dsh-plugin/dsh-auxiliary"], &["@deepseek-ai/dsh-base"]),
-                ),
-                (
-                    "cordis.patch.yml",
-                    "[ { id: dsh-auxiliary, disabled: true } ]\n",
-                ),
-            ],
-            "web",
-        );
-        let dir = crate::profile::profile_dir(&home, "web").unwrap();
-        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
-
-        let before: Vec<(std::path::PathBuf, Vec<u8>, std::time::SystemTime)> =
-            ["package.json", "cordis.patch.yml"]
-                .iter()
-                .map(|n| {
-                    let p = dir.join(n);
-                    let bytes = std::fs::read(&p).unwrap();
-                    let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
-                    (p, bytes, mtime)
-                })
-                .collect();
-
-        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
-        // The directory listing is unchanged too (nothing created/removed).
-        let listing_before = dir.read_dir().unwrap().count();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = list_plugins_for(&state, "h1", "web").await.unwrap();
-
-        for (path, bytes, mtime) in before {
-            assert_eq!(std::fs::read(&path).unwrap(), bytes, "bytes changed: {path:?}");
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().modified().unwrap(),
-                mtime,
-                "mtime changed: {path:?}"
-            );
-        }
-        assert_eq!(dir.read_dir().unwrap().count(), listing_before);
     }
 
     /// An adopted instance carries a bare URL and no token, so the view is
@@ -1360,7 +1054,7 @@ mod tests {
         }
         let view = list_plugins_for(&state, "h1", "web").await.unwrap();
         assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
-        assert!(view.plugins.is_empty());
+        assert!(view.bundles.is_empty());
         let adopted_reason = view.reason.expect("adopted reason");
         assert!(
             adopted_reason.contains("接管"),
@@ -1373,6 +1067,41 @@ mod tests {
             "实例未运行",
         );
         assert_ne!(Some(adopted_reason), not_running.reason);
+    }
+
+    /// Adoption is not what blocks management: when the launcher remembered
+    /// the adopted process's launch URL, the write path goes on to connect
+    /// like any other. Only the connection itself may then fail.
+    #[tokio::test]
+    async fn an_adopted_instance_with_a_token_is_still_addressed() {
+        let home = scratch_home("adopted-token");
+        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+        {
+            let mut running = state.running.lock().await;
+            running.insert(
+                "i1".to_string(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".to_string(),
+                    // Port 1 refuses immediately: the failure has to come from
+                    // the connection, not from a refusal to try.
+                    url: Some("http://127.0.0.1:1/?token=remembered".to_string()),
+                    adopted: Some(crate::process::Adopted {
+                        pid: 1,
+                        port: 1,
+                        host: "127.0.0.1".to_string(),
+                    }),
+                },
+            );
+        }
+        let err = match write_client(&state, "h1", "web").await {
+            Ok(_) => panic!("no instance is reachable in this test"),
+            Err(e) => e,
+        };
+        assert!(
+            !err.contains("接管"),
+            "an adopted instance we hold a token for must be attempted, got: {err}"
+        );
     }
 
     /// Managing a bundle requires the profile's instance to be running: with
@@ -1396,7 +1125,6 @@ mod tests {
                 last_profile: None,
                 icon: None,
                 port: None,
-                preserve_symlinks: false,
             }],
         );
         let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
@@ -1425,7 +1153,6 @@ mod tests {
                 last_profile: None,
                 icon: None,
                 port: None,
-                preserve_symlinks: false,
             }],
         );
         {
@@ -1469,17 +1196,7 @@ mod tests {
             last_profile: None,
             icon: None,
             port: None,
-            preserve_symlinks: false,
         }]
-    }
-
-    fn plugin_input(id: &str, enabled: bool) -> SetPluginEnabledInput {
-        SetPluginEnabledInput {
-            home_id: "h1".to_string(),
-            profile: "web".to_string(),
-            id: id.to_string(),
-            enabled,
-        }
     }
 
     /// The refusal code becomes the reason the page shows verbatim; this is the
@@ -1527,7 +1244,7 @@ mod tests {
             "warnings": [],
         }))
         .unwrap();
-        let outcome = ChangeOutcome::from(native);
+        let outcome = ChangeOutcome::from_native(native, "zh-CN");
         // `errorCode` carries the **raw native code** (logic); the instance's
         // own diagnostic rides alongside it untouched. The localized reason is
         // folded in later, by `localize_refusal`, for every write command.
@@ -1562,7 +1279,7 @@ mod tests {
         };
 
         // Bundle toggle: `management-required` (the "ships with DSH" refusal).
-        let bundle = localize_refusal(ChangeOutcome::from(refusal("management-required")));
+        let bundle = localize_refusal(ChangeOutcome::from_native(refusal("management-required"), "zh-CN"));
         assert_eq!(bundle.error_code.as_deref(), Some("management-required"));
         assert_eq!(
             bundle.diagnostic.as_deref(),
@@ -1570,7 +1287,7 @@ mod tests {
         );
 
         // Bundle removal: `not-removable`.
-        let removed = localize_refusal(ChangeOutcome::from(refusal("not-removable")));
+        let removed = localize_refusal(ChangeOutcome::from_native(refusal("not-removable"), "zh-CN"));
         assert_eq!(removed.error_code.as_deref(), Some("not-removable"));
         assert_eq!(
             removed.diagnostic.as_deref(),
@@ -1578,7 +1295,7 @@ mod tests {
         );
 
         // Plugin-entry toggle: `unknown-plugin`.
-        let entry = localize_refusal(ChangeOutcome::from(refusal("unknown-plugin")));
+        let entry = localize_refusal(ChangeOutcome::from_native(refusal("unknown-plugin"), "zh-CN"));
         assert_eq!(entry.error_code.as_deref(), Some("unknown-plugin"));
         assert_eq!(
             entry.diagnostic.as_deref(),
@@ -1586,7 +1303,7 @@ mod tests {
         );
 
         // An empty code still reads as a sentence, never an empty diagnostic.
-        let bare = localize_refusal(ChangeOutcome::from(refusal("")));
+        let bare = localize_refusal(ChangeOutcome::from_native(refusal(""), "zh-CN"));
         assert_eq!(bare.error_code.as_deref(), Some(""));
         assert_eq!(bare.diagnostic.as_deref(), Some("实例未说明原因"));
     }
@@ -1625,43 +1342,6 @@ mod tests {
         };
         let localized = localize_refusal(failed);
         assert_eq!(localized.diagnostic.as_deref(), Some("port in use"));
-    }
-
-    /// ADR-0001: a plugin operation needs the profile's instance running;
-    /// otherwise the command refuses with a clear Chinese reason.
-    #[tokio::test]
-    async fn set_plugin_enabled_refuses_without_a_running_instance() {
-        let state = app_state(one_home(), one_instance());
-        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
-            .await
-            .unwrap_err();
-        assert!(err.contains("实例未在运行"), "err: {err}");
-    }
-
-    /// An adopted instance has no recoverable token, so it cannot be managed.
-    #[tokio::test]
-    async fn set_plugin_enabled_refuses_an_adopted_instance() {
-        let state = app_state(one_home(), one_instance());
-        {
-            let mut running = state.running.lock().await;
-            running.insert(
-                "i1".to_string(),
-                crate::process::RunningInstance {
-                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
-                    profile: "web".to_string(),
-                    url: Some("http://127.0.0.1:3089".to_string()),
-                    adopted: Some(crate::process::Adopted {
-                        pid: 1,
-                        port: 3089,
-                        host: "127.0.0.1".to_string(),
-                    }),
-                },
-            );
-        }
-        let err = set_plugin_enabled_for(&state, &plugin_input("include:llm", false))
-            .await
-            .unwrap_err();
-        assert!(err.contains("接管"), "err: {err}");
     }
 
     fn remove_input(name: &str) -> RemoveBundleInput {

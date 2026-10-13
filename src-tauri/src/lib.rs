@@ -158,6 +158,16 @@ pub fn run() {
             // System tray with dynamic menu.
             tray::build_tray(app.handle())?;
 
+            // Instances that outlived the last launcher session (an update, a
+            // force quit) are adopted in the background, so the board, the tray
+            // and the plugins page all agree they are running.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::process::adopt_surviving_instances(&handle).await;
+                });
+            }
+
             // Close-to-tray for the main window (destroyed-window recreation
             // is handled by show_or_create_main / the RunEvent loop below).
             if let Some(win) = app.get_webview_window("main") {
@@ -180,6 +190,8 @@ pub fn run() {
             tasks::cancel_task,
             runtime::get_runtime_status,
             commands::list_instances,
+            commands::create_instance,
+            commands::delete_instance,
             commands::update_instance,
             commands::set_instance_port,
             commands::list_profiles,
@@ -210,7 +222,6 @@ pub fn run() {
             update::check_launcher_update,
             plugins::list_plugins,
             plugins::set_bundle_enabled,
-            plugins::set_plugin_enabled,
             plugins::remove_bundle,
         ])
         .build(tauri::generate_context!())

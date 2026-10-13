@@ -5,6 +5,11 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
+import DlIcon from '@/components/DlIcon.vue'
+
+// The toolchain check. It states the same version floors the backend resolver
+// enforces and offers the install command the backend picked for this machine,
+// so the page never invents a number or a package manager.
 
 const router = useRouter()
 const { t } = useI18n()
@@ -17,38 +22,22 @@ const node = computed(() => store.runtime?.node)
 const pnpm = computed(() => store.runtime?.pnpm)
 const nodeOk = computed(() => node.value?.installed ?? false)
 const pnpmOk = computed(() => pnpm.value?.installed ?? false)
-// Readiness is about usability: node is what DSH needs to boot; pnpm is needed
-// to install a version or manage plugins, and the launcher no longer installs
-// one itself, so its absence is something to fix here rather than at the first
-// install attempt.
+// Node is what DSH needs to boot; pnpm is needed to install a version and to
+// manage plugins, and the launcher no longer installs one itself.
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
 const belowRecommended = computed(() => store.runtime?.node_below_recommended ?? false)
 
-// --- Adaptive install guidance ------------------------------------------------
-
-/** Version floors and install commands as the backend computes them: the page
- *  then states the same numbers the resolver enforces, and offers the command
- *  the backend picked from the managers it actually detected. */
 const requirements = computed(() => store.runtime?.requirements)
-
-/** The node command to copy. The backend chose it from the detected managers —
- *  extending whichever the user already has — so the cascade lives there. */
 const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
-
-/** The pnpm command, likewise from the backend. Deliberately not version-pinned:
- *  the launcher accepts any pnpm at or above the floor, so pinning would go
- *  stale. */
 const pnpmCommand = computed(() => requirements.value?.pnpm_install_command ?? '')
 
-const copiedKey = ref('')
+const copied = ref('')
 
-/** Copies via the shared helper (which reports the real outcome), and tracks
- *  which button to flip to「已复制」. */
 async function copyCommand(text: string, key: string) {
   if (!(await copy(text))) return
-  copiedKey.value = key
+  copied.value = key
   window.setTimeout(() => {
-    if (copiedKey.value === key) copiedKey.value = ''
+    if (copied.value === key) copied.value = ''
   }, 2000)
 }
 
@@ -62,271 +51,221 @@ async function recheck() {
   }
 }
 
-/**
- * A toolchain installed in a terminal becomes visible as soon as the user
- * comes back to the window, so the page does not make them hunt for a button.
- * The store's refresh debounces nothing, so a focus storm costs one probe.
- */
+// A toolchain installed in a terminal becomes visible as soon as the user comes
+// back to the window, so the page does not make them hunt for a button.
 async function onFocus() {
   if (checking.value) return
   await store.checkRuntime()
 }
 
-onMounted(() => {
-  window.addEventListener('focus', onFocus)
-})
-onUnmounted(() => {
-  window.removeEventListener('focus', onFocus)
-})
+onMounted(() => window.addEventListener('focus', onFocus))
+onUnmounted(() => window.removeEventListener('focus', onFocus))
+
+interface ToolRow {
+  name: string
+  ok: boolean
+  version?: string | null
+  path?: string | null
+}
+
+const tools = computed<ToolRow[]>(() => [
+  { name: 'Node.js', ok: nodeOk.value, version: node.value?.version, path: node.value?.path },
+  { name: 'pnpm', ok: pnpmOk.value, version: pnpm.value?.version, path: pnpm.value?.path },
+])
 </script>
 
 <template>
-  <div class="setup-page">
-    <div class="dl-card setup-card">
-      <div class="setup-icon">
-        <svg viewBox="0 0 48 48" width="42" height="42" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M30 6a9 9 0 0 0-8.5 12.1L8 31.6V40h8.4l13.5-13.5A9 9 0 1 0 30 6z" />
-          <circle cx="33" cy="15" r="2.4" />
-        </svg>
+  <div class="dl-page setup-page">
+    <header class="dl-head">
+      <div class="dl-head-text">
+        <h1>{{ t('setup.title') }}</h1>
+        <p class="dl-head-sub">{{ t('setup.desc') }}</p>
       </div>
-      <h2>{{ t('setup.title') }}</h2>
-      <p class="setup-desc">{{ t('setup.desc') }}</p>
-
-      <!-- Toolchain status: inset group, one row per tool. -->
-      <div class="apple-inset-group setup-tools">
-        <div class="apple-inset-row">
-          <div class="row-info">
-            <span class="row-title">Node.js</span>
-            <span v-if="nodeOk && node?.path" class="row-desc tnum">{{ node.path }}</span>
-          </div>
-          <span :class="['setup-tag', nodeOk ? 'ok' : 'missing']">
-            {{ nodeOk ? t('setup.installed', { v: node?.version ?? '' }) : t('setup.missing') }}
-          </span>
-        </div>
-        <div class="apple-inset-row">
-          <div class="row-info">
-            <span class="row-title">pnpm</span>
-            <span v-if="pnpmOk && pnpm?.path" class="row-desc tnum">{{ pnpm.path }}</span>
-          </div>
-          <span :class="['setup-tag', pnpmOk ? 'ok' : 'missing']">
-            {{ pnpmOk ? t('setup.installed', { v: pnpm?.version ?? '' }) : t('setup.missing') }}
-          </span>
-        </div>
-      </div>
-
-      <p v-if="nodeOk && belowRecommended" class="setup-note warn">
-        {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
-      </p>
-
-      <!-- Guidance: one block per missing tool, so a machine that lacks both is
-           told both things at once. -->
-      <div v-if="!nodeOk" class="guide-block">
-        <h4>{{ t('setup.installNode') }}</h4>
-        <p class="guide-desc">{{ t('setup.nodeCommandDesc') }}</p>
-        <div class="cmd-row">
-          <pre class="cmd-text">{{ nodeCommand }}</pre>
-          <button class="mac-secondary-btn" @click="copyCommand(nodeCommand, 'node')">
-            {{ copiedKey === 'node' ? t('common.copied') : t('common.copy') }}
-          </button>
-        </div>
-      </div>
-
-      <div v-if="!pnpmOk" class="guide-block">
-        <h4>{{ t('setup.installPnpm') }}</h4>
-        <p class="guide-desc">{{ t('setup.pnpmCommandDesc', { major: requirements?.min_pnpm_major }) }}</p>
-        <div class="cmd-row">
-          <pre class="cmd-text">{{ pnpmCommand }}</pre>
-          <button class="mac-secondary-btn" @click="copyCommand(pnpmCommand, 'pnpm')">
-            {{ copiedKey === 'pnpm' ? t('common.copied') : t('common.copy') }}
-          </button>
-        </div>
-      </div>
-
-      <p v-if="!allOk" class="guide-hint shared-hint">{{ t('setup.afterInstallHint') }}</p>
-
-      <div v-if="allOk" class="ready-block">
-        <span class="ready-check">
-          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-        </span>
-        <p class="ready-title">{{ t('setup.allReady') }}</p>
-        <button class="mac-primary-btn" @click="router.push({ name: 'home' })">
+      <div class="dl-head-actions">
+        <button class="dl-btn dl-btn--quiet" :disabled="checking" @click="recheck">
+          <DlIcon name="refresh" :size="13" />
+          {{ t('setup.recheck') }}
+        </button>
+        <button v-if="allOk" class="dl-btn dl-btn--primary" @click="router.push({ name: 'instances' })">
           {{ t('setup.enterApp') }}
         </button>
       </div>
+    </header>
 
-      <div class="setup-actions">
-        <button class="mac-secondary-btn" :disabled="checking" @click="recheck">
-          {{ t('setup.recheck') }}
-        </button>
+    <!-- Status first: the two tools, resolved paths and what to do if a leg is
+         missing. One block per missing tool, so a machine lacking both is told
+         both things at once. -->
+    <section class="dl-section">
+      <div class="dl-section-label">
+        {{ t('settings.environment.title') }}
+        <span class="dl-section-count">
+          <span class="dl-tag" :class="allOk ? 'dl-tag--run' : 'dl-tag--danger'">
+            {{ allOk ? t('setup.allReady') : t('nav.envMissing') }}
+          </span>
+        </span>
       </div>
-    </div>
+
+      <div class="dl-surface">
+        <div v-for="tool in tools" :key="tool.name" class="dl-row">
+          <span class="tool-mark" :class="tool.ok ? 'is-on' : 'is-off'">
+            <DlIcon :name="tool.ok ? 'check' : 'alert'" :size="13" />
+          </span>
+          <div class="tool-info">
+            <span class="tool-name">{{ tool.name }}</span>
+            <span v-if="tool.ok && tool.path" class="tool-path dl-mono">{{ tool.path }}</span>
+          </div>
+          <span class="dl-chip">{{ tool.ok ? tool.version : t('setup.missing') }}</span>
+        </div>
+      </div>
+
+      <p v-if="nodeOk && belowRecommended" class="setup-note">
+        <DlIcon name="alert" :size="13" />
+        {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
+      </p>
+    </section>
+
+    <section v-if="!allOk" class="dl-section">
+      <div class="dl-section-label">{{ t('setup.howTo') }}</div>
+
+      <div v-if="!nodeOk" class="dl-surface guide">
+        <div class="guide-head">
+          <span class="guide-title">{{ t('setup.installNode') }}</span>
+          <span class="guide-desc">{{ t('setup.nodeCommandDesc') }}</span>
+        </div>
+        <div class="cmd-row">
+          <code class="cmd-text">{{ nodeCommand }}</code>
+          <button class="dl-btn dl-btn--quiet" @click="copyCommand(nodeCommand, 'node')">
+            <DlIcon name="copy" :size="13" />
+            {{ copied === 'node' ? t('common.copied') : t('common.copy') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="!pnpmOk" class="dl-surface guide">
+        <div class="guide-head">
+          <span class="guide-title">{{ t('setup.installPnpm') }}</span>
+          <span class="guide-desc">
+            {{ t('setup.pnpmCommandDesc', { major: requirements?.min_pnpm_major }) }}
+          </span>
+        </div>
+        <div class="cmd-row">
+          <code class="cmd-text">{{ pnpmCommand }}</code>
+          <button class="dl-btn dl-btn--quiet" @click="copyCommand(pnpmCommand, 'pnpm')">
+            <DlIcon name="copy" :size="13" />
+            {{ copied === 'pnpm' ? t('common.copied') : t('common.copy') }}
+          </button>
+        </div>
+      </div>
+
+      <p class="setup-note">{{ t('setup.afterInstallHint') }}</p>
+    </section>
   </div>
 </template>
 
 <style lang="scss" scoped>
 .setup-page {
-  height: 100%;
-  display: flex;
+  max-width: 720px;
+}
+
+.tool-mark {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-}
-
-.setup-card {
-  max-width: 560px;
-  width: 100%;
-  padding: 36px 40px;
-}
-
-.setup-icon {
-  display: flex;
-  justify-content: center;
-  color: rgb(var(--primary-6));
-  opacity: 0.9;
-}
-
-h2 {
-  margin: 12px 0 4px;
-  text-align: center;
-}
-
-.setup-desc {
-  color: var(--color-text-3);
-  margin: 0 0 22px;
-  text-align: center;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-// Toolchain status rows (reuses the shared inset-group look).
-.setup-tools {
-  text-align: left;
-
-  .row-desc {
-    word-break: break-all;
-    font-size: 11.5px;
-  }
-}
-
-.setup-tag {
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
-  padding: 2px 9px;
-  font-size: 12px;
+  border-radius: var(--dl-r-ctl);
+
+  &.is-on {
+    background: var(--dl-run-soft);
+    color: var(--dl-run);
+  }
+
+  &.is-off {
+    background: var(--dl-danger-soft);
+    color: var(--dl-danger);
+  }
+}
+
+.tool-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-name {
+  font-size: var(--dl-text-md);
   font-weight: 600;
-  border-radius: 6px;
+  color: var(--dl-ink);
+}
 
-  &.ok {
-    background: rgba(var(--green-6), 0.14);
-    color: rgb(var(--green-6));
-  }
-
-  &.missing {
-    background: rgba(var(--red-6), 0.14);
-    color: rgb(var(--red-6));
-  }
+.tool-path {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .setup-note {
-  margin: 10px 0 0;
-  font-size: 12px;
-  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 2px 0;
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-warn);
+}
 
-  &.warn {
-    color: rgb(var(--orange-6));
+.guide {
+  padding: 16px;
+
+  & + .guide {
+    margin-top: 12px;
   }
 }
 
-.guide-block {
-  text-align: left;
-  margin-top: 18px;
-  padding: 14px 16px;
-  background: var(--apple-group-bg);
-  border: 1px solid var(--apple-card-border);
-  border-radius: 10px;
+.guide-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 12px;
+}
 
-  h4 {
-    margin: 0 0 6px;
-    font-size: 13.5px;
-  }
+.guide-title {
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
 }
 
 .guide-desc {
-  margin: 0 0 10px;
-  font-size: 12.5px;
-  color: var(--color-text-3);
-  line-height: 1.55;
-}
-
-.guide-hint {
-  margin: 12px 0 0;
-  font-size: 12px;
-  color: var(--color-text-3);
-}
-
-/* The shared "it re-checks itself" line sits outside the guide blocks, so it
-   needs its own inset to line up with their text. */
-.shared-hint {
-  margin: 10px 0 0;
-  padding: 0 4px;
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
 }
 
 .cmd-row {
   display: flex;
+  align-items: stretch;
   gap: 8px;
-  align-items: flex-start;
 }
 
 .cmd-text {
   flex: 1;
   min-width: 0;
-  margin: 0;
-  padding: 10px 14px;
-  background: #1d2129;
-  color: #a9b7c6;
-  border-radius: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-3);
+  color: var(--dl-ink);
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
   user-select: text;
-}
-
-// Ready state: a centered success mark instead of Arco's result block.
-.ready-block {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  margin-top: 20px;
-  padding: 18px;
-  background: rgba(var(--green-6), 0.08);
-  border: 1px solid rgba(var(--green-6), 0.2);
-  border-radius: 10px;
-
-  .ready-check {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    background: rgba(var(--green-6), 0.15);
-    color: rgb(var(--green-6));
-  }
-
-  .ready-title {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--color-text-1);
-  }
-}
-
-.setup-actions {
-  margin-top: 18px;
-  text-align: center;
 }
 </style>

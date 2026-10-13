@@ -4,17 +4,17 @@
 //! A profile is one directory under `<DSH_HOME>/profiles/<name>`. Its patch
 //! document's plugin entries are written by the CLI (insert rows when a plugin
 //! is installed) and the `@linxin666/dsh-remote-web-ui` plugin manages a marked
-//! lan-bind block that pins the web port. The launcher no longer writes
-//! `disabled:` rows to gate plugin entries: plugin state belongs to the running
-//! DSH (ADR-0001), so the launcher only **reads** those rows (see
-//! [`read_disabled_ids`]). What the launcher still owns here is the port
-//! pinning that must land before a start ([`scrub_port_pin`] /
-//! [`assert_profile_lan_bind_port`]).
+//! lan-bind block that pins the web port. The launcher never writes plugin
+//! state: patch layers and their entries belong to the running DSH (ADR-0001),
+//! and the plugin page talks to that process over HTTP instead. What the
+//! launcher still owns here are the two *read* facts a start needs — the port
+//! pin that must land before launch ([`scrub_port_pin`] /
+//! [`assert_profile_lan_bind_port`]) and whether the manifest declares a
+//! `link:` dependency ([`preserve_symlinks_for`]).
 //!
 //! Path derivation goes through [`profile_dir`], which keeps a profile name
 //! a single path segment — a traversal attempt can never escape `profiles/`.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -71,169 +71,10 @@ fn patch_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("cordis.patch.yml")
 }
 
-/// cordis id for a package: bundles register under their unscoped short name
-/// (dsh-auxiliary) unless the package declares otherwise. We default to the
-/// last path segment without the scope.
-pub fn cordis_id_of(package: &str) -> String {
-    let last = package.rsplit('/').next().unwrap_or(package);
-    last.to_string()
-}
-
 /// Marker lines the `@linxin666/dsh-remote-web-ui` plugin wraps its managed
 /// lan-bind block in (must match that plugin's `lan-bind.ts`).
 const LAN_BIND_BLOCK_BEGIN: &str = "# --- remote-web-ui lan-bind block (managed - do not edit) ---";
 const LAN_BIND_BLOCK_END: &str = "# --- end remote-web-ui lan-bind block ---";
-
-/// Parse disabled cordis ids from a patch document.
-///
-/// The document is a top-level YAML **array** of loader patch entries. Two
-/// spellings of it are in the wild, and both must parse:
-///
-/// * the **block** style the CLI/launcher append (`- id: x` / `  disabled:
-///   true`), and
-/// * the **flow** style the native plugin manager rewrites the whole file into
-///   when it saves (`[ { id: x, disabled: true }, … ]`, probe §6).
-///
-/// A line scanner cannot see the flow form (it only matched indented `- id:`
-/// rows), which silently reported a native-written profile as fully enabled.
-/// So this uses a real YAML parser and falls back to the scanner — the parser
-/// chokes on `!!js`-tagged expressions and other DSH-specific values, and a
-/// degraded read (no disabled info) beats failing the whole view.
-fn parse_disabled_ids(raw: &str) -> HashSet<String> {
-    match parse_disabled_ids_yaml(raw) {
-        Some(set) => set,
-        // The scanner understands the block dialect, the flat scan recovers
-        // `{ … disabled: true }` rows the parser could not get past.
-        None => {
-            let mut set = parse_disabled_ids_scanned(raw);
-            set.extend(parse_disabled_ids_flow(raw));
-            set
-        }
-    }
-}
-
-/// Entry ids the native manager prints in its **flow** dialect, `{ id: x,
-/// disabled: true }` on one line, including inside a `[ … ]` array. This exists
-/// only because [`serde_yaml`] rejects the `!!js`-tagged values a patch
-/// document may legitimately carry: the flat rows are easy to read even when
-/// the surrounding document is not valid plain YAML.
-fn parse_disabled_ids_flow(raw: &str) -> HashSet<String> {
-    fn closing_brace(line: &str, from: usize) -> Option<usize> {
-        let bytes = line.as_bytes();
-        let mut depth = 0usize;
-        for (i, b) in bytes.iter().enumerate().skip(from) {
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Some(i + 1);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    fn entry_disabled(body: &str) -> Option<(String, bool)> {
-        // Drop a quoted value if present; flat ids are bare in practice.
-        let id = body
-            .split_once("id:")
-            .map(|(_, v)| v.trim())
-            .map(|v| v.split([',', '}']).next().unwrap_or(""))
-            .map(|v| v.trim().trim_matches('"').trim_matches('\''))
-            .filter(|v| !v.is_empty())?;
-        let disabled = body.split_once("disabled:").is_some_and(|(_, v)| {
-            v.trim_start().starts_with("true")
-        });
-        Some((id.to_string(), disabled))
-    }
-
-    let mut set = HashSet::new();
-    for line in raw.lines() {
-        let mut byte = 0usize;
-        while let Some(rel) = line[byte..].find('{') {
-            let open = byte + rel + 1;
-            let Some(close) = closing_brace(line, open) else {
-                break;
-            };
-            if let Some((id, true)) = entry_disabled(&line[open..close.saturating_sub(1)]) {
-                set.insert(id);
-            }
-            byte = close;
-        }
-    }
-    set
-}
-
-/// YAML-parsed disabled ids: `None` means "not usable, fall back".
-fn parse_disabled_ids_yaml(raw: &str) -> Option<HashSet<String>> {
-    #[derive(serde::Deserialize)]
-    struct PatchEntry {
-        id: Option<String>,
-        #[serde(default)]
-        disabled: bool,
-    }
-
-    let doc: serde_yaml::Value = serde_yaml::from_str(raw).ok()?;
-    // A sequence is the documented shape; a bare mapping (a single entry) is
-    // accepted too, so one odd top-level value never blanks the whole read.
-    let entries: Vec<PatchEntry> = match doc {
-        serde_yaml::Value::Sequence(_) => serde_yaml::from_value(doc).ok()?,
-        serde_yaml::Value::Mapping(_) => serde_yaml::from_value(doc).ok().map(|e| vec![e])?,
-        _ => Vec::new(),
-    };
-    Some(
-        entries
-            .into_iter()
-            .filter(|e| e.disabled)
-            .filter_map(|e| e.id)
-            .collect(),
-    )
-}
-
-/// The block-style scanner (kept as the degraded fallback for documents the
-/// YAML parser rejects). Only `id` rows with a *scalar* value are recorded, so
-/// an `id:` that opens an insert / bundle block is never mistaken for one.
-fn parse_disabled_ids_scanned(raw: &str) -> HashSet<String> {
-    let mut set = HashSet::new();
-    let mut current_id: Option<String> = None;
-    for line in raw.lines() {
-        let t = line.trim();
-        if t.starts_with("- id:") {
-            current_id = scalar_after(t, "- id:");
-        } else if t.starts_with("id:") && !line.starts_with(' ') && !line.starts_with('\t') {
-            current_id = scalar_after(t, "id:");
-        } else if t == "disabled: true" {
-            if let Some(id) = current_id.take() {
-                set.insert(id);
-            }
-        } else if t.starts_with("- ") && !t.starts_with("- id:") {
-            current_id = None;
-        }
-    }
-    set
-}
-
-/// The bare scalar on a `id: <value>` line, if it is one (a block-opening `id:`
-/// with nothing after it yields `None`).
-fn scalar_after(line: &str, key: &str) -> Option<String> {
-    let value = line.trim_start_matches(key).trim();
-    if value.is_empty() || value.starts_with('#') {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
-/// The disabled cordis ids recorded in a profile's patch document.
-pub(crate) fn read_disabled_ids(profile_dir: &Path) -> HashSet<String> {
-    match std::fs::read_to_string(patch_path(profile_dir)) {
-        Ok(raw) => parse_disabled_ids(&raw),
-        Err(_) => HashSet::new(),
-    }
-}
 
 /// Rewrites the webserver `port:` row inside the `id: webserver` block to `0`
 /// (OS-assigned random port). DSH persists the first web bind into the patch
@@ -353,6 +194,27 @@ pub(crate) fn declares_link_dependency(profile_dir: &Path) -> bool {
         })
 }
 
+/// Node's `--preserve-symlinks` decision for an instance launched with this
+/// HOME and profile.
+///
+/// The launcher derives it from the profile manifest instead of asking the
+/// user: the flag exists for exactly one situation (a profile that declares a
+/// `link:` dependency), and it is actively harmful everywhere else — see
+/// [`crate::launch::node_runtime_flags`]. A setting the user must keep in sync
+/// with a fact the launcher can read is a setting that will be wrong.
+///
+/// Unknown HOME/profile reads as `false`: an unreadable manifest means the
+/// profile has probably not been installed yet, and the flag's failure mode
+/// (every DSH settings write rejected) is much worse than the one it prevents.
+pub(crate) fn preserve_symlinks_for(home: &Path, profile: &str) -> bool {
+    if profile.is_empty() {
+        return false;
+    }
+    profile_dir(home, profile)
+        .map(|dir| declares_link_dependency(&dir))
+        .unwrap_or(false)
+}
+
 /// Scrubs the webserver port pin in a copied profile directory's patch
 /// document (template flows). Missing file / absent block: no-op.
 pub(crate) fn scrub_profile_port_pin(profile_dir: &Path) {
@@ -385,106 +247,6 @@ pub(crate) fn assert_profile_lan_bind_port(home: &Path, profile: &str, port: u16
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cordis_id_of_strips_scope_and_org() {
-        assert_eq!(cordis_id_of("@dsh-plugin/dsh-auxiliary"), "dsh-auxiliary");
-        assert_eq!(cordis_id_of("@dsh-external/dsh-sidechain"), "dsh-sidechain");
-        assert_eq!(cordis_id_of("dsh-better-sidebar"), "dsh-better-sidebar");
-        assert_eq!(cordis_id_of("@canglongcl/dsh-web-review"), "dsh-web-review");
-    }
-
-    #[test]
-    fn parse_disabled_ids_handles_blocks() {
-        let raw = "# header\n- id: ui-dsh-aionui-panel\n  disabled: true\n\n- id: live-stats\n  disabled: true\n\n- id: keep\n  config:\n    x: 1\n";
-        let set = parse_disabled_ids(raw);
-        assert!(set.contains("ui-dsh-aionui-panel"));
-        assert!(set.contains("live-stats"));
-        assert!(!set.contains("keep"));
-    }
-
-    /// The read side the offline view depends on: [`read_disabled_ids`] reads a
-    /// profile's own patch document. It only ever reads — the launcher no
-    /// longer writes `disabled:` rows (ADR-0001), so this file is the one place
-    /// the launcher still sees another writer's disables.
-    #[test]
-    fn read_disabled_ids_reads_the_patch_document() {
-        let dir = std::env::temp_dir().join(format!("dsh-profile-read-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("cordis.patch.yml"),
-            "- id: dsh-auxiliary\n  disabled: true\n- id: dsh-base\n  disabled: false\n",
-        )
-        .unwrap();
-        let disabled = read_disabled_ids(&dir);
-        assert!(disabled.contains("dsh-auxiliary"), "disabled: {disabled:?}");
-        assert!(!disabled.contains("dsh-base"), "disabled: {disabled:?}");
-        // Reading writes nothing: the document is byte-identical afterwards.
-        let after = std::fs::read_to_string(dir.join("cordis.patch.yml")).unwrap();
-        assert!(after.contains("dsh-auxiliary"), "after: {after}");
-
-        // A profile with no patch document reads as "nothing disabled" rather
-        // than erroring — the offline view renders regardless.
-        assert!(read_disabled_ids(&dir.join("missing")).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The native manager writes a **flow-style** top-level array (probe §6):
-    /// `[ { id: llm, disabled: false }, … ]` on one line. The old line scanner
-    /// only understood indented `- id:` blocks, so it saw none of these rows
-    /// and reported every entry of a native-written profile as enabled.
-    #[test]
-    fn parse_disabled_ids_reads_native_flow_style() {
-        // The verbatim document the native writer emits (probe §6): both rows
-        // are `disabled: false`, so nothing is disabled — but crucially the
-        // parser must not crash and must not invent a disabled id.
-        let native_sample = "# Your patch layer for this dsh profile, applied after every bundle layer:\n\
-# a top-level YAML array of loader patch entries (id-targeted config\n\
-# overrides, disables, and insert lists; `!!js` expressions allowed).\n\
-[ { id: llm, disabled: false }, { id: tool-plugin-manager, disabled: false } ]\n";
-        assert!(parse_disabled_ids(native_sample).is_empty());
-
-        // The same flow shape with an actually-disabled row: the case the old
-        // scanner got wrong (it returned an empty set, hiding the disable).
-        let disabled = "[ { id: llm, disabled: false }, { id: tool-plugin-manager, disabled: true } ]\n";
-        let set = parse_disabled_ids(disabled);
-        assert!(set.contains("tool-plugin-manager"), "set: {set:?}");
-        assert!(!set.contains("llm"), "set: {set:?}");
-    }
-
-    /// A document the YAML parser rejects (or an entry shape we do not model)
-    /// must degrade — never panic and never fail the whole view.
-    #[test]
-    fn parse_disabled_ids_degrades_on_odd_documents() {
-        assert!(parse_disabled_ids("").is_empty());
-        assert!(parse_disabled_ids("# only a comment\n").is_empty());
-        assert!(parse_disabled_ids("[]\n").is_empty());
-        // A scalar / non-entry element inside the array is ignored.
-        let odd = "[ 42, { id: x, disabled: true }, { disabled: true }, { id: y } ]\n";
-        let set = parse_disabled_ids(odd);
-        assert!(set.contains("x"), "set: {set:?}");
-        assert!(!set.contains("y"), "set: {set:?}");
-        // A `!!js`-tagged value must not abort the read; the flat `id`/`disabled`
-        // rows around it are still collected.
-        let tagged = "[ { id: llm, disabled: true, config: !!js process.env.X } ]\n";
-        let tagged_set = parse_disabled_ids(tagged);
-        assert!(tagged_set.contains("llm"), "tagged: {tagged_set:?}");
-    }
-
-    /// Both the old block style and the new flow style can coexist in one
-    /// document (the CLI appends blocks, the native manager rewrites flow).
-    #[test]
-    fn parse_disabled_ids_handles_mixed_styles_and_top_level_mapping() {
-        let mixed = "# header\n- id: block-off\n  disabled: true\n[ { id: flow-off, disabled: true } ]\n";
-        let set = parse_disabled_ids(mixed);
-        assert!(set.contains("block-off"), "set: {set:?}");
-        assert!(set.contains("flow-off"), "set: {set:?}");
-
-        // A bare top-level mapping (no sequence) is still understood: the old
-        // scanner read a column-0 `id:` line the same way.
-        let mapping = "id: webserver\ndisabled: true\n";
-        assert!(parse_disabled_ids(mapping).contains("webserver"));
-    }
 
     #[test]
     fn scrub_port_pin_rewrites_webserver_block_only() {
@@ -565,5 +327,32 @@ mod tests {
         assert!(declares_link_dependency(&dir));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An instance derives its flag from the profile it launches with, so the
+    /// HOME + profile name pair is the whole input, and anything unresolvable
+    /// stays off.
+    #[test]
+    fn preserve_symlinks_for_resolves_the_instance_profile() {
+        let home = std::env::temp_dir().join(format!("dsh-psl-home-{}", uuid::Uuid::new_v4()));
+        let dir = home.join("profiles").join("linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"dependencies":{"my-plugin":"link:../my-plugin"}}"#,
+        )
+        .unwrap();
+        assert!(preserve_symlinks_for(&home, "linked"));
+
+        // No profile name (an instance that has never been assigned one) and a
+        // profile that does not exist both read as "off".
+        assert!(!preserve_symlinks_for(&home, ""));
+        assert!(!preserve_symlinks_for(&home, "missing"));
+
+        // A name that would escape the HOME's profiles directory is refused
+        // rather than resolved.
+        assert!(!preserve_symlinks_for(&home, "../../etc"));
+
+        std::fs::remove_dir_all(&home).ok();
     }
 }

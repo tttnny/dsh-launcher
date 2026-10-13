@@ -1,46 +1,44 @@
-// Global styles for DSH Launcher — Apple Design System
+// DSH Launcher — global stylesheet.
+//
+// Structure comes from a page grid (title rule → content), hairlines and the
+// type scale. Colour is reserved for state. See tokens.scss for the palette.
 
-:root {
-  --dl-header-height: 52px;
-  --dl-content-max: 1120px;
-  --dl-sider-width: 216px;
-  // Collapsed rail: wide enough for a centered 18px icon and for the native
-  // traffic lights that draw over the sidebar header (their right edge sits at
-  // ~79px from the window edge, so the rail must clear that).
-  --dl-sider-collapsed-width: 84px;
-  --dl-card-radius: 14px;
-  --dl-page-gap: 18px;
+@use './tokens.scss';
 
-  // Apple Spring & Physics Timing
-  --apple-spring-curve: cubic-bezier(0.16, 1, 0.3, 1);
-  --apple-bounce-curve: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --apple-active-scale: 0.97;
-  --apple-duration: 0.28s;
+// ---------------------------------------------------------------------------
+// Arco overrides
+// Arco supplies behaviour (select, switch, modal, tooltip, message); its skin is
+// replaced here so third-party widgets do not read as a different product.
+// ---------------------------------------------------------------------------
 
-  // Materials & Borders (Light Mode defaults)
-  --apple-card-bg: rgba(255, 255, 255, 0.82);
-  --apple-card-border: rgba(0, 0, 0, 0.08);
-  --apple-card-border-top: rgba(255, 255, 255, 0.9);
-  --apple-card-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.03);
-  --apple-card-hover-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
-  --apple-sidebar-bg: rgba(246, 246, 248, 0.85);
-  --apple-sidebar-border: rgba(0, 0, 0, 0.07);
-  --apple-content-bg: #f9f9fb;
-  --apple-group-bg: rgba(0, 0, 0, 0.03);
-  --apple-separator: rgba(0, 0, 0, 0.06);
-}
+body {
+  --primary-1: 234, 240, 255;
+  --primary-2: 214, 226, 255;
+  --primary-3: 183, 200, 254;
+  --primary-4: 143, 174, 252;
+  --primary-5: 107, 150, 247;
+  --primary-6: 47, 107, 228;
+  --primary-7: 36, 88, 199;
+  --primary-8: 28, 70, 168;
+  --primary-9: 21, 54, 137;
+  --primary-10: 15, 40, 108;
 
-body[arco-theme='dark'] {
-  --apple-card-bg: rgba(36, 36, 42, 0.78);
-  --apple-card-border: rgba(255, 255, 255, 0.08);
-  --apple-card-border-top: rgba(255, 255, 255, 0.14);
-  --apple-card-shadow: 0 6px 20px -3px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.2);
-  --apple-card-hover-shadow: 0 10px 30px -4px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
-  --apple-sidebar-bg: rgba(25, 25, 28, 0.82);
-  --apple-sidebar-border: rgba(255, 255, 255, 0.07);
-  --apple-content-bg: #16161a;
-  --apple-group-bg: rgba(255, 255, 255, 0.04);
-  --apple-separator: rgba(255, 255, 255, 0.07);
+  --color-text-1: var(--dl-ink);
+  --color-text-2: var(--dl-ink-2);
+  --color-text-3: var(--dl-ink-3);
+  --color-text-4: var(--dl-ink-4);
+  --color-border: var(--dl-line);
+  --color-fill-1: var(--dl-surface-2);
+  --color-fill-2: var(--dl-surface-3);
+  --color-bg-1: var(--dl-surface);
+  --color-bg-2: var(--dl-surface);
+  --color-bg-3: var(--dl-surface);
+  --color-bg-4: var(--dl-surface);
+  --color-bg-5: var(--dl-surface);
+  --color-bg-popup: var(--dl-surface);
+  --border-radius-small: var(--dl-r-ctl);
+  --border-radius-medium: var(--dl-r-card);
+  --border-radius-large: var(--dl-r-panel);
 }
 
 * {
@@ -58,540 +56,662 @@ body,
 }
 
 body {
-  font-family:
-    -apple-system,
-    BlinkMacSystemFont,
-    'SF Pro Text',
-    'SF Pro Display',
-    'PingFang SC',
-    'Segoe UI',
-    system-ui,
-    sans-serif;
-  background-color: var(--apple-content-bg);
-  color: var(--color-text-1);
-  letter-spacing: -0.01em;
+  font-family: var(--dl-font-ui);
+  font-size: var(--dl-text-md);
+  background: var(--dl-canvas);
+  color: var(--dl-ink);
+  letter-spacing: -0.008em;
 }
 
-// Typography Enhancements
-h1, h2, h3, h4, .apple-title {
-  letter-spacing: -0.02em;
-  font-weight: 600;
-}
+// ---------------------------------------------------------------------------
+// Page skeleton
+// ---------------------------------------------------------------------------
 
-// Page heading: every page opens with a title + one-line subtitle in the scroll
-// content, so the toolbar title stays a bare context label (same split the
-// macOS system apps use).
-.dl-page-head {
-  margin: 0 0 20px;
-
-  h2 {
-    margin: 0;
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: -0.022em;
-    color: var(--color-text-1);
-  }
-
-  .dl-page-sub {
-    margin: 6px 0 0;
-    max-width: 68ch;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--color-text-3);
-  }
-}
-
-// A small neutral chip for technical identity (a profile name, a package name,
-// a version). One chip language for the whole app: quiet, monospaced numerals,
-// no colour of its own — colour is reserved for state.
-.dl-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 7px;
-  border-radius: 6px;
-  border: 1px solid var(--apple-card-border);
-  background: var(--apple-group-bg);
-  color: var(--color-text-3);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 1.5;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.tnum {
-  font-feature-settings: "tnum";
-  font-variant-numeric: tabular-nums;
-}
-
-// Layout Page Container
 .dl-page {
-  max-width: var(--dl-content-max);
+  max-width: var(--dl-content);
   margin: 0 auto;
-  padding: 24px 28px 48px;
+  padding: 26px 30px 60px;
 }
 
-// Apple-Grade Glass Card
-.dl-card {
-  background: var(--apple-card-bg);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid var(--apple-card-border);
-  border-top: 1px solid var(--apple-card-border-top);
-  border-radius: var(--dl-card-radius);
-  padding: 20px 24px;
-  box-shadow: var(--apple-card-shadow);
-  transition:
-    transform var(--apple-duration) var(--apple-spring-curve),
-    box-shadow var(--apple-duration) var(--apple-spring-curve),
-    border-color var(--apple-duration) var(--apple-spring-curve);
+// Page head: the title is the only large type on the page, and the hairline
+// under it is the page's structural anchor — the same rule on every page.
+.dl-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--dl-line);
+  margin-bottom: 20px;
 
-  & + & {
-    margin-top: var(--dl-page-gap);
+  .dl-head-text {
+    min-width: 0;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: var(--dl-text-2xl);
+    font-weight: 700;
+    letter-spacing: -0.032em;
+    line-height: 1.15;
+    color: var(--dl-ink);
+  }
+
+  .dl-head-sub {
+    margin: 5px 0 0;
+    max-width: 72ch;
+    font-size: var(--dl-text-md);
+    line-height: 1.5;
+    color: var(--dl-ink-3);
+  }
+
+  .dl-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    padding-bottom: 1px;
   }
 }
 
-// Cards inside grid containers must never inherit sequential top margin
-.instance-grid > .dl-card {
-  margin-top: 0 !important;
+// A section within a page: a quiet label over a hairline, then content.
+.dl-section {
+  margin-top: 26px;
+
+  &:first-of-type {
+    margin-top: 0;
+  }
 }
 
-.dl-card-title {
+.dl-section-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: var(--dl-text-sm);
+  font-weight: 600;
+  color: var(--dl-ink-2);
+
+  .dl-section-count {
+    font-weight: 500;
+    color: var(--dl-ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Surface: the one card in the app. Grouped content lives in it; a list of rows
+// lives in it too, separated by hairlines rather than nested boxes.
+// ---------------------------------------------------------------------------
+
+.dl-surface {
+  background: var(--dl-surface);
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-card);
+
+  & + .dl-surface {
+    margin-top: 14px;
+  }
+}
+
+// A row inside a .dl-surface: label (+ optional description) on the left, the
+// control on the right. Defined once so the settings page and the instance
+// form cannot drift into two different ideas of what a form row looks like.
+.dl-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 14px;
+  padding: 12px 16px;
 
-  h3 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: -0.015em;
-    color: var(--color-text-1);
+  & + .dl-row {
+    border-top: 1px solid var(--dl-line);
   }
 }
 
-.dl-card-desc {
-  margin: -8px 0 16px;
-  font-size: 13px;
-  color: var(--color-text-3);
-  line-height: 1.55;
-}
-
-.dl-toolbar {
+.dl-row-info {
   display: flex;
-  gap: 8px;
-  align-items: center;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.dl-empty-action {
-  margin-top: 16px;
-  display: flex;
-  justify-content: center;
-}
-
-// Apple Physical Motion: Active Feedback
-button,
-.arco-btn,
-.nav-item,
-.apple-interactive {
-  transition:
-    transform 0.12s ease-out,
-    background-color 0.15s ease,
-    color 0.15s ease,
-    box-shadow 0.15s ease;
-
-  &:active:not(:disabled):not(.is-disabled) {
-    transform: scale(var(--apple-active-scale));
-  }
-}
-
-// Keyboard focus: macOS draws a soft ring only for keyboard users, never for
-// pointer clicks, so focus-visible is the right hook throughout the app.
-:where(button, a, input, select, textarea, [tabindex]):focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.32);
-  border-radius: 8px;
-}
-
-// Apple Status Indicator Dots
-.apple-status-dot {
+.dl-row-label {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-
-  &::before {
-    content: '';
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    transition: all 0.25s ease;
-  }
-
-  &.running {
-    color: rgb(var(--green-6));
-    &::before {
-      background-color: rgb(var(--green-6));
-      box-shadow: 0 0 0 2px rgba(var(--green-6), 0.24);
-      animation: apple-pulse 2.2s infinite var(--apple-spring-curve);
-    }
-  }
-
-  &.done {
-    color: rgb(var(--green-6));
-    &::before {
-      background-color: rgb(var(--green-6));
-    }
-  }
-
-  &.starting {
-    color: rgb(var(--orange-6));
-    &::before {
-      background-color: rgb(var(--orange-6));
-      box-shadow: 0 0 0 2px rgba(var(--orange-6), 0.24);
-      animation: apple-pulse 1.4s infinite var(--apple-spring-curve);
-    }
-  }
-
-  &.stopped,
-  &.idle {
-    color: var(--color-text-3);
-    &::before {
-      background-color: var(--color-text-4);
-    }
-  }
-
-  &.error {
-    color: rgb(var(--red-6));
-    &::before {
-      background-color: rgb(var(--red-6));
-    }
-  }
+  gap: 7px;
+  font-size: var(--dl-text-md);
+  font-weight: 550;
+  color: var(--dl-ink);
 }
 
-@keyframes apple-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(var(--green-6), 0.4);
-  }
-  70% {
-    box-shadow: 0 0 0 5px rgba(var(--green-6), 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(var(--green-6), 0);
-  }
+.dl-row-desc {
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
 }
 
-// Apple Segmented Control capsule
-.apple-segmented {
-  display: inline-flex;
-  background: var(--apple-group-bg);
-  border-radius: 8px;
-  padding: 3px;
-  border: 1px solid var(--apple-card-border);
+// ---------------------------------------------------------------------------
+// Controls
+// ---------------------------------------------------------------------------
 
-  button {
-    border: none;
-    background: transparent;
-    padding: 5px 14px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--color-text-2);
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.16s ease;
-
-    &.active {
-      background: var(--apple-card-bg);
-      color: var(--color-text-1);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-      font-weight: 600;
-    }
-
-    &:hover:not(.active) {
-      color: var(--color-text-1);
-    }
-  }
-}
-
-// Table styling improvements (NSTableView feel)
-.arco-table {
-  background: transparent !important;
-
-  .arco-table-th {
-    background: transparent !important;
-    border-bottom: 1px solid var(--apple-separator) !important;
-    color: var(--color-text-3) !important;
-    font-size: 12px !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.01em;
-    padding: 10px 14px !important;
-  }
-
-  .arco-table-td {
-    border-bottom: 1px solid var(--apple-separator) !important;
-    padding: 12px 14px !important;
-    font-size: 13px;
-    transition: background 0.15s ease;
-  }
-
-  .arco-table-tr:hover .arco-table-td {
-    background-color: var(--apple-group-bg) !important;
-  }
-}
-
-// Inset Group styling for settings & inspectors
-.apple-inset-group {
-  background: var(--apple-card-bg);
-  backdrop-filter: blur(20px);
-  border: 1px solid var(--apple-card-border);
-  border-top: 1px solid var(--apple-card-border-top);
-  border-radius: var(--dl-card-radius);
-  overflow: hidden;
-  box-shadow: var(--apple-card-shadow);
-
-  .apple-inset-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--apple-separator);
-    transition: background 0.15s ease;
-
-    &:last-child {
-      border-bottom: none;
-    }
-
-    &:hover {
-      background: var(--apple-group-bg);
-    }
-
-    .row-info {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-
-      .row-title {
-        font-size: 13.5px;
-        font-weight: 500;
-        color: var(--color-text-1);
-      }
-
-      .row-desc {
-        font-size: 12px;
-        color: var(--color-text-3);
-      }
-    }
-  }
-}
-
-// Global Shared Apple Control Classes
-.mac-primary-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 14px;
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  border-radius: 8px;
-  border: none;
-  background: rgb(var(--primary-6));
-  color: #fff;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(var(--primary-6), 0.3);
-  transition: all 0.16s ease;
-
-  &:hover:not(:disabled) {
-    filter: brightness(1.06);
-    box-shadow: 0 2px 8px rgba(var(--primary-6), 0.45);
-  }
-
-  &:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  &:active:not(:disabled) {
-    transform: scale(var(--apple-active-scale));
-  }
-}
-
-.mac-secondary-btn {
+.dl-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   height: 30px;
   padding: 0 12px;
-  font-size: 13px;
-  font-weight: 500;
+  border: 1px solid transparent;
+  border-radius: var(--dl-r-ctl);
+  font-family: inherit;
+  font-size: var(--dl-text-sm);
+  font-weight: 550;
   white-space: nowrap;
-  border-radius: 8px;
-  border: 1px solid var(--apple-card-border);
-  background: var(--apple-card-bg);
-  color: var(--color-text-2);
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  transition: all 0.16s ease;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    border-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
 
-  &:hover:not(:disabled) {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
+  svg {
+    flex-shrink: 0;
   }
 
   &:disabled {
-    opacity: 0.45;
+    opacity: 0.42;
     cursor: not-allowed;
-  }
-
-  &:active:not(:disabled) {
-    transform: scale(var(--apple-active-scale));
   }
 }
 
-.mac-action-pill {
-  border: 1px solid var(--apple-card-border);
-  background: var(--apple-card-bg);
-  color: var(--color-text-2);
-  border-radius: 6px;
-  padding: 3px 9px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
+.dl-btn--primary {
+  background: var(--dl-signal);
+  color: #fff;
 
   &:hover:not(:disabled) {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
+    background: var(--dl-signal-ink);
   }
+}
 
-  &.warning {
-    color: rgb(var(--orange-6));
+// The live action: opening a running instance is the app's happy path, so it is
+// the only control that ever carries the run colour.
+.dl-btn--live {
+  background: var(--dl-run);
+  color: #fff;
 
-    &:hover:not(:disabled) {
-      background: rgba(var(--orange-6), 0.12);
-    }
+  &:hover:not(:disabled) {
+    filter: brightness(1.08);
   }
+}
 
-  &.danger {
-    color: rgb(var(--red-6));
+.dl-btn--quiet {
+  background: var(--dl-surface);
+  border-color: var(--dl-line-strong);
+  color: var(--dl-ink-2);
 
-    &:hover:not(:disabled) {
-      background: rgba(var(--red-6), 0.12);
-    }
+  &:hover:not(:disabled) {
+    background: var(--dl-surface-2);
+    border-color: var(--dl-ink-4);
+    color: var(--dl-ink);
+  }
+}
+
+.dl-btn--ghost {
+  background: transparent;
+  color: var(--dl-ink-3);
+
+  &:hover:not(:disabled) {
+    background: var(--dl-surface-3);
+    color: var(--dl-ink);
+  }
+}
+
+.dl-btn--danger {
+  background: transparent;
+  color: var(--dl-danger);
+
+  &:hover:not(:disabled) {
+    background: var(--dl-danger-soft);
+  }
+}
+
+// Square icon button (toolbar / row overflow).
+.dl-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--dl-r-ctl);
+  background: transparent;
+  color: var(--dl-ink-3);
+  cursor: pointer;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
+
+  &:hover:not(:disabled) {
+    background: var(--dl-surface-3);
+    color: var(--dl-ink);
   }
 
   &:disabled {
-    opacity: 0.45;
+    opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  &:active:not(:disabled) {
-    transform: scale(var(--apple-active-scale));
   }
 }
 
-.mac-micro-btn {
+.dl-input {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--dl-line-strong);
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface);
+  color: var(--dl-ink);
+  font-family: inherit;
+  font-size: var(--dl-text-md);
+  outline: none;
+  transition:
+    border-color var(--dl-fast) var(--dl-ease),
+    box-shadow var(--dl-fast) var(--dl-ease);
+
+  // A search field is the input plus a lens and a clear affordance; it is one
+  // control, so it is defined once here rather than once per list that needs it.
+  &.dl-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px 0 10px;
+    color: var(--dl-ink-3);
+
+    // The wrapper is what draws the field, but the input inside it is what
+    // gets focused, so the ring has to come from :focus-within.
+    &:focus-within {
+      border-color: var(--dl-signal);
+      box-shadow: 0 0 0 3px var(--dl-signal-soft);
+    }
+
+    .dl-search-input {
+      flex: 1;
+      min-width: 0;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--dl-ink);
+      font-family: inherit;
+      font-size: var(--dl-text-md);
+
+      &::placeholder {
+        color: var(--dl-ink-4);
+      }
+    }
+
+    .dl-search-clear {
+      width: 20px;
+      height: 20px;
+    }
+  }
+
+  &::placeholder {
+    color: var(--dl-ink-4);
+  }
+
+  &:focus {
+    border-color: var(--dl-signal);
+    box-shadow: 0 0 0 3px var(--dl-signal-soft);
+  }
+
+  &:disabled {
+    background: var(--dl-surface-2);
+    color: var(--dl-ink-3);
+  }
+}
+
+.dl-input--mono {
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-sm);
+}
+
+.dl-input--error {
+  border-color: var(--dl-danger);
+}
+
+// Keyboard focus: only for keyboard users (macOS convention).
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--dl-signal);
+  outline-offset: 1px;
+}
+
+// ---------------------------------------------------------------------------
+// Chips: quiet, monospaced identifiers.
+// ---------------------------------------------------------------------------
+
+.dl-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
-  font-size: 11.5px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--color-text-3);
-  cursor: pointer;
-  transition: all 0.15s ease;
+  max-width: 100%;
+  padding: 1px 7px;
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-2);
+  color: var(--dl-ink-2);
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-xs);
+  font-weight: 500;
+  line-height: 1.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
-  &:hover:not(:disabled) {
-    background: var(--apple-group-bg);
-    color: var(--color-text-1);
-    border-color: var(--apple-card-border);
+// A label for the *kind* of a chip (e.g. 共享 DSH_HOME).
+.dl-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: var(--dl-r-ctl);
+  font-size: var(--dl-text-xs);
+  font-weight: 550;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.dl-tag--signal {
+  background: var(--dl-signal-soft);
+  color: var(--dl-signal-ink);
+}
+
+.dl-tag--run {
+  background: var(--dl-run-soft);
+  color: var(--dl-run);
+}
+
+.dl-tag--warn {
+  background: var(--dl-warn-soft);
+  color: var(--dl-warn);
+}
+
+.dl-tag--danger {
+  background: var(--dl-danger-soft);
+  color: var(--dl-danger);
+}
+
+.dl-tag--muted {
+  background: var(--dl-surface-3);
+  color: var(--dl-ink-3);
+}
+
+// ---------------------------------------------------------------------------
+// Status lamp: dot + label. State is the only thing that gets colour.
+// ---------------------------------------------------------------------------
+
+.dl-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--dl-text-sm);
+  font-weight: 550;
+  white-space: nowrap;
+
+  &::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--dl-ink-4);
   }
 
-  &.danger {
-    color: rgb(var(--red-6));
+  &.is-running {
+    color: var(--dl-run);
 
-    &:hover:not(:disabled) {
-      background: rgba(var(--red-6), 0.12);
+    &::before {
+      background: var(--dl-run);
+      box-shadow: 0 0 0 3px var(--dl-run-soft);
+      animation: dl-pulse 2.4s var(--dl-ease) infinite;
     }
   }
 
-  &.icon-only {
-    padding: 5px;
+  &.is-starting {
+    color: var(--dl-warn);
+
+    &::before {
+      background: var(--dl-warn);
+      box-shadow: 0 0 0 3px var(--dl-warn-soft);
+      animation: dl-pulse 1.2s var(--dl-ease) infinite;
+    }
   }
 
-  &:active:not(:disabled) {
-    transform: scale(var(--apple-active-scale));
-  }
-}
+  &.is-exited {
+    color: var(--dl-danger);
 
-.apple-input-sm {
-  height: 30px;
-  padding: 0 10px;
-  font-size: 13px;
-  border-radius: 7px;
-  border: 1px solid var(--apple-card-border);
-  background: var(--apple-group-bg);
-  color: var(--color-text-1);
-  outline: none;
-  transition: all 0.16s ease;
-
-  &:focus {
-    background: var(--apple-card-bg);
-    border-color: rgb(var(--primary-6));
-    box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.18);
+    &::before {
+      background: var(--dl-danger);
+    }
   }
 
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  &.is-stopped {
+    color: var(--dl-ink-3);
   }
 }
 
-// Modal dialog Apple styling
-.apple-modal,
-.apple-sheet-modal {
+@keyframes dl-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--dl-run-soft);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Segmented control: the one tab device (used by the Library page).
+// ---------------------------------------------------------------------------
+
+.dl-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-2);
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--dl-ink-3);
+    font-family: inherit;
+    font-size: var(--dl-text-sm);
+    font-weight: 550;
+    cursor: pointer;
+    transition:
+      background-color var(--dl-fast) var(--dl-ease),
+      color var(--dl-fast) var(--dl-ease);
+
+    &:hover:not(.is-active) {
+      color: var(--dl-ink);
+    }
+
+    &.is-active {
+      background: var(--dl-surface);
+      color: var(--dl-ink);
+      box-shadow: var(--dl-lift-1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Empty state
+// ---------------------------------------------------------------------------
+
+.dl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 44px 24px;
+  text-align: center;
+
+  .dl-empty-glyph {
+    color: var(--dl-ink-4);
+  }
+
+  .dl-empty-title {
+    font-size: var(--dl-text-md);
+    font-weight: 600;
+    color: var(--dl-ink-2);
+  }
+
+  .dl-empty-text {
+    max-width: 42ch;
+    font-size: var(--dl-text-sm);
+    line-height: 1.55;
+    color: var(--dl-ink-3);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Overlays: sheets carry the real elevation in this app.
+// ---------------------------------------------------------------------------
+
+.dl-sheet {
   .arco-modal {
-    border-radius: 16px !important;
+    border-radius: var(--dl-r-panel) !important;
+    border: 1px solid var(--dl-line);
+    background: var(--dl-surface) !important;
+    box-shadow: var(--dl-lift-3) !important;
     overflow: hidden;
-    background: var(--apple-card-bg) !important;
-    backdrop-filter: blur(28px) saturate(180%) !important;
-    -webkit-backdrop-filter: blur(28px) saturate(180%) !important;
-    border: 1px solid var(--apple-card-border);
-    border-top: 1px solid var(--apple-card-border-top);
-    box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.25) !important;
   }
 
   .arco-modal-header {
-    border-bottom: 1px solid var(--apple-separator);
-    padding: 14px 20px;
     height: auto;
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--dl-line);
   }
 
   .arco-modal-title {
-    font-size: 14px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
+    font-size: var(--dl-text-lg);
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    text-align: left;
   }
 
   .arco-modal-body {
-    padding: 18px 20px 14px;
+    padding: 18px 20px;
   }
 
   .arco-modal-footer {
-    border-top: 1px solid var(--apple-separator);
     padding: 12px 20px;
+    border-top: 1px solid var(--dl-line);
+  }
+}
+
+.dl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  & + .dl-field {
+    margin-top: 16px;
+  }
+}
+
+.dl-field-label {
+  font-size: var(--dl-text-sm);
+  font-weight: 600;
+  color: var(--dl-ink-2);
+}
+
+.dl-field-hint {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+}
+
+.dl-error-text {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-danger);
+}
+
+// ---------------------------------------------------------------------------
+// Arco widget skins
+// ---------------------------------------------------------------------------
+
+.arco-select-view,
+.arco-input,
+.arco-input-inner-wrapper,
+.arco-textarea {
+  border-radius: var(--dl-r-ctl) !important;
+  border-color: var(--dl-line-strong) !important;
+  background-color: var(--dl-surface) !important;
+  color: var(--dl-ink) !important;
+  font-family: inherit;
+
+  &:hover {
+    border-color: var(--dl-ink-4) !important;
+    background-color: var(--dl-surface) !important;
+  }
+}
+
+.arco-select-view-focus {
+  border-color: var(--dl-signal) !important;
+  box-shadow: 0 0 0 3px var(--dl-signal-soft) !important;
+}
+
+.arco-select-option-selected {
+  color: var(--dl-signal) !important;
+  font-weight: 600;
+}
+
+.arco-switch-checked {
+  background-color: var(--dl-signal) !important;
+}
+
+.arco-progress-line-bar {
+  background-color: var(--dl-signal) !important;
+}
+
+.arco-tooltip-content {
+  border-radius: var(--dl-r-ctl) !important;
+  background: var(--dl-ink) !important;
+  font-size: var(--dl-text-xs) !important;
+  max-width: 320px;
+}
+
+.arco-popconfirm {
+  .arco-popconfirm-content {
+    border-radius: var(--dl-r-card) !important;
+    border: 1px solid var(--dl-line);
+    background: var(--dl-surface) !important;
+    box-shadow: var(--dl-lift-2) !important;
+  }
+}
+
+.arco-btn {
+  border-radius: var(--dl-r-ctl);
+  font-family: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
   }
 }
 

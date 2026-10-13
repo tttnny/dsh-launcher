@@ -330,6 +330,92 @@ pub fn list_instances(state: State<'_, AppState>) -> Result<Vec<DshInstance>, St
     Ok(state.config.lock().unwrap().instances.clone())
 }
 
+/// Creates a new instance on an already-installed version.
+///
+/// Installing a version materializes one 1:1 instance; this is how a second
+/// instance of the same version is added (the README's "同一版本可建多个实例"),
+/// and the only path that binds a version to a *different* HOME.
+#[tauri::command]
+pub fn create_instance(
+    state: State<'_, AppState>,
+    name: String,
+    version_id: String,
+    home_id: String,
+) -> Result<DshInstance, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("实例名称不能为空".to_string());
+    }
+    let mut cfg = state.config.lock().unwrap();
+    if cfg.instances.iter().any(|i| i.name == name) {
+        return Err("同名实例已存在".to_string());
+    }
+    if !cfg.versions.iter().any(|v| v.id == version_id) {
+        return Err("DSH 版本不存在".to_string());
+    }
+    if !cfg.homes.iter().any(|h| h.id == home_id) {
+        return Err("DSH_HOME 不存在".to_string());
+    }
+    let inst = DshInstance {
+        id: new_id("i"),
+        name,
+        version_id,
+        home_id,
+        env_overrides: Default::default(),
+        default_profile: None,
+        last_profile: None,
+        icon: None,
+        port: None,
+    };
+    cfg.instances.push(inst.clone());
+    save_state(&state, &cfg)?;
+    Ok(inst)
+}
+
+/// Deletes one instance record. The version, the DSH_HOME and every other
+/// instance are untouched — an instance is a binding, not a directory. Only the
+/// instance's own local icon file (which the launcher itself wrote into the
+/// HOME's `icons/` folder) is removed, and that removal is best-effort.
+#[tauri::command]
+pub async fn delete_instance(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    // Stop first: a running process holds the DSH_HOME and would outlive its
+    // own record, leaving an orphan nothing can stop from the UI.
+    if state.running.lock().await.contains_key(&id) {
+        let _ = process::stop_instance_process(&app, &state, &id).await;
+    }
+
+    let icon_path = {
+        let mut cfg = state.config.lock().unwrap();
+        let Some(pos) = cfg.instances.iter().position(|i| i.id == id) else {
+            return Err("实例不存在".to_string());
+        };
+        let inst = cfg.instances.remove(pos);
+        if cfg.settings.last_instance_id.as_deref() == Some(id.as_str()) {
+            cfg.settings.last_instance_id = None;
+        }
+        // Resolve the local icon path before saving: the record is the only
+        // thing that names the file, so it must be read while it still exists.
+        let icon_path = if inst.icon.as_deref() == Some("local") {
+            cfg.homes
+                .iter()
+                .find(|h| h.id == inst.home_id)
+                .map(|h| crate::icons::local_icon_path(&h.path, &id))
+        } else {
+            None
+        };
+        save_state(&state, &cfg.clone())?;
+        icon_path
+    };
+    if let Some(path) = icon_path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn update_instance(
     state: State<'_, AppState>,
@@ -898,8 +984,13 @@ pub fn open_instance_terminal(
     };
     let terminal = state.config.lock().unwrap().settings.terminal.clone();
     // The terminal's wrapper must boot the same CLI the instance does, so it
-    // takes the instance's own flag.
-    let preserve_symlinks = cfg_inst.preserve_symlinks;
+    // derives the flag from the same profile the instance launches with.
+    let profile = cfg_inst
+        .default_profile
+        .clone()
+        .or_else(|| cfg_inst.last_profile.clone())
+        .unwrap_or_default();
+    let preserve_symlinks = crate::profile::preserve_symlinks_for(&cfg_home.path, &profile);
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 
@@ -1315,5 +1406,53 @@ mod tests {
         assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
         assert!(user_dsh.join("sessions").is_dir(), "~/.dsh 不受影响");
         assert!(user_home.join("sessions").is_dir(), "用户指定的 HOME 不受影响");
+    }
+
+    /// An instance is a binding, not a directory: deleting one must leave its
+    /// version and its DSH_HOME untouched, and must clear the "last used"
+    /// pointer if it named this instance.
+    #[test]
+    fn remove_instance_keeps_version_and_home() {
+        let data = ScratchDir::new("delete-instance");
+        let home_dir = data.path().join("shared-home");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let mut cfg = crate::config::Config::default();
+        cfg.homes.push(crate::config::DshHome {
+            id: "h1".into(),
+            name: "shared".into(),
+            path: home_dir.clone(),
+        });
+        cfg.versions.push(crate::config::DshVersion {
+            id: "v1".into(),
+            version: "0.1.0-rc.6".into(),
+            dir: data.path().join("versions/0.1.0-rc.6"),
+        });
+        cfg.instances.push(crate::config::DshInstance {
+            id: "i1".into(),
+            name: "one".into(),
+            version_id: "v1".into(),
+            home_id: "h1".into(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        });
+        cfg.settings.last_instance_id = Some("i1".into());
+
+        // Mirrors the body of `delete_instance` without the Tauri State/app
+        // plumbing: remove the record, clear the pointer, keep everything else.
+        let pos = cfg.instances.iter().position(|i| i.id == "i1").unwrap();
+        cfg.instances.remove(pos);
+        if cfg.settings.last_instance_id.as_deref() == Some("i1") {
+            cfg.settings.last_instance_id = None;
+        }
+
+        assert!(cfg.instances.is_empty(), "实例记录被删除");
+        assert_eq!(cfg.versions.len(), 1, "版本不受影响");
+        assert_eq!(cfg.homes.len(), 1, "DSH_HOME 不受影响");
+        assert_eq!(cfg.settings.last_instance_id, None, "最近使用指针被清空");
+        assert!(home_dir.is_dir(), "DSH_HOME 目录留在磁盘上");
     }
 }

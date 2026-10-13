@@ -33,48 +33,70 @@ pub type NativeFuture<'a, T> =
 // Wire shapes
 // ---------------------------------------------------------------------------
 
-/// A native **plugin entry** (the service's `PluginInfo`), narrowed to the
-/// fields the launcher renders. `patchId` and `readOnlyReason` are mutually
-/// exclusive in the native union; each is stored as its own `Option`.
+/// One **row** of a bundle: the composition-tree node a bundle contributes.
+///
+/// The page manages patch layers, not rows, so this exists to *count* them —
+/// what a layer brings in is a fact about the layer. Everything but the count
+/// is optional: the service omits `entryId` for rows that are not
+/// individually addressable, and a local build may ship rows without metadata.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NativePlugin {
-    /// Addressable node id in the composition tree; the UI row key and the
-    /// `id` argument of `setPluginEnabled`.
-    pub entry_id: String,
-    /// The module specifier the loader imports, e.g.
-    /// `@deepseek-ai/dsh-plugin-manager`.
-    pub module_name: String,
-    /// Localized display metadata; absent for many entries.
+pub struct NativeBundleRow {
+    #[serde(default)]
+    pub entry_id: Option<String>,
+    #[serde(default)]
+    pub module_name: Option<String>,
     #[serde(default)]
     pub meta: Option<NativeMeta>,
-    /// Loader-level effective enable state.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Runtime phase: pending / loading / active / failed / unloading.
-    #[serde(default)]
-    pub fiber_phase: Option<String>,
-    /// Present = manageable.
-    #[serde(default)]
-    pub patch_id: Option<String>,
-    /// Present = not manageable (`management-required` | `unaddressable`).
-    #[serde(default)]
-    pub read_only_reason: Option<String>,
-    /// Not part of the service's answer: the launcher fills it in from the
-    /// bundle that provides this entry's package, so the two halves of the
-    /// page state versions the same way. `skip_deserializing` keeps a stray
-    /// field in the response from being mistaken for the service's own.
-    #[serde(default, skip_deserializing)]
-    pub version: Option<String>,
 }
 
-/// Localized display metadata carried on a plugin entry or a bundle.
+/// A native text field: plain text, or the locale map the service uses for its
+/// own localized copy (`{"en": …, "zh": …}`).
+///
+/// Both shapes occur in one payload — DSH localizes the copy it ships and
+/// leaves the rest as plain strings — so a field that can be either must accept
+/// both. Reading one of these as `String` is what makes a whole list
+/// unparseable the moment a single layer carries a translated title.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NativeText {
+    Plain(String),
+    Localized(std::collections::BTreeMap<String, String>),
+}
+
+impl NativeText {
+    /// The text for `locale` (`zh-CN` also matches a plain `zh` key), then the
+    /// service's own `en` fallback, then whatever the map happens to hold.
+    pub fn pick(&self, locale: &str) -> String {
+        match self {
+            Self::Plain(text) => text.clone(),
+            Self::Localized(map) => {
+                let base = locale.split(['-', '_']).next().unwrap_or(locale);
+                [locale, base, "en"]
+                    .iter()
+                    .find_map(|key| map.get(*key))
+                    .or_else(|| map.values().next())
+                    .cloned()
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    /// [`pick`](Self::pick), with an empty result reading as "no text" so a
+    /// blank translation does not become a blank line in the list.
+    pub fn pick_opt(&self, locale: &str) -> Option<String> {
+        let text = self.pick(locale);
+        (!text.trim().is_empty()).then_some(text)
+    }
+}
+
+/// Localized display metadata carried on a bundle or one of its rows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeMeta {
     #[serde(default)]
-    pub title: Option<String>,
+    pub title: Option<NativeText>,
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: Option<NativeText>,
 }
 
 /// A native **bundle** (a patch layer), narrowed to the fields the launcher
@@ -94,7 +116,7 @@ pub struct NativeBundle {
     #[serde(default)]
     pub meta: Option<NativeMeta>,
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: Option<NativeText>,
     /// Selected by the profile manifest.
     #[serde(default)]
     pub enabled: bool,
@@ -103,6 +125,9 @@ pub struct NativeBundle {
     pub installed: bool,
     #[serde(default)]
     pub source: Option<String>,
+    /// The rows this layer contributes to the composition tree.
+    #[serde(default)]
+    pub rows: Vec<NativeBundleRow>,
     /// Shipped with the install, offered as a user toggle.
     #[serde(default)]
     pub optional: bool,
@@ -153,7 +178,7 @@ pub struct NativeChangeResult {
 pub struct NativeChangeError {
     pub code: String,
     #[serde(default)]
-    pub diagnostic: Option<String>,
+    pub diagnostic: Option<NativeText>,
 }
 
 /// One unary request the service strictly validates: **every field is
@@ -380,13 +405,6 @@ impl NativeClient {
         parse_value(resp)
     }
 
-    /// Lists the instance's plugin entries — including `@deepseek-ai/*` core
-    /// entries, which the launcher's former file reader filtered out.
-    pub async fn list_plugins(&self) -> Result<Vec<NativePlugin>, String> {
-        let value = self.call("listPlugins", serde_json::json!({})).await?;
-        serde_json::from_value(value).map_err(|e| format!("解析插件列表失败: {e}"))
-    }
-
     /// Lists the instance's bundles (patch layers).
     pub async fn list_bundles(&self) -> Result<Vec<NativeBundle>, String> {
         let value = self.call("listBundles", serde_json::json!({})).await?;
@@ -409,26 +427,6 @@ impl NativeClient {
             .call("setBundleEnabled", serde_json::json!({ "name": name, "enabled": enabled }))
             .await?;
         serde_json::from_value(value).map_err(|e| format!("解析改动结果失败: {e}"))
-    }
-
-    /// Enables/disables one **plugin entry** by its `entryId` (the `id`
-    /// argument the service expects — never the old package name).
-    ///
-    /// Returns the instance's own [`NativeChangeResult`]: a refusal
-    /// (`changed:false` + `error.code`) is a normal answer, not an error. Only
-    /// the transport layer (`call`) can fail.
-    pub async fn set_plugin_enabled(
-        &self,
-        id: &str,
-        enabled: bool,
-    ) -> Result<NativeChangeResult, String> {
-        let value = self
-            .call(
-                "setPluginEnabled",
-                serde_json::json!({ "id": id, "enabled": enabled }),
-            )
-            .await?;
-        serde_json::from_value(value).map_err(|e| format!("解析插件启停结果失败: {e}"))
     }
 
     /// Removes one whole **Bundle（补丁层）** by `name` (the native
@@ -559,36 +557,16 @@ pub enum PluginViewMode {
     Unreachable,
 }
 
-/// A **plugin entry** (the native `PluginInfo`'s stable subset).
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PluginItem {
-    /// Row key; the `id` argument of `setPluginEnabled`.
-    pub entry_id: String,
-    pub module_name: String,
-    /// `meta.title`; the UI falls back to `moduleName` when absent.
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub enabled: bool,
-    pub fiber_phase: Option<String>,
-    pub patch_id: Option<String>,
-    /// `management-required` | `unaddressable`.
-    pub read_only_reason: Option<String>,
-    /// The version of the bundle（补丁层）this entry arrived in.
-    ///
-    /// The native inventory has no version for an entry — the service does not
-    /// send one. The launcher fills this in from the bundle that provides the
-    /// entry's package (`plugins::attach_entry_versions`) so an entry row can
-    /// state a version at all; an entry no bundle claims keeps `None`.
-    pub version: Option<String>,
-}
-
 /// A **Bundle（补丁层）** — the native `BundleInfo`'s stable subset.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleItem {
     /// The `name` argument of `setBundleEnabled` / `removeBundle`.
     pub name: String,
+    /// How many composition-tree rows this layer contributes. The rows are not
+    /// a control surface here; the count is what makes "one whole layer" — the
+    /// unit this page manages — concrete.
+    pub row_count: usize,
     pub title: Option<String>,
     pub description: Option<String>,
     pub version: Option<String>,
@@ -606,86 +584,58 @@ pub struct BundleItem {
 /// One snapshot of the Plugins page: `mode` says whether operations are
 /// allowed, `reason` is the localized read-only explanation the UI shows
 /// verbatim.
+///
+/// The bundles（补丁层）are the whole page: a bundle is the unit the profile
+/// selects and DSH mounts, and it is what carries a version, an availability
+/// and a removal rule. The rows inside it are DSH's own composition detail, not
+/// a control surface the launcher should hand out one switch at a time.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
     pub mode: PluginViewMode,
     pub reason: Option<String>,
-    /// `true` when the list was read from the profile's own files for a
-    /// read-only view rather than answered by a running instance. The offline
-    /// content genuinely differs (best-effort by scope, no liveness/error
-    /// info); the UI uses this to say so.
-    pub files: bool,
-    pub plugins: Vec<PluginItem>,
     pub bundles: Vec<BundleItem>,
 }
 
 impl PluginView {
-    /// A managed snapshot, projected from the instance's two lists.
-    pub fn managed(plugins: Vec<NativePlugin>, bundles: Vec<NativeBundle>) -> Self {
+    /// A managed snapshot, projected from the instance's own bundle list.
+    pub fn managed(bundles: Vec<NativeBundle>, locale: &str) -> Self {
         Self {
             mode: PluginViewMode::Managed,
             reason: None,
-            files: false,
-            plugins: plugins.into_iter().map(PluginItem::from).collect(),
-            bundles: bundles.into_iter().map(BundleItem::from).collect(),
+            bundles: bundles
+                .into_iter()
+                .map(|b| BundleItem::from_native(b, locale))
+                .collect(),
         }
     }
 
-    /// A read-only snapshot with empty lists and the localized reason.
+    /// A read-only snapshot: no instance is running that profile (or the one
+    /// that is cannot be authenticated), so there is nothing to manage and the
+    /// localization-ready `reason` says why.
     pub fn readonly(mode: PluginViewMode, reason: impl Into<String>) -> Self {
         Self {
             mode,
             reason: Some(reason.into()),
-            files: false,
-            plugins: Vec::new(),
-            bundles: Vec::new(),
-        }
-    }
-
-    /// A read-only snapshot whose list was read from the profile's files
-    /// (instance not running). The list is best-effort: it is a scope-wide
-    /// projection of the profile manifest + patch document, not the instance's
-    /// own answer.
-    pub fn readonly_files(
-        mode: PluginViewMode,
-        reason: impl Into<String>,
-        plugins: Vec<PluginItem>,
-    ) -> Self {
-        Self {
-            mode,
-            reason: Some(reason.into()),
-            files: true,
-            plugins,
             bundles: Vec::new(),
         }
     }
 }
 
-impl From<NativePlugin> for PluginItem {
-    fn from(p: NativePlugin) -> Self {
-        let meta = p.meta.unwrap_or_default();
-        Self {
-            entry_id: p.entry_id,
-            module_name: p.module_name,
-            title: meta.title,
-            description: meta.description,
-            enabled: p.enabled,
-            fiber_phase: p.fiber_phase,
-            patch_id: p.patch_id,
-            read_only_reason: p.read_only_reason,
-            version: p.version,
-        }
-    }
-}
-
-impl From<NativeBundle> for BundleItem {
-    fn from(b: NativeBundle) -> Self {
+impl BundleItem {
+    /// Projects one native bundle; its own `description` wins over the one
+    /// carried in `meta`, exactly as before localization existed.
+    pub fn from_native(b: NativeBundle, locale: &str) -> Self {
         let meta = b.meta.unwrap_or_default();
         Self {
             name: b.name,
-            title: meta.title,
-            description: meta.description.or(b.description),
+            row_count: b.rows.len(),
+            title: meta.title.as_ref().and_then(|t| t.pick_opt(locale)),
+            description: meta
+                .description
+                .as_ref()
+                .or(b.description.as_ref())
+                .and_then(|d| d.pick_opt(locale)),
             version: b.version,
             enabled: b.enabled,
             installed: b.installed,
@@ -781,18 +731,18 @@ mod tests {
     /// `pluginManager/` prefix, endpoint path, and the session cookie — with
     /// no `Origin` header possible.
     #[test]
-    fn list_plugins_sends_the_verified_envelope() {
+    fn list_bundles_sends_the_verified_envelope() {
         let (client, fake) = client_with(vec![ok_response(serde_json::json!([]))]);
-        block_on(client.list_plugins()).unwrap();
+        block_on(client.list_bundles()).unwrap();
 
         let req = fake.last_sent();
         assert_eq!(
             req.url,
-            "http://127.0.0.1:34567/api/pluginManager/listPlugins"
+            "http://127.0.0.1:34567/api/pluginManager/listBundles"
         );
         assert_eq!(req.cookie, COOKIE);
         assert_eq!(req.envelope.kind, "client-request");
-        assert_eq!(req.envelope.method, "pluginManager/listPlugins");
+        assert_eq!(req.envelope.method, "pluginManager/listBundles");
         assert_eq!(req.envelope.payload.args, serde_json::json!({}));
         assert!(!req.envelope.rpc_id.is_empty(), "rpcId must be present");
 
@@ -818,48 +768,94 @@ mod tests {
         );
     }
 
-    /// The list is exactly what the instance returns — the `@deepseek-ai/*`
-    /// core entries the old file reader dropped must survive the parse.
+    /// The service localizes its own copy: `meta.title` is a plain string for
+    /// most plugins and a `{en, zh}` map for the ones it translated. Both
+    /// shapes have to parse — reading the map as a string is what made one
+    /// The service localizes its own copy: a bundle's `meta.title` is a plain
+    /// string for most layers and a `{en, zh}` map for the ones it translated.
+    /// Both shapes have to parse — reading the map as a string is what made one
+    /// translated title fail the *whole* list, and with it the page.
     #[test]
-    fn list_plugins_keeps_deepseek_ai_entries_and_optional_fields() {
+    fn a_localized_title_does_not_fail_the_bundle_list() {
         let payload = serde_json::json!([
             {
-                "entryId": "include:plugin-manager",
-                "moduleName": "@deepseek-ai/dsh-plugin-manager",
+                "name": "@deepseek-ai/dsh-base",
                 "enabled": true,
-                "fiberPhase": "active",
-                "meta": { "title": "插件管理", "description": "内置" },
-                "patchId": "p1"
+                "installed": true,
+                "removable": false,
+                "optional": false,
+                "meta": { "title": "@deepseek-ai/dsh-base", "description": "The core" },
+                "rows": [{ "entryId": "include:llm" }, { "moduleName": "x" }]
             },
             {
-                "entryId": "include:llm",
-                "moduleName": "@deepseek-ai/dsh-llm",
+                "name": "@deepseek-ai/dsh-schedule",
+                "enabled": true,
+                "installed": true,
+                "removable": true,
+                "optional": false,
+                "meta": {
+                    "title": { "en": "Task scheduling", "zh": "任务调度" },
+                    "description": { "en": "Stores tasks", "zh": "保存任务" }
+                },
+                "rows": [{ "entryId": "include:schedule" }]
+            },
+            {
+                "name": "bare",
                 "enabled": false,
-                "fiberPhase": null,
-                "readOnlyReason": "management-required"
+                "installed": false,
+                "removable": false,
+                "optional": false
             }
         ]);
         let (client, _) = client_with(vec![ok_response(payload)]);
-        let plugins = block_on(client.list_plugins()).unwrap();
+        let bundles = block_on(client.list_bundles())
+            .expect("a translated title must not fail the list");
 
-        assert_eq!(plugins.len(), 2);
-        assert_eq!(plugins[0].entry_id, "include:plugin-manager");
-        assert_eq!(plugins[0].module_name, "@deepseek-ai/dsh-plugin-manager");
-        assert_eq!(
-            plugins[0].meta.as_ref().unwrap().title.as_deref(),
-            Some("插件管理")
-        );
-        assert_eq!(plugins[0].patch_id.as_deref(), Some("p1"));
-        assert!(plugins[0].read_only_reason.is_none());
-        // Options may be absent entirely — the second entry has no `meta`.
-        assert_eq!(plugins[1].entry_id, "include:llm");
-        assert!(plugins[1].meta.is_none());
-        assert_eq!(
-            plugins[1].read_only_reason.as_deref(),
-            Some("management-required")
-        );
+        let zh: Vec<BundleItem> = bundles
+            .clone()
+            .into_iter()
+            .map(|b| BundleItem::from_native(b, "zh-CN"))
+            .collect();
+        assert_eq!(zh[0].title.as_deref(), Some("@deepseek-ai/dsh-base"));
+        assert_eq!(zh[0].description.as_deref(), Some("The core"));
+        assert_eq!(zh[1].title.as_deref(), Some("任务调度"));
+        assert_eq!(zh[1].description.as_deref(), Some("保存任务"));
+        assert_eq!(zh[2].title, None, "no meta at all stays absent");
+        // The layer's size is a fact about the layer.
+        assert_eq!(zh[0].row_count, 2);
+        assert_eq!(zh[2].row_count, 0);
+
+        // The same list, shown in English.
+        let en: Vec<BundleItem> = bundles
+            .into_iter()
+            .map(|b| BundleItem::from_native(b, "en-US"))
+            .collect();
+        assert_eq!(en[1].title.as_deref(), Some("Task scheduling"));
     }
 
+    /// Locale resolution: exact tag, then the tag's base language, then the
+    /// service's own `en`, then whatever the map holds — and an empty result
+    /// reads as "no text" rather than a blank line.
+    #[test]
+    fn native_text_picks_a_locale_with_fallbacks() {
+        let plain: NativeText = serde_json::from_value(serde_json::json!("Text")).unwrap();
+        assert_eq!(plain.pick("zh-CN"), "Text");
+
+        let map: NativeText =
+            serde_json::from_value(serde_json::json!({ "en": "Hello", "zh": "你好" })).unwrap();
+        assert_eq!(map.pick("zh-CN"), "你好");
+        assert_eq!(map.pick("zh-TW"), "你好", "a base language matches its regions");
+        assert_eq!(map.pick("en-GB"), "Hello");
+        assert_eq!(map.pick("fr"), "Hello", "`en` is the service's own fallback");
+
+        let only_other: NativeText =
+            serde_json::from_value(serde_json::json!({ "fr": "Bonjour" })).unwrap();
+        assert_eq!(only_other.pick("zh-CN"), "Bonjour");
+
+        let blank: NativeText =
+            serde_json::from_value(serde_json::json!({ "fr": "   " })).unwrap();
+        assert_eq!(blank.pick_opt("zh-CN"), None);
+    }
     #[test]
     fn list_bundles_parses_native_bundle_shape() {
         let payload = serde_json::json!([
@@ -907,7 +903,7 @@ mod tests {
             let status = resp.status;
             let (client, _) = client_with(vec![resp]);
             assert!(
-                block_on(client.list_plugins()).is_err(),
+                block_on(client.list_bundles()).is_err(),
                 "status {status} must be an error"
             );
         }
@@ -1005,72 +1001,40 @@ mod tests {
         assert_eq!(outcome.warnings, vec!["随 DSH 发布".to_string()]);
     }
 
-    /// The read-only snapshot carries the mode + localized reason and no rows,
-    /// so T5 only has to add content and UI.
+    /// The read-only snapshot carries the mode + localized reason and no
+    /// bundles: without a running instance there is nothing to manage.
     #[test]
     fn readonly_view_is_empty_with_mode_and_reason() {
         let view = PluginView::readonly(PluginViewMode::NotRunning, "实例未运行");
         assert_eq!(view.mode, PluginViewMode::NotRunning);
         assert_eq!(view.reason.as_deref(), Some("实例未运行"));
-        assert!(!view.files);
-        assert!(view.plugins.is_empty());
         assert!(view.bundles.is_empty());
     }
-
-    /// The offline read-only snapshot carries a file-sourced list and flags it,
-    /// so the UI can tell the user the list came from the profile files.
-    #[test]
-    fn readonly_files_view_flags_the_file_sourced_list() {
-        let plugin: NativePlugin = serde_json::from_value(serde_json::json!({
-            "entryId": "dsh-auxiliary",
-            "moduleName": "@dsh-plugin/dsh-auxiliary",
-            "enabled": false,
-        }))
-        .unwrap();
-        let view = PluginView::readonly_files(
-            PluginViewMode::NotRunning,
-            "实例未在运行",
-            vec![PluginItem::from(plugin)],
-        );
-        assert_eq!(view.mode, PluginViewMode::NotRunning);
-        assert!(view.files);
-        assert_eq!(view.plugins.len(), 1);
-        assert!(!view.plugins[0].enabled);
-
-        let json = serde_json::to_value(&view).unwrap();
-        assert_eq!(json["files"], true);
-        assert_eq!(json["plugins"][0]["moduleName"], "@dsh-plugin/dsh-auxiliary");
-    }
-
-    /// Projection: `meta.title` becomes `title`, and a bundle's error code
-    /// surfaces for the UI. Serialization is camelCase for the frontend.
+    /// Projection: a bundle's `meta.title` becomes `title` (resolved to one
+    /// language), its own `description` outranks the meta one, and its error
+    /// code — not its diagnostic — becomes `errorCode`.
     #[test]
     fn managed_view_projects_meta_and_bundle_error() {
-        let plugins = serde_json::from_value(serde_json::json!([{
-            "entryId": "include:llm",
-            "moduleName": "@deepseek-ai/dsh-llm",
-            "enabled": true,
-            "meta": { "title": "LLM" }
-        }]))
-        .unwrap();
         let bundles = serde_json::from_value(serde_json::json!([{
             "name": "ds-bot",
             "enabled": false,
             "installed": true,
             "removable": true,
             "optional": false,
-            "error": { "code": "bundle-in-use" }
+            "error": { "code": "bundle-in-use" },
+            "meta": { "title": { "en": "Bot", "zh": "机器人" } }
         }]))
         .unwrap();
-        let view = PluginView::managed(plugins, bundles);
+        let view = PluginView::managed(bundles, "zh-CN");
         assert_eq!(view.mode, PluginViewMode::Managed);
-        assert_eq!(view.plugins[0].title.as_deref(), Some("LLM"));
         assert_eq!(view.bundles[0].name, "ds-bot");
+        assert_eq!(view.bundles[0].title.as_deref(), Some("机器人"));
         assert_eq!(view.bundles[0].error_code.as_deref(), Some("bundle-in-use"));
 
         let json = serde_json::to_value(&view).unwrap();
-        assert_eq!(json["plugins"][0]["entryId"], "include:llm");
         assert_eq!(json["mode"], "managed");
+        assert_eq!(json["bundles"][0]["name"], "ds-bot");
+        assert_eq!(json["bundles"][0]["rowCount"], 0);
     }
 
     /// A native `ChangeResult` value as the service answers it.
@@ -1092,53 +1056,11 @@ mod tests {
         value
     }
 
-    /// Toggling a **plugin entry** addresses it by `entryId` — never the old
-    /// package name — with the native `{id, enabled}` args, on the
-    /// `setPluginEnabled` method.
-    #[test]
-    fn set_plugin_enabled_sends_entry_id_and_enabled_args() {
-        let (client, fake) = client_with(vec![ok_response(change_result("applied", true, None))]);
-        block_on(client.set_plugin_enabled("include:llm", false)).unwrap();
-
-        let req = fake.last_sent();
-        assert_eq!(
-            req.url,
-            "http://127.0.0.1:34567/api/pluginManager/setPluginEnabled"
-        );
-        assert_eq!(req.envelope.method, "pluginManager/setPluginEnabled");
-        assert_eq!(
-            req.envelope.payload.args,
-            serde_json::json!({ "id": "include:llm", "enabled": false })
-        );
-    }
-
-    /// A refusal is HTTP 200 + `result.ok:true` with `changed:false` and an
-    /// `error.code` — "this cannot be changed", not a transport failure — so it
-    /// must come back as an ordinary result carrying the code, never an `Err`.
-    #[test]
-    fn set_plugin_enabled_surfaces_a_refusal_as_a_change_result() {
-        let (client, _) = client_with(vec![ok_response(change_result(
-            "failed",
-            false,
-            Some(serde_json::json!({
-                "code": "management-required",
-                "diagnostic": "managed by DSH",
-            })),
-        ))]);
-        let out = block_on(client.set_plugin_enabled("include:llm", false)).unwrap();
-        assert!(!out.changed);
-        assert_eq!(out.application, "failed");
-        assert_eq!(out.error.as_ref().unwrap().code, "management-required");
-        assert_eq!(
-            out.error.as_ref().unwrap().diagnostic.as_deref(),
-            Some("managed by DSH")
-        );
-    }
-
     /// `application` has five values, not three: each is carried through
-    /// verbatim so the page can tell 已生效 / 需重启 / 被覆盖 / 失败 / 取消 apart.
+    /// verbatim so the page can tell 已生效 / 需重启 / 被覆盖 / 失败 / 取消
+    /// apart. Driven through the bundle toggle, the write path that remains.
     #[test]
-    fn set_plugin_enabled_keeps_every_application_value() {
+    fn set_bundle_enabled_keeps_every_application_value() {
         for application in [
             "applied",
             "restart-required",
@@ -1149,7 +1071,7 @@ mod tests {
             let mut value = change_result(application, true, None);
             value["warnings"] = serde_json::json!(["w1"]);
             let (client, _) = client_with(vec![ok_response(value)]);
-            let out = block_on(client.set_plugin_enabled("include:llm", true)).unwrap();
+            let out = block_on(client.set_bundle_enabled("ds-bot", true)).unwrap();
             assert_eq!(out.application, application);
             assert_eq!(out.enabled, None);
             assert_eq!(out.warnings, vec!["w1".to_string()]);
