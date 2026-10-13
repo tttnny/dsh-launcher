@@ -115,7 +115,10 @@ async fn list_plugins_for(
     let Some(entry) =
         crate::process::running_for_profile(state, home_id, profile, instance_id).await?
     else {
-        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
+        // No instance to ask, but the page still answers the question the user
+        // came with ("这个 Profile 装了什么？") from the profile's own files.
+        let bundles = offline_bundles(state, home_id, profile);
+        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING, bundles));
     };
     // What decides is the token, not how we came to own the entry: an adopted
     // process whose launch URL we remembered is as manageable as a child of
@@ -127,7 +130,8 @@ async fn list_plugins_for(
             PluginViewMode::NotRunning
         };
         let reason = if entry.adopted { ADOPTED } else { NOT_RUNNING };
-        return Ok(PluginView::readonly(mode, reason));
+        let bundles = offline_bundles(state, home_id, profile);
+        return Ok(PluginView::readonly(mode, reason, bundles));
     };
     let url = url.to_string();
 
@@ -135,10 +139,103 @@ async fn list_plugins_for(
     // command error: the page still renders with the instance's reason.
     let client = match NativeClient::connect(&url).await {
         Ok(client) => client,
-        Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
+        Err(e) => {
+            let bundles = offline_bundles(state, home_id, profile);
+            return Ok(PluginView::readonly(PluginViewMode::Unreachable, e, bundles));
+        }
     };
     let bundles = client.list_bundles().await?;
     Ok(PluginView::managed(bundles, &ui_locale(state), &entry.id))
+}
+
+/// The profile's own files as a layer list, for the states where no instance
+/// can answer. Read-only by construction — it never writes a profile file
+/// (ADR-0001) — and deliberately thinner than the live list: it cannot know
+/// live state, availability, removal rules or a layer's row count, so it
+/// reports only what the files say, and the page labels it as such.
+///
+/// The order is the profile's own: the bundles it selects (which is its
+/// priority order), then the packages it installs but does not mount.
+fn offline_bundles(
+    state: &AppState,
+    home_id: &str,
+    profile: &str,
+) -> Vec<crate::native::BundleItem> {
+    let home = state
+        .config
+        .lock()
+        .unwrap()
+        .homes
+        .iter()
+        .find(|h| h.id == home_id)
+        .map(|h| std::path::PathBuf::from(&h.path));
+    match home {
+        Some(path) => offline_bundles_in(&path, profile),
+        None => Vec::new(),
+    }
+}
+
+/// [`offline_bundles`] against a HOME path, so tests need no `AppState` config.
+pub(crate) fn offline_bundles_in(
+    home: &std::path::Path,
+    profile: &str,
+) -> Vec<crate::native::BundleItem> {
+    use crate::native::BundleItem;
+
+    let Ok(dir) = crate::profile::profile_dir(home, profile) else {
+        return Vec::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+
+    let strings = |value: Option<&serde_json::Value>| -> Vec<String> {
+        value
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let selected = strings(doc.pointer("/dsh/profile/bundles"));
+    let installed: Vec<String> = doc
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|deps| deps.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // The profile's order first — it is the priority order — then whatever else
+    // the profile installs, so the same set always reads the same way.
+    let mut names = selected.clone();
+    let mut rest: Vec<String> = installed
+        .iter()
+        .filter(|name| !selected.contains(name))
+        .cloned()
+        .collect();
+    rest.sort();
+    names.extend(rest);
+
+    names
+        .into_iter()
+        .map(|name| {
+            let version = read_installed_version(&dir, &name);
+            BundleItem::from_profile_files(name.clone(), selected.contains(&name), installed.contains(&name), version)
+        })
+        .collect()
+}
+
+/// The version of an installed package, read from the copy pnpm linked into the
+/// profile's `node_modules`. Absent when it is not there (or not readable),
+/// which is exactly the case the page shows as "no version".
+fn read_installed_version(profile_dir: &std::path::Path, name: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(profile_dir.join("node_modules").join(name).join("package.json")).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    doc.get("version").and_then(|v| v.as_str()).map(str::to_string)
 }
 
 /// The launcher's own UI language. The service localizes its metadata
@@ -1017,12 +1114,12 @@ mod tests {
         home
     }
 
-    /// No instance is running this profile: the page is read-only in
     /// Without a running instance the page is read-only: the reason says what
-    /// to do, and there is nothing to manage until one is up — the bundle list
-    /// is the *instance's* answer, so the launcher does not guess it from files.
+    /// to do, and the list is the profile's own files — what it selects (its
+    /// priority order first) and what it installs, with nothing invented that
+    /// only a running instance could know.
     #[tokio::test]
-    async fn list_plugins_is_read_only_and_empty_when_not_running() {
+    async fn list_plugins_falls_back_to_the_profile_files_when_not_running() {
         let home = seeded_home(
             &[
                 (
@@ -1044,10 +1141,63 @@ mod tests {
         let view = list_plugins_for(&state, "h1", "web", None).await.unwrap();
 
         assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
-        assert!(view.bundles.is_empty(), "no instance, no bundle list");
+        assert!(view.instance_id.is_none(), "no instance answered");
         // The reason is distinct and tells the user what to do.
         let reason = view.reason.expect("read-only reason");
         assert!(reason.contains("启动该实例"), "reason: {reason}");
+
+        // The profile's own order first, then the rest of what it installs.
+        let names: Vec<&str> = view.bundles.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["@deepseek-ai/dsh-base", "@dsh-plugin/dsh-auxiliary"]);
+        assert!(view.bundles.iter().all(|b| b.enabled && b.installed));
+        // Nothing a file cannot prove: no row counts, no removal rule, no
+        // version (nothing is linked into node_modules in this scratch HOME).
+        assert!(view.bundles.iter().all(|b| b.row_count == 0
+            && !b.removable
+            && b.version.is_none()
+            && b.availability.is_none()
+            && b.error_code.is_none()));
+    }
+
+    /// The file projection is a projection of the files, nothing else: a
+    /// package the profile installs but does not mount shows up unmounted, and
+    /// an unreadable/absent profile answers with no list at all.
+    #[tokio::test]
+    async fn offline_bundles_read_only_what_the_profile_declares() {
+        let home = seeded_home(
+            &[(
+                "package.json",
+                &profile_json(
+                    &["@deepseek-ai/dsh-base", "ds-bot"],
+                    &["@deepseek-ai/dsh-base"],
+                ),
+            )],
+            "web",
+        );
+        let dir = crate::profile::profile_dir(&home, "web").unwrap();
+        // A linked package with a version on disk is the one thing the files can
+        // add; here ds-bot has no node_modules copy, so it gets none.
+        std::fs::create_dir_all(dir.join("node_modules").join("@deepseek-ai/dsh-base")).unwrap();
+        std::fs::write(
+            dir.join("node_modules").join("@deepseek-ai/dsh-base").join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh-base","version":"0.2.1-alpha.2"}"#,
+        )
+        .unwrap();
+
+        let bundles = offline_bundles_in(&home, "web");
+        let by_name = |name: &str| bundles.iter().find(|b| b.name == name).unwrap().clone();
+        let base = by_name("@deepseek-ai/dsh-base");
+        assert!(base.enabled && base.installed);
+        assert_eq!(base.version.as_deref(), Some("0.2.1-alpha.2"));
+        let bot = by_name("ds-bot");
+        assert!(!bot.enabled, "installed but not selected = unmounted");
+        assert!(bot.installed);
+        assert_eq!(bundles.len(), 2);
+
+        // Nothing to read: an empty profile, and a profile that does not exist.
+        assert!(offline_bundles_in(&home, "nope").is_empty());
+        std::fs::write(dir.join("package.json"), "not json").unwrap();
+        assert!(offline_bundles_in(&home, "web").is_empty());
     }
 
     /// An adopted instance carries a bare URL and no token, so the view is
@@ -1075,6 +1225,7 @@ mod tests {
         }
         let view = list_plugins_for(&state, "h1", "web", None).await.unwrap();
         assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
+        // The HOME has no profile yet: the file projection simply has nothing.
         assert!(view.bundles.is_empty());
         let adopted_reason = view.reason.expect("adopted reason");
         assert!(
@@ -1086,6 +1237,7 @@ mod tests {
         let not_running = crate::native::PluginView::readonly(
             crate::native::PluginViewMode::NotRunning,
             "实例未运行",
+            Vec::new(),
         );
         assert_ne!(Some(adopted_reason), not_running.reason);
     }

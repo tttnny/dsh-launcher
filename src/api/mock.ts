@@ -4,6 +4,7 @@
 // enforces it so the two adapters cannot drift silently.
 
 import type {
+  BundleItem,
   ChangeOutcome,
   DshHome,
   DshInstance,
@@ -183,22 +184,29 @@ function resolveRunningInstance(
 }
 
 /** Seed a native view on first read, so the Plugins page is usable. */
-function nativeViewFor(
-  homeId: string,
-  profile: string,
-  instanceId: string | null,
-): PluginView {
-  if (!instanceId) {
-    // No instance, no layer list: the bundles are the *instance's* answer, so
-    // the read-only view states the mode and the reason and shows nothing.
-    return {
-      mode: 'not-running',
-      instanceId: null,
-      reason:
-        '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
-      bundles: [],
-    }
-  }
+/**
+ * What the profile's own files say, as the backend's offline projection reports
+ * it: which layers it declares and installs, and nothing only a running
+ * instance could know — no live state, availability, row count or removal rule.
+ */
+function offlineProjection(bundles: BundleItem[]): BundleItem[] {
+  return bundles.map((b) => ({
+    ...b,
+    // A file has no title, no description and no count: those come from the
+    // running instance's own list.
+    title: null,
+    description: null,
+    rowCount: 0,
+    removable: false,
+    optional: false,
+    availability: null,
+    readOnlyReason: null,
+    errorCode: null,
+  }))
+}
+
+/** The layers this profile declares: the mock's stand-in for its `package.json`. */
+function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
   const key = `${homeId}:${profile}`
   if (!mockNativeStore[key]) {
     mockNativeStore[key] = {
@@ -295,8 +303,28 @@ function nativeViewFor(
       ],
     }
   }
+  return mockNativeStore[key].bundles
+}
+
+function nativeViewFor(
+  homeId: string,
+  profile: string,
+  instanceId: string | null,
+): PluginView {
+  const bundles = mockBundlesFor(homeId, profile)
+  if (!instanceId) {
+    // No instance answers, so the list is the profile's own files — the same
+    // fallback the backend takes, labelled read-only by `mode`.
+    return {
+      mode: 'not-running',
+      instanceId: null,
+      reason:
+        '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
+      bundles: offlineProjection(bundles),
+    }
+  }
   // The list is per profile; which instance answers is per call.
-  return { ...mockNativeStore[key], instanceId }
+  return { mode: 'managed', instanceId, reason: null, bundles }
 }
 
 function mockNewId(prefix: string): string {

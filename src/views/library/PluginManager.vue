@@ -269,6 +269,8 @@ function toggleGroup(key: string) {
 }
 
 const bundlePending = ref<Record<string, boolean>>({})
+/** Any write in flight: every control on the page locks (see `BundleRow.locked`). */
+const locked = computed(() => Object.keys(bundlePending.value).length > 0)
 
 function bundleName(b: BundleItem): string {
   return b.title?.trim() || b.name
@@ -425,7 +427,7 @@ async function removeBundle(b: BundleItem) {
                   {{ t('plugins.bundlesNoneMine') }}
                 </div>
                 <BundleRow v-for="b in g.items" :key="b.name" :tone="g.tone" :bundle="b"
-                  :pending="!!bundlePending[b.name]" :managed="managed"
+                  :pending="!!bundlePending[b.name]" :managed="managed" :locked="locked"
                   @toggle="(on) => toggleBundle(b, on)" @remove="removeBundle(b)" />
               </template>
             </section>
@@ -433,6 +435,30 @@ async function removeBundle(b: BundleItem) {
         </div>
 
         <p class="bundle-hint">{{ t('plugins.bundleOrderHint') }}</p>
+      </section>
+
+      <!-- Read-only: the layers the profile's own files declare. No folds and
+           no grouping — grouping is `removable`, and a file cannot prove that,
+           so this is a flat list of facts with the switches locked. -->
+      <section v-else class="dl-section">
+        <div class="dl-section-label">
+          {{ t('plugins.offlineTitle') }}
+          <span v-if="bundles.length" class="dl-section-count">
+            {{ t('plugins.bundlesMountedOf', { mounted: mountedCount, total: bundles.length }) }}
+          </span>
+        </div>
+
+        <div class="dl-surface bundle-list">
+          <div v-if="bundles.length === 0" class="dl-row-none">
+            {{ loading ? t('common.loading') : t('plugins.offlineEmpty') }}
+          </div>
+          <template v-else>
+            <BundleRow v-for="b in bundles" :key="b.name" tone="own" :bundle="b"
+              :pending="false" :managed="false" :locked="false" />
+          </template>
+        </div>
+
+        <p class="bundle-hint">{{ t('plugins.offlineNote') }}</p>
       </section>
     </template>
   </div>

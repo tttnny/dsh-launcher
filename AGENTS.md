@@ -47,10 +47,22 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 默认展开，行内可卸载）与「随 DSH 发布」（`removable:false`，默认折叠，只报个数）——
 **不要**按 `enabled` 再切一个「未挂载」组：挂没挂载是状态，开关和状态点已经说了，而且
 按状态分组的折叠会让刚被切掉的那一行从指针底下跑掉。两组的组头都是折叠开关并带计数，
-所以折叠不等于隐藏。段标题报状态总数（「已挂载 N / M」）。这段列表只在实例 `running`
-时存在：未运行时页面只剩横幅 + 启动 / 重启按钮，不要拿空列表冒充「这个 Profile 没有
-补丁层」。写入返回 `restart-required` 时，页面顶部留一条「改动要重启才生效」的提示 +
-重启按钮（实例状态一变就撤掉），不要只靠一条 toast。
+所以折叠不等于隐藏。段标题报状态总数（「已挂载 N / M」）。写入返回
+`restart-required` 时，页面顶部留一条「改动要重启才生效」的提示 + 重启按钮（实例
+状态一变就撤掉），不要只靠一条 toast。
+
+**未运行时给的是「文件投影」，不是实例的答案（契约）**：没有实例应答（没在跑 / 被
+接管 / 连不上）时，页面用 `plugins::offline_bundles` 读 Profile 自己的 `package.json`
+——它声明的层（`dsh.profile.bundles`，即优先级顺序）在先，装了的依赖在后，
+`version` 从 `node_modules/<name>/package.json` 读。这份投影**只读**（ADR-0001 一条都
+不破），而且**故意比在线列表薄**：没有实时状态、可用性、卸载规则、条目数，`removable`
+一律 false——所以它在界面上也长得不一样：平铺、不分组（分组依据是 `removable`，文件
+证明不了），开关禁用，脚注说明它读自文件。别把它当成实例的列表，也别据此把层归到
+「随 DSH 发布」那一组。
+
+**写入时锁住整页（契约）**：实例是拿一把 profile 文件锁串行写盘的，第二个点击会排在
+第一个后面、还可能回一个看不懂的拒绝。所以只要有写入在飞（`bundlePending` 非空），
+页面上所有开关与卸载按钮一起禁用（`BundleRow.locked`），跟原生插件页的行为一致。
 
 **启动 token 要跨会话记住（契约）**：实例就绪时打印的 URL（含 `token=`）写进
 `<data_dir>/running.json`（`process::remember_url`），实例停止 / 退出时删掉。收养
@@ -119,7 +131,9 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 
 推 tag 即发版（`git tag v<version> && git push origin v<version>`，tag 必须等于
 `package.json` 的 version）。推 main 发预发布 `v<版本>-dev.<工作流序号>`，不动
-Latest；收尾的 `bump-version` job 把 manifest 抬到下一个 patch 并推回 main。
+Latest，也不抬版本号；`bump-version` job 只在**推 tag 且是正式版**时跑（工作流里的
+条件就是 `startsWith(refs/tags/v) && prerelease == false`），它把 manifest 抬到下一个
+patch 并推回 main。
 
 - Release notes 手写（中英双语）；流水线只在正文还是占位符时填「下载表 + 提交
   列表」，改 `ci/release-notes-*.mjs` 后跑 `pnpm test:release-notes`。

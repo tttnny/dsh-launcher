@@ -618,18 +618,55 @@ impl PluginView {
 
     /// A read-only snapshot: no instance is running that profile (or the one
     /// that is cannot be authenticated), so there is nothing to manage and the
-    /// localization-ready `reason` says why.
-    pub fn readonly(mode: PluginViewMode, reason: impl Into<String>) -> Self {
+    /// localization-ready `reason` says why. `bundles` is what the profile's
+    /// own files say it holds — a best-effort projection that the page labels
+    /// as such (design §4: it never writes, and it differs from the live list
+    /// on purpose).
+    pub fn readonly(
+        mode: PluginViewMode,
+        reason: impl Into<String>,
+        bundles: Vec<BundleItem>,
+    ) -> Self {
         Self {
             mode,
             instance_id: None,
             reason: Some(reason.into()),
-            bundles: Vec::new(),
+            bundles,
         }
     }
 }
 
 impl BundleItem {
+    /// One layer as the profile's own files declare it — the read-only
+    /// projection used when no instance can answer. It carries only what a
+    /// file says: that the profile selects this layer, that it installs that
+    /// package, and (when the package is on disk) its version. Live state,
+    /// availability, removal rules and row counts are the instance's business,
+    /// so they stay empty here rather than being guessed.
+    pub fn from_profile_files(
+        name: String,
+        selected: bool,
+        installed: bool,
+        version: Option<String>,
+    ) -> Self {
+        Self {
+            name,
+            row_count: 0,
+            title: None,
+            description: None,
+            version,
+            enabled: selected,
+            installed,
+            // We cannot see the installation's manifest from here, so we never
+            // claim a layer is removable: the page is read-only anyway.
+            removable: false,
+            optional: false,
+            availability: None,
+            read_only_reason: None,
+            error_code: None,
+        }
+    }
+
     /// Projects one native bundle; its own `description` wins over the one
     /// carried in `meta`, exactly as before localization existed.
     pub fn from_native(b: NativeBundle, locale: &str) -> Self {
@@ -1005,14 +1042,32 @@ mod tests {
         assert_eq!(outcome.warnings, vec!["随 DSH 发布".to_string()]);
     }
 
-    /// The read-only snapshot carries the mode + localized reason and no
-    /// bundles: without a running instance there is nothing to manage.
+    /// The read-only snapshot carries the mode + localized reason, no instance
+    /// id, and whatever the profile's files said (the caller passes the
+    /// projection; the shape only has to survive serialization).
     #[test]
-    fn readonly_view_is_empty_with_mode_and_reason() {
-        let view = PluginView::readonly(PluginViewMode::NotRunning, "实例未运行");
+    fn readonly_view_carries_the_mode_reason_and_file_projection() {
+        let view = PluginView::readonly(
+            PluginViewMode::NotRunning,
+            "实例未运行",
+            vec![BundleItem::from_profile_files(
+                "ds-bot".to_string(),
+                true,
+                true,
+                Some("0.9.4".to_string()),
+            )],
+        );
         assert_eq!(view.mode, PluginViewMode::NotRunning);
         assert_eq!(view.reason.as_deref(), Some("实例未运行"));
-        assert!(view.bundles.is_empty());
+        assert!(view.instance_id.is_none());
+        assert_eq!(view.bundles.len(), 1);
+        assert_eq!(view.bundles[0].name, "ds-bot");
+        assert!(view.bundles[0].enabled);
+        assert!(!view.bundles[0].removable, "a file projection proves nothing about removal");
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["mode"], "not-running");
+        assert!(json["instanceId"].is_null());
+        assert_eq!(json["bundles"][0]["version"], "0.9.4");
     }
     /// Projection: a bundle's `meta.title` becomes `title` (resolved to one
     /// language), its own `description` outranks the meta one, and its error

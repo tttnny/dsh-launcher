@@ -15,6 +15,13 @@ const props = defineProps<{
   bundle: BundleItem
   pending: boolean
   managed: boolean
+  /**
+   * True while *any* layer on the page has a write in flight. The instance
+   * serializes writes on one profile file lock, so a second click would queue
+   * behind the first and can come back as a confusing refusal; the native page
+   * locks every control for the same reason.
+   */
+  locked?: boolean
   /** Which fold the row belongs to; only changes how loud it is. */
   tone: 'own' | 'shipped'
 }>()
@@ -58,7 +65,9 @@ function rowCount(): string | null {
     <span class="bundle-dot" :class="{ 'is-on': bundle.enabled, 'is-bad': !!bundle.errorCode }" />
     <div class="bundle-main">
       <div class="bundle-title">
-        <span class="bundle-name">{{ name() }}</span>
+        <!-- Mono exactly when the name on show *is* the package name: machine
+             identifiers wear the readout face, a translated title does not. -->
+        <span class="bundle-name" :class="{ 'dl-mono': !bundleHasOwnTitle() }">{{ name() }}</span>
         <span v-if="bundle.version" class="dl-chip dl-mono">{{ bundle.version }}</span>
         <span v-if="rowCount()" class="bundle-rows">{{ rowCount() }}</span>
         <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{ t('plugins.bundleOptional') }}</span>
@@ -84,7 +93,7 @@ function rowCount(): string | null {
       <a-switch
         :model-value="bundle.enabled"
         :loading="pending"
-        :disabled="!managed"
+        :disabled="!managed || !!locked"
         size="small"
         @change="(v: string | number | boolean) => emit('toggle', v === true)"
       />
@@ -96,7 +105,7 @@ function rowCount(): string | null {
         modal-class="dl-sheet"
         @ok="emit('remove')"
       >
-        <button class="dl-btn dl-btn--danger" :disabled="pending">
+        <button class="dl-btn dl-btn--danger" :disabled="pending || !!locked">
           <DlIcon name="trash" :size="13" />
           {{ t('plugins.bundleRemove') }}
         </button>
