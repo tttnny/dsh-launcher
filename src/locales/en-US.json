@@ -134,6 +134,8 @@
     "bundlesShippedGroup": "Ships with DSH",
     "bundleRows": "{count} rows",
     "bundleOptional": "Optional",
+    "bundleManaged": "Required by DSH",
+    "bundleManagedWhy": "This layer backs DSH's own plugin manager: it can be switched off, never uninstalled",
     "bundleMissing": "Package files unreadable",
     "bundleErrored": "Failed to load",
     "bundleRemove": "Uninstall",

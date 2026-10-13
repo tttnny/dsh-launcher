@@ -206,7 +206,7 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     // navigate (event is a no-op until the frontend listens).
     let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "实例", true, None::<&str>)?;
     // DSH 版本 / DSH_HOME / Profile 都是资源库的标签页，点进去直达对应那一页。
-    // 插件管理不占格：它是 Profile 行上的动作（ADR-0001）。
+    // 插件管理不占格：它属于运行中的实例，入口在实例行展开的卡片里。
     let quick_versions = MenuItem::with_id(app, MENU_QUICK_VERSIONS, "DSH 版本", true, None::<&str>)?;
     let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "DSH_HOME", true, None::<&str>)?;
     let quick_profiles = MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;

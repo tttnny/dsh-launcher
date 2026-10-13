@@ -7,9 +7,9 @@ import DlIcon from '@/components/DlIcon.vue'
 //
 // A layer states what it *is* (name, version, how many composition rows it
 // contributes) and offers the two things a layer can do: mount/unmount, and —
-// only for a layer the user added — 卸载. The three groups it can appear in
-// (yours / ships with DSH / not mounted) are the page's business, so this row
-// carries no group logic beyond the tone it is drawn with.
+// only for a layer the user added — 卸载. Which of the page's two groups it
+// lands in (yours / ships with DSH) is the page's business, so this row carries
+// no group logic beyond the tone it is drawn with.
 
 const props = defineProps<{
   bundle: BundleItem
@@ -28,9 +28,20 @@ function name(): string {
 }
 
 /** The package name only earns a second line when it is not what the title says. */
-function hasOwnTitle(): boolean {
+function bundleHasOwnTitle(): boolean {
   const title = props.bundle.title?.trim()
   return Boolean(title) && title !== props.bundle.name
+}
+
+/**
+ * Why a layer offers no 卸载 button, when the instance bothered to say. The
+ * three layers that back the plugin manager itself are the ones that do, and
+ * without this tag a user reads their missing button as a bug.
+ */
+function managedReason(): string | null {
+  return props.bundle.readOnlyReason === 'management-required'
+    ? t('plugins.bundleManagedWhy')
+    : null
 }
 
 /** A layer with no rows is a real thing (an install-only or config-only
@@ -51,6 +62,9 @@ function rowCount(): string | null {
         <span v-if="bundle.version" class="dl-chip dl-mono">{{ bundle.version }}</span>
         <span v-if="rowCount()" class="bundle-rows">{{ rowCount() }}</span>
         <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{ t('plugins.bundleOptional') }}</span>
+      <span v-if="managedReason()" class="dl-tag dl-tag--muted" :title="managedReason()!">
+        {{ t('plugins.bundleManaged') }}
+      </span>
         <!-- "The package files are unreadable" already says the layer cannot
              load; the error code would be a second amber tag saying it twice. -->
         <span v-if="bundle.availability === 'missing'" class="dl-tag dl-tag--warn">
@@ -64,7 +78,7 @@ function rowCount(): string | null {
           {{ t('plugins.bundleErrored') }}
         </span>
       </div>
-      <span v-if="hasOwnTitle()" class="bundle-sub dl-mono">{{ bundle.name }}</span>
+      <span v-if="bundleHasOwnTitle()" class="bundle-sub dl-mono">{{ bundle.name }}</span>
     </div>
     <div class="bundle-actions">
       <a-switch

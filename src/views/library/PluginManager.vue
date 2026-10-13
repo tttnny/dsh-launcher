@@ -71,9 +71,9 @@ async function fixInstance() {
 }
 
 /**
- * "返回实例" goes back to the instance the user left, not to a fixed page:
- * the board's row (expanded, scrolled to) when the entry was the row's own
- * button, or the settings page when the entry was there.
+ * "返回实例" goes back to the instance the user left, not to a fixed page: the
+ * board's row (expanded, scrolled to) when the page was opened from that row,
+ * or the instance's settings page when it was opened from there.
  */
 function goBack() {
   if (instanceId.value) {
@@ -136,9 +136,9 @@ function applicationOutcome(application: string): { tone: Tone; label: string } 
 }
 
 /**
- * The one renderer for a write outcome, shared by the entry path, the bundle
- * toggle and the bundle removal, so the refusal branch and the five
- * `application` branches cannot drift between them.
+ * The one renderer for a write outcome, shared by the bundle toggle and the
+ * bundle removal, so the refusal branch and the five `application` branches
+ * cannot drift between them.
  *
  * A refusal (`changed:false`) carries the **localized** reason in `diagnostic`;
  * `errorCode` is the raw native code and is never shown.
@@ -392,7 +392,7 @@ async function removeBundle(b: BundleItem) {
         </div>
 
         <div class="dl-surface bundle-list">
-          <div v-if="bundles.length === 0" class="row-none">
+          <div v-if="bundles.length === 0" class="dl-row-none">
             {{ loading ? t('common.loading') : t('plugins.bundlesEmpty') }}
           </div>
 
@@ -405,7 +405,7 @@ async function removeBundle(b: BundleItem) {
                 <span class="group-count dl-tnum">{{ g.items.length }}</span>
               </button>
               <template v-if="expandedGroups[g.key]">
-                <div v-if="g.items.length === 0" class="row-none">
+                <div v-if="g.items.length === 0" class="dl-row-none">
                   {{ t('plugins.bundlesNoneMine') }}
                 </div>
                 <BundleRow v-for="b in g.items" :key="b.name" :tone="g.tone" :bundle="b"
@@ -484,13 +484,6 @@ async function removeBundle(b: BundleItem) {
 
 .bundle-list {
   overflow: hidden;
-}
-
-.row-none {
-  padding: 22px 16px;
-  text-align: center;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
 }
 
 // A folded group's header: the count is the whole point, so it is always

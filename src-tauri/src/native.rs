@@ -768,9 +768,6 @@ mod tests {
         );
     }
 
-    /// The service localizes its own copy: `meta.title` is a plain string for
-    /// most plugins and a `{en, zh}` map for the ones it translated. Both
-    /// shapes have to parse — reading the map as a string is what made one
     /// The service localizes its own copy: a bundle's `meta.title` is a plain
     /// string for most layers and a `{en, zh}` map for the ones it translated.
     /// Both shapes have to parse — reading the map as a string is what made one

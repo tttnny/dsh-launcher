@@ -556,6 +556,15 @@ body {
 // Empty state
 // ---------------------------------------------------------------------------
 
+// One line of "there is nothing here" inside a list surface — the three Library
+// panes all need exactly this, so it lives here instead of three times over.
+.dl-row-none {
+  padding: 22px 16px;
+  text-align: center;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-4);
+}
+
 .dl-empty {
   display: flex;
   flex-direction: column;

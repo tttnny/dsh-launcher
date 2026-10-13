@@ -168,7 +168,9 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
 
   <template v-else>
     <!-- The HOME axis is a row of chips, not a select: there are usually two
-         or three, and the chosen one's path stays legible beside them. -->
+         or three, and the chosen one's path stays legible beside them. It is a
+         picker inside a section, not a page tab, so it deliberately does not
+         wear the page-level segmented control (`.dl-segmented`). -->
     <div class="home-tabs">
       <button
         v-for="h in store.homes"
@@ -214,7 +216,7 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
           icon="profile"
           :description="t('profiles.profilesEmpty')"
         />
-        <div v-else-if="profilesLoading && profiles.length === 0" class="row-none">
+        <div v-else-if="profilesLoading && profiles.length === 0" class="dl-row-none">
           {{ t('common.loading') }}
         </div>
 
@@ -340,13 +342,6 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
 
 .profile-list {
   overflow: hidden;
-}
-
-.row-none {
-  padding: 22px 16px;
-  text-align: center;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
 }
 
 .profile-row {

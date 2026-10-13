@@ -20,9 +20,10 @@ const router = createRouter({
       name: 'library',
       component: () => import('@/views/Library.vue'),
     },
-    // The plugin manager is a page of its own — it is what a Profile's row
-    // opens, and it needs the full width for the entry table. It carries the
-    // (HOME, Profile) pair it manages in its query so the link is honest.
+    // The plugin manager is a page of its own — a running instance's expanded
+    // card opens it. It carries the (HOME, Profile) pair it manages plus the
+    // instance it came from in its query, so the link is honest and "返回实例"
+    // can land back on that row.
     {
       path: '/plugins',
       name: 'plugins',

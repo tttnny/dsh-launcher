@@ -12,8 +12,9 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 **导航只有三个目的地：实例 / 资源库 / 设置（契约，见 ADR-0004）**：
 `src/router/index.ts` 是唯一的路由表，`src/shortcuts.ts` 是快捷键与后端
 `menu-navigate` 载荷的唯一映射。旧路径（`/homes`、`/profiles`、`/versions`、
-`/plugins`、`/tasks`）必须继续重定向；托盘与原生菜单的载荷指向
-`/library?tab=…`。加第四项顶级导航前先读 ADR-0004。
+`/tasks`）必须继续重定向；托盘与原生菜单的载荷指向 `/library?tab=…`。
+`/plugins` **不在这份名单里**——它一直是插件页本身（只由运行中的实例进入），
+别把它改成重定向。加第四项顶级导航前先读 ADR-0004。
 
 **实例是一条绑定记录（契约，见 ADR-0003）**：`create_instance` 只绑定已安装的
 版本，不建目录、不碰 DSH_HOME；`delete_instance` 只删记录（加上实例自己的图标

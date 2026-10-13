@@ -76,6 +76,20 @@
   --dl-lift-1: 0 1px 2px rgba(19, 26, 36, 0.06);
   --dl-lift-2: 0 8px 24px -6px rgba(19, 26, 36, 0.14), 0 1px 2px rgba(19, 26, 36, 0.05);
   --dl-lift-3: 0 24px 60px -16px rgba(19, 26, 36, 0.3);
+
+  // --- Readout --------------------------------------------------------------
+  // The diagnostics console stays dark under both themes (a readout is a
+  // readout), so it cannot borrow the theme-flipping palette above: it gets its
+  // own fixed set. Nothing else may use these.
+  --dl-readout-bg: #0f141c;
+  --dl-readout-body: #cbd5e1;
+  --dl-readout-ink: #e2e8f0;
+  --dl-readout-dim: #64748b;
+  --dl-readout-run: #3dd68c;
+  --dl-readout-warn: #e8a33d;
+  --dl-readout-warn-soft: rgba(232, 163, 61, 0.08);
+  --dl-readout-danger: #f0756a;
+  --dl-readout-danger-soft: rgba(240, 117, 106, 0.08);
 }
 
 body[arco-theme='dark'] {

@@ -134,6 +134,8 @@
     "bundlesShippedGroup": "随 DSH 发布",
     "bundleRows": "{count} 个条目",
     "bundleOptional": "可选",
+    "bundleManaged": "DSH 自身依赖",
+    "bundleManagedWhy": "这个补丁层撑着 DSH 自己的插件管理，只能停用，不能卸载",
     "bundleMissing": "包文件读不到",
     "bundleErrored": "加载失败",
     "bundleRemove": "卸载",

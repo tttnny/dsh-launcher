@@ -136,9 +136,9 @@ function emitTaskLog(l: TaskLog) {
 const mockTasks = new Map<string, TaskInfo>()
 // Mock profiles created at runtime per home id.
 const mockProfiles: Record<string, string[]> = {}
-// Mock native plugin views per `homeId:profile` (mirrors the instance's own
-// /api/pluginManager lists; includes the @deepseek-ai/* core entries the old
-// file reader filtered out, so the two are visibly different).
+// Mock native plugin views per `homeId:profile`, mirroring what a running
+// instance answers to `/api/pluginManager/listBundles` (localized titles, an
+// installation-only layer, an unmounted layer, and one broken layer).
 const mockNativeStore: Record<string, PluginView> = {}
 
 /**
@@ -193,7 +193,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           removable: false,
           optional: false,
           availability: 'installation',
-          readOnlyReason: null,
+          readOnlyReason: 'management-required',
           errorCode: null,
         },
         {
@@ -207,7 +207,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
           removable: false,
           optional: false,
           availability: 'installation',
-          readOnlyReason: null,
+          readOnlyReason: 'management-required',
           errorCode: null,
         },
         {

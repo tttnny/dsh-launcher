@@ -184,8 +184,8 @@ async function onRecheck() {
   overflow-y: auto;
   padding: 12px 14px;
   border-radius: var(--dl-r-card);
-  background: #0f141c;
-  color: #cbd5e1;
+  background: var(--dl-readout-bg);
+  color: var(--dl-readout-body);
   font-family: var(--dl-font-mono);
   font-size: 12px;
   line-height: 1.6;
@@ -196,10 +196,10 @@ async function onRecheck() {
   align-items: center;
   gap: 8px;
   padding: 24px 4px;
-  color: #64748b;
+  color: var(--dl-readout-dim);
 
   .health-empty-mark {
-    color: #3dd68c;
+    color: var(--dl-readout-run);
     font-weight: 700;
   }
 }
@@ -217,23 +217,23 @@ async function onRecheck() {
   }
 
   &.is-warn {
-    border-left-color: #e8a33d;
-    background: rgba(232, 163, 61, 0.08);
+    border-left-color: var(--dl-readout-warn);
+    background: var(--dl-readout-warn-soft);
   }
 
   &.is-error {
-    border-left-color: #f0756a;
-    background: rgba(240, 117, 106, 0.08);
+    border-left-color: var(--dl-readout-danger);
+    background: var(--dl-readout-danger-soft);
   }
 }
 
 .health-meta {
   font-size: 11px;
-  color: #64748b;
+  color: var(--dl-readout-dim);
 }
 
 .health-msg {
-  color: #e2e8f0;
+  color: var(--dl-readout-ink);
   white-space: pre-wrap;
   word-break: break-word;
 }

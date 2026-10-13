@@ -201,7 +201,7 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
     </div>
 
     <div class="dl-surface">
-      <div v-if="visibleInstallable.length === 0" class="ver-none">
+      <div v-if="visibleInstallable.length === 0" class="dl-row-none">
         {{
           store.remoteLoading
             ? t('common.loading')
@@ -360,10 +360,4 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
   }
 }
 
-.ver-none {
-  padding: 22px 16px;
-  text-align: center;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
-}
 </style>

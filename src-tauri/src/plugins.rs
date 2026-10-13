@@ -1259,11 +1259,11 @@ mod tests {
         assert_eq!(json["warnings"], serde_json::json!([]));
     }
 
-    /// The shape every write command (`set_plugin_enabled`, `set_bundle_enabled`,
-    /// `remove_bundle`) returns for a bare refusal: the **raw** code in
-    /// `errorCode` plus the **localized** reason in `diagnostic` — the single
-    /// rule the frontend renders. Driven through the same two helpers all three
-    /// commands compose (`ChangeOutcome::from` + `localize_refusal`).
+    /// The shape both write commands (`set_bundle_enabled`, `remove_bundle`)
+    /// return for a bare refusal: the **raw** code in `errorCode` plus the
+    /// **localized** reason in `diagnostic` — the single rule the frontend
+    /// renders. Driven through the same two helpers both commands compose
+    /// (`ChangeOutcome::from` + `localize_refusal`).
     #[test]
     fn write_commands_return_a_raw_code_and_a_localized_diagnostic() {
         let refusal = |code: &str| -> NativeChangeResult {
@@ -1294,7 +1294,7 @@ mod tests {
             Some("该 Bundle 随 DSH 发布，只能停用不能删除")
         );
 
-        // Plugin-entry toggle: `unknown-plugin`.
+        // A write naming a layer the profile does not have: `unknown-plugin`.
         let entry = localize_refusal(ChangeOutcome::from_native(refusal("unknown-plugin"), "zh-CN"));
         assert_eq!(entry.error_code.as_deref(), Some("unknown-plugin"));
         assert_eq!(
