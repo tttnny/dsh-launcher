@@ -861,6 +861,10 @@ pub async fn list_statuses(state: &State<'_, AppState>) -> Vec<InstanceStatus> {
 /// What the running table says about one instance, as needed by callers that
 /// only want to know where an instance lives and whether it can be managed.
 pub struct RunningEntry {
+    /// The instance this entry belongs to. Callers that were handed an
+    /// instance id report it back, so a page can say which instance actually
+    /// answered instead of assuming the one it was opened from.
+    pub id: String,
     /// The instance URL; when it carries the one-time start token
     /// (`...?token=...`) the launcher can authenticate, otherwise it is bare
     /// (`http://host:port`) and only good for opening in a browser.
@@ -873,8 +877,14 @@ pub struct RunningEntry {
 }
 
 /// Resolves the running instance that is executing `profile` of `home_id`:
-/// the same DSH_HOME and the running profile equal to `profile`; the first
-/// match wins (design §4). This is the instance the Plugins page talks to.
+/// the same DSH_HOME and the running profile equal to `profile`. `prefer` names
+/// the instance the caller came from — when it is itself running that profile
+/// it wins, and the first registered match is only the fallback (design §4).
+///
+/// The preference exists because one DSH_HOME and one profile can be running in
+/// two instances at once: the Plugins page must talk to the instance whose row
+/// the user clicked, or a toggle would be applied by a process they are not
+/// looking at.
 ///
 /// Returns `Err` only when the DSH_HOME itself is unknown — "no running
 /// instance" is `Ok(None)`, which is a normal state (ADR-0001), not an error.
@@ -882,6 +892,7 @@ pub async fn running_for_profile(
     state: &AppState,
     home_id: &str,
     profile: &str,
+    prefer: Option<&str>,
 ) -> Result<Option<RunningEntry>, String> {
     let instance_ids: Vec<String> = {
         let cfg = state.config.lock().unwrap();
@@ -896,10 +907,22 @@ pub async fn running_for_profile(
             .collect()
     };
     let running = state.running.lock().await;
-    for id in instance_ids {
+    let order = match prefer {
+        // The named instance first, the rest in registration order. An id that
+        // belongs to another HOME (or to no instance) is ignored: the caller
+        // can only be pointing at an instance of the HOME it asked about.
+        Some(preferred) if instance_ids.iter().any(|id| id == preferred) => {
+            let mut order = vec![preferred.to_string()];
+            order.extend(instance_ids.iter().filter(|id| id.as_str() != preferred).cloned());
+            order
+        }
+        _ => instance_ids,
+    };
+    for id in order {
         if let Some(entry) = running.get(&id) {
             if entry.profile == profile {
                 return Ok(Some(RunningEntry {
+                    id,
                     url: entry.url.clone(),
                     adopted: entry.adopted.is_some(),
                 }));
@@ -1101,6 +1124,7 @@ mod tests {
     #[test]
     fn manageable_url_requires_a_token() {
         let spawned = RunningEntry {
+            id: "i1".to_string(),
             url: Some("http://127.0.0.1:1/?token=a".to_string()),
             adopted: false,
         };
@@ -1108,26 +1132,30 @@ mod tests {
 
         // Adopted, but we remembered the token it printed: manageable.
         let adopted_with_token = RunningEntry {
+            id: "i1".to_string(),
             url: Some("http://127.0.0.1:1/?token=a".to_string()),
             adopted: true,
         };
         assert!(manageable_url(&adopted_with_token).is_some());
 
         let adopted_bare = RunningEntry {
+            id: "i1".to_string(),
             url: Some("http://127.0.0.1:1".to_string()),
             adopted: true,
         };
         assert!(manageable_url(&adopted_bare).is_none());
 
         let unknown = RunningEntry {
+            id: "i2".to_string(),
             url: None,
             adopted: false,
         };
         assert!(manageable_url(&unknown).is_none());
     }
 
-    /// The Plugins page resolves (HOME, Profile) to the instance actually
-    /// running that profile: same HOME, equal profile, first match wins.
+    /// Without a preference the Plugins page resolves (HOME, Profile) to the
+    /// instance actually running that profile: same HOME, equal profile, and
+    /// the first registered match wins.
     #[tokio::test]
     async fn running_for_profile_matches_home_and_profile() {
         let state = app_state(
@@ -1155,18 +1183,56 @@ mod tests {
             );
         }
 
-        let hit = running_for_profile(&state, "h1", "web").await.unwrap().unwrap();
+        let hit = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
         assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
         assert!(!hit.adopted);
 
         // A different HOME never borrows another HOME's instance.
-        let other = running_for_profile(&state, "h2", "web").await.unwrap().unwrap();
+        let other = running_for_profile(&state, "h2", "web", None).await.unwrap().unwrap();
         assert_eq!(other.url.as_deref(), Some("http://127.0.0.1:3/?token=c"));
 
         // Instance registered but not started -> no running entry.
-        assert!(running_for_profile(&state, "h1", "demo").await.unwrap().is_none());
+        assert!(running_for_profile(&state, "h1", "demo", None).await.unwrap().is_none());
         // Unknown HOME is an error, distinct from "not running".
-        assert!(running_for_profile(&state, "nope", "web").await.is_err());
+        assert!(running_for_profile(&state, "nope", "web", None).await.is_err());
+    }
+
+    /// Two instances can run one DSH_HOME and one profile at the same time. The
+    /// page was opened from one of their rows, and the write has to be applied
+    /// by that process — the first match is only what happens without one.
+    #[tokio::test]
+    async fn running_for_profile_prefers_the_instance_the_user_came_from() {
+        let state = app_state(
+            vec![home("h1"), home("h2")],
+            vec![
+                instance("i1", "h1"),
+                instance("i2", "h1"),
+                instance("i9", "h2"),
+            ],
+        );
+        {
+            let mut running = state.running.lock().await;
+            running.insert("i1".to_string(), running_entry("web", Some("http://127.0.0.1:1/?token=a")));
+            running.insert("i2".to_string(), running_entry("web", Some("http://127.0.0.1:2/?token=b")));
+            running.insert("i9".to_string(), running_entry("web", Some("http://127.0.0.1:3/?token=c")));
+        }
+
+        // Without a preference: registration order, as before.
+        let first = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
+        assert_eq!(first.id, "i1");
+
+        // With one: the named instance answers, and it says which one it is.
+        let preferred = running_for_profile(&state, "h1", "web", Some("i2")).await.unwrap().unwrap();
+        assert_eq!(preferred.id, "i2");
+        assert_eq!(preferred.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
+
+        // A stale id (the instance was deleted), and one belonging to another
+        // HOME, only rank: the page is scoped by (HOME, Profile), so neither
+        // can borrow another HOME's process or turn into an error.
+        for ignored in ["nope", "i9"] {
+            let hit = running_for_profile(&state, "h1", "web", Some(ignored)).await.unwrap().unwrap();
+            assert_eq!(hit.id, "i1", "{ignored} must not change the answer");
+        }
     }
 
     /// An adopted instance has a bare URL and no token: it must surface as
@@ -1185,7 +1251,7 @@ mod tests {
                 });
             }
         }
-        let hit = running_for_profile(&state, "h1", "web").await.unwrap().unwrap();
+        let hit = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
         assert!(hit.adopted);
         assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:3089"));
     }

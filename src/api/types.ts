@@ -193,9 +193,27 @@ export interface BundleItem {
   errorCode?: string | null
 }
 
+/**
+ * The instance an action was taken from. One DSH_HOME and one profile can be
+ * running in two instances at once, so it ranks the candidates: the instance
+ * the user came from wins when it is itself running that profile, and the first
+ * registered match is only the fallback.
+ */
+export interface InstanceScope {
+  /** The instance the page was opened from; `null` when it is unknown. */
+  instanceId?: string | null
+}
+
 /** One snapshot of the Plugins page; `mode` picks managed vs read-only. */
 export interface PluginView {
   mode: PluginViewMode
+  /**
+   * The instance that answered. The page names this one rather than the one it
+   * was opened from: the two can differ when the row's instance stopped (or
+   * when the preference did not resolve) and another one runs the same profile.
+   * `null` in every read-only mode.
+   */
+  instanceId?: string | null
   /** Read-only explanation, already localized by the backend; shown verbatim. */
   reason?: string | null
   /**
@@ -221,14 +239,14 @@ export interface ChangeOutcome {
   warnings: string[]
 }
 
-export interface SetBundleEnabledInput {
+export interface SetBundleEnabledInput extends InstanceScope {
   homeId: string
   profile: string
   name: string
   enabled: boolean
 }
 
-export interface RemoveBundleInput {
+export interface RemoveBundleInput extends InstanceScope {
   homeId: string
   profile: string
   name: string

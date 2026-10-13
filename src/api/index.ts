@@ -131,9 +131,17 @@ export const api = {
   },
 
   // Profile plugins (scoped by HOME + profile): list / enable / disable / uninstall.
-  /** The instance's own plugin list (native plugin management, ADR-0001). */
-  listPlugins: (homeId: string, profile: string) =>
-    call<PluginView>('list_plugins', { home_id: homeId, profile }),
+  /**
+   * The instance's own plugin list (native plugin management, ADR-0001).
+   * `instanceId` is the instance the page was opened from: it decides which
+   * process answers when two instances run this HOME + profile at once.
+   */
+  listPlugins: (homeId: string, profile: string, instanceId?: string) =>
+    call<PluginView>('list_plugins', {
+      home_id: homeId,
+      profile,
+      instance_id: instanceId ?? null,
+    }),
   /**
    * Enables/disables one whole Bundle（补丁层） through the running instance's
    * native plugin manager. The launcher never writes the profile manifest

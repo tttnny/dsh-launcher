@@ -98,12 +98,24 @@ const mode = computed(() => view.value?.mode ?? 'not-running')
 const managed = computed(() => mode.value === 'managed')
 const reason = computed(() => view.value?.reason ?? null)
 
+/**
+ * The instance the page is working on. It is the one that answered, not the one
+ * in the URL: the two differ whenever the row's instance is no longer running
+ * that profile and another instance of the same HOME took over.
+ */
+const scopeInstanceId = computed(() => view.value?.instanceId ?? instanceId.value)
+const scopeInstance = computed(() =>
+  scopeInstanceId.value ? store.instanceById(scopeInstanceId.value) : undefined,
+)
+
 async function load() {
   view.value = null
   if (!homeId.value || !profile.value) return
   loading.value = true
   try {
-    view.value = await api.listPlugins(homeId.value, profile.value)
+    // The instance decides which process answers when two of them run this
+    // HOME + profile at once, so the page hands over the one it was opened from.
+    view.value = await api.listPlugins(homeId.value, profile.value, instanceId.value || undefined)
   } catch (e) {
     Message.error(String(e))
   } finally {
@@ -269,6 +281,7 @@ async function toggleBundle(b: BundleItem, enabled: boolean) {
     const outcome = await api.setBundleEnabled({
       homeId: homeId.value,
       profile: profile.value,
+      instanceId: instanceId.value || undefined,
       name: b.name,
       enabled,
     })
@@ -298,6 +311,7 @@ async function removeBundle(b: BundleItem) {
     const outcome = await api.removeBundle({
       homeId: homeId.value,
       profile: profile.value,
+      instanceId: instanceId.value || undefined,
       name: b.name,
     })
     reportOutcome(outcome, {
@@ -322,8 +336,10 @@ async function removeBundle(b: BundleItem) {
       <div class="dl-head-text">
         <h1>{{ t('plugins.pageTitle') }}</h1>
         <p class="dl-head-sub plugin-scope">
-          <span v-if="instance" class="dl-chip">{{ instance.name }}</span>
-          <span v-if="instance" class="plugin-scope-sep">/</span>
+          <span v-if="scopeInstance" class="dl-chip" :title="scopeInstance.name">
+            {{ scopeInstance.name }}
+          </span>
+          <span v-if="scopeInstance" class="plugin-scope-sep">/</span>
           <span class="dl-chip">{{ home?.name ?? '—' }}</span>
           <span class="plugin-scope-sep">/</span>
           <span class="dl-chip dl-mono">{{ profile || '—' }}</span>

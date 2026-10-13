@@ -164,13 +164,36 @@ function mockRefusal(stage: string, target: string, code: string): ChangeOutcome
   }
 }
 
+/**
+ * Which instance answers for `(homeId, profile)`: the one the page was opened
+ * from when it is itself running that profile, otherwise the first registered
+ * match — the same rule as the backend's `running_for_profile`.
+ */
+function resolveRunningInstance(
+  db: MockDb,
+  homeId: string,
+  profile: string,
+  prefer?: string | null,
+): string | null {
+  const own = db.instances.filter((i) => i.home_id === homeId)
+  const live = (i: DshInstance) =>
+    db.running[i.id]?.state === 'running' && db.running[i.id]?.profile === profile
+  const preferred = prefer ? own.find((i) => i.id === prefer && live(i)) : undefined
+  return (preferred ?? own.find(live))?.id ?? null
+}
+
 /** Seed a native view on first read, so the Plugins page is usable. */
-function nativeViewFor(homeId: string, profile: string, running: boolean): PluginView {
-  if (!running) {
+function nativeViewFor(
+  homeId: string,
+  profile: string,
+  instanceId: string | null,
+): PluginView {
+  if (!instanceId) {
     // No instance, no layer list: the bundles are the *instance's* answer, so
     // the read-only view states the mode and the reason and shows nothing.
     return {
       mode: 'not-running',
+      instanceId: null,
       reason:
         '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
       bundles: [],
@@ -180,6 +203,7 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
   if (!mockNativeStore[key]) {
     mockNativeStore[key] = {
       mode: 'managed',
+      instanceId: null,
       reason: null,
       bundles: [
         {
@@ -271,7 +295,8 @@ function nativeViewFor(homeId: string, profile: string, running: boolean): Plugi
       ],
     }
   }
-  return mockNativeStore[key]
+  // The list is per profile; which instance answers is per call.
+  return { ...mockNativeStore[key], instanceId }
 }
 
 function mockNewId(prefix: string): string {
@@ -727,29 +752,25 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       const profile = String(args?.profile ?? 'web')
       // Mirror the backend: the view is managed only while an instance of this
-      // HOME is running this profile (the launcher resolves HOME+Profile to an
-      // instance), otherwise the read-only not-running stub.
-      const running = db.instances.some(
-        (i) =>
-          i.home_id === homeId &&
-          db.running[i.id]?.state === 'running' &&
-          db.running[i.id]?.profile === profile,
+      // HOME is running this profile, and that instance is the one the page was
+      // opened from when it is still the candidate — otherwise the read-only
+      // not-running stub.
+      const instanceId = resolveRunningInstance(
+        db,
+        homeId,
+        profile,
+        args?.instance_id as string | null | undefined,
       )
-      return nativeViewFor(homeId, profile, running) as T
+      return nativeViewFor(homeId, profile, instanceId) as T
     }
     case 'set_bundle_enabled': {
       const input = args?.input as SetBundleEnabledInput
       const homeId = input.homeId
       const profile = input.profile
-      const running = db.instances.some(
-        (i) =>
-          i.home_id === homeId &&
-          db.running[i.id]?.state === 'running' &&
-          db.running[i.id]?.profile === profile,
-      )
+      const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
       // No instance → a plain error (mirrors the backend Err), not a refusal.
-      if (!running) fail('实例未在运行，请先启动实例')
-      const view = nativeViewFor(homeId, profile, true)
+      if (!instanceId) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, instanceId)
       const bundle = view.bundles.find((b) => b.name === input.name)
       const refusal = (code: string): ChangeOutcome =>
         mockRefusal('enable', input.name, code)
@@ -773,15 +794,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const input = args?.input as RemoveBundleInput
       const homeId = input.homeId
       const profile = input.profile
-      const running = db.instances.some(
-        (i) =>
-          i.home_id === homeId &&
-          db.running[i.id]?.state === 'running' &&
-          db.running[i.id]?.profile === profile,
-      )
+      const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
       // No instance → a plain error (mirrors the backend Err), not a refusal.
-      if (!running) fail('实例未在运行，请先启动实例')
-      const view = nativeViewFor(homeId, profile, true)
+      if (!instanceId) fail('实例未在运行，请先启动实例')
+      const view = nativeViewFor(homeId, profile, instanceId)
       const index = view.bundles.findIndex((b) => b.name === input.name)
       if (index < 0) {
         // The instance answers a refusal (not an error) with the code only.

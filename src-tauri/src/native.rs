@@ -593,15 +593,21 @@ pub struct BundleItem {
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
     pub mode: PluginViewMode,
+    /// Which instance answered. The page was opened from one instance's row,
+    /// but (HOME, Profile) can be running in two of them at once: this is the
+    /// one that actually resolved, so the page can name it instead of assuming.
+    pub instance_id: Option<String>,
     pub reason: Option<String>,
     pub bundles: Vec<BundleItem>,
 }
 
 impl PluginView {
     /// A managed snapshot, projected from the instance's own bundle list.
-    pub fn managed(bundles: Vec<NativeBundle>, locale: &str) -> Self {
+    /// `instance_id` is the instance that answered (see [`Self::instance_id`]).
+    pub fn managed(bundles: Vec<NativeBundle>, locale: &str, instance_id: &str) -> Self {
         Self {
             mode: PluginViewMode::Managed,
+            instance_id: Some(instance_id.to_string()),
             reason: None,
             bundles: bundles
                 .into_iter()
@@ -616,6 +622,7 @@ impl PluginView {
     pub fn readonly(mode: PluginViewMode, reason: impl Into<String>) -> Self {
         Self {
             mode,
+            instance_id: None,
             reason: Some(reason.into()),
             bundles: Vec::new(),
         }
@@ -1022,14 +1029,16 @@ mod tests {
             "meta": { "title": { "en": "Bot", "zh": "机器人" } }
         }]))
         .unwrap();
-        let view = PluginView::managed(bundles, "zh-CN");
+        let view = PluginView::managed(bundles, "zh-CN", "i-main");
         assert_eq!(view.mode, PluginViewMode::Managed);
+        assert_eq!(view.instance_id.as_deref(), Some("i-main"));
         assert_eq!(view.bundles[0].name, "ds-bot");
         assert_eq!(view.bundles[0].title.as_deref(), Some("机器人"));
         assert_eq!(view.bundles[0].error_code.as_deref(), Some("bundle-in-use"));
 
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["mode"], "managed");
+        assert_eq!(json["instanceId"], "i-main");
         assert_eq!(json["bundles"][0]["name"], "ds-bot");
         assert_eq!(json["bundles"][0]["rowCount"], 0);
     }

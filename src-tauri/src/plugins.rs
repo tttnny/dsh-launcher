@@ -80,16 +80,19 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 /// `reason` differs so the two are distinguishable, and so is "not running".
 ///
 /// The instance is resolved from the selectors: the same DSH_HOME, running the
-/// selected profile (see [`crate::process::running_for_profile`]). The
-/// credential is the running-table URL's one-time token; the launcher never
-/// reads `<DSH_HOME>/.credentials.yaml`.
+/// selected profile (see [`crate::process::running_for_profile`]). `instance_id`
+/// is the instance the page was opened from, and it wins when it is itself
+/// running that profile — one DSH_HOME and one profile can be live in two
+/// instances at once. The credential is the running-table URL's one-time token;
+/// the launcher never reads `<DSH_HOME>/.credentials.yaml`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_plugins(
     state: State<'_, AppState>,
     home_id: String,
     profile: String,
+    instance_id: Option<String>,
 ) -> Result<crate::native::PluginView, String> {
-    list_plugins_for(state.inner(), &home_id, &profile).await
+    list_plugins_for(state.inner(), &home_id, &profile, instance_id.as_deref()).await
 }
 
 /// The body of [`list_plugins`], taking `&AppState` so tests can drive the
@@ -98,6 +101,7 @@ async fn list_plugins_for(
     state: &AppState,
     home_id: &str,
     profile: &str,
+    instance_id: Option<&str>,
 ) -> Result<crate::native::PluginView, String> {
     use crate::native::{NativeClient, PluginView, PluginViewMode};
 
@@ -108,7 +112,9 @@ async fn list_plugins_for(
     const ADOPTED: &str =
         "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理补丁层。请从启动器重启该实例。";
 
-    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+    let Some(entry) =
+        crate::process::running_for_profile(state, home_id, profile, instance_id).await?
+    else {
         return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING));
     };
     // What decides is the token, not how we came to own the entry: an adopted
@@ -132,7 +138,7 @@ async fn list_plugins_for(
         Err(e) => return Ok(PluginView::readonly(PluginViewMode::Unreachable, e)),
     };
     let bundles = client.list_bundles().await?;
-    Ok(PluginView::managed(bundles, &ui_locale(state)))
+    Ok(PluginView::managed(bundles, &ui_locale(state), &entry.id))
 }
 
 /// The launcher's own UI language. The service localizes its metadata
@@ -154,6 +160,10 @@ pub struct SetBundleEnabledInput {
     #[serde(alias = "home_id")]
     pub home_id: String,
     pub profile: String,
+    /// The instance the action was taken from; it wins when it is running this
+    /// profile (see [`running_for_profile`](crate::process::running_for_profile)).
+    #[serde(default)]
+    pub instance_id: Option<String>,
     pub name: String,
     pub enabled: bool,
 }
@@ -183,6 +193,7 @@ pub async fn set_bundle_enabled(
         state.inner(),
         &input.home_id,
         &input.profile,
+        input.instance_id.as_deref(),
         &input.name,
         input.enabled,
     )
@@ -197,10 +208,11 @@ pub(crate) async fn set_bundle_enabled_for(
     state: &AppState,
     home_id: &str,
     profile: &str,
+    instance_id: Option<&str>,
     name: &str,
     enabled: bool,
 ) -> Result<ChangeOutcome, String> {
-    let client = write_client(state, home_id, profile).await?;
+    let client = write_client(state, home_id, profile, instance_id).await?;
     let result = client.set_bundle_enabled(name, enabled).await?;
     Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
 }
@@ -265,6 +277,9 @@ pub struct RemoveBundleInput {
     #[serde(alias = "home_id")]
     pub home_id: String,
     pub profile: String,
+    /// The instance the action was taken from (see [`SetBundleEnabledInput`]).
+    #[serde(default)]
+    pub instance_id: Option<String>,
     pub name: String,
 }
 
@@ -297,7 +312,8 @@ pub(crate) async fn remove_bundle_for(
     state: &AppState,
     input: &RemoveBundleInput,
 ) -> Result<ChangeOutcome, String> {
-    let client = write_client(state, &input.home_id, &input.profile).await?;
+    let client = write_client(state, &input.home_id, &input.profile, input.instance_id.as_deref())
+        .await?;
     let result = client.remove_bundle(&input.name).await?;
     Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
 }
@@ -570,14 +586,19 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
 }
 
 /// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a
-/// connected [`NativeClient`](crate::native::NativeClient). The refusal messages
-/// are the ones the page shows for the "cannot manage now" states.
+/// connected [`NativeClient`](crate::native::NativeClient). `instance_id` is the
+/// instance the page was opened from and wins when it is running that profile.
+/// The refusal messages are the ones the page shows for the "cannot manage now"
+/// states.
 pub(crate) async fn write_client(
     state: &AppState,
     home_id: &str,
     profile: &str,
+    instance_id: Option<&str>,
 ) -> Result<crate::native::NativeClient, String> {
-    let Some(entry) = crate::process::running_for_profile(state, home_id, profile).await? else {
+    let Some(entry) =
+        crate::process::running_for_profile(state, home_id, profile, instance_id).await?
+    else {
         return Err("实例未在运行，请先启动实例".to_string());
     };
     // Same rule as the read path: a token is what makes the instance
@@ -1020,7 +1041,7 @@ mod tests {
         );
         let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
 
-        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+        let view = list_plugins_for(&state, "h1", "web", None).await.unwrap();
 
         assert_eq!(view.mode, crate::native::PluginViewMode::NotRunning);
         assert!(view.bundles.is_empty(), "no instance, no bundle list");
@@ -1052,7 +1073,7 @@ mod tests {
                 },
             );
         }
-        let view = list_plugins_for(&state, "h1", "web").await.unwrap();
+        let view = list_plugins_for(&state, "h1", "web", None).await.unwrap();
         assert_eq!(view.mode, crate::native::PluginViewMode::Adopted);
         assert!(view.bundles.is_empty());
         let adopted_reason = view.reason.expect("adopted reason");
@@ -1094,7 +1115,7 @@ mod tests {
                 },
             );
         }
-        let err = match write_client(&state, "h1", "web").await {
+        let err = match write_client(&state, "h1", "web", None).await {
             Ok(_) => panic!("no instance is reachable in this test"),
             Err(e) => e,
         };
@@ -1127,7 +1148,7 @@ mod tests {
                 port: None,
             }],
         );
-        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+        let err = set_bundle_enabled_for(&state, "h1", "web", None, "@deepseek-ai/dsh-llm", false)
             .await
             .unwrap_err();
         assert!(err.contains("未在运行"), "err: {err}");
@@ -1171,7 +1192,7 @@ mod tests {
                 },
             );
         }
-        let err = set_bundle_enabled_for(&state, "h1", "web", "@deepseek-ai/dsh-llm", false)
+        let err = set_bundle_enabled_for(&state, "h1", "web", None, "@deepseek-ai/dsh-llm", false)
             .await
             .unwrap_err();
         assert!(err.contains("接管"), "err: {err}");
@@ -1348,6 +1369,7 @@ mod tests {
         RemoveBundleInput {
             home_id: "h1".to_string(),
             profile: "web".to_string(),
+            instance_id: None,
             name: name.to_string(),
         }
     }
