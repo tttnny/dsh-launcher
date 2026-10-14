@@ -16,11 +16,13 @@ import InstanceAvatar from '@/components/InstanceAvatar.vue'
 // One instance on the board.
 //
 // The row answers exactly two questions — what is it, and is it live — and
-// carries exactly two controls: the profile it launches with (the one choice
-// made at launch time) and its primary action. Everything else lives in the
-// card the row expands into: clicking the row (or its name) opens it, so an
-// instance has one place for its facts and one place for its actions instead
-// of a row plus a hovering menu.
+// carries the controls that act on those answers: the profile it launches with
+// (the one choice made at launch time), its primary action, and — while there
+// is a process to drive — that process's own controls (restart / stop /
+// plugins). Those three used to live in the card, which meant a click to open
+// before a click to act, on the one row the user is actually driving. Facts
+// still live in the card the row expands into: expanding the row is for
+// reading, not for reaching a control.
 
 const props = defineProps<{
   inst: DshInstance
@@ -70,12 +72,25 @@ watch(
 
 /**
  * The whole row is the hit target, but the controls inside it are not: a click
- * that started on a button, the profile select, or a link belongs to that
- * control, not to the disclosure.
+ * or a keypress that belongs to a button, the profile select, or a link is that
+ * control's, not the disclosure's. Keyboard matters here because Enter on a
+ * focused button fires the button *and* bubbles this far — without the guard,
+ * stopping an instance from the row would also expand it.
  */
+function onRowControl(target: EventTarget | null) {
+  return !!(target as HTMLElement | null)?.closest(
+    'button, a, input, textarea, select, .arco-select',
+  )
+}
+
 function onRowClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
-  if (target?.closest('button, a, input, textarea, select, .arco-select')) return
+  if (onRowControl(event.target)) return
+  toggleExpanded()
+}
+
+function onRowKeydown(event: KeyboardEvent) {
+  if (onRowControl(event.target)) return
+  event.preventDefault()
   toggleExpanded()
 }
 const running = computed(() => status.value.state === 'running')
@@ -250,7 +265,7 @@ onMounted(() => {
       class="inst-line"
       tabindex="0"
       @click="onRowClick"
-      @keydown.enter.space.prevent="toggleExpanded"
+      @keydown.enter.space="onRowKeydown"
     >
 
     <InstanceAvatar :id="inst.id" :icon="inst.icon" :size="36" />
@@ -288,55 +303,83 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="inst-profile">
-      <a-select
-        v-if="!running && !starting"
-        v-model="selectedProfile"
-        :placeholder="t('home.selectProfile')"
-        :loading="profilesLoading"
-        size="small"
-        :allow-clear="false"
-        style="width: 132px"
-        @change="touchLastUsed"
-      >
-        <a-option v-for="p in profiles" :key="p" :value="p">{{ p }}</a-option>
-      </a-select>
-      <span v-else class="dl-chip" :title="status.profile ?? selectedProfile">
-        {{ status.profile ?? selectedProfile ?? t('home.selectProfile') }}
-      </span>
-    </div>
+    <!-- The row's controls, stacked: what the instance is running on top, and —
+         only while there is a process to drive — that process's own controls
+         underneath, where they are one click away instead of one click and an
+         expansion away. -->
+    <div class="inst-tail">
+      <div class="inst-tail-line">
+        <div class="inst-profile">
+          <a-select
+            v-if="!running && !starting"
+            v-model="selectedProfile"
+            :placeholder="t('home.selectProfile')"
+            :loading="profilesLoading"
+            size="small"
+            :allow-clear="false"
+            style="width: 132px"
+            @change="touchLastUsed"
+          >
+            <a-option v-for="p in profiles" :key="p" :value="p">{{ p }}</a-option>
+          </a-select>
+          <span v-else class="dl-chip" :title="status.profile ?? selectedProfile">
+            {{ status.profile ?? selectedProfile ?? t('home.selectProfile') }}
+          </span>
+        </div>
 
-    <span class="dl-status inst-status" :class="`is-${status.state}`">
-      {{ t(`home.status.${status.state}`) }}
-    </span>
+        <span class="dl-status inst-status" :class="`is-${status.state}`">
+          {{ t(`home.status.${status.state}`) }}
+        </span>
 
-    <div class="inst-actions">
-      <button
-        v-if="running"
-        class="dl-btn dl-btn--live inst-primary"
-        :disabled="!!openAction.busy[inst.id]"
-        @click="onOpen"
-      >
-        <DlIcon name="external" :size="13" />
-        {{ t('home.openBrowser') }}
-      </button>
-      <button
-        v-else-if="starting"
-        class="dl-btn dl-btn--quiet inst-primary"
-        disabled
-      >
-        <span class="dl-spinner" />
-        {{ t('home.status.starting') }}
-      </button>
-      <button
-        v-else
-        class="dl-btn dl-btn--primary inst-primary"
-        :disabled="!selectedProfile || busy || !store.versionById(inst.version_id)"
-        @click="onStart"
-      >
-        <DlIcon name="play" :size="13" />
-        {{ t('home.start') }}
-      </button>
+        <div class="inst-actions">
+          <button
+            v-if="running"
+            class="dl-btn dl-btn--live inst-primary"
+            :disabled="!!openAction.busy[inst.id]"
+            @click="onOpen"
+          >
+            <DlIcon name="external" :size="13" />
+            {{ t('home.openBrowser') }}
+          </button>
+          <button
+            v-else-if="starting"
+            class="dl-btn dl-btn--quiet inst-primary"
+            disabled
+          >
+            <span class="dl-spinner" />
+            {{ t('home.status.starting') }}
+          </button>
+          <button
+            v-else
+            class="dl-btn dl-btn--primary inst-primary"
+            :disabled="!selectedProfile || busy || !store.versionById(inst.version_id)"
+            @click="onStart"
+          >
+            <DlIcon name="play" :size="13" />
+            {{ t('home.start') }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Acts on the process, so it only exists while there is one. -->
+      <div v-if="running || starting" class="inst-tail-line inst-proc">
+        <button class="dl-btn dl-btn--quiet" :disabled="busy" @click="onRestart">
+          <DlIcon name="restart" :size="13" />
+          {{ t('home.restart') }}
+        </button>
+        <button class="dl-btn dl-btn--quiet inst-stop" :disabled="busy" @click="onStop">
+          <DlIcon name="stop" :size="13" />
+          {{ t('home.stop') }}
+        </button>
+        <button
+          v-if="canManagePlugins(inst.id)"
+          class="dl-btn dl-btn--quiet"
+          @click="openPlugins(inst.id, 'instances')"
+        >
+          <DlIcon name="plugin" :size="13" />
+          {{ t('profiles.managePlugins') }}
+        </button>
+      </div>
     </div>
 
     <!-- The disclosure mark, at the far edge where it reads as "this row opens"
@@ -401,35 +444,12 @@ onMounted(() => {
       </div>
 
       <!-- The action bar is grouped by what an action acts on, and the groups
-           are laid out on their own lines: the live process first (only a
-           running instance has one), then the machine, then the binding. One
-           wrapping row used to strand a single button on a line of its own. -->
+           are laid out on their own lines: the machine first, then the binding.
+           The process group is not here — a live process is driven from the row
+           above, which is already reporting it. One wrapping row used to strand
+           a single button on a line of its own. -->
       <div class="facts-actions">
         <div class="facts-line">
-          <template v-if="running || starting">
-            <button class="dl-btn dl-btn--quiet" :disabled="busy" @click="onRestart">
-              <DlIcon name="restart" :size="13" />
-              {{ t('home.restart') }}
-            </button>
-            <button
-              class="dl-btn dl-btn--quiet facts-stop"
-              :disabled="busy"
-              @click="onStop"
-            >
-              <DlIcon name="stop" :size="13" />
-              {{ t('home.stop') }}
-            </button>
-            <button
-              v-if="canManagePlugins(inst.id)"
-              class="dl-btn dl-btn--quiet"
-              @click="openPlugins(inst.id, 'instances')"
-            >
-              <DlIcon name="plugin" :size="13" />
-              {{ t('profiles.managePlugins') }}
-            </button>
-            <span class="facts-divider" aria-hidden="true" />
-          </template>
-
           <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
             <DlIcon name="terminal" :size="13" />
             {{ t('home.openTerminal') }}
@@ -638,20 +658,6 @@ onMounted(() => {
   gap: 4px;
 }
 
-.facts-divider {
-  width: 1px;
-  height: 16px;
-  margin: 0 6px;
-  background: var(--dl-line-strong);
-}
-
-// Stopping is the one action here that takes something away; it says so on
-// hover instead of wearing red all the time.
-.facts-stop:hover:not(:disabled) {
-  border-color: var(--dl-danger);
-  color: var(--dl-danger);
-}
-
 @keyframes facts-in {
   from {
     opacity: 0;
@@ -774,6 +780,36 @@ onMounted(() => {
     width: 22px;
     height: 22px;
   }
+}
+
+// The row's control block: a column, so the process controls can sit on their
+// own line under the primary action without widening the row. Right-aligned on
+// both lines — the row's controls end at one edge, whatever they are.
+.inst-tail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.inst-tail-line {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+// Grouped tighter than the facts beside them: these three act on one thing.
+.inst-proc {
+  gap: 4px;
+}
+
+// Stopping is the one control on the row that takes something away; it says so
+// on hover instead of wearing red all the time.
+.inst-stop:hover:not(:disabled) {
+  border-color: var(--dl-danger);
+  color: var(--dl-danger);
 }
 
 .inst-profile {
