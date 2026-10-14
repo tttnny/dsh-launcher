@@ -93,10 +93,12 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 横排）：都挤在一行时尾部的按钮会被宽度顶成孤立的一行（实例设置、复制实例都中过招）。
 不要再引入 `⋯` 之类的 hover 菜单，也不要往行上塞图标按钮。
 
-**`--preserve-symlinks` 不做用户开关（契约）**：它由 profile 清单推导
-（`crate::profile::preserve_symlinks_for` → `declares_link_dependency`），实例启动、
-实例终端、模板引导三处同源。重新引入 per-instance 开关前先读 `launch.rs` 里那段
-注释：这个 flag 的错误方向是「DSH 设置写入全失败」，不能让用户手动开错。
+**不给 dsh 传 Node 运行时 flag（契约）**：`--preserve-symlinks` 已删除。它让 Node
+把同一个包经多条路径加载成多个模块实例，而 DSH 的模块级状态按身份认人（工具调度器是
+模块级 `Symbol`，`dsh-app-boot` 是模块级 WeakMap），于是整个进程坏掉：所有工具调用
+报 `Cannot read properties of undefined (reading 'prepare')`，设置写入也全被拒。
+代价是 `link:` 插件要靠自己 checkout 里的 `node_modules`（或 DSH 自己的内核包路由）。
+要重新引入任何 node 运行时 flag，先确认 DSH 扛得住重复的模块实例。
 
 **颜色只表示状态**：`src/styles/tokens.scss` 是唯一的调色板来源，机器事实
 （版本号、端口、URL、路径、条目 id）一律加 `.dl-mono`。不要在视图里再写一份

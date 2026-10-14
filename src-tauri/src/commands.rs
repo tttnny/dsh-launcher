@@ -983,14 +983,6 @@ pub fn open_instance_terminal(
         (home, inst, ver)
     };
     let terminal = state.config.lock().unwrap().settings.terminal.clone();
-    // The terminal's wrapper must boot the same CLI the instance does, so it
-    // derives the flag from the same profile the instance launches with.
-    let profile = cfg_inst
-        .default_profile
-        .clone()
-        .or_else(|| cfg_inst.last_profile.clone())
-        .unwrap_or_default();
-    let preserve_symlinks = crate::profile::preserve_symlinks_for(&cfg_home.path, &profile);
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 
@@ -999,7 +991,7 @@ pub fn open_instance_terminal(
     let version_dir: Option<std::path::PathBuf> = cfg_ver
         .as_ref()
         .map(|v| std::path::PathBuf::from(&v.dir));
-    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref(), preserve_symlinks);
+    let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref());
 
     let path_prefix = if !path_dirs.is_empty() {
         let joined = path_dirs

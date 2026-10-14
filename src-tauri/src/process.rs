@@ -536,20 +536,14 @@ pub async fn start_instance_process(
     // binding is re-probed when its recorded path no longer exists).
     let node = crate::runtime::node_for_spawn_checked(state).await?;
 
-    // The launch spec module owns the argv: node_runtime_flags order,
-    // --profile, per-instance --port, --no-open feature detection, and the
-    // deliberate absence of --host (the profile layer owns the bind host).
-    // `--preserve-symlinks` is read out of the profile this instance is
-    // starting with, not out of a per-instance switch.
-    let preserve_symlinks = home_path
-        .as_deref()
-        .is_some_and(|hp| crate::profile::preserve_symlinks_for(hp, profile));
+    // The launch spec module owns the argv: --profile, per-instance --port,
+    // --no-open feature detection, and the deliberate absence of --host (the
+    // profile layer owns the bind host).
     let mut cmd = crate::launch::instance_command(
         &node,
         &version.dir,
         profile,
         is_web.then(|| inst.port.unwrap_or(0)),
-        preserve_symlinks,
     )?;
 
     let env = build_env(&cfg, instance_id)?;
