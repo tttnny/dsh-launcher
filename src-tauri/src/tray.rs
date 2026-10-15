@@ -1,4 +1,7 @@
-use crate::{process, AppState};
+use crate::config::{Config, LOCAL_HOST_ID};
+use crate::process::{self, RunningInstance};
+use crate::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -9,6 +12,9 @@ const MENU_QUIT: &str = "quit";
 const MENU_RUNNING_SUB: &str = "running-profiles";
 const MENU_OPEN_PREFIX: &str = "open::";
 const MENU_STOP_PREFIX: &str = "stop::";
+/// 运行中子菜单里两个动作的前缀，与 `open::` / `stop::` 的 id 前缀配套。
+const MENU_OPEN_LABEL: &str = "打开：";
+const MENU_STOP_LABEL: &str = "停止：";
 // t5: enriched tray menu ids. Original ids above are kept verbatim for
 // merge compatibility with the tray-click branch (t2).
 const MENU_STATUS: &str = "status-header";
@@ -26,8 +32,18 @@ const MENU_CHECK_UPDATE: &str = "check-update";
 const MENU_OPEN_SETTINGS: &str = "open-settings";
 const MENU_RESTART: &str = "restart";
 
-/// (instance_id, instance_name, profile)
-type RunningItem = (String, String, String);
+/// One running instance as the tray sees it: the record it belongs to, the name
+/// the user gave it, the machine it runs on, and the profile it runs.
+///
+/// The machine is part of the item, not of the menu: this menu is one list of
+/// every host's instances (ADR-0006 §4), and two machines may both run an
+/// instance called `web` — the name by itself would not say which one.
+struct RunningItem {
+    id: String,
+    name: String,
+    host: String,
+    profile: String,
+}
 
 /// M1: 左键单击防抖 —— 双击会先产生两次 Click(Left,Up) 再产生 DoubleClick，
 /// 若单击立即开窗，双击就会多弹出一次主窗口。单击只记录时间戳并延迟
@@ -158,18 +174,103 @@ async fn running_snapshot(app: &AppHandle) -> Vec<RunningItem> {
     let state = app.state::<AppState>();
     let running = state.running.lock().await;
     let cfg = state.config.lock().unwrap();
-    running
+    running_items(&cfg, &running)
+}
+
+/// Every running instance, with the machine it runs on — the facts the tray
+/// menu and its actions are built from.
+///
+/// The host comes from the instance's own record: the running table says a
+/// process is up, the config says what the user calls it and where it runs. An
+/// entry whose record is gone still gets a line — it really is running — and is
+/// named by its id.
+///
+/// The order is the menu's: by machine, then by name. Reading a HashMap in
+/// place would reshuffle the menu every time an instance starts or stops.
+fn running_items(cfg: &Config, running: &HashMap<String, RunningInstance>) -> Vec<RunningItem> {
+    let mut items: Vec<RunningItem> = running
         .iter()
         .map(|(id, entry)| {
-            let name = cfg
-                .instances
-                .iter()
-                .find(|i| i.id == *id)
-                .map(|i| i.name.clone())
-                .unwrap_or_else(|| id.clone());
-            (id.clone(), name, entry.profile.clone())
+            let inst = cfg.instances.iter().find(|i| i.id == *id);
+            let host_id = inst
+                .map(|i| i.host_id.trim().to_string())
+                .filter(|host| !host.is_empty())
+                .or_else(|| entry.remote.as_ref().map(|run| run.host_id.clone()))
+                .unwrap_or_else(|| LOCAL_HOST_ID.to_string());
+            RunningItem {
+                id: id.clone(),
+                name: inst.map(|i| i.name.clone()).unwrap_or_else(|| id.clone()),
+                host: host_label(cfg, &host_id),
+                profile: entry.profile.clone(),
+            }
         })
-        .collect()
+        .collect();
+    items.sort_by(|a, b| a.host.cmp(&b.host).then_with(|| a.name.cmp(&b.name)));
+    items
+}
+
+/// How the tray spells one host. A record whose host has no name of its own
+/// falls back to its id, so no line reads as if it had no machine at all.
+fn host_label(cfg: &Config, host_id: &str) -> String {
+    cfg.hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map(|h| h.display_name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| host_id.to_string())
+}
+
+/// How the tray names one instance when it has to talk about it: the name the
+/// user gave it and the machine it is on — never the name alone, because two
+/// machines may both run an instance called `web`.
+fn instance_label(name: &str, host: &str) -> String {
+    format!("{name}（{host}）")
+}
+
+/// One action line in the running submenu: what the click does, the instance's
+/// name, the machine it runs on, and the profile it runs.
+fn action_label(action: &str, name: &str, host: &str, profile: &str) -> String {
+    format!("{action}{name}（{host} · {profile}）")
+}
+
+/// Which instance a double click opens straight away: the only one running, or
+/// none.
+///
+/// 「Only one」 counts every machine's instances together. The menu is a single
+/// list and a double click has no host to narrow it with, so two machines with
+/// one instance each is not one instance — that shows the window instead.
+fn sole_running(items: &[RunningItem]) -> Option<&str> {
+    match items {
+        [only] => Some(only.id.as_str()),
+        _ => None,
+    }
+}
+
+/// What one stop that did not happen tells the user. A stop fails for real
+/// reasons now — a pid that is no longer that process, a machine that does not
+/// answer, a process that will not go — and the tray has no page to say them on,
+/// so they come out here and go into a dialog.
+fn stop_failure_note(label: &str, reason: &str) -> String {
+    format!("停止实例「{label}」失败：{reason}")
+}
+
+/// The same for a stop-all: one list naming every instance that did not stop,
+/// or nothing at all when they all did. One dialog for the whole action —
+/// a stream of them is worse than a list.
+fn stop_all_failure_note(failures: &[(String, String)]) -> Option<String> {
+    match failures {
+        [] => None,
+        [(label, reason)] => Some(stop_failure_note(label, reason)),
+        many => Some(format!(
+            "有 {} 个实例没能停止：\n{}",
+            many.len(),
+            many.iter()
+                .map(|(label, reason)| format!("· {label}：{reason}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+    }
 }
 
 fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<tauri::Wry>> {
@@ -219,24 +320,26 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     let quick_sub = Submenu::with_id_and_items(app, MENU_QUICK_SUB, "快捷入口", true, &quick_refs)?;
 
     // Running profiles live in a second-level submenu: each instance gets an
-    // "open window" and a "stop" entry. Empty state is a disabled hint;
-    // the status header above already says "暂无运行中".
+    // "open window" and a "stop" entry. Every line carries the machine the
+    // instance runs on, so two machines' instances of the same name stay apart.
+    // Empty state is a disabled hint; the status header above already says
+    // "暂无运行中".
     let mut owned: Vec<MenuItem<tauri::Wry>> = Vec::new();
     let mut running_sub = None;
     let mut empty_hint = None;
     if !running.is_empty() {
-        for (id, name, profile) in running {
+        for item in running {
             owned.push(MenuItem::with_id(
                 app,
-                format!("{MENU_OPEN_PREFIX}{id}"),
-                format!("打开：{name}（{profile}）"),
+                format!("{MENU_OPEN_PREFIX}{}", item.id),
+                action_label(MENU_OPEN_LABEL, &item.name, &item.host, &item.profile),
                 true,
                 None::<&str>,
             )?);
             owned.push(MenuItem::with_id(
                 app,
-                format!("{MENU_STOP_PREFIX}{id}"),
-                format!("停止：{name}（{profile}）"),
+                format!("{MENU_STOP_PREFIX}{}", item.id),
+                action_label(MENU_STOP_LABEL, &item.name, &item.host, &item.profile),
                 true,
                 None::<&str>,
             )?);
@@ -381,9 +484,19 @@ fn stop_all_instances(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let ids: Vec<String> = state.running.lock().await.keys().cloned().collect();
-        for id in ids {
-            let _ = process::stop_instance_process(&app, &state, &id).await;
+        // Every machine's running instances: this menu has no host dimension —
+        // it is one list (ADR-0006 §3) — so 「停止全部」 means all of it. A stop
+        // that does not happen is named with the reason it gave: the tray has
+        // no page to show it on.
+        let mut failures: Vec<(String, String)> = Vec::new();
+        for item in running_snapshot(&app).await {
+            if let Err(reason) = process::stop_instance_process(&app, &state, &item.id).await {
+                crate::log_warn!("托盘停止全部：实例 {} 停止失败：{reason}", item.id);
+                failures.push((instance_label(&item.name, &item.host), reason));
+            }
+        }
+        if let Some(note) = stop_all_failure_note(&failures) {
+            report_to_user(&app, &note);
         }
     });
 }
@@ -535,7 +648,19 @@ fn stop_instance_from_tray(app: &AppHandle, instance_id: &str) {
     let id = instance_id.to_string();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let _ = process::stop_instance_process(&app, &state, &id).await;
+        let label = running_snapshot(&app)
+            .await
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| instance_label(&item.name, &item.host))
+            .unwrap_or_else(|| id.clone());
+        if let Err(reason) = process::stop_instance_process(&app, &state, &id).await {
+            // The reasons are real ones now — a reused pid, an unreachable
+            // machine, a process that will not go — and silence here is the one
+            // outcome that misleads.
+            crate::log_warn!("托盘停止实例 {id} 失败：{reason}");
+            report_to_user(&app, &stop_failure_note(&label, &reason));
+        }
     });
 }
 
@@ -544,14 +669,8 @@ fn handle_double_click(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         // 仅当唯一运行实例时直达其页面（系统浏览器），否则显示主窗口。
-        let target = {
-            let running = state.running.lock().await;
-            if running.len() == 1 {
-                running.keys().next().cloned()
-            } else {
-                None
-            }
-        };
+        // 「唯一」把每台机器的实例算在一起：菜单是一份跨主机的清单。
+        let target = sole_running(&running_snapshot(&app).await).map(str::to_string);
 
         // The same rule the tray's own 「打开」 uses, so a remote instance is
         // reached through the launcher's forward here too. A failure falls through
@@ -584,4 +703,164 @@ fn handle_double_click(app: &AppHandle) {
             show_launcher(&app);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DshInstance, Host};
+
+    fn server_host() -> Host {
+        Host {
+            id: "host-server".into(),
+            display_name: "阿里云服务器".into(),
+            ssh_target: "zjq_aliyun".into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: Some(std::path::PathBuf::from("/home/demo/.local/share/dsh-launcher")),
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        }
+    }
+
+    fn instance(id: &str, name: &str, host_id: &str) -> DshInstance {
+        DshInstance {
+            id: id.to_string(),
+            name: name.to_string(),
+            version_id: "v1".into(),
+            home_id: "h1".into(),
+            host_id: host_id.to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        }
+    }
+
+    fn entry(profile: &str) -> RunningInstance {
+        RunningInstance {
+            kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+            profile: profile.to_string(),
+            url: None,
+            adopted: None,
+            remote: None,
+        }
+    }
+
+    fn config(instances: Vec<DshInstance>) -> Config {
+        Config {
+            homes: Vec::new(),
+            versions: Vec::new(),
+            instances,
+            settings: Default::default(),
+            hosts: vec![Host::local(), server_host()],
+        }
+    }
+
+    fn item(id: &str, name: &str, host: &str) -> RunningItem {
+        RunningItem {
+            id: id.to_string(),
+            name: name.to_string(),
+            host: host.to_string(),
+            profile: "web".into(),
+        }
+    }
+
+    /// 两台机器上的同名实例不是同一行：名字后面必须跟着它跑在哪台机器上
+    /// （ADR-0006 §4），否则「打开 web」在两台机器上都叫 web 时无处可选。
+    #[test]
+    fn every_running_instance_says_which_machine_it_runs_on() {
+        let cfg = config(vec![
+            instance("i-local", "web", LOCAL_HOST_ID),
+            instance("i-server", "web", "host-server"),
+        ]);
+        let mut running = HashMap::new();
+        running.insert("i-local".to_string(), entry("web"));
+        running.insert("i-server".to_string(), entry("default"));
+
+        let items = running_items(&cfg, &running);
+        let lines: Vec<String> = items
+            .iter()
+            .map(|i| action_label(MENU_OPEN_LABEL, &i.name, &i.host, &i.profile))
+            .collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "打开：web（本机 · web）",
+                "打开：web（阿里云服务器 · default）",
+            ],
+            "菜单按主机名与实例名排序，两台机器的同名实例各占一行"
+        );
+    }
+
+    /// 双击的「只有一个运行实例时直达」数的是**所有机器**的运行实例：菜单
+    /// 是一份跨主机的清单，双击也没有主机可以缩小范围。
+    #[test]
+    fn a_double_click_goes_straight_to_the_only_running_instance_anywhere() {
+        let only_local = vec![item("i-local", "web", "本机")];
+        assert_eq!(sole_running(&only_local), Some("i-local"));
+
+        let only_remote = vec![item("i-server", "web", "阿里云服务器")];
+        assert_eq!(sole_running(&only_remote), Some("i-server"));
+
+        let one_per_machine = vec![
+            item("i-local", "web", "本机"),
+            item("i-server", "web", "阿里云服务器"),
+        ];
+        assert_eq!(
+            sole_running(&one_per_machine),
+            None,
+            "两台机器各一个不是「只有一个」：双击该显示主窗口"
+        );
+
+        assert_eq!(sole_running(&[]), None);
+    }
+
+    /// 停止失败现在有真原因（pid 已被复用、主机不可达、进程不肯走），托盘
+    /// 没有页面可以显示它们，所以原因必须原样进对话框。
+    #[test]
+    fn a_stop_that_failed_names_the_instance_and_the_reason() {
+        let note = stop_failure_note("web（阿里云服务器）", "主机不可达：连接超时");
+        assert!(note.contains("web（阿里云服务器）"), "要说清是哪一台：{note}");
+        assert!(note.contains("主机不可达：连接超时"), "要带上原因：{note}");
+    }
+
+    /// 停止全部失败时给一条清单而不是一串弹窗：都停下来了就什么都不说。
+    #[test]
+    fn stop_all_reports_every_instance_that_did_not_stop_in_one_note() {
+        assert!(stop_all_failure_note(&[]).is_none());
+
+        let failures = vec![
+            (
+                "web（本机）".to_string(),
+                "停止实例超时（进程未响应终止信号）".to_string(),
+            ),
+            (
+                "api（阿里云服务器）".to_string(),
+                "主机不可达：连接超时".to_string(),
+            ),
+        ];
+        let note = stop_all_failure_note(&failures).expect("有失败就要说出来");
+        for said in [
+            "web（本机）",
+            "停止实例超时（进程未响应终止信号）",
+            "api（阿里云服务器）",
+            "主机不可达：连接超时",
+        ] {
+            assert!(note.contains(said), "清单里少了「{said}」：{note}");
+        }
+
+        // 只有一条失败时不必摆成清单，直接说那一条。
+        let one = vec![(
+            "web（本机）".to_string(),
+            "停止实例超时（进程未响应终止信号）".to_string(),
+        )];
+        assert_eq!(
+            stop_all_failure_note(&one).as_deref(),
+            Some("停止实例「web（本机）」失败：停止实例超时（进程未响应终止信号）")
+        );
+    }
 }
