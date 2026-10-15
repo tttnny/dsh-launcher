@@ -123,9 +123,12 @@ const host = computed(() => store.hostById(props.inst.host_id))
  * row would otherwise repeat the same name the filter already states.
  */
 const showHost = computed(() => store.allHosts && !!host.value && !host.value.builtin)
-/** This instance lives on another machine — the one case where the launcher's
- *  own view of its state can be 「问不到」. */
-const remoteHost = computed(() => !!host.value && !host.value.builtin)
+/**
+ * On another machine, so its DSH_HOME is a directory there. The three machine
+ * actions still apply — a terminal connects to it, its log is copied home — but
+ * 「打开目录」 cannot open what this Mac does not have.
+ */
+const remote = computed(() => !!host.value && !host.value.builtin)
 /**
  * Why the state is what it is, when the state itself cannot say: the last word
  * about reaching that machine (連不上 / 认证失败 / 超时), or the retry's own
@@ -277,6 +280,17 @@ const logAction = useAction(() => api.openInstanceLog(props.inst.id), {
 })
 const terminalAction = useAction(() => api.openInstanceTerminal(props.inst.id), {
   success: (label) => t('home.terminalOpened', { label }),
+})
+
+// An instance on another machine has a DSH_HOME that is a directory *there*:
+// this Mac can neither open it nor hold it, so the machine line hands over what
+// a user can actually use — the path, and one command that reaches it.
+const remoteCopyAction = useAction(async (what: 'path' | 'command') => {
+  const location = await api.instanceRemoteLocation(props.inst.id)
+  await copy(
+    what === 'path' ? location.path : location.command,
+    what === 'path' ? 'instances.pathCopied' : 'instances.commandCopied',
+  )
 })
 
 function openDetail() {
@@ -503,7 +517,7 @@ onMounted(() => {
           <!-- The dependency tree of a remote instance is on that machine, and
                the launcher does not read it: 「没有发现问题」 would be a claim it
                never checked. -->
-          <span v-else-if="remoteHost" class="fact-sub">{{ t('instances.healthNotChecked') }}</span>
+          <span v-else-if="remote" class="fact-sub">{{ t('instances.healthNotChecked') }}</span>
           <span v-else class="fact-sub">{{ t('instances.healthOk') }}</span>
         </span>
       </div>
@@ -520,7 +534,20 @@ onMounted(() => {
             <DlIcon name="terminal" :size="13" />
             {{ t('home.openTerminal') }}
           </button>
-          <button class="dl-btn dl-btn--quiet" @click="dirAction.run()">
+          <!-- This Mac's file manager cannot open a directory on another
+               machine, so that machine's DSH_HOME is handed over as what it
+               is: a path to paste, and one command that reaches it. -->
+          <template v-if="remote">
+            <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('path')">
+              <DlIcon name="copy" :size="13" />
+              {{ t('instances.copyPath') }}
+            </button>
+            <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('command')">
+              <DlIcon name="copy" :size="13" />
+              {{ t('instances.copyCommand') }}
+            </button>
+          </template>
+          <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
             <DlIcon name="folder" :size="13" />
             {{ t('instanceEdit.openDir') }}
           </button>

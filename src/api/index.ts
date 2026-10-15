@@ -13,6 +13,7 @@ import type {
   Host,
   HostInput,
   HostWithStatus,
+  InstanceLocation,
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
@@ -186,6 +187,13 @@ export const api = {
   /** Opens an instance's DSH_HOME directory in the file manager. */
   openInstanceDirectory: (instanceId: string) =>
     call<string>('open_instance_directory', { instanceId }),
+  /**
+   * A remote instance's location: the DSH_HOME as that machine spells it, and
+   * one command that reaches it from a terminal here. Answers from the
+   * launcher's records, so it works while that machine is off.
+   */
+  instanceRemoteLocation: (instanceId: string) =>
+    call<InstanceLocation>('instance_remote_location', { instanceId }),
   /** Opens a DSH_HOME directory in the file manager. */
   openHomeDirectory: (homeId: string) =>
     call<string>('open_home_directory', { homeId }),

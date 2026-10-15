@@ -328,8 +328,9 @@ pub fn template_boot_command(
 /// Returns the `.bin` directory (to prepend to the terminal's PATH) when the
 /// version tree exists.
 pub fn ensure_terminal_dsh_wrapper(version_dir: &Path) -> Option<PathBuf> {
-    let bin_dir = version_dir.join("node_modules").join(".bin");
+    let bin_dir = version_bin_dir(version_dir);
     let dsh_bin = bin_dir.join("dsh");
+
     // The wrapper this build wants, or `None` when the version tree has no
     // bin.js to point at (a partial install has nothing to write).
     let desired = wrapper_script(version_dir);
@@ -392,6 +393,15 @@ pub fn terminal_path_dirs(version_dir: Option<&Path>) -> Vec<PathBuf> {
         dirs.push(dir);
     }
     dirs
+}
+
+/// Where a version's `dsh` command lives: `<版本目录>/node_modules/.bin`.
+/// 本机's terminal gets it as a directory the launcher may write a wrapper into
+/// ([`ensure_terminal_dsh_wrapper`]); on another machine the same directory is
+/// simply put on the terminal's `PATH`, because the launcher writes nothing
+/// there and pnpm's own entry needs no flag of ours.
+pub fn version_bin_dir(version_dir: &Path) -> PathBuf {
+    version_dir.join("node_modules").join(".bin")
 }
 
 /// The environment exports for an instance terminal: DSH_HOME + the launcher

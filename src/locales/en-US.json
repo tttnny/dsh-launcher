@@ -92,7 +92,11 @@
     "hostFilter": "Host",
     "hostAll": "All",
     "localTag": "This Mac",
-    "healthNotChecked": "Not checked on a remote host"
+    "healthNotChecked": "Not checked on a remote host",
+    "copyPath": "Copy path",
+    "copyCommand": "Copy command",
+    "pathCopied": "Remote path copied",
+    "commandCopied": "Command copied — paste it into a terminal"
   },
   "homes": {
     "homesTitle": "DSH_HOME directories",

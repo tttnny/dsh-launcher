@@ -134,6 +134,23 @@ export interface DshInstance {
   port?: number | null
 }
 
+/**
+ * Where an instance on another machine lives, and how a user reaches it from
+ * this Mac: the path to paste, and one command that runs there. The instance
+ * card offers these instead of 「打开目录」, which can only open a directory on
+ * this Mac (ADR-0006).
+ */
+export interface InstanceLocation {
+  host_id: string
+  host_name: string
+  /** The ssh target exactly as the host record spells it. */
+  ssh_target: string
+  /** The DSH_HOME as that machine spells it. */
+  path: string
+  /** `ls -la` at that path, through ssh — built by the backend, which owns the quoting. */
+  command: string
+}
+
 export interface LauncherSettings {
   locale: string
   minimize_to_tray: boolean

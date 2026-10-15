@@ -270,6 +270,7 @@ pub fn run() {
             commands::open_launcher_log,
             commands::open_instance_log,
             commands::open_instance_directory,
+            commands::instance_remote_location,
             commands::open_home_directory,
             commands::get_launcher_directory,
             pending_deep_link,
