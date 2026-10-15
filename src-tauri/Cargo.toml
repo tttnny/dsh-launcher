@@ -36,6 +36,12 @@ tauri-plugin-single-instance = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 
+[dev-dependencies]
+# `tauri::test::mock_context` — the install paths take an `AppHandle`, and a
+# windowless app is the only way to give them one in a test. Dev-only: release
+# builds do not enable the feature.
+tauri = { version = "2", features = ["test"] }
+
 [profile.release]
 codegen-units = 1
 lto = true
