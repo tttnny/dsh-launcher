@@ -242,6 +242,12 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         }}
       </div>
 
+      <!-- The list is that host's, but the install button is this Mac's: say so
+           once, instead of leaving a row of greyed-out buttons unexplained. -->
+      <div v-if="!canInstallHere && visibleInstallable.length > 0" class="dl-row-none">
+        {{ t('versions.installLocalOnly') }}
+      </div>
+
       <div v-for="v in visibleInstallable" :key="v.version" class="ver-row">
         <span class="ver-mark is-idle"><DlIcon name="download" :size="14" /></span>
         <div class="ver-main">
