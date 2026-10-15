@@ -3569,9 +3569,10 @@ mod tests {
     /// A data directory the user configured is the one the remote side is asked
     /// about, and what that machine settles it to is what the record keeps — a
     /// value the user typed is never replaced by the machine's own default. The
-    /// typed form and the settled one differ here (that machine folds the
-    /// trailing `/` away), so each assertion can only be satisfied by the step
-    /// it names.
+    /// typed form here is one that machine folds by text (`..` drops a part),
+    /// and the folded form differs as a path too: the script assertion can only
+    /// be satisfied by the value handed over, and the record one only by the
+    /// settled value having been written back.
     #[test]
     fn a_configured_data_directory_is_what_the_remote_is_asked_to_check() {
         let data = ScratchDir::new("host-data-dir");
@@ -3586,7 +3587,7 @@ mod tests {
         );
         let state = host_state(&data, crate::config::Config::default(), fake.clone());
         let mut host = remote_host("host-lab", "lab");
-        host.data_dir = Some(std::path::PathBuf::from("/srv/dsh launcher/"));
+        host.data_dir = Some(std::path::PathBuf::from("/srv/dsh/../dsh launcher"));
         state.config.lock().unwrap().hosts.push(host.clone());
 
         let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
@@ -3594,7 +3595,7 @@ mod tests {
         assert!(test.ok);
         let script = fake.last_script();
         assert!(
-            script.contains("dsh_configured='/srv/dsh launcher/'"),
+            script.contains("dsh_configured='/srv/dsh/../dsh launcher'"),
             "用户填的数据目录要原样问那台机器：{script}"
         );
         let saved = list_hosts_with_status(&state)
@@ -3603,8 +3604,8 @@ mod tests {
             .find(|v| v.host.id == host.id)
             .unwrap();
         assert_eq!(
-            saved.host.data_dir,
-            Some(std::path::PathBuf::from("/srv/dsh launcher")),
+            saved.host.data_dir.as_deref(),
+            Some(std::path::Path::new("/srv/dsh launcher")),
             "那台机器 settle 出来的绝对路径要写回记录，不是用户打的那一份"
         );
     }
