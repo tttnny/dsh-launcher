@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { LOCAL_HOST_ID } from '@/api/types'
-import type { HostWithStatus, RuntimeStatus, SkippedCandidate, ToolSource } from '@/api/types'
+import type { RuntimeStatus, SkippedCandidate, ToolSource } from '@/api/types'
 import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
@@ -32,18 +32,27 @@ const store = useLauncherStore()
 const checking = ref(false)
 const picking = ref<ToolId | null>(null)
 
-// The page answers for one host at a time. 本机 is the default, and it is the
-// only host whose answer the app itself needs — the redirect here at startup is
-// about the launcher's own toolchain (App.vue), so only that answer is mirrored
-// into the store.
-const hosts = ref<HostWithStatus[]>([])
-const hostId = ref(LOCAL_HOST_ID)
-const runtime = ref<RuntimeStatus | null>(null)
+// The page answers for one host at a time — the launcher's 当前主机, the same
+// state the Library's picker and the board's filter read, so this page reports
+// the machine those pages are showing (ADR-0006 §3). 本机 is the default, and it
+// is the only host whose answer the app itself needs — the redirect here at
+// startup is about the launcher's own toolchain (App.vue), so only that answer
+// is mirrored into the store.
+const hostId = computed({
+  get: () => store.currentHostId,
+  set: (id: string) => void store.selectHost(id),
+})
+// Only 本机's answer is known when the page opens; a machine that has not been
+// probed starts empty, so its panel never wears the local conclusion while the
+// read is in flight.
+const runtime = ref<RuntimeStatus | null>(
+  store.currentHostId === LOCAL_HOST_ID ? store.runtime : null,
+)
 const manualInput = ref<Record<ToolId, string>>({ node: '', pnpm: '' })
 /** Why this host has no conclusions at all (an unreachable machine, a bad target). */
 const loadError = ref('')
 
-const selectedHost = computed(() => hosts.value.find((h) => h.id === hostId.value) ?? null)
+const selectedHost = computed(() => store.currentHost)
 const isRemote = computed(() => hostId.value !== LOCAL_HOST_ID)
 
 function statusOf(id: ToolId) {
@@ -172,6 +181,16 @@ async function load(force = false) {
   }
 }
 
+// The one current host can move from another page too (the Library's picker,
+// the board's filter), and its conclusion is that machine's own. Clearing first
+// keeps the machine just left — its tools, or the reason it failed — from being
+// read as the new host's answer while the probe runs.
+watch(hostId, () => {
+  runtime.value = null
+  loadError.value = ''
+  void load()
+})
+
 /** Re-reads the environment: the user may have just fixed their PATH. */
 async function recheck() {
   checking.value = true
@@ -187,12 +206,6 @@ async function recheck() {
 // back to the window, so the page does not make them hunt for a button.
 async function onFocus() {
   if (checking.value) return
-  await load()
-}
-
-async function selectHost(id: string) {
-  if (id === hostId.value) return
-  hostId.value = id
   await load()
 }
 
@@ -245,12 +258,6 @@ function clearOverride(id: ToolId) {
 
 onMounted(async () => {
   window.addEventListener('focus', onFocus)
-  try {
-    hosts.value = await api.listHosts()
-  } catch {
-    // No host list is no reason to hide the page: 本机 is always there to report on.
-    hosts.value = []
-  }
   await load()
 })
 onUnmounted(() => window.removeEventListener('focus', onFocus))
@@ -265,13 +272,12 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       </div>
       <div class="dl-head-actions">
         <a-select
-          v-if="hosts.length > 1"
-          :model-value="hostId"
+          v-if="store.hosts.length > 1"
+          v-model="hostId"
           style="width: 190px"
           size="small"
-          @change="(v) => selectHost(String(v))"
         >
-          <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
+          <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
         </a-select>
         <button class="dl-btn dl-btn--quiet" :disabled="checking" @click="recheck">
           <DlIcon name="refresh" :size="13" />
