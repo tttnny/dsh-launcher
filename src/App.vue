@@ -202,17 +202,17 @@ function handleDeepLink(raw: string) {
 }
 
 /**
- * The instance a deep link names — which is why a link prefers the id.
+ * The instance a deep link names.
  *
- * An id names one instance on one machine, so it resolves anywhere. A **name**
- * only has to be unique on its own host (两台机器可以各有一个 `web`, ADR-0006 §1),
- * and the link carries no host of its own — so a name is read as 「当前主机上叫
- * 这个名字的那一个」, and a link whose name is not there says so rather than
- * starting whatever instance happens to share the name on another machine.
- *
- * The launcher writes ids into links (`dsh-launcher://launch` is the only scheme
- * there is); a name can only arrive in a hand-written URL, which is exactly when
- * picking one of two machines at random would be worst.
+ * This launcher only **reads** `dsh-launcher://launch` links — nothing in this
+ * tree writes one, and the only shape the scheme is known to carry is an
+ * `instance` parameter holding either an id or a name (a link that arrives from
+ * outside is hand-written). An id names one instance on one machine, so it
+ * resolves anywhere. A **name** only has to be unique on its own host
+ * (两台机器可以各有一个 `web`, ADR-0006 §1), and the link carries no host of its
+ * own — so a name is read as 「当前主机上叫这个名字的那一个」, and a link whose
+ * name is not there says so rather than starting whatever instance happens to
+ * share the name on another machine.
  */
 function launchTarget(ref: string): DshInstance | undefined {
   const byId = store.instanceById(ref)
@@ -225,7 +225,7 @@ async function launchFromDeepLink(u: URL) {
   if (!ref) return
   const inst = launchTarget(ref)
   if (!inst) {
-    Message.error(String(ref))
+    Message.error(t('app.launchInstanceMissing', { ref }))
     return
   }
   try {

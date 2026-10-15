@@ -130,9 +130,15 @@ pub struct ConnectionTest {
     pub message: Option<String>,
     pub system: Option<RemoteSystem>,
     pub home: Option<String>,
-    /// The launcher's data directory *on that machine*, with `~` already
-    /// expanded there — the launcher cannot expand a remote path itself.
+    /// The launcher's data directory *on that machine*, settled there: `~` is
+    /// that machine's home directory, and one directory typed two ways is one
+    /// path — only that machine can settle a path at all. `None` when the value
+    /// the user typed could not be settled, which `data_dir_problem` explains.
     pub data_dir: Option<String>,
+    /// Why the configured data directory could not be settled on that machine —
+    /// a relative path, or a `~用户名` the launcher will not expand. The record
+    /// keeps what the user typed, and this is what the page says about it.
+    pub data_dir_problem: Option<String>,
     /// Whether that directory is already there. A fresh host has none until the
     /// launcher first writes something into it.
     pub data_dir_exists: bool,
@@ -149,6 +155,7 @@ impl ConnectionTest {
             system: None,
             home: None,
             data_dir: None,
+            data_dir_problem: None,
             data_dir_exists: false,
             node: None,
             pnpm: None,
@@ -166,7 +173,8 @@ impl ConnectionTest {
                 arch: facts.arch,
             }),
             home: Some(facts.home),
-            data_dir: Some(facts.data_dir),
+            data_dir: facts.data_dir,
+            data_dir_problem: facts.data_dir_problem,
             data_dir_exists: facts.data_dir_exists,
             node: facts.node,
             pnpm: facts.pnpm,
@@ -181,7 +189,10 @@ struct Facts {
     release: String,
     arch: String,
     home: String,
-    data_dir: String,
+    /// Settled by the script *there*; `None` with a reason in
+    /// `data_dir_problem` when the configured value cannot be settled.
+    data_dir: Option<String>,
+    data_dir_problem: Option<String>,
     data_dir_exists: bool,
     node: Option<RemoteTool>,
     pnpm: Option<RemoteTool>,
@@ -190,8 +201,9 @@ struct Facts {
 /// Runs the connection test on one host.
 ///
 /// `data_dir` is the host record's configured data directory, or `None` for the
-/// default — the script resolves it *there*, because `~` and existence are
-/// facts only that machine has.
+/// default. The script settles it *there* — `~`, `.` / `..` and existence are
+/// facts only that machine has — and the answer is what the launcher writes
+/// down, so no later script is handed a `~` to misread.
 pub async fn connection_test(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -755,20 +767,51 @@ dsh_tool() {
   printf '{"path":"%s","version":"%s"}' "$(dsh_esc "$dsh_path")" "$(dsh_esc "$dsh_version")"
 }
 
+# The data directory is settled **here**, once: `~` is this machine's home
+# directory, one directory typed two ways is one path, and a value that cannot be
+# settled is answered as a reason instead of guessed at. That machine's answer is
+# what the launcher writes down, so every later script is handed the settled
+# absolute path and none of them has to know what a `~` meant.
 dsh_configured=%%DATA_DIR%%
+if [ -z "$dsh_configured" ]; then dsh_configured='~/.local/share/dsh-launcher'; fi
+dsh_problem=
 case "$dsh_configured" in
-  '') dsh_data="${HOME:-}/.local/share/dsh-launcher" ;;
-  '~/'*) dsh_data="${HOME:-}/${dsh_configured:2}" ;;
-  *) dsh_data="$dsh_configured" ;;
+  '~') dsh_data="${HOME:-}" ;;
+  '~/'*) dsh_data="${HOME:-}/${dsh_configured#\~/}" ;;
+  '~'*) dsh_data=; dsh_problem="不支持 ~用户名 形式的路径：$dsh_configured" ;;
+  /*) dsh_data="$dsh_configured" ;;
+  *) dsh_data=; dsh_problem="请填写绝对路径（以 / 开头），或用 ~ 表示那台机器的家目录：$dsh_configured" ;;
 esac
-if [ -d "$dsh_data" ]; then dsh_exists=true; else dsh_exists=false; fi
+if [ -z "$dsh_problem" ]; then
+  # Settle by text: one directory typed two ways is one data directory.
+  dsh_rest=${dsh_data#/}
+  dsh_data=
+  while [ -n "$dsh_rest" ]; do
+    dsh_part=${dsh_rest%%/*}
+    if [ "$dsh_rest" = "$dsh_part" ]; then dsh_rest=; else dsh_rest=${dsh_rest#*/}; fi
+    case "$dsh_part" in
+      ''|.) ;;
+      ..) dsh_data=${dsh_data%/*} ;;
+      *) dsh_data="$dsh_data/$dsh_part" ;;
+    esac
+  done
+  [ -n "$dsh_data" ] || dsh_data=/
+fi
 
-dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s","data_dir":"%s","data_dir_exists":%s,"node":%s,"pnpm":%s}' \
+if [ -n "$dsh_problem" ]; then
+  dsh_dir_json='"data_dir":null,"data_dir_problem":"'"$(dsh_esc "$dsh_problem")"'"'
+  dsh_exists=false
+else
+  dsh_dir_json='"data_dir":"'"$(dsh_esc "$dsh_data")"'","data_dir_problem":null'
+  if [ -d "$dsh_data" ]; then dsh_exists=true; else dsh_exists=false; fi
+fi
+
+dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s",%s,"data_dir_exists":%s,"node":%s,"pnpm":%s}' \
   "$(dsh_esc "$(uname -s)")" \
   "$(dsh_esc "$(uname -r)")" \
   "$(dsh_esc "$(uname -m)")" \
   "$(dsh_esc "${HOME:-}")" \
-  "$(dsh_esc "$dsh_data")" \
+  "$dsh_dir_json" \
   "$dsh_exists" \
   "$(dsh_tool node)" \
   "$(dsh_tool pnpm)")
@@ -2298,6 +2341,21 @@ pub(crate) mod testing {
         node: Option<(&str, &str)>,
         pnpm: Option<(&str, &str)>,
     ) -> String {
+        connection_stdout_with_dir(
+            "/home/demo/.local/share/dsh-launcher",
+            node,
+            pnpm,
+        )
+    }
+
+    /// The same answer for a machine that settled the directory the user typed —
+    /// what the script reports when the record holds a `~` or a path with `.` or
+    /// `//` in it.
+    pub(crate) fn connection_stdout_with_dir(
+        data_dir: &str,
+        node: Option<(&str, &str)>,
+        pnpm: Option<(&str, &str)>,
+    ) -> String {
         fn tool(value: Option<(&str, &str)>) -> String {
             match value {
                 Some((path, version)) => {
@@ -2308,7 +2366,7 @@ pub(crate) mod testing {
         }
         marked(&format!(
             "{{\"os\":\"Linux\",\"release\":\"6.8.0-45-generic\",\"arch\":\"x86_64\",\
-             \"home\":\"/home/demo\",\"data_dir\":\"/home/demo/.local/share/dsh-launcher\",\
+             \"home\":\"/home/demo\",\"data_dir\":\"{data_dir}\",\"data_dir_problem\":null,\
              \"data_dir_exists\":false,\"node\":{},\"pnpm\":{}}}",
             tool(node),
             tool(pnpm)
@@ -2806,14 +2864,14 @@ mod tests {
 
         assert!(!facts.os.is_empty() && !facts.release.is_empty() && !facts.arch.is_empty());
         assert_eq!(facts.home, std::env::var("HOME").unwrap_or_default());
+        let data_dir = facts.data_dir.expect("默认数据目录要能 settle 出来");
         assert!(
-            facts.data_dir.ends_with("/.local/share/dsh-launcher"),
-            "默认数据目录按那台机器的家目录推：{}",
-            facts.data_dir
+            data_dir.ends_with("/.local/share/dsh-launcher"),
+            "默认数据目录按那台机器的家目录推：{data_dir}"
         );
         assert_eq!(
             facts.data_dir_exists,
-            std::path::Path::new(&facts.data_dir).is_dir(),
+            std::path::Path::new(&data_dir).is_dir(),
             "「目录存不存在」要如实回答"
         );
         for tool in [facts.node, facts.pnpm].into_iter().flatten() {
@@ -2823,6 +2881,68 @@ mod tests {
                 tool.path
             );
         }
+    }
+
+    /// The data directory the user typed is settled **on that machine**: `~` is
+    /// that machine's home directory, and one directory typed two ways is one
+    /// path. The connection test is where the value is read, so it is where it
+    /// is settled — every later script is handed the absolute answer and none of
+    /// them has to know what a `~` meant.
+    #[test]
+    fn the_typed_data_directory_is_settled_on_that_machine() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let cases = [
+            ("~/dsh", format!("{home}/dsh")),
+            ("~/dsh/", format!("{home}/dsh")),
+            ("~/a/../dsh", format!("{home}/dsh")),
+            ("~", home.clone()),
+            ("/srv//dsh/", "/srv/dsh".to_string()),
+        ];
+        for (typed, expected) in cases {
+            let output = local_shell(&connection_test_script(Some(typed)));
+            let facts: Facts = parse_marked(&output).expect("真实 shell 跑出来的答案要能解析");
+            assert_eq!(
+                facts.data_dir.as_deref(),
+                Some(expected.as_str()),
+                "{typed} 要 settle 成绝对路径"
+            );
+        }
+    }
+
+    /// A data directory that cannot be settled is **reported**, not written down
+    /// as something else: a relative path would land in whatever directory that
+    /// machine's shell happens to be in, and `~用户名` is not the launcher's to
+    /// expand. The record keeps what the user typed and the page says why.
+    #[test]
+    fn a_data_directory_that_cannot_be_settled_comes_back_as_a_reason() {
+        for (typed, expected) in [("dsh", "绝对路径"), ("~bob/dsh", "~用户名")] {
+            let output = local_shell(&connection_test_script(Some(typed)));
+            assert!(
+                output.stdout.contains("\"data_dir\":null"),
+                "{typed} 不能当路径用：{}",
+                output.stdout
+            );
+            assert!(
+                output.stdout.contains(expected),
+                "{typed} 的理由要说清楚：{}",
+                output.stdout
+            );
+            let facts: Facts = parse_marked(&output).expect("真实 shell 跑出来的答案要能解析");
+            assert!(facts.data_dir.is_none(), "{typed}: {:?}", facts.data_dir);
+            assert!(
+                facts
+                    .data_dir_problem
+                    .unwrap_or_default()
+                    .contains(expected),
+                "{typed}: 解析出来的理由"
+            );
+        }
+        let settled = local_shell(&connection_test_script(Some("~/dsh")));
+        assert!(
+            settled.stdout.contains("\"data_dir_problem\":null"),
+            "settle 得了的就没有理由可说：{}",
+            settled.stdout
+        );
     }
 
     /// What a machine has under its versions directory, told the way the page

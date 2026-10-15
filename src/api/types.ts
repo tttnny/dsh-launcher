@@ -73,7 +73,14 @@ export interface ConnectionTest {
   message: string | null
   system: { os: string; release: string; arch: string } | null
   home: string | null
+  /**
+   * The launcher's data directory on that machine, settled there (`~` expanded,
+   * one directory typed two ways is one path). `null` when the value the user
+   * typed could not be settled — `data_dir_problem` says why.
+   */
   data_dir: string | null
+  /** Why `data_dir` could not be settled; the record keeps what the user typed. */
+  data_dir_problem: string | null
   /** A fresh host has no data directory yet; the launcher creates it on first write. */
   data_dir_exists: boolean
   /** `null` = 那台机器上没有这个命令。 */

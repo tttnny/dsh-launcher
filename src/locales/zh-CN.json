@@ -1,6 +1,7 @@
 {
   "app": {
-    "mockBadge": "浏览器预览"
+    "mockBadge": "浏览器预览",
+    "launchInstanceMissing": "这台主机上没有名为「{ref}」的实例"
   },
   "nav": {
     "instances": "实例",
@@ -255,7 +256,7 @@
       "extraEnvInvalid": "环境变量要写成每行一个 KEY=VALUE",
       "dataDir": "数据目录（可选）",
       "dataDirPlaceholder": "留空就用那台机器上的默认目录",
-      "dataDirHint": "这台主机上放版本、专属 DSH_HOME、日志与运行记录的地方；留空则按那台机器上的家目录推（~/.local/share/dsh-launcher）。",
+      "dataDirHint": "这台主机上放版本、专属 DSH_HOME、日志与运行记录的地方；留空则按那台机器上的家目录推（~/.local/share/dsh-launcher）。写 ~/dsh 这样的路径会在那台机器上展开，第一次测连接时定下来。",
       "test": "测试连接",
       "retest": "重试",
       "edit": "编辑",

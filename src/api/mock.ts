@@ -584,6 +584,27 @@ function sepOf(dir: string): string {
 }
 
 /**
+ * The typed data directory settled the way the connection test settles it **on
+ * that machine**, mirroring the script: `~` is that machine's home directory,
+ * and a value that cannot be settled (a relative path, `~用户名`) comes back as
+ * a reason instead — the record keeps what the user typed.
+ */
+function settleRemoteDataDir(
+  host: Host,
+  typed: string | null | undefined,
+): { dir: string | null; problem: string | null } {
+  const value = (typed ?? '').trim()
+  try {
+    return {
+      dir: settleRemotePath(host, value || '~/.local/share/dsh-launcher'),
+      problem: null,
+    }
+  } catch (e) {
+    return { dir: null, problem: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
  * A host the preview marks 不可达 answers nothing: the backend's per-host reads
  * fail there too, and a page that showed a list anyway would be showing the
  * launcher's memory instead of the machine's answer.
@@ -702,22 +723,26 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const host = db.hosts.find((h) => h.id === id)
       if (!host) fail(`主机不存在: ${id}`)
       if (host.builtin) fail('本机就在这台 Mac 上，不需要测试连接')
+      const settled = settleRemoteDataDir(host, host.data_dir)
       // A machine that answers: the sample the real script's JSON mirrors.
       const test: ConnectionTest = {
         ok: true,
         kind: null,
         message: null,
         system: { os: 'Linux', release: '6.8.0-45-generic', arch: 'x86_64' },
-        home: '/home/demo',
-        data_dir: host.data_dir ?? '/home/demo/.local/share/dsh-launcher',
-        data_dir_exists: true,
+        home: mockHostHomes[id] ?? '/home/demo',
+        data_dir: settled.dir,
+        data_dir_problem: settled.problem,
+        data_dir_exists: settled.dir !== null,
         node: { path: '/home/linuxbrew/.linuxbrew/bin/node', version: 'v26.0.0' },
         pnpm: { path: '/home/demo/.local/share/pnpm/pnpm', version: '11.1.2' },
       }
       mockHostStatuses[id] = { state: 'reachable', message: null }
       mockHostHomes[id] = test.home ?? mockHostHomes[id] ?? ''
-      if (!host.data_dir) {
-        host.data_dir = test.data_dir
+      // What that machine settled is what the launcher writes down; a value it
+      // could not settle leaves the record as the user typed it.
+      if (settled.dir && host.data_dir !== settled.dir) {
+        host.data_dir = settled.dir
         saveDb(db)
       }
       return test as T

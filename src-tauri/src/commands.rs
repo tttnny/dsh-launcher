@@ -237,10 +237,12 @@ pub(crate) async fn test_host_connection_for(
             HostStatus::unreachable(test.message.clone().unwrap_or_default())
         },
     );
-    // A machine that answered also told us where its data directory is. Remember
-    // it, so later work on that host does not have to ask again; a value the user
-    // configured always wins.
-    if test.ok && host.data_dir.is_none() {
+    // A machine that answered also settled the data directory: `~` is *its* home
+    // directory, and one path typed two ways is one directory. That absolute
+    // answer is what the launcher writes down — so no later script is handed a
+    // `~` to misread — and when the value could not be settled there, the record
+    // keeps what the user typed and the page says why.
+    if test.ok {
         if let Some(dir) = test.data_dir.clone() {
             remember_data_dir(state, id, &dir);
         }
@@ -248,12 +250,15 @@ pub(crate) async fn test_host_connection_for(
     Ok(test)
 }
 
+/// The data directory that machine settled, written onto the host record: the
+/// absolute form of what the user typed, or that machine's own default when the
+/// field was empty.
 fn remember_data_dir(state: &AppState, id: &str, dir: &str) {
     let mut cfg = state.config.lock().unwrap();
     let Some(host) = cfg.hosts.iter_mut().find(|h| h.id == id) else {
         return;
     };
-    if host.data_dir.is_some() {
+    if host.data_dir.as_deref() == Some(std::path::Path::new(dir)) {
         return;
     }
     host.data_dir = Some(std::path::PathBuf::from(dir));
@@ -3428,16 +3433,153 @@ mod tests {
         );
     }
 
+    /// A data directory the user typed as `~/dsh` is settled **on that machine**
+    /// and that absolute answer is what the record keeps — so the work that
+    /// follows asks the machine about `/home/demo/dsh/versions`, never about a
+    /// `~` in whatever directory the remote shell happens to start in.
+    #[test]
+    fn a_typed_tilde_data_directory_is_stored_as_that_machine_settled_it() {
+        let data = ScratchDir::new("host-tilde-data-dir");
+        let transport = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::connection_stdout_with_dir(
+                    "/home/demo/dsh",
+                    Some(("/usr/bin/node", "v22.11.0")),
+                    None,
+                ),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"versions":[]}"#),
+            ));
+        let state = host_state(&data, crate::config::Config::default(), transport.clone());
+        let host = create_host_record(
+            &state,
+            HostInput {
+                data_dir: Some("~/dsh".into()),
+                ..host_input("实验室", "lab")
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            host.data_dir.as_deref(),
+            Some(std::path::Path::new("~/dsh")),
+            "存的时候记的是用户打的那一份"
+        );
+
+        let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
+
+        assert!(test.ok);
+        assert_eq!(test.data_dir.as_deref(), Some("/home/demo/dsh"));
+        let saved = list_hosts_with_status(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.host.id == host.id)
+            .unwrap();
+        assert_eq!(
+            saved.host.data_dir.as_deref(),
+            Some(std::path::Path::new("/home/demo/dsh")),
+            "那台机器 settle 出来的绝对路径要写回记录"
+        );
+
+        block_on(list_versions_for(&state, Some(&host.id))).unwrap();
+
+        let script = transport.last_script();
+        assert!(
+            script.contains("dsh_dir='/home/demo/dsh/versions'"),
+            "后面的脚本拿到的是 settle 过的绝对路径：{script}"
+        );
+        assert!(!script.contains('~'), "literal 波浪号不能进脚本：{script}");
+    }
+
+    /// A directory the machine could not settle is **not** written down, and the
+    /// record keeps what the user typed so they can fix it: the answer carries
+    /// the reason instead of a path nobody meant.
+    #[test]
+    fn a_data_directory_that_cannot_be_settled_leaves_the_record_alone() {
+        let data = ScratchDir::new("host-relative-data-dir");
+        let transport = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
+                r#"{"os":"Linux","release":"6.8.0","arch":"x86_64","home":"/home/demo","data_dir":null,"data_dir_problem":"请填写绝对路径（以 / 开头），或用 ~ 表示那台机器的家目录：dsh","data_dir_exists":false,"node":null,"pnpm":null}"#,
+            )),
+        );
+        let state = host_state(&data, crate::config::Config::default(), transport.clone());
+        let host = create_host_record(
+            &state,
+            HostInput {
+                data_dir: Some("dsh".into()),
+                ..host_input("实验室", "lab")
+            },
+        )
+        .unwrap();
+
+        let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
+
+        assert!(test.ok, "机器答了就是答了，这跟「连不上」不是一回事");
+        assert_eq!(test.kind, None);
+        assert!(test.data_dir.is_none());
+        assert!(
+            test.data_dir_problem.unwrap_or_default().contains("绝对路径"),
+            "页面要拿到理由"
+        );
+        let saved = list_hosts_with_status(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.host.id == host.id)
+            .unwrap();
+        assert_eq!(
+            saved.host.data_dir.as_deref(),
+            Some(std::path::Path::new("dsh")),
+            "记不住的路径就原样留着，等人改"
+        );
+        assert_eq!(
+            saved.status.unwrap().state,
+            crate::config::HostState::Reachable,
+            "一个数据目录写错，不能让这台机器变成「不可达」"
+        );
+    }
+
+    /// A record that still holds what the user typed — `~/dsh`, or a relative
+    /// path — cannot be used as that machine's data directory: a script would
+    /// receive a literal `~` and look in whatever directory the remote shell
+    /// starts in. Saying so is the point; an empty version list would look like
+    /// an answer.
+    #[test]
+    fn a_data_directory_that_is_not_absolute_is_refused_instead_of_guessed_at() {
+        let data = ScratchDir::new("host-unsettled-data-dir");
+        let mut host = remote_host("host-lab", "lab");
+        host.data_dir = Some(std::path::PathBuf::from("~/dsh"));
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake.clone());
+
+        let refused = block_on(list_versions_for(&state, Some("host-lab"))).unwrap_err();
+
+        assert!(refused.contains("~/dsh"), "理由要说出记的是什么：{refused}");
+        assert!(refused.contains("测试连接"), "还要说怎么办：{refused}");
+        assert!(
+            fake.calls().is_empty(),
+            "不能拿一个 literal 波浪号去问那台机器：{:?}",
+            fake.calls()
+        );
+    }
+
     /// A data directory the user configured is the one the remote side is asked
-    /// about — the launcher does not quietly replace it with its own default.
+    /// about, and what that machine settles it to is what the record keeps — a
+    /// value the user typed is never replaced by the machine's own default.
     #[test]
     fn a_configured_data_directory_is_what_the_remote_is_asked_to_check() {
         let data = ScratchDir::new("host-data-dir");
         let fake = crate::remote::testing::FakeTransport::new().answering(
-            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::connection_stdout(
-                Some(("/usr/bin/node", "v22.11.0")),
-                Some(("/usr/bin/pnpm", "11.0.0")),
-            )),
+            crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::connection_stdout_with_dir(
+                    "/srv/dsh launcher",
+                    Some(("/usr/bin/node", "v22.11.0")),
+                    Some(("/usr/bin/pnpm", "11.0.0")),
+                ),
+            ),
         );
         let state = host_state(&data, crate::config::Config::default(), fake.clone());
         let mut host = remote_host("host-lab", "lab");
@@ -3460,7 +3602,7 @@ mod tests {
         assert_eq!(
             saved.host.data_dir,
             Some(std::path::PathBuf::from("/srv/dsh launcher")),
-            "远端报的默认值不该覆盖用户填的"
+            "那台机器 settle 出来的还是用户填的那个目录"
         );
     }
 

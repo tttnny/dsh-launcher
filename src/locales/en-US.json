@@ -1,6 +1,7 @@
 {
   "app": {
-    "mockBadge": "Browser preview"
+    "mockBadge": "Browser preview",
+    "launchInstanceMissing": "No instance named \"{ref}\" on this host"
   },
   "nav": {
     "instances": "Instances",
@@ -255,7 +256,7 @@
       "extraEnvInvalid": "Environment variables take one KEY=VALUE per line",
       "dataDir": "Data directory (optional)",
       "dataDirPlaceholder": "Empty = that machine's default",
-      "dataDirHint": "Where this host keeps its versions, dedicated DSH_HOMEs, logs and running record. Empty derives it from that machine's home directory (~/.local/share/dsh-launcher).",
+      "dataDirHint": "Where this host keeps its versions, dedicated DSH_HOMEs, logs and running record. Empty derives it from that machine's home directory (~/.local/share/dsh-launcher). A path like ~/dsh is expanded on that machine, settled by its first connection test.",
       "test": "Test connection",
       "retest": "Retry",
       "edit": "Edit",

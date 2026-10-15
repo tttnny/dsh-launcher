@@ -298,18 +298,22 @@ function hostName(hostId: string): string {
 /** The result when the machine answered — the facts below only exist then. */
 const passedTest = computed(() => (testResult.value?.test.ok ? testResult.value.test : null))
 
+/** The data directory the test found: the settled answer, the reason the typed
+ *  value could not be settled on that machine, or the fact it is not there yet. */
+function dataDirLine(test: ConnectionTest): string {
+  if (test.data_dir_problem) return test.data_dir_problem
+  const dir = test.data_dir ?? '—'
+  return test.data_dir_exists ? dir : `${dir} · ${t('settings.hosts.dataDirMissing')}`
+}
+
 /** One row per fact the connection test reports: label + mono value. */
 const testFacts = computed(() => {
   const test = passedTest.value
   if (!test) return []
-  const dataDir = test.data_dir ?? '—'
   return [
     { label: t('settings.hosts.system'), value: systemLine(test) },
     { label: t('settings.hosts.home'), value: test.home ?? '—' },
-    {
-      label: t('settings.hosts.dataDirResult'),
-      value: test.data_dir_exists ? dataDir : `${dataDir} · ${t('settings.hosts.dataDirMissing')}`,
-    },
+    { label: t('settings.hosts.dataDirResult'), value: dataDirLine(test) },
     { label: 'Node', value: toolLine(test.node) },
     { label: 'pnpm', value: toolLine(test.pnpm) },
   ]
