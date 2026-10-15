@@ -268,7 +268,7 @@
       "deleteRecords": "The versions, DSH_HOMEs and instance records filed under this host go with it, and its instances will no longer show up in the launcher.",
       "deleteLeft": "The remote data directory stays on that machine as it is (versions, dedicated DSH_HOMEs, logs, running record). To look at it yourself, run in a terminal:",
       "deleteCommandCopied": "Cleanup command copied",
-      "deleteRunning": "“{0}” keep running on that machine and the launcher will no longer see them; stopping them has to happen there."
+      "deleteRunning": "“{names}” keep running on that machine and the launcher will no longer see them; stopping them has to happen there."
     },
     "language": "Language",
     "theme": {

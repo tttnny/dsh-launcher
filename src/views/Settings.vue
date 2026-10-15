@@ -29,7 +29,7 @@ import DlIcon from '@/components/DlIcon.vue'
 // the sidebar, and duplicating it here was the old page's biggest confusion.
 
 const router = useRouter()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const store = useLauncherStore()
 
 const THEME_OPTIONS = computed<{ value: ThemeMode; label: string }[]>(() => [
@@ -343,6 +343,13 @@ const hostRunsOnDelete = computed(() => {
     })
     .map((inst) => inst.name)
 })
+
+/** Those names as one phrase for the confirmation. The message names all of
+ *  them, so they are joined here rather than passed as an interpolation list
+ *  (which would only ever render the first name). */
+const hostRunNames = computed(() =>
+  hostRunsOnDelete.value.join(locale.value === 'zh-CN' ? '、' : ', '),
+)
 
 /** What the user can run on the server to see what the launcher left behind. */
 function cleanupCommand(host: HostWithStatus | null): string {
@@ -970,7 +977,7 @@ onUnmounted(() => {
     >
       <p class="delete-warning">{{ t('settings.hosts.deleteWarning') }}</p>
       <p v-if="hostRunsOnDelete.length" class="delete-warning">
-        {{ t('settings.hosts.deleteRunning', hostRunsOnDelete) }}
+        {{ t('settings.hosts.deleteRunning', { names: hostRunNames }) }}
       </p>
       <p class="delete-warning">{{ t('settings.hosts.deleteRecords') }}</p>
       <p class="delete-warning">{{ t('settings.hosts.deleteLeft') }}</p>
