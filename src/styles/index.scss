@@ -591,6 +591,36 @@ body {
   }
 }
 
+// A machine that did not answer: the title says what could not be read, the
+// body is what it said, and the hint is what to do about it. Every Library pane
+// reports a failed read this way, so it is defined here instead of once per
+// pane. Pairs with `.dl-surface` for the card around it.
+.dl-failure {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+
+  .dl-failure-title {
+    font-size: var(--dl-text-md);
+    font-weight: 600;
+    color: var(--dl-ink);
+  }
+
+  .dl-failure-text {
+    font-size: var(--dl-text-sm);
+    line-height: 1.5;
+    color: var(--dl-danger);
+    overflow-wrap: anywhere;
+  }
+
+  .dl-failure-hint {
+    font-size: var(--dl-text-sm);
+    line-height: 1.5;
+    color: var(--dl-ink-3);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Overlays: sheets carry the real elevation in this app.
 // ---------------------------------------------------------------------------

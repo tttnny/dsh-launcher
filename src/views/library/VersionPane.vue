@@ -171,10 +171,10 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
       />
     </div>
 
-    <div v-if="store.hostError" class="dl-surface ver-unreachable">
-      <p class="ver-unreachable-title">{{ t('library.hostErrorTitle') }}</p>
-      <p class="ver-unreachable-text">{{ store.hostError }}</p>
-      <p class="ver-unreachable-hint">{{ t('library.hostErrorHint') }}</p>
+    <div v-if="store.versionError" class="dl-surface dl-failure">
+      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-text">{{ store.versionError }}</p>
+      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
     </div>
 
     <div v-else-if="installedVersions.length === 0" class="dl-surface">
@@ -334,32 +334,6 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
   .ver-label-spacer {
     flex: 1;
   }
-}
-
-.ver-unreachable {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px;
-}
-
-.ver-unreachable-title {
-  margin: 0;
-  font-size: var(--dl-text-md);
-  font-weight: 600;
-  color: var(--dl-ink);
-}
-
-.ver-unreachable-text {
-  margin: 0;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-danger);
-}
-
-.ver-unreachable-hint {
-  margin: 0;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-3);
 }
 
 .ver-channels {

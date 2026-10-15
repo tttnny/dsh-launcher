@@ -99,7 +99,16 @@ function viewProfiles(homeId: string) {
       </button>
     </div>
 
-    <div class="dl-surface home-list">
+    <!-- A DSH_HOME is a record the launcher keeps, so a machine that cannot be
+         reached still has its list here; only a failed read of the records
+         themselves replaces the list with what went wrong. -->
+    <div v-if="store.homeError" class="dl-surface dl-failure">
+      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-text">{{ store.homeError }}</p>
+      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+    </div>
+
+    <div v-else class="dl-surface home-list">
       <DlEmpty v-if="store.homes.length === 0" icon="tray" :description="t('homes.homesEmpty')" />
 
       <div v-for="h in store.homes" :key="h.id" class="home-row">

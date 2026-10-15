@@ -63,14 +63,21 @@ interface LauncherState {
   allHosts: boolean
   /** DSH_HOMEs per host. Records, so reading them never touches the machine. */
   homesByHost: Record<string, DshHome[]>
+  /**
+   * Why one host's DSH_HOMEs could not be read, by host id. A DSH_HOME is a
+   * record the launcher keeps itself (ADR-0006 §2), so a machine that is merely
+   * unreachable leaves this empty and its records stay on screen.
+   */
+  homeErrors: Record<string, string>
   /** Installed versions per host, as that host's own `/versions` answered. */
   versionsByHost: Record<string, DshVersion[]>
   /**
-   * Why one host's resources could not be read (「连不上」 and friends), by host
-   * id. A host that failed has **no** list here: showing the previous one would
-   * present yesterday's answer as today's.
+   * Why one host's installed versions could not be read (「连不上」 and friends),
+   * by host id. 「装了哪些」 is a claim only that machine can make, so a host that
+   * failed has **no** list here: showing the previous one would present
+   * yesterday's answer as today's.
    */
-  hostErrors: Record<string, string>
+  versionErrors: Record<string, string>
   /**
    * Instances of every host. The board labels each row with its machine, so two
    * instances called the same thing on two hosts stay two rows; nothing else
@@ -96,7 +103,7 @@ interface LauncherState {
    *  again; the refresh button is what asks again. */
   remoteVersionsByHost: Record<string, RemoteVersion[]>
   /** Why one host's installable list could not be read. Same rule as
-   *  `hostErrors`: no list is served from a failed call. */
+   *  `versionErrors`: no list is served from a failed call. */
   remoteErrors: Record<string, string>
   remoteLoading: boolean
   runtime: RuntimeStatus | null
@@ -110,8 +117,9 @@ export const useLauncherStore = defineStore('launcher', {
     currentHostId: LOCAL_HOST_ID,
     allHosts: true,
     homesByHost: {},
+    homeErrors: {},
     versionsByHost: {},
-    hostErrors: {},
+    versionErrors: {},
     instances: [],
     settings: {
       locale: 'zh-CN',
@@ -148,8 +156,10 @@ export const useLauncherStore = defineStore('launcher', {
     versions: (s) => s.versionsByHost[s.currentHostId] ?? [],
     /** The current host's DSH_HOMEs. */
     homes: (s) => s.homesByHost[s.currentHostId] ?? [],
-    /** Why the current host's resources could not be read; `''` when they could. */
-    hostError: (s) => s.hostErrors[s.currentHostId] ?? '',
+    /** Why the current host's DSH_HOMEs could not be read; `''` when they could. */
+    homeError: (s) => s.homeErrors[s.currentHostId] ?? '',
+    /** Why the current host's installed versions could not be read; `''` when they could. */
+    versionError: (s) => s.versionErrors[s.currentHostId] ?? '',
     /** The current host's installable versions (cached per host). */
     remoteVersions: (s) => s.remoteVersionsByHost[s.currentHostId] ?? [],
     /** Why the current host's installable list could not be read. */
@@ -322,23 +332,31 @@ export const useLauncherStore = defineStore('launcher', {
     },
 
     /**
-     * One host's DSH_HOMEs and installed versions, cached by host. Both are
-     * read together because a host that cannot be reached fails both, and one
-     * honest error per host (with no list beside it) is what the Library shows.
+     * One host's DSH_HOMEs and installed versions, cached by host.
+     *
+     * The two are read independently, because they are not the same kind of
+     * fact: a DSH_HOME is a record the launcher keeps itself (ADR-0006 §2), so
+     * a machine that cannot be reached still has its HOMEs on screen, while
+     * 「装了哪些版本」 is a claim only that machine can make and fails with it.
+     * Each list gets its own outcome, and a list that failed keeps no answer:
+     * the previous one would be yesterday's result presented as today's.
      */
     async loadHostResources(hostId: string) {
-      try {
-        const [homes, versions] = await Promise.all([
-          api.listHomes(hostId),
-          api.listVersions(hostId),
-        ])
-        this.homesByHost[hostId] = homes
-        this.versionsByHost[hostId] = versions
-        delete this.hostErrors[hostId]
-      } catch (e) {
-        // No list is kept for a host that failed: the previous one would be
-        // yesterday's answer presented as today's (ADR-0006).
-        this.hostErrors[hostId] = String(e)
+      const [homes, versions] = await Promise.allSettled([
+        api.listHomes(hostId),
+        api.listVersions(hostId),
+      ])
+      if (homes.status === 'fulfilled') {
+        this.homesByHost[hostId] = homes.value
+        delete this.homeErrors[hostId]
+      } else {
+        this.homeErrors[hostId] = String(homes.reason)
+      }
+      if (versions.status === 'fulfilled') {
+        this.versionsByHost[hostId] = versions.value
+        delete this.versionErrors[hostId]
+      } else {
+        this.versionErrors[hostId] = String(versions.reason)
       }
     },
 
@@ -387,7 +405,8 @@ export const useLauncherStore = defineStore('launcher', {
         if (!changed) continue
         delete this.versionsByHost[host.id]
         delete this.remoteVersionsByHost[host.id]
-        delete this.hostErrors[host.id]
+        delete this.homeErrors[host.id]
+        delete this.versionErrors[host.id]
         delete this.remoteErrors[host.id]
         if (host.id === this.currentHostId) currentWentStale = true
       }
