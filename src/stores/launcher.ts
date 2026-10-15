@@ -229,8 +229,8 @@ export const useLauncherStore = defineStore('launcher', {
       this.pendingInstallTasks[taskId] = version
     },
 
-    async checkRuntime() {
-      this.runtime = await api.getRuntimeStatus()
+    async checkRuntime(force = false) {
+      this.runtime = await api.getRuntimeStatus(force)
     },
 
     async refreshRemoteVersions() {

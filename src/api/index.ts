@@ -42,7 +42,11 @@ import {
 export const api = {
   isTauri,
 
-  getRuntimeStatus: () => call<RuntimeStatus>('get_runtime_status'),
+  /** `force` 为 true 时忽略缓存，重新读一次系统环境变量（供「重新检测」按钮使用）。 */
+  getRuntimeStatus: (force = false) => call<RuntimeStatus>('get_runtime_status', { force }),
+  /** 指定某个工具的可执行文件；path 为 null 表示取消指定，回到自动检测。返回刷新后的状态。 */
+  setToolchainOverride: (tool: 'node' | 'pnpm', path: string | null) =>
+    call<RuntimeStatus>('set_toolchain_override', { tool, path }),
 
   listHomes: () => call<DshHome[]>('list_homes'),
   createHome: (name: string, path: string) => call<DshHome>('create_home', { name, path }),

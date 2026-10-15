@@ -149,14 +149,7 @@ pub(crate) fn pnpm_store_flags(store_dir: &Path, loglevel: &str) -> Vec<String> 
 /// not. [`crate::runtime::PROBE_CWD`] makes the answer depend only on the
 /// binary.
 async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
-    let mut cmd = tokio::process::Command::new(prog);
-    crate::process::hide_console(&mut cmd);
-    cmd.current_dir(crate::runtime::PROBE_CWD);
-    let out = cmd.arg("--version").output().await.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&out.stdout).to_string();
+    let raw = crate::runtime::probe_version(prog).await?;
     let major = pnpm_major(&raw);
     Some((raw, major))
 }
@@ -164,19 +157,47 @@ async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
 /// The pnpm executable the launcher should drive installs with: the first
 /// candidate whose major is acceptable, plus its version output. Candidates
 /// come from the same scan the setup page reports (see
-/// [`crate::runtime::candidate_paths`]), so the two never disagree.
+/// [`crate::runtime::tool_candidates`]), so the two never disagree — including
+/// the executable the user picked by hand, which `manual` carries and which is
+/// tried before anything detected.
 ///
 /// `note` receives a human-readable reason for each candidate that was
 /// skipped, so a user with pnpm 9 learns why it was not used instead of seeing
-/// a bare "not found".
+/// a bare "not found" — and a user whose hand-picked pnpm stopped working
+/// learns that too.
 pub(crate) async fn resolve_pnpm(
+    manual: Option<&Path>,
     note: &mut (dyn FnMut(String) + Send),
 ) -> Option<(PathBuf, String)> {
-    for candidate in crate::runtime::candidate_paths("pnpm") {
+    let candidates = crate::runtime::tool_candidates("pnpm", manual).await;
+    resolve_pnpm_from(candidates, note).await
+}
+
+/// The walk itself over a candidate list the caller assembled, so the decision
+/// ("which of these may drive an install") is testable without a login shell or
+/// the machine's own PATH.
+async fn resolve_pnpm_from(
+    candidates: Vec<(PathBuf, crate::runtime::ToolSource)>,
+    note: &mut (dyn FnMut(String) + Send),
+) -> Option<(PathBuf, String)> {
+    for (candidate, source) in candidates {
+        let is_manual = source == crate::runtime::ToolSource::Manual;
         if !candidate.is_file() {
+            if is_manual {
+                note(format!(
+                    "你指定的 pnpm 不存在：{}，已跳过",
+                    candidate.display()
+                ));
+            }
             continue;
         }
         let Some((raw, major)) = probe_pnpm_version(&candidate).await else {
+            if is_manual {
+                note(format!(
+                    "你指定的 pnpm 无法运行：{}，已跳过",
+                    candidate.display()
+                ));
+            }
             continue;
         };
         match major {
@@ -209,14 +230,24 @@ pub(crate) fn pnpm_missing_error() -> String {
 
 /// Resolves a pnpm executable for a background task: the same decision, with
 /// the skip reasons also landing in the task log so the user sees why an
-/// installed pnpm was not used.
+/// installed pnpm was not used. A pnpm the user picked by hand on the setup
+/// page is the one this drives, so version installs and source builds run the
+/// same binary the page reports.
 pub(crate) async fn ensure_pnpm_for_task(
     app: &AppHandle,
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
+    let manual = state
+        .config
+        .lock()
+        .unwrap()
+        .settings
+        .toolchain_overrides
+        .pnpm
+        .clone();
     let mut notes = Vec::new();
-    match resolve_pnpm(&mut |s| notes.push(s)).await {
+    match resolve_pnpm(manual.as_deref(), &mut |s| notes.push(s)).await {
         Some((path, version)) => {
             for note in &notes {
                 crate::log_warn!("{note}");
@@ -244,6 +275,77 @@ pub(crate) async fn ensure_pnpm_for_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::ToolSource;
+
+    /// A stand-in pnpm: a script that prints the version it was told to, so the
+    /// candidate walk can be driven against real executables without depending
+    /// on what the test machine has installed.
+    fn fake_pnpm(tag: &str, version: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("pnpm");
+        std::fs::write(&exe, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, exe)
+    }
+
+    #[tokio::test]
+    async fn the_hand_picked_pnpm_is_the_one_install_flows_drive() {
+        let (dir, exe) = fake_pnpm("pnpm-manual", "12.4.2");
+        let mut notes = Vec::new();
+        let picked = resolve_pnpm_from(
+            vec![
+                (exe.clone(), ToolSource::Manual),
+                (dir.join("missing"), ToolSource::System),
+            ],
+            &mut |s| notes.push(s),
+        )
+        .await;
+        assert_eq!(picked, Some((exe, "12.4.2".to_string())));
+        assert!(notes.is_empty(), "nothing was skipped: {notes:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_unusable_hand_picked_pnpm_falls_back_and_says_so() {
+        // A pnpm below the floor is skipped with the measured major in the note,
+        // and the walk continues instead of failing the install outright.
+        let (old_dir, old) = fake_pnpm("pnpm-old", "9.15.0");
+        let (good_dir, good) = fake_pnpm("pnpm-good", "12.4.2");
+        let mut notes = Vec::new();
+        let picked = resolve_pnpm_from(
+            vec![
+                (old.clone(), ToolSource::Manual),
+                (good.clone(), ToolSource::System),
+            ],
+            &mut |s| notes.push(s),
+        )
+        .await;
+        assert_eq!(picked, Some((good, "12.4.2".to_string())));
+        assert!(
+            notes.iter().any(|n| n.contains("pnpm 9") && n.contains(&old.display().to_string())),
+            "the user has to be told why their pnpm was passed over: {notes:?}"
+        );
+
+        // A pick that no longer exists is reported too, not just silently
+        // skipped — that is what tells the user their path went stale.
+        let mut notes = Vec::new();
+        let gone = old_dir.join("gone");
+        assert!(resolve_pnpm_from(vec![(gone.clone(), ToolSource::Manual)], &mut |s| notes.push(s))
+            .await
+            .is_none());
+        assert!(
+            notes.iter().any(|n| n.contains(&gone.display().to_string())),
+            "a stale pick must be named: {notes:?}"
+        );
+
+        std::fs::remove_dir_all(&old_dir).ok();
+        std::fs::remove_dir_all(&good_dir).ok();
+    }
 
     #[test]
     fn pnpm_major_parses_version_output() {

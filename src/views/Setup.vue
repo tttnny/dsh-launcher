@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
+import { api } from '@/api'
+import type { ToolSource } from '@/api/types'
 import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
@@ -10,6 +12,16 @@ import DlIcon from '@/components/DlIcon.vue'
 // The toolchain check. It states the same version floors the backend resolver
 // enforces and offers the install command the backend picked for this machine,
 // so the page never invents a number or a package manager.
+//
+// The verdict is per source: whether the tool comes from the user's login-shell
+// PATH (the one a terminal would find), from a directory the launcher searched
+// on its own, or from a path the user picked. Anything but `system` means the
+// terminal does not see it, so those tools also get the picker.
+
+type ToolId = 'node' | 'pnpm'
+
+const TOOL_IDS: ToolId[] = ['node', 'pnpm']
+const TOOL_LABELS: Record<ToolId, string> = { node: 'Node.js', pnpm: 'pnpm' }
 
 const router = useRouter()
 const { t } = useI18n()
@@ -17,11 +29,37 @@ const { copy } = useCopy()
 const store = useLauncherStore()
 
 const checking = ref(false)
+const picking = ref<ToolId | null>(null)
 
-const node = computed(() => store.runtime?.node)
-const pnpm = computed(() => store.runtime?.pnpm)
-const nodeOk = computed(() => node.value?.installed ?? false)
-const pnpmOk = computed(() => pnpm.value?.installed ?? false)
+function statusOf(id: ToolId) {
+  return (id === 'node' ? store.runtime?.node : store.runtime?.pnpm) ?? null
+}
+
+interface ToolRow {
+  id: ToolId
+  name: string
+  ok: boolean
+  version: string | null
+  path: string | null
+  source: ToolSource | null
+}
+
+const tools = computed<ToolRow[]>(() =>
+  TOOL_IDS.map((id) => {
+    const status = statusOf(id)
+    return {
+      id,
+      name: TOOL_LABELS[id],
+      ok: status?.installed ?? false,
+      version: status?.version ?? null,
+      path: status?.path ?? null,
+      source: status?.source ?? null,
+    }
+  }),
+)
+
+const nodeOk = computed(() => statusOf('node')?.installed ?? false)
+const pnpmOk = computed(() => statusOf('pnpm')?.installed ?? false)
 // Node is what DSH needs to boot; pnpm is needed to install a version and to
 // manage plugins, and the launcher no longer installs one itself.
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
@@ -30,6 +68,31 @@ const belowRecommended = computed(() => store.runtime?.node_below_recommended ??
 const requirements = computed(() => store.runtime?.requirements)
 const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
 const pnpmCommand = computed(() => requirements.value?.pnpm_install_command ?? '')
+
+const overridePath = (id: ToolId) => statusOf(id)?.manual_path ?? null
+// A pick that no longer resolves: the backend falls back to its own detection
+// and still reports the chosen path, so the page can say so and let the user
+// replace or clear it.
+const overrideBroken = (id: ToolId) => {
+  const status = statusOf(id)
+  return !!status?.manual_path && status.source !== 'manual'
+}
+
+// The tools the picker is worth showing for: a terminal would not find them
+// (missing, or found by the launcher on its own), or the user already picked a
+// path and must be able to see, change and clear it — including a pick that has
+// gone stale while the tool itself is back in the system PATH.
+const manualTools = computed(() =>
+  tools.value.filter((tool) => !tool.ok || tool.source !== 'system' || !!overridePath(tool.id)),
+)
+
+function sourceLabel(tool: ToolRow): string {
+  if (!tool.ok) return t('setup.sourceMissing')
+  if (tool.source === 'system') return t('setup.sourceSystem')
+  if (tool.source === 'fallback') return t('setup.sourceFallback')
+  if (tool.source === 'manual') return t('setup.sourceManual')
+  return ''
+}
 
 const copied = ref('')
 
@@ -41,10 +104,11 @@ async function copyCommand(text: string, key: string) {
   }, 2000)
 }
 
+/** Re-reads the system environment variables: the user may have just fixed their PATH. */
 async function recheck() {
   checking.value = true
   try {
-    await store.checkRuntime()
+    await store.checkRuntime(true)
     if (nodeOk.value && pnpmOk.value) Message.success(t('setup.allReady'))
   } finally {
     checking.value = false
@@ -58,20 +122,42 @@ async function onFocus() {
   await store.checkRuntime()
 }
 
-onMounted(() => window.addEventListener('focus', onFocus))
-onUnmounted(() => window.removeEventListener('focus', onFocus))
-
-interface ToolRow {
-  name: string
-  ok: boolean
-  version?: string | null
-  path?: string | null
+/** Points one tool at the file the user picked; `null` goes back to automatic detection. */
+async function applyOverride(id: ToolId, path: string | null) {
+  try {
+    store.runtime = await api.setToolchainOverride(id, path)
+    Message.success(
+      t(path ? 'setup.overrideApplied' : 'setup.overrideCleared', { tool: TOOL_LABELS[id] }),
+    )
+  } catch (e) {
+    Message.error(String(e))
+  }
 }
 
-const tools = computed<ToolRow[]>(() => [
-  { name: 'Node.js', ok: nodeOk.value, version: node.value?.version, path: node.value?.path },
-  { name: 'pnpm', ok: pnpmOk.value, version: pnpm.value?.version, path: pnpm.value?.path },
-])
+async function pickFile(id: ToolId) {
+  if (!api.isTauri) {
+    Message.info(t('setup.browserPickHint'))
+    return
+  }
+  picking.value = id
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    // No filters: node and pnpm carry no file extension, so a filter would hide them.
+    const picked = await open({ multiple: false })
+    if (typeof picked === 'string') await applyOverride(id, picked)
+  } catch (e) {
+    Message.error(String(e))
+  } finally {
+    picking.value = null
+  }
+}
+
+function clearOverride(id: ToolId) {
+  return applyOverride(id, null)
+}
+
+onMounted(() => window.addEventListener('focus', onFocus))
+onUnmounted(() => window.removeEventListener('focus', onFocus))
 </script>
 
 <template>
@@ -113,6 +199,7 @@ const tools = computed<ToolRow[]>(() => [
           <div class="tool-info">
             <span class="tool-name">{{ tool.name }}</span>
             <span v-if="tool.ok && tool.path" class="tool-path dl-mono">{{ tool.path }}</span>
+            <span class="tool-source">{{ sourceLabel(tool) }}</span>
           </div>
           <span class="dl-chip">{{ tool.ok ? tool.version : t('setup.missing') }}</span>
         </div>
@@ -122,6 +209,42 @@ const tools = computed<ToolRow[]>(() => [
         <DlIcon name="alert" :size="13" />
         {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
       </p>
+    </section>
+
+    <!-- The two ways out of a missing or non-system toolchain: point the
+         launcher at the file, or fix PATH in a terminal and re-check. Shown for
+         every tool the terminal would not find, plus any tool the user already
+         picked, so their choice stays visible and revisable. -->
+    <section v-if="manualTools.length" class="dl-section">
+      <div class="dl-section-label">{{ t('setup.manualSection') }}</div>
+
+      <div v-for="tool in manualTools" :key="tool.id" class="dl-surface pick">
+        <div class="pick-head">
+          <span class="pick-title">{{ t('setup.manualToolTitle', { tool: tool.name }) }}</span>
+          <span class="pick-desc">{{ t('setup.manualDesc', { tool: tool.name }) }}</span>
+          <span v-if="overridePath(tool.id)" class="pick-path dl-mono">
+            {{ overridePath(tool.id) }}
+          </span>
+          <span v-if="overrideBroken(tool.id)" class="pick-broken">
+            <DlIcon name="alert" :size="13" />
+            {{ t('setup.manualBroken') }}
+          </span>
+        </div>
+        <div class="pick-actions">
+          <button class="dl-btn dl-btn--quiet" :disabled="picking === tool.id" @click="pickFile(tool.id)">
+            <DlIcon name="folder" :size="13" />
+            {{ t('setup.pickFile') }}
+          </button>
+          <button
+            v-if="overridePath(tool.id)"
+            class="dl-btn dl-btn--quiet"
+            :disabled="picking === tool.id"
+            @click="clearOverride(tool.id)"
+          >
+            {{ t('setup.clearOverride') }}
+          </button>
+        </div>
+      </div>
     </section>
 
     <section v-if="!allOk" class="dl-section">
@@ -209,6 +332,11 @@ const tools = computed<ToolRow[]>(() => [
   white-space: nowrap;
 }
 
+.tool-source {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+}
+
 .setup-note {
   display: flex;
   align-items: center;
@@ -225,6 +353,56 @@ const tools = computed<ToolRow[]>(() => [
   & + .guide {
     margin-top: 12px;
   }
+}
+
+.pick {
+  padding: 16px;
+
+  & + .pick {
+    margin-top: 12px;
+  }
+}
+
+.pick-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 12px;
+}
+
+.pick-title {
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.pick-desc {
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+}
+
+.pick-path {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-broken {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-warn);
+}
+
+.pick-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .guide-head {

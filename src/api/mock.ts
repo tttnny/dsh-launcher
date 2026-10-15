@@ -19,6 +19,7 @@ import type {
   TaskInfo,
   TaskProgress,
   TaskLog,
+  ToolStatus,
 } from './types'
 
 export type Listener<T> = (payload: T) => void
@@ -141,6 +142,53 @@ const mockProfiles: Record<string, string[]> = {}
 // instance answers to `/api/pluginManager/listBundles` (localized titles, an
 // installation-only layer, an unmounted layer, and one broken layer).
 const mockNativeStore: Record<string, PluginView> = {}
+// The hand-picked executables of the browser preview: there is no backend here,
+// so a path chosen on the setup page is only remembered in this module.
+const mockToolchainOverrides: Record<'node' | 'pnpm', string | null> = { node: null, pnpm: null }
+
+/**
+ * The preview's runtime status: both tools are assumed to be in the system
+ * environment variables, and a tool that was picked reports that path instead —
+ * the same "the pick wins" rule the real backend applies.
+ */
+function mockRuntimeStatus(): RuntimeStatus {
+  const base = {
+    node: { version: 'v22.14.0', path: '/usr/local/bin/node' },
+    pnpm: { version: '11.17.0', path: '/usr/local/bin/pnpm' },
+  }
+  const tool = (name: 'node' | 'pnpm'): ToolStatus => {
+    const manual = mockToolchainOverrides[name]
+    if (manual) {
+      return {
+        installed: true,
+        version: base[name].version,
+        path: manual,
+        source: 'manual',
+        manual_path: manual,
+      }
+    }
+    return {
+      installed: true,
+      version: base[name].version,
+      path: base[name].path,
+      source: 'system',
+      manual_path: null,
+    }
+  }
+  return {
+    node: tool('node'),
+    pnpm: tool('pnpm'),
+    managers: ['brew'],
+    node_below_recommended: false,
+    requirements: {
+      min_pnpm_major: 11,
+      recommended_node_major: 20,
+      pnpm_install_command: 'npm install -g pnpm',
+      node_install_command: 'brew install node',
+    },
+    system_env_shell: '/bin/zsh',
+  }
+}
 
 /**
  * A refusal, shaped exactly like the backend's `ChangeOutcome` (design §4d/§4b):
@@ -488,21 +536,15 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
 
       return task.id as T
     }
-    case 'get_runtime_status': {
-      // Browser preview: assume Node + pnpm are available so the UI is usable.
-      const mockRuntime: RuntimeStatus = {
-        node: { installed: true, version: 'v22.14.0', path: '/usr/local/bin/node' },
-        pnpm: { installed: true, version: '11.17.0', path: '/usr/local/bin/pnpm' },
-        managers: ['brew'],
-        node_below_recommended: false,
-        requirements: {
-          min_pnpm_major: 11,
-          recommended_node_major: 20,
-          pnpm_install_command: 'npm install -g pnpm',
-          node_install_command: 'brew install node',
-        },
-      }
-      return mockRuntime as T
+    case 'get_runtime_status':
+      // Browser preview: assume Node + pnpm are in the system PATH so the UI is usable.
+      return mockRuntimeStatus() as T
+    case 'set_toolchain_override': {
+      const tool = args?.tool
+      if (tool !== 'node' && tool !== 'pnpm') fail('工具名必须是 node 或 pnpm')
+      const path = typeof args?.path === 'string' ? args.path.trim() : ''
+      mockToolchainOverrides[tool] = path || null
+      return mockRuntimeStatus() as T
     }
     case 'list_tasks': {
       return [...mockTasks.values()].sort((a, b) => b.created_at - a.created_at) as T

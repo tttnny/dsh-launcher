@@ -94,3 +94,15 @@ _Avoid_: 资料库、设置
 **自检 (Check)**：
 依赖树预检（`doctor`）。它是建议性的：发现的问题上报、记日志、不阻止启动。
 _Avoid_: 健康检查、诊断
+
+**系统环境变量 (System environment)**：
+用户在终端里用的那一套环境变量，`PATH` 由登录 shell（`~/.zshrc` / `~/.zprofile`）决定。
+图形界面应用从 Finder 启动时继承不到它，所以环境检测另起一个登录 shell 去读，把它当作
+「本机有没有 Node / pnpm」的基准（ADR-0005）。
+_Avoid_: 系统 PATH、全局环境
+
+**手动指定的可执行文件 (Manual toolchain path)**：
+用户在环境检测页亲自选定的 node / pnpm 可执行文件，优先于一切探测，记在
+`settings.toolchain_overrides`。与 `toolchain`（每次探测都会重写的缓存）不同，只有用户
+能改动它。
+_Avoid_: 自定义路径、覆盖路径

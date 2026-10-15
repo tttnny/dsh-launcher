@@ -1,14 +1,35 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::State;
 
 use crate::AppState;
+
+/// Where a resolved executable came from: the user pointed at it, the user's
+/// login shell has it on PATH, or the launcher found it in a known install
+/// directory on its own. The setup page reports this so "环境已就绪" can say
+/// which of the three it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolSource {
+    Manual,
+    System,
+    Fallback,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolStatus {
     pub installed: bool,
     pub version: Option<String>,
     pub path: Option<String>,
+    /// Which candidate the executable at `path` came from; `None` when the tool
+    /// was not found at all.
+    pub source: Option<ToolSource>,
+    /// The path the user picked by hand, if any. Reported even when it can no
+    /// longer be run, so the page can say that the choice has stopped working
+    /// instead of silently showing a different tool.
+    pub manual_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -28,6 +49,10 @@ pub struct RuntimeStatus {
     /// enforce them so the UI copy cannot drift out of sync with what the
     /// backend actually accepts.
     pub requirements: ToolchainRequirements,
+    /// The shell the system environment was read from (e.g. `/bin/zsh`), or
+    /// `None` when that read failed — in which case the system environment
+    /// falls back to the PATH the app itself inherited.
+    pub system_env_shell: Option<String>,
 }
 
 /// What the launcher needs from the user's toolchain. Sent to the frontend so
@@ -82,63 +107,331 @@ fn node_install_command(managers: &[String]) -> String {
 /// threshold, never a hard gate.
 pub(crate) const RECOMMENDED_NODE_MAJOR: u64 = 20;
 
-/// Every path a program of this name may live at, in resolution order: the
-/// inherited PATH first (so an explicitly configured toolchain wins), then the
-/// known tool directories. Shared by the UI probe and by
-/// [`crate::toolchain`]'s resolver, so "what the setup page reports" and "what
-/// the launcher actually executes" can never disagree.
-pub(crate) fn candidate_paths(program: &str) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    for dir in tool_fallback_bins() {
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
+/// Every executable of this name the launcher may run, in resolution order, each
+/// tagged with where it came from: what the user picked by hand first, then the
+/// directories of the system environment (the user's login shell PATH), then the
+/// known tool directories. A path that appears twice keeps only its first —
+/// earlier entries are the more authoritative source.
+///
+/// Shared by the UI probe and by [`crate::toolchain`]'s resolver, so "what the
+/// setup page reports" and "what the launcher actually executes" can never
+/// disagree.
+pub(crate) fn candidates(
+    program: &str,
+    manual: Option<&Path>,
+    system_dirs: &[PathBuf],
+) -> Vec<(PathBuf, ToolSource)> {
+    candidates_with(program, manual, system_dirs, &tool_fallback_bins())
+}
+
+/// [`candidates`] with the known tool directories injected, so a test can drive
+/// the resolution without touching the machine's own node.
+pub(crate) fn candidates_with(
+    program: &str,
+    manual: Option<&Path>,
+    system_dirs: &[PathBuf],
+    fallback_dirs: &[PathBuf],
+) -> Vec<(PathBuf, ToolSource)> {
+    let mut out: Vec<(PathBuf, ToolSource)> = Vec::new();
+    if let Some(manual) = manual {
+        out.push((manual.to_path_buf(), ToolSource::Manual));
+    }
+    out.extend(
+        system_dirs
+            .iter()
+            .map(|dir| (exe_in(dir, program), ToolSource::System)),
+    );
+
+    for dir in fallback_dirs {
+        let exe = exe_in(dir, program);
+        // A system directory may be a per-shell temporary: fnm hands every shell
+        // its own `fnm_multishells/<pid>_<stamp>/bin`, holding hard links to the
+        // version it selected, so a binding made there dies with that shell while
+        // the same binary also sits in fnm's durable directory. When a system
+        // entry and a known directory hold the *same file*, the durable spelling
+        // is the one that gets bound; the source stays `System`, because the
+        // user's terminal does reach this very file.
+        let same = out
+            .iter()
+            .position(|(seen, source)| *source == ToolSource::System && same_file(seen, &exe));
+        match same {
+            Some(index) => out[index].0 = exe,
+            None => out.push((exe, ToolSource::Fallback)),
         }
     }
 
-    let mut out = Vec::with_capacity(dirs.len());
-    for dir in dirs {
-        let exe = if dir.as_os_str().is_empty() {
-            PathBuf::from(program)
-        } else {
-            dir.join(program)
-        };
-        if !out.contains(&exe) {
-            out.push(exe);
-        }
-    }
+    // The same path can be reached twice (a directory named twice on the PATH,
+    // or the system environment naming one of the known directories). The first
+    // entry keeps its source.
+    let mut seen: Vec<PathBuf> = Vec::new();
+    out.retain(|(exe, _)| {
+        let duplicate = seen.iter().any(|s| crate::config::paths_equal(s, exe));
+        seen.push(exe.clone());
+        !duplicate
+    });
     out
 }
 
-async fn probe(program: &str) -> ToolStatus {
+fn exe_in(dir: &Path, program: &str) -> PathBuf {
+    // An empty PATH entry means the current directory.
+    if dir.as_os_str().is_empty() {
+        PathBuf::from(program)
+    } else {
+        dir.join(program)
+    }
+}
+
+/// [`candidates`] with the system environment resolved for this call. Async
+/// because the system directories are read from the user's login shell (unless
+/// that read is still cached).
+pub(crate) async fn tool_candidates(
+    program: &str,
+    manual: Option<&Path>,
+) -> Vec<(PathBuf, ToolSource)> {
+    let env = system_env(false).await;
+    candidates(program, manual, &env.dirs)
+}
+
+/// Whether two paths name the same file on disk rather than the same string.
+/// On Unix that is device and inode, so hard links count (fnm's per-shell
+/// directories are hard links into the real installation) while an ordinary copy
+/// does not.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Which source produced the executable at `path`, decided by the candidate
+/// list itself: the first entry that is that same file wins, so the answer can
+/// never contradict what the resolver actually walked. A bound path that today's
+/// list spells differently — the same tool reached through another directory, or
+/// the per-shell temporary an earlier read named — still matches by file.
+pub(crate) fn source_of(
+    program: &str,
+    path: &Path,
+    manual: Option<&Path>,
+    system_dirs: &[PathBuf],
+) -> ToolSource {
+    let list = candidates(program, manual, system_dirs);
+    if let Some((_, source)) = list
+        .iter()
+        .find(|(exe, _)| crate::config::paths_equal(exe, path))
+    {
+        return *source;
+    }
+    if let Some((_, source)) = list.iter().find(|(exe, _)| same_file(exe, path)) {
+        return *source;
+    }
+    ToolSource::Fallback
+}
+
+/// Runs `<exe> --version` from a neutral cwd and returns its trimmed stdout, or
+/// `None` when it cannot be run or exits non-zero.
+///
+/// The cwd matters: pnpm resolves a `packageManager` field from the working
+/// directory and reports *that* version — a corepack shim would even download
+/// it — so [`PROBE_CWD`] is what makes the reported version depend only on the
+/// binary.
+pub(crate) async fn probe_version(exe: &Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(exe);
+    crate::process::hide_console(&mut cmd);
+    cmd.current_dir(PROBE_CWD);
+    cmd.stdin(std::process::Stdio::null());
+    let out = cmd.arg("--version").output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The first runnable executable of this name, in [`candidates`] order.
+async fn probe_tool(program: &str, manual: Option<&Path>) -> ToolStatus {
     // GUI-launched apps inherit a minimal PATH with no shell rc, so a plain
     // Command::new(program) misses fnm/nvm/Homebrew/user-installed tools.
-    // candidate_paths walks PATH and then the known tool directories
-    // (fnm/nvm layouts, PNPM_HOME, Homebrew, …).
-    for exe in candidate_paths(program) {
+    // The candidate list walks the user's shell PATH first and then the known
+    // tool directories (fnm/nvm layouts, PNPM_HOME, Homebrew, …).
+    let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
+    for (exe, source) in tool_candidates(program, manual).await {
         if !exe.is_file() {
             continue;
         }
-        let mut cmd = tokio::process::Command::new(&exe);
-        crate::process::hide_console(&mut cmd);
-        // A neutral cwd keeps the reported version honest (see PROBE_CWD).
-        cmd.current_dir(PROBE_CWD);
-        if let Ok(out) = cmd.arg("--version").output().await {
-            if out.status.success() {
-                let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return ToolStatus {
-                    installed: true,
-                    version: Some(version),
-                    path: Some(exe.to_string_lossy().into_owned()),
-                };
-            }
+        if let Some(version) = probe_version(&exe).await {
+            return ToolStatus {
+                installed: true,
+                version: Some(version),
+                path: Some(exe.to_string_lossy().into_owned()),
+                source: Some(source),
+                manual_path,
+            };
         }
     }
     ToolStatus {
         installed: false,
         version: None,
         path: None,
+        source: None,
+        manual_path,
     }
+}
+
+/// How long a shell read is reused. The setup page asks for a status every time
+/// it is opened or focused, and each read costs a full interactive shell
+/// startup, so the answer is cached briefly instead of spawning one per call.
+const SYSTEM_ENV_TTL: Duration = Duration::from_secs(30);
+
+/// A shell that hangs — a `.zshrc` waiting on input, a slow plugin manager —
+/// must not hang the launcher with it.
+const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+const SHELL_PATH_MARK: &str = "<<<DSH-PATH>>>";
+const SHELL_PATH_END: &str = "<<<DSH-END>>>";
+
+/// Prints PATH between two markers. `.zshrc` files routinely print something of
+/// their own (plugin manager banners, version notices), so the whole stdout is
+/// not usable as the PATH — only what sits between the markers is.
+const SHELL_PATH_SCRIPT: &str = "printf '<<<DSH-PATH>>>%s<<<DSH-END>>>' \"$PATH\"";
+
+/// The system environment as the launcher sees it: the directories a name
+/// resolves in, and the shell they were read from (`None` when the read failed
+/// and `dirs` are the PATH this app inherited instead).
+#[derive(Clone, Debug)]
+struct SystemEnv {
+    dirs: Vec<PathBuf>,
+    shell: Option<String>,
+    at: Instant,
+}
+
+static SYSTEM_ENV: Mutex<Option<SystemEnv>> = Mutex::new(None);
+
+/// The PATH this process inherited at launch, captured before
+/// [`ensure_macos_paths`] appends the known tool directories to the process
+/// PATH. Afterwards `std::env::var("PATH")` is no longer the inherited value,
+/// so this is the only honest record of it.
+static INHERITED_PATH: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Remembers the inherited PATH. Called before the process PATH is first
+/// mutated; a later caller gets whatever was stored then.
+fn capture_inherited_path() {
+    INHERITED_PATH.get_or_init(|| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect()
+    });
+}
+
+fn inherited_path_dirs() -> Vec<PathBuf> {
+    capture_inherited_path();
+    INHERITED_PATH.get().cloned().unwrap_or_default()
+}
+
+fn cached_system_env() -> Option<SystemEnv> {
+    match SYSTEM_ENV.lock().unwrap().as_ref() {
+        Some(cached) if cached.at.elapsed() < SYSTEM_ENV_TTL => Some(cached.clone()),
+        _ => None,
+    }
+}
+
+/// The system environment, read from the user's login shell and cached for
+/// [`SYSTEM_ENV_TTL`]. `force` skips the cache (the setup page's re-check: the
+/// user just edited their shell config and wants that honoured now).
+///
+/// A failed read is not an error the user has to act on: the launcher keeps
+/// working with the PATH it inherited, and the failure is logged instead.
+async fn system_env(force: bool) -> SystemEnv {
+    if !force {
+        if let Some(cached) = cached_system_env() {
+            return cached;
+        }
+    }
+    let env = match read_shell_path().await {
+        Ok((shell, path)) => SystemEnv {
+            dirs: std::env::split_paths(&path).collect(),
+            shell: Some(shell),
+            at: Instant::now(),
+        },
+        Err(reason) => {
+            crate::log_warn!("读取系统环境变量失败（{reason}），改用应用继承的 PATH");
+            SystemEnv {
+                dirs: inherited_path_dirs(),
+                shell: None,
+                at: Instant::now(),
+            }
+        }
+    };
+    *SYSTEM_ENV.lock().unwrap() = Some(env.clone());
+    env
+}
+
+/// The shell whose environment counts as "the system's": the user's login shell
+/// if it is known, otherwise the platform default.
+fn login_shell() -> String {
+    match std::env::var("SHELL") {
+        Ok(shell) if !shell.trim().is_empty() => shell.trim().to_string(),
+        _ => {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh".to_string()
+            } else {
+                "/bin/bash".to_string()
+            }
+        }
+    }
+}
+
+/// Reads PATH out of the user's login shell: `Ok((shell, path))`, or a reason
+/// why the read failed.
+///
+/// A GUI app inherits neither the shell's PATH nor its rc files, so without
+/// this a user who exports PATH in `.zshrc` — nvm, fnm, a custom Node — is
+/// invisible to the launcher even though the same command works in their
+/// terminal.
+async fn read_shell_path() -> Result<(String, String), String> {
+    let shell = login_shell();
+    let mut cmd = tokio::process::Command::new(&shell);
+    crate::process::hide_console(&mut cmd);
+    cmd.arg("-ilc").arg(SHELL_PATH_SCRIPT);
+    cmd.stdin(std::process::Stdio::null());
+    // The timeout below drops the future; killing on drop is what keeps a hung
+    // shell from being left behind as an orphan process.
+    cmd.kill_on_drop(true);
+
+    let output = match tokio::time::timeout(SHELL_PROBE_TIMEOUT, cmd.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(format!("无法启动 {shell}：{e}")),
+        Err(_) => {
+            return Err(format!(
+                "{shell} 没有在 {} 秒内返回",
+                SHELL_PROBE_TIMEOUT.as_secs()
+            ))
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match parse_shell_path(&stdout) {
+        Some(path) => Ok((shell, path)),
+        None => Err(format!("{shell} 的输出里没有 PATH 标记")),
+    }
+}
+
+/// Pulls PATH out of a shell's stdout: everything between
+/// [`SHELL_PATH_MARK`] and [`SHELL_PATH_END`], regardless of whatever else the
+/// shell printed. `None` when either marker is missing or the value is empty.
+fn parse_shell_path(stdout: &str) -> Option<String> {
+    let after_mark = &stdout[stdout.find(SHELL_PATH_MARK)? + SHELL_PATH_MARK.len()..];
+    let path = after_mark[..after_mark.find(SHELL_PATH_END)?].trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 /// Probes node and pnpm and records the result in the config, so every later
@@ -150,18 +443,35 @@ async fn probe(program: &str) -> ToolStatus {
 /// has not moved. A binding whose path vanished (an nvm version the user
 /// switched away from, a removed brew formula) is re-probed and updated — that
 /// is the whole point of persisting a *resolution* rather than a preference.
+/// A tool the user picked by hand is only fresh while the binding is exactly
+/// that file, so the choice is applied on the next refresh.
+///
+/// `force` probes even a binding that is still fresh: it is the setup page's
+/// re-check, and the user asking for it means the environment may have moved
+/// under us (a path exported in `.zshrc` outranks the directory a still-valid
+/// binding was found in).
 pub async fn refresh_toolchain_binding(
     state: &State<'_, AppState>,
+    force: bool,
 ) -> crate::config::ToolchainBinding {
-    let current = state.config.lock().unwrap().settings.toolchain.clone();
+    let (current, overrides) = {
+        let cfg = state.config.lock().unwrap();
+        (
+            cfg.settings.toolchain.clone(),
+            cfg.settings.toolchain_overrides.clone(),
+        )
+    };
     // Both freshness checks run before either field is moved out.
-    let (node_fresh, pnpm_fresh) = (current.node_is_fresh(), current.pnpm_is_fresh());
+    let (node_fresh, pnpm_fresh) = (
+        !force && current.node_is_fresh(overrides.node.as_deref()),
+        !force && current.pnpm_is_fresh(overrides.pnpm.as_deref()),
+    );
 
     // node: keep the recorded path when it still exists.
     let node = if node_fresh {
         current.node
     } else {
-        bound_from(probe("node").await)
+        bound_from(probe_tool("node", overrides.node.as_deref()).await)
     };
     // pnpm: reuse the resolver, so the bound binary is exactly the one the
     // install flows will drive (and its version already meets the floor).
@@ -169,7 +479,9 @@ pub async fn refresh_toolchain_binding(
         current.pnpm
     } else {
         let mut notes = Vec::new();
-        match crate::toolchain::resolve_pnpm(&mut |s| notes.push(s)).await {
+        let resolved =
+            crate::toolchain::resolve_pnpm(overrides.pnpm.as_deref(), &mut |s| notes.push(s)).await;
+        match resolved {
             Some((path, version)) => Some(crate::config::BoundTool { path, version }),
             None => {
                 for note in notes {
@@ -250,33 +562,164 @@ pub async fn node_for_spawn_checked(
 ) -> Result<PathBuf, String> {
     let fresh = {
         let cfg = state.config.lock().unwrap();
-        cfg.settings.toolchain.node_is_fresh()
+        cfg.settings
+            .toolchain
+            .node_is_fresh(cfg.settings.toolchain_overrides.node.as_deref())
     };
     if fresh {
         let cfg = state.config.lock().unwrap();
         return Ok(node_for_spawn(&cfg));
     }
-    let binding = refresh_toolchain_binding(state).await;
+    let binding = refresh_toolchain_binding(state, false).await;
     match binding.node {
         Some(bound) => Ok(bound.path),
         None => Err(node_missing_error()),
     }
 }
 
+/// The status the setup page renders.
+///
+/// `force` re-reads the system environment and re-probes both tools: it is the
+/// page's re-check, and the user asking for one means their shell environment
+/// may have moved (a path they just exported, a tool they just installed).
 #[tauri::command]
-pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+pub async fn get_runtime_status(
+    state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<RuntimeStatus, String> {
+    Ok(runtime_status(&state, force.unwrap_or(false)).await)
+}
+
+/// Points the launcher at a `node` / `pnpm` the user picked by hand, or clears
+/// that choice when `path` is absent or empty. Answers with the status as it
+/// stands afterwards, so one call applies the change and refreshes the page.
+///
+/// Nothing is written until the file has been run successfully: an override
+/// that cannot be executed would leave the launcher with a toolchain it cannot
+/// spawn, and the user with no obvious way back.
+#[tauri::command]
+pub async fn set_toolchain_override(
+    state: State<'_, AppState>,
+    tool: String,
+    path: Option<String>,
+) -> Result<RuntimeStatus, String> {
+    let program = match tool.trim() {
+        "node" => "node",
+        "pnpm" => "pnpm",
+        other => return Err(format!("无法指定「{other}」：这里只能指定 node 或 pnpm。")),
+    };
+    let manual = match path.map(|p| p.trim().to_string()) {
+        Some(raw) if !raw.is_empty() => Some(validate_manual_tool(program, &raw).await?),
+        _ => None,
+    };
+
+    {
+        let mut cfg = state.config.lock().unwrap();
+        let is_node = program == "node";
+        let changed = {
+            let slot = if is_node {
+                &mut cfg.settings.toolchain_overrides.node
+            } else {
+                &mut cfg.settings.toolchain_overrides.pnpm
+            };
+            let changed = match (slot.as_deref(), manual.as_deref()) {
+                (Some(a), Some(b)) => !crate::config::paths_equal(a, b),
+                (None, None) => false,
+                _ => true,
+            };
+            if changed {
+                *slot = manual;
+            }
+            changed
+        };
+        if changed {
+            // The recorded binding is the answer to the previous choice; drop it
+            // so the refresh below resolves again instead of reusing it.
+            let binding = &mut cfg.settings.toolchain;
+            if is_node {
+                binding.node = None;
+            } else {
+                binding.pnpm = None;
+            }
+        }
+        crate::config::save_config(&state.config_path, &cfg)
+            .map_err(|e| format!("保存设置失败: {e}"))?;
+    }
+
+    Ok(runtime_status(&state, false).await)
+}
+
+/// Probes both tools and reports where each one came from.
+async fn runtime_status(state: &State<'_, AppState>, force: bool) -> RuntimeStatus {
+    if force {
+        // Warm the cache first: every probe below reads it.
+        system_env(true).await;
+    }
     // One probe path for both the UI and the binding: the numbers the setup
     // page shows are the ones the launcher will actually spawn.
-    let binding = refresh_toolchain_binding(&state).await;
-    let node = status_from(&binding.node);
+    let binding = refresh_toolchain_binding(state, force).await;
+    let overrides = state
+        .config
+        .lock()
+        .unwrap()
+        .settings
+        .toolchain_overrides
+        .clone();
+    let env = system_env(false).await;
+    let node = status_from("node", &binding.node, overrides.node.as_deref(), &env.dirs);
+    let pnpm = status_from("pnpm", &binding.pnpm, overrides.pnpm.as_deref(), &env.dirs);
     let managers = detected_managers();
-    Ok(RuntimeStatus {
+    RuntimeStatus {
         node_below_recommended: node_is_below_recommended(&node),
         node,
-        pnpm: status_from(&binding.pnpm),
+        pnpm,
         requirements: ToolchainRequirements::current(&managers),
         managers,
-    })
+        system_env_shell: env.shell,
+    }
+}
+
+/// Accepts a hand-typed executable path, or explains in the user's terms why it
+/// cannot be used. The file must exist *and* answer `--version` from
+/// [`PROBE_CWD`] — the same probe every automatic candidate goes through — so an
+/// override the launcher would then fail to spawn is refused up front.
+async fn validate_manual_tool(program: &str, raw: &str) -> Result<PathBuf, String> {
+    // The app's cwd is wherever Finder launched it from; storing a relative
+    // path would mean something different for every later spawn.
+    let path = std::path::absolute(raw).map_err(|e| format!("无法解析路径「{raw}」：{e}"))?;
+    if !path.is_file() {
+        return Err(format!(
+            "这个文件不是可用的 {program}：{} 不存在或不是可执行文件。请选择 {program} 可执行文件本身。",
+            path.display()
+        ));
+    }
+    let Some(version) = probe_version(&path).await else {
+        return Err(format!(
+            "这个文件不是可用的 {program}：{} 无法运行（执行 --version 失败）。请选择 {program} 可执行文件本身。",
+            path.display()
+        ));
+    };
+    if program == "pnpm" {
+        match crate::toolchain::pnpm_major(&version) {
+            Some(major) if crate::toolchain::accepts_pnpm_major(major) => {}
+            Some(major) => {
+                return Err(format!(
+                    "这个 pnpm 版本过低：{} 报告的是 pnpm {major}，需要 {} 或更高。\
+                     请在终端升级（如 {}）后重新指定。",
+                    path.display(),
+                    crate::toolchain::MIN_PNPM_MAJOR,
+                    crate::toolchain::PNPM_INSTALL_HINT
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "这个文件不是可用的 pnpm：{} 报告的版本号「{version}」无法识别。",
+                    path.display()
+                ))
+            }
+        }
+    }
+    Ok(path)
 }
 
 /// Whether the probed node reports a major older than
@@ -326,17 +769,30 @@ fn detected_managers() -> Vec<String> {
     found
 }
 
-fn status_from(tool: &Option<crate::config::BoundTool>) -> ToolStatus {
+/// The status of one tool: what the binding resolved to, tagged with the source
+/// that produced it and with the user's own choice (which the page reports even
+/// when the launcher fell back to something else).
+fn status_from(
+    program: &str,
+    tool: &Option<crate::config::BoundTool>,
+    manual: Option<&Path>,
+    system_dirs: &[PathBuf],
+) -> ToolStatus {
+    let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
     match tool {
         Some(bound) => ToolStatus {
             installed: true,
             version: Some(bound.version.clone()),
             path: Some(bound.path.to_string_lossy().into_owned()),
+            source: Some(source_of(program, &bound.path, manual, system_dirs)),
+            manual_path,
         },
         None => ToolStatus {
             installed: false,
             version: None,
             path: None,
+            source: None,
+            manual_path,
         },
     }
 }
@@ -516,6 +972,10 @@ fn tool_fallback_bins() -> Vec<PathBuf> {
 /// spawned children. Reuses the probe's directory scan so the two can never
 /// disagree about where a tool lives.
 pub fn ensure_macos_paths() {
+    // Before this function touches PATH: from here on, the process PATH is a
+    // widened one, and the *inherited* PATH (what the app was launched with) is
+    // only available from the snapshot.
+    capture_inherited_path();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
@@ -674,6 +1134,8 @@ mod tests {
             installed: v.is_some(),
             version: v.map(|s| s.to_string()),
             path: None,
+            source: None,
+            manual_path: None,
         };
         // Other majors are supported; 20 is the recommendation floor.
         assert!(node_is_below_recommended(&with(Some("v18.19.0"))));
@@ -682,6 +1144,209 @@ mod tests {
         // A missing or unparsable version must not produce a warning.
         assert!(!node_is_below_recommended(&with(None)));
         assert!(!node_is_below_recommended(&with(Some("weird"))));
+    }
+
+    /// Somewhere no real tool directory can be: a temp dir, so a test about
+    /// ordering does not accidentally pick up the machine's own node.
+    fn tmp_bin_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn candidates_put_the_hand_picked_tool_first() {
+        let manual_dir = tmp_bin_dir("manual-bin");
+        let system_dir = tmp_bin_dir("system-bin");
+        let manual = manual_dir.join("node");
+        std::fs::write(&manual, "#!/bin/sh\n").unwrap();
+
+        let list = candidates("node", Some(&manual), std::slice::from_ref(&system_dir));
+        assert_eq!(list[0], (manual.clone(), ToolSource::Manual), "the user's pick decides");
+        assert_eq!(
+            list[1],
+            (system_dir.join("node"), ToolSource::System),
+            "the system environment comes next"
+        );
+        // Whatever the launcher knows on its own is a fallback only.
+        assert!(list.iter().skip(2).all(|(_, s)| *s == ToolSource::Fallback));
+
+        std::fs::remove_dir_all(&manual_dir).ok();
+        std::fs::remove_dir_all(&system_dir).ok();
+    }
+
+    #[test]
+    fn candidates_list_each_path_once_and_keep_the_first_source() {
+        // `~/.local/bin` is also one of the launcher's own fallback directories,
+        // so a shell PATH that names it must still read as the system's — the
+        // first source to meet a path is the one that decides. The same holds
+        // for a directory the PATH names twice.
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let dir = home.join(".local").join("bin");
+        for dirs in [vec![dir.clone()], vec![dir.clone(), dir.clone()]] {
+            let list = candidates("node", None, &dirs);
+            let exe = dir.join("node");
+            assert_eq!(
+                list.iter().filter(|(p, _)| p == &exe).count(),
+                1,
+                "a path must be listed once: {list:?}"
+            );
+            assert_eq!(source_of("node", &exe, None, &dirs), ToolSource::System);
+        }
+    }
+
+    /// fnm hands each shell its own directory of hard links into the version it
+    /// selected. Both spellings name one file; the durable one is what gets
+    /// bound, and the source still says the terminal has it.
+    #[test]
+    fn candidates_bind_the_durable_spelling_of_the_same_file() {
+        let shell_dir = tmp_bin_dir("fnm-multishell");
+        let durable_dir = tmp_bin_dir("fnm-version");
+        let in_shell = shell_dir.join("node");
+        std::fs::write(&in_shell, "#!/bin/sh\n").unwrap();
+        std::fs::hard_link(&in_shell, durable_dir.join("node")).unwrap();
+
+        let list = candidates_with(
+            "node",
+            None,
+            std::slice::from_ref(&shell_dir),
+            std::slice::from_ref(&durable_dir),
+        );
+        assert_eq!(
+            list,
+            vec![(durable_dir.join("node"), ToolSource::System)],
+        );
+
+        std::fs::remove_dir_all(&shell_dir).ok();
+        std::fs::remove_dir_all(&durable_dir).ok();
+    }
+
+    /// A copy is a different file: the directory the shell named keeps the
+    /// binding, and the launcher's own copy stays a fallback for the day the
+    /// first one is gone.
+    #[test]
+    fn candidates_keep_a_copy_where_the_system_named_it() {
+        let shell_dir = tmp_bin_dir("copy-shell");
+        let fallback_dir = tmp_bin_dir("copy-fallback");
+        let in_shell = shell_dir.join("node");
+        std::fs::write(&in_shell, "#!/bin/sh\n").unwrap();
+        std::fs::copy(&in_shell, fallback_dir.join("node")).unwrap();
+
+        let list = candidates_with(
+            "node",
+            None,
+            std::slice::from_ref(&shell_dir),
+            std::slice::from_ref(&fallback_dir),
+        );
+        assert_eq!(
+            list,
+            vec![
+                (shell_dir.join("node"), ToolSource::System),
+                (fallback_dir.join("node"), ToolSource::Fallback),
+            ]
+        );
+
+        std::fs::remove_dir_all(&shell_dir).ok();
+        std::fs::remove_dir_all(&fallback_dir).ok();
+    }
+
+    /// A recorded path can be spelled differently from today's list while naming
+    /// the same tool, so the answer follows the file.
+    #[test]
+    fn a_path_matches_a_candidate_by_file_not_by_spelling() {
+        let picked_dir = tmp_bin_dir("picked");
+        let alias_dir = tmp_bin_dir("picked-alias");
+        let picked = picked_dir.join("node");
+        std::fs::write(&picked, "#!/bin/sh\n").unwrap();
+        let alias = alias_dir.join("node");
+        std::fs::hard_link(&picked, &alias).unwrap();
+
+        assert_eq!(
+            source_of("node", &alias, Some(&picked), &[]),
+            ToolSource::Manual,
+            "the same file as the pick is still the pick"
+        );
+        assert_eq!(
+            source_of("node", Path::new("/nowhere/bin/node"), Some(&picked), &[]),
+            ToolSource::Fallback,
+            "a file nothing in the list names is the launcher's own find"
+        );
+
+        std::fs::remove_dir_all(&picked_dir).ok();
+        std::fs::remove_dir_all(&alias_dir).ok();
+    }
+
+    #[test]
+    fn source_is_reported_from_the_candidate_order() {
+        let manual_dir = tmp_bin_dir("manual-src");
+        let system_dir = tmp_bin_dir("system-src");
+        let manual = manual_dir.join("node");
+        std::fs::write(&manual, "#!/bin/sh\n").unwrap();
+        let system_dirs = vec![system_dir.clone()];
+
+        assert_eq!(
+            source_of("node", &manual, Some(&manual), &system_dirs),
+            ToolSource::Manual
+        );
+        assert_eq!(
+            source_of("node", &system_dir.join("node"), Some(&manual), &system_dirs),
+            ToolSource::System
+        );
+        // A path outside both the pick and the system environment — including
+        // one the launcher would not itself offer — reads as a fallback rather
+        // than making the page claim a source it cannot prove.
+        assert_eq!(
+            source_of("node", Path::new("/nowhere/bin/node"), Some(&manual), &system_dirs),
+            ToolSource::Fallback
+        );
+
+        std::fs::remove_dir_all(&manual_dir).ok();
+        std::fs::remove_dir_all(&system_dir).ok();
+    }
+
+    #[test]
+    fn a_hand_picked_path_outranks_the_same_directory_entry() {
+        // Both the pick and the system environment name the very same file: the
+        // user's deliberate choice is what the page must say.
+        let dir = tmp_bin_dir("same-bin");
+        let exe = dir.join("node");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            candidates("node", Some(&exe), std::slice::from_ref(&dir))[0],
+            (exe.clone(), ToolSource::Manual)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_shell_path_survives_a_noisy_login_shell() {
+        // Plugin managers print their own banners while `.zshrc` runs, so only
+        // what sits between the markers may be taken as PATH.
+        assert_eq!(
+            parse_shell_path("compinit: 3 warnings\n<<<DSH-PATH>>>/usr/bin:/bin<<<DSH-END>>>\n"),
+            Some("/usr/bin:/bin".to_string())
+        );
+        assert_eq!(
+            parse_shell_path("<<<DSH-PATH>>>  /opt/bin:/usr/bin  <<<DSH-END>>>"),
+            Some("/opt/bin:/usr/bin".to_string()),
+            "surrounding whitespace is not part of a PATH"
+        );
+        assert_eq!(
+            parse_shell_path("<<<DSH-PATH>>>/a:/b<<<DSH-END>>>trailing noise"),
+            Some("/a:/b".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_shell_path_rejects_output_without_the_markers() {
+        // A shell that failed, or one that overrides `printf`, gives nothing
+        // usable — the caller then falls back to the inherited PATH.
+        assert_eq!(parse_shell_path("/usr/bin:/bin\n"), None);
+        assert_eq!(parse_shell_path("<<<DSH-PATH>>>/usr/bin:/bin"), None);
+        assert_eq!(parse_shell_path(""), None);
+        assert_eq!(parse_shell_path("<<<DSH-PATH>>><<<DSH-END>>>"), None);
     }
 
     #[test]
@@ -702,3 +1367,4 @@ mod tests {
         assert!(bare.contains("nvm install --lts"));
     }
 }
+

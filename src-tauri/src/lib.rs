@@ -138,7 +138,7 @@ pub fn run() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let state = handle.state::<AppState>();
-                    let binding = runtime::refresh_toolchain_binding(&state).await;
+                    let binding = runtime::refresh_toolchain_binding(&state, false).await;
                     crate::log_info!(
                         "工具链绑定：node={}，pnpm={}",
                         binding
@@ -189,6 +189,7 @@ pub fn run() {
             tasks::remove_task,
             tasks::cancel_task,
             runtime::get_runtime_status,
+            runtime::set_toolchain_override,
             commands::list_instances,
             commands::create_instance,
             commands::delete_instance,

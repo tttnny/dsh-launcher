@@ -88,6 +88,22 @@ pub struct LauncherSettings {
     /// inherit at launch.
     #[serde(default)]
     pub toolchain: ToolchainBinding,
+    /// Executables the user picked by hand on the setup page. `toolchain` above
+    /// records what the launcher detected; this records what the user chose.
+    /// A chosen path wins over detection, and detection only runs again as the
+    /// fallback when the choice stops working.
+    #[serde(default)]
+    pub toolchain_overrides: ToolchainOverrides,
+}
+
+/// The user's hand-picked `node` / `pnpm` executables. Each is `None` until the
+/// user points the setup page at one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToolchainOverrides {
+    #[serde(default)]
+    pub node: Option<PathBuf>,
+    #[serde(default)]
+    pub pnpm: Option<PathBuf>,
 }
 
 /// The resolved toolchain. Each entry is `None` until a probe finds it.
@@ -111,19 +127,26 @@ impl ToolchainBinding {
     /// Whether a bound tool is still usable as recorded. A path that vanished
     /// (a deleted nvm version, an uninstalled brew formula) makes the binding
     /// stale, which the resolver treats as "probe again".
-    fn is_fresh(&self, tool: &Option<BoundTool>) -> bool {
+    ///
+    /// A tool the user pointed at is fresh only while the binding is still that
+    /// very file: any other recorded path means the choice has not been applied
+    /// yet, so the resolver has to run again.
+    fn is_fresh(&self, tool: &Option<BoundTool>, manual: Option<&Path>) -> bool {
         match tool {
-            Some(bound) => bound.path.is_file(),
+            Some(bound) => match manual {
+                Some(manual) => paths_equal(&bound.path, manual) && manual.is_file(),
+                None => bound.path.is_file(),
+            },
             None => false,
         }
     }
 
-    pub fn node_is_fresh(&self) -> bool {
-        self.is_fresh(&self.node)
+    pub fn node_is_fresh(&self, manual: Option<&Path>) -> bool {
+        self.is_fresh(&self.node, manual)
     }
 
-    pub fn pnpm_is_fresh(&self) -> bool {
-        self.is_fresh(&self.pnpm)
+    pub fn pnpm_is_fresh(&self, manual: Option<&Path>) -> bool {
+        self.is_fresh(&self.pnpm, manual)
     }
 }
 
@@ -175,6 +198,7 @@ impl Default for LauncherSettings {
             proxy_apply_dsh: false,
             terminal: default_terminal(),
             toolchain: ToolchainBinding::default(),
+            toolchain_overrides: ToolchainOverrides::default(),
         }
     }
 }
@@ -579,11 +603,41 @@ mod tests {
             }),
             pnpm: None,
         };
-        assert!(binding.node_is_fresh());
-        assert!(!binding.pnpm_is_fresh(), "an absent binding is never fresh");
+        assert!(binding.node_is_fresh(None));
+        assert!(!binding.pnpm_is_fresh(None), "an absent binding is never fresh");
 
         std::fs::remove_file(&exe).unwrap();
-        assert!(!binding.node_is_fresh(), "a vanished path must be stale");
+        assert!(!binding.node_is_fresh(None), "a vanished path must be stale");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_hand_picked_tool_is_fresh_only_while_the_binding_is_that_file() {
+        let dir = std::env::temp_dir().join(format!("manual-tool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manual = dir.join("node");
+        let detected = dir.join("other-node");
+        std::fs::write(&manual, "#!/bin/sh\n").unwrap();
+        std::fs::write(&detected, "#!/bin/sh\n").unwrap();
+
+        let bound = |path: &Path| ToolchainBinding {
+            node: Some(BoundTool {
+                path: path.to_path_buf(),
+                version: "v22.0.0".to_string(),
+            }),
+            pnpm: None,
+        };
+
+        // The user's choice is what the config must end up with, so a binding
+        // that points anywhere else is stale and forces a re-resolve.
+        assert!(bound(&manual).node_is_fresh(Some(&manual)));
+        assert!(!bound(&detected).node_is_fresh(Some(&manual)));
+
+        // A choice that stopped working falls back to detection — but the
+        // binding it left behind is stale either way.
+        std::fs::remove_file(&manual).unwrap();
+        assert!(!bound(&manual).node_is_fresh(Some(&manual)));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -595,7 +649,7 @@ mod tests {
         let binding = ToolchainBinding::default();
         assert!(binding.node.is_none());
         assert!(binding.pnpm.is_none());
-        assert!(!binding.node_is_fresh());
+        assert!(!binding.node_is_fresh(None));
 
         let raw = r#"{}"#;
         let parsed: ToolchainBinding = serde_json::from_str(raw).unwrap();
@@ -609,5 +663,24 @@ mod tests {
         let raw = r#"{"locale":"zh-CN"}"#;
         let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
         assert!(settings.toolchain.node.is_none());
+    }
+
+    #[test]
+    fn settings_without_toolchain_overrides_still_load() {
+        // Same forward compatibility for the hand-picked executables: a config
+        // written before that field existed means "nothing picked by hand".
+        let raw = r#"{"locale":"zh-CN","toolchain":{"node":{"path":"/usr/bin/node","version":"v22.0.0"}}}"#;
+        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
+        assert!(settings.toolchain.node.is_some(), "the detection cache must survive");
+        assert!(settings.toolchain_overrides.node.is_none());
+        assert!(settings.toolchain_overrides.pnpm.is_none());
+
+        let raw = r#"{"toolchain_overrides":{"node":"/opt/node/bin/node"}}"#;
+        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            settings.toolchain_overrides.node,
+            Some(PathBuf::from("/opt/node/bin/node"))
+        );
+        assert!(settings.toolchain_overrides.pnpm.is_none());
     }
 }

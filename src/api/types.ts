@@ -97,10 +97,17 @@ export interface InstanceStatus {
   exit_code: number | null
 }
 
+/** Where the executable the launcher picked came from. */
+export type ToolSource = 'manual' | 'system' | 'fallback'
+
 export interface ToolStatus {
   installed: boolean
   version: string | null
   path: string | null
+  /** 被选中的可执行文件从哪来；未安装时为 null。 */
+  source: ToolSource | null
+  /** 用户指定过的路径（即使已失效也如实带回）。 */
+  manual_path: string | null
 }
 
 export interface RuntimeStatus {
@@ -114,6 +121,8 @@ export interface RuntimeStatus {
   /** The version floors the backend enforces, so UI copy states the same
    *  numbers the resolver checks rather than repeating them as literals. */
   requirements: ToolchainRequirements
+  /** 系统环境变量是从哪个 shell 读来的（如 '/bin/zsh'）；null = 读 shell 失败，退回应用继承的 PATH。 */
+  system_env_shell: string | null
 }
 
 export interface ToolchainRequirements {
