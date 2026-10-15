@@ -82,14 +82,17 @@ function formatDate(iso: string | null): string {
 const installAction = useAction(
   async (version: string) => {
     // The install runs on the machine the Library is showing, and the row it
-    // shows its progress on is keyed by exactly that host.
+    // shows its progress on is keyed by exactly that host. Both the id and the
+    // name come from the click, so a host switch while the call is in flight
+    // cannot relabel where the install went.
     const hostId = store.currentHostId
+    const host = hostLabel.value
     const taskId = await api.startInstallVersionTask(version, hostId)
-    return { taskId, hostId, version }
+    return { taskId, hostId, version, host }
   },
   {
     key: (version) => version,
-    success: ({ version }) => t('versions.installTaskStarted', { version, host: hostLabel.value }),
+    success: ({ version, host }) => t('versions.installTaskStarted', { version, host }),
   },
 )
 
