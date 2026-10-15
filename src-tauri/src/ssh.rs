@@ -70,7 +70,8 @@ pub type HostFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send 
 pub enum HostErrorKind {
     /// ssh never reached the machine: refused, unresolvable, no route. It is
     /// also where a failure ssh did not explain lands — 255 with an empty
-    /// stderr, which carries no evidence about the machine at all.
+    /// stderr, which cannot tell that machine from the launcher's own
+    /// connection being cut out from under the call.
     Unreachable,
     /// The machine answered but would not let us in — no key and no agent to
     /// offer one, or a host key `known_hosts` does not know yet.
@@ -680,9 +681,10 @@ const MAX_SOCKET_PATH: usize = 86;
 /// exits 255; there is no structured code to read, so the four classes come
 /// from what it said.
 ///
-/// A failure ssh did **not** explain (255, nothing on stderr) is not evidence
-/// about the machine, and the message for it says so rather than asserting a
-/// cause — see the 「连不上」 arm.
+/// A failure ssh did **not** explain (255, nothing on stderr) is what losing a
+/// connection ssh already had looks like, and it does not say which end went:
+/// the message for it states both possibilities rather than asserting a cause —
+/// see the 「连不上」 arm.
 pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
     // The one failure that is not about the machine: ssh's own control socket
     // path. It has two spellings (ssh's pre-flight check and the bind that
@@ -713,15 +715,16 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
         ),
         HostErrorKind::Unreachable => {
             if silent {
-                // ssh exits 255 without a word when the connection it was
-                // riding is cut out from under it, and the launcher's own exit
-                // path does exactly that to a remote call still in flight (a
-                // log follower inside `remote::tail`). A machine that is off is
-                // not the only way this failure happens — and ssh, given a
-                // machine that really is off, says why (refused, no route,
-                // timeout, unresolvable name) — so this one states the two
-                // possibilities instead of sending the user to check a machine
-                // that may be up.
+                // ssh exits 255 without a word when it loses a connection it
+                // already had, which is not the failure of being unable to
+                // dial: the launcher's own exit path cuts its multiplexed
+                // connection out from under a call still in flight (a log
+                // follower inside `remote::tail`), and the far side of that
+                // established connection going away looks identical. Dialing
+                // failures always name their cause (refused, no route, timeout,
+                // unresolvable name). Silence therefore says nothing about the
+                // machine, and this states both possibilities instead of
+                // sending the user to check a machine that may be up.
                 format!(
                     "ssh 什么都没说就退出了：这既可能是连不上 {target}，\
                      也可能是启动器自己那条连接刚被断开（撤销转发、退出启动器时会这样）。\
