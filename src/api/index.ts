@@ -5,11 +5,14 @@
 
 import type {
   ChangeOutcome,
+  ConnectionTest,
   DoctorReport,
   DshHome,
   DshInstance,
   DshVersion,
   Host,
+  HostInput,
+  HostWithStatus,
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
@@ -18,6 +21,7 @@ import type {
   RuntimeStatus,
   SetBundleEnabledInput,
   RemoveBundleInput,
+  SshAlias,
   TaskInfo,
   TaskLog,
   TaskProgress,
@@ -49,8 +53,30 @@ export const api = {
   setToolchainOverride: (tool: 'node' | 'pnpm', path: string | null) =>
     call<RuntimeStatus>('set_toolchain_override', { tool, path }),
 
-  /** The machines the launcher manages. 本机 is always one of them (ADR-0006). */
-  listHosts: () => call<Host[]>('list_hosts'),
+  /**
+   * The machines the launcher manages, each with the status last observed for
+   * it. 本机 is always one of them and never has a status: it is not a machine
+   * to reach (ADR-0006).
+   */
+  listHosts: () => call<HostWithStatus[]>('list_hosts'),
+  /** Adds a remote host. Nothing is dialed: a machine that is off can be saved. */
+  createHost: (input: HostInput) => call<Host>('create_host', { input }),
+  /** Rewrites one host's editable fields; its id and 本机-ness are the record's. */
+  updateHost: (id: string, input: HostInput) => call<Host>('update_host', { id, input }),
+  /**
+   * Removes a host and the records filed under it — the launcher's own records
+   * only. Nothing on that machine is touched and the instances running there
+   * keep running (ADR-0006 §5, ADR-0007).
+   */
+  deleteHost: (id: string) => call<void>('delete_host', { id }),
+  /**
+   * Tests one host: its system, home, data directory and what Node / pnpm it
+   * resolves to. A machine that cannot be reached comes back as a result
+   * (「不可达」 plus one of the four classes), not as a thrown error.
+   */
+  testHostConnection: (id: string) => call<ConnectionTest>('test_host_connection', { id }),
+  /** The aliases in the user's own `~/.ssh/config`, for the add-host picker. */
+  listSshAliases: () => call<SshAlias[]>('list_ssh_aliases'),
 
   listHomes: () => call<DshHome[]>('list_homes'),
   createHome: (name: string, path: string) => call<DshHome>('create_home', { name, path }),

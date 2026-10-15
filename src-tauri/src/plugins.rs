@@ -1054,6 +1054,10 @@ mod tests {
             }),
             running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            // Plugin management talks to a *running instance* over HTTP; the
+            // remote transport plays no part in these tests.
+            host_transport: crate::remote::testing::idle(),
+            host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

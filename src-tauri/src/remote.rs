@@ -1,0 +1,1032 @@
+//! Every remote script the launcher runs, and the reading of their answers.
+//!
+//! Two rules hold for the whole remote feature (issue #9, 「传输层」):
+//!
+//! * **The shell text lives here.** A call site asks this module for a script
+//!   and hands the result to the transport; nobody assembles shell strings of
+//!   their own, because everything that can go wrong with quoting goes wrong
+//!   there.
+//! * **An answer comes back as JSON between two markers.** A Linux login shell
+//!   prints things of its own (`~/.bashrc` banners, version notices, and
+//!   `bash -i`'s 「no job control」), so the whole of stdout is not usable as the
+//!   answer — only what sits between `<<<DSH-JSON>>>` and `<<<DSH-END>>>` is.
+//!   `runtime::parse_shell_path` reads the local login shell's `PATH` the same
+//!   way.
+//!
+//! Probing here is deliberately raw: the connection test reports what a machine
+//! resolves `node` and `pnpm` to, and nothing more. The three sources
+//! (系统环境变量 / 常见安装目录 / 用户指定) and the 「远端跳过 Node 低于 20 的候选」 rule
+//! belong to the remote environment page, which extends `dsh_tool` below rather
+//! than re-deriving it (ADR-0005 追加).
+
+use crate::ssh::{
+    HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput,
+    DEFAULT_TIMEOUT,
+};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Marks the answer. Read back between these, never around them.
+pub const MARK: &str = "<<<DSH-JSON>>>";
+pub const END: &str = "<<<DSH-END>>>";
+
+/// POSIX single-quoting: the one escaping rule every remote script uses, and
+/// the reason a path with a space or a quote in it survives.
+///
+/// A remote word goes through **two** shells — the local ssh argv, which joins
+/// the command words with spaces, and the remote login shell, which splits them
+/// again. Both are ordinary shells, so one rule covers both.
+pub fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Reads the marked JSON block out of a script's stdout.
+///
+/// A missing block and unreadable JSON are both 「远端命令失败」: the remote side
+/// did not do what it was asked, and its stderr is the best explanation there
+/// is.
+pub fn parse_marked<T: DeserializeOwned>(out: &RemoteOutput) -> Result<T, HostError> {
+    let payload = between_markers(&out.stdout)
+        .ok_or_else(|| failed(out, "远端脚本没有返回结果标记"))?;
+    serde_json::from_str(payload)
+        .map_err(|e| failed(out, &format!("远端脚本的结果无法解析：{e}")))
+}
+
+fn between_markers(stdout: &str) -> Option<&str> {
+    let start = stdout.find(MARK)? + MARK.len();
+    let rest = &stdout[start..];
+    let end = rest.find(END)?;
+    Some(rest[..end].trim())
+}
+
+fn failed(out: &RemoteOutput, note: &str) -> HostError {
+    let said = match crate::ssh::stderr_tail(&out.stderr) {
+        tail if tail.is_empty() => "远端没有说明原因".to_string(),
+        tail => tail,
+    };
+    let message = if out.status == 0 {
+        format!("{note}：{said}")
+    } else {
+        format!("远端命令失败（退出码 {}）：{said}", out.status)
+    };
+    HostError::remote_command(message)
+}
+
+/// Runs one script and reads its marked JSON answer.
+pub async fn json<T: DeserializeOwned>(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    script: String,
+    timeout: Duration,
+) -> Result<T, HostError> {
+    let out = transport.run(host, RemoteCall::within(script, timeout)).await?;
+    parse_marked(&out)
+}
+
+// ---------------------------------------------------------------------------
+// The connection test
+// ---------------------------------------------------------------------------
+
+/// A machine's system, as reported by `uname`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSystem {
+    pub os: String,
+    pub release: String,
+    pub arch: String,
+}
+
+/// One probe of one tool on a remote machine: the absolute path the login shell
+/// resolves it to, and what `--version` said. `None` means the machine has no
+/// such command, which is a fact to report, not an error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTool {
+    pub path: String,
+    pub version: String,
+}
+
+/// What 「测试连接」 found on a host.
+///
+/// A failure is a **result**, not an error: the user may save a machine that is
+/// simply switched off right now, and the page then says 「不可达」 rather than
+/// treating the host record as broken (ADR-0006). `kind` carries the class, so
+/// the page can tell 连不上 / 认证失败 / 超时 / 远端命令失败 apart.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConnectionTest {
+    pub ok: bool,
+    pub kind: Option<HostErrorKind>,
+    pub message: Option<String>,
+    pub system: Option<RemoteSystem>,
+    pub home: Option<String>,
+    /// The launcher's data directory *on that machine*, with `~` already
+    /// expanded there — the launcher cannot expand a remote path itself.
+    pub data_dir: Option<String>,
+    /// Whether that directory is already there. A fresh host has none until the
+    /// launcher first writes something into it.
+    pub data_dir_exists: bool,
+    pub node: Option<RemoteTool>,
+    pub pnpm: Option<RemoteTool>,
+}
+
+impl ConnectionTest {
+    fn refused(err: HostError) -> Self {
+        Self {
+            ok: false,
+            kind: Some(err.kind),
+            message: Some(err.message),
+            system: None,
+            home: None,
+            data_dir: None,
+            data_dir_exists: false,
+            node: None,
+            pnpm: None,
+        }
+    }
+
+    fn answered(facts: Facts) -> Self {
+        Self {
+            ok: true,
+            kind: None,
+            message: None,
+            system: Some(RemoteSystem {
+                os: facts.os,
+                release: facts.release,
+                arch: facts.arch,
+            }),
+            home: Some(facts.home),
+            data_dir: Some(facts.data_dir),
+            data_dir_exists: facts.data_dir_exists,
+            node: facts.node,
+            pnpm: facts.pnpm,
+        }
+    }
+}
+
+/// The script's answer, field for field.
+#[derive(Deserialize)]
+struct Facts {
+    os: String,
+    release: String,
+    arch: String,
+    home: String,
+    data_dir: String,
+    data_dir_exists: bool,
+    node: Option<RemoteTool>,
+    pnpm: Option<RemoteTool>,
+}
+
+/// Runs the connection test on one host.
+///
+/// `data_dir` is the host record's configured data directory, or `None` for the
+/// default — the script resolves it *there*, because `~` and existence are
+/// facts only that machine has.
+pub async fn connection_test(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    data_dir: Option<&str>,
+) -> ConnectionTest {
+    let script = connection_test_script(data_dir);
+    match json::<Facts>(transport, host, script, DEFAULT_TIMEOUT).await {
+        Ok(facts) => ConnectionTest::answered(facts),
+        Err(err) => ConnectionTest::refused(err),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scripts
+// ---------------------------------------------------------------------------
+
+/// Escapes one value for the JSON the script builds. A login shell prints
+/// things of its own, and a banner full of quotes must not be able to break the
+/// answer apart: control characters go, backslashes and quotes are escaped.
+const ESCAPER: &str = r#"dsh_esc() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}"#;
+
+/// The connection test: what this machine is, where its home and the launcher's
+/// data directory are, and what `node` / `pnpm` resolve to.
+///
+/// It runs in an **interactive** login shell, which is the point: on a machine
+/// where `~/.bashrc` puts Linuxbrew's Node 26 in front of apt's Node 18, only
+/// that shell sees the Node the user's terminal sees — and execution later uses
+/// the same shape, so the page and the work agree (ADR-0005 追加).
+///
+/// `%%DATA_DIR%%` is the host record's data directory, quoted, or empty.
+const CONNECTION_TEST: &str = r#"set -u
+%%ESCAPER%%
+
+# A tool as this machine resolves it in this shell: an absolute path and the
+# first line of its --version, or null when the machine has no such command.
+dsh_tool() {
+  dsh_path=$(command -v "$1" 2>/dev/null || true)
+  if [ -z "$dsh_path" ]; then
+    printf 'null'
+    return 0
+  fi
+  dsh_version=$("$dsh_path" --version 2>/dev/null | head -n 1 || true)
+  printf '{"path":"%s","version":"%s"}' "$(dsh_esc "$dsh_path")" "$(dsh_esc "$dsh_version")"
+}
+
+dsh_configured=%%DATA_DIR%%
+case "$dsh_configured" in
+  '') dsh_data="${HOME:-}/.local/share/dsh-launcher" ;;
+  '~/'*) dsh_data="${HOME:-}/${dsh_configured:2}" ;;
+  *) dsh_data="$dsh_configured" ;;
+esac
+if [ -d "$dsh_data" ]; then dsh_exists=true; else dsh_exists=false; fi
+
+dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s","data_dir":"%s","data_dir_exists":%s,"node":%s,"pnpm":%s}' \
+  "$(dsh_esc "$(uname -s)")" \
+  "$(dsh_esc "$(uname -r)")" \
+  "$(dsh_esc "$(uname -m)")" \
+  "$(dsh_esc "${HOME:-}")" \
+  "$(dsh_esc "$dsh_data")" \
+  "$dsh_exists" \
+  "$(dsh_tool node)" \
+  "$(dsh_tool pnpm)")
+printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
+"#;
+
+/// The connection test's script. `data_dir` is the host's configured data
+/// directory (`None` = let that machine pick its default).
+pub fn connection_test_script(data_dir: Option<&str>) -> String {
+    fill(
+        CONNECTION_TEST,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%DATA_DIR%%", data_dir.map(quote).unwrap_or_default()),
+        ],
+    )
+}
+
+/// Reads one file, as base64 — the ssh channel is text, and version manifests,
+/// icons and patch documents must arrive byte for byte.
+const READ_FILE: &str = r#"set -u
+dsh_path=%%PATH%%
+if [ ! -f "$dsh_path" ]; then
+  printf '远端没有这个文件：%s\n' "$dsh_path" >&2
+  exit 2
+fi
+dsh_data=$(base64 "$dsh_path" | tr -d '\n')
+printf '<<<DSH-JSON>>>{"data":"%s"}<<<DSH-END>>>' "$dsh_data"
+"#;
+
+/// Writes one file, creating its directory. The bytes travel base64-encoded in
+/// the script itself: the payloads the launcher writes (an icon, a small JSON
+/// document) are far below the argv limit.
+const WRITE_FILE: &str = r#"set -u
+dsh_path=%%PATH%%
+mkdir -p "$(dirname "$dsh_path")" || exit 2
+printf %s %%BASE64%% | base64 -d > "$dsh_path" || exit 3
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Lists one directory's entry names (hidden files included).
+const LIST_DIR: &str = r#"set -u
+%%ESCAPER%%
+dsh_path=%%PATH%%
+if [ ! -d "$dsh_path" ]; then
+  printf '远端没有这个目录：%s\n' "$dsh_path" >&2
+  exit 2
+fi
+dsh_names=
+dsh_sep=
+for dsh_entry in "$dsh_path"/* "$dsh_path"/.[!.]*; do
+  [ -e "$dsh_entry" ] || continue
+  dsh_names="$dsh_names$dsh_sep\"$(dsh_esc "${dsh_entry##*/}")\""
+  dsh_sep=,
+done
+printf '<<<DSH-JSON>>>{"entries":[%s]}<<<DSH-END>>>' "$dsh_names"
+"#;
+
+/// Stops one process. SIGTERM by pid, with the pid cross-checked against the
+/// running record by the caller before it gets here (ADR-0007): a pid may have
+/// been reused, and signalling the wrong process is the one unrecoverable
+/// mistake available on a remote machine.
+const STOP_PID: &str = r#"set -u
+kill -TERM %%PID%% 2>/dev/null || { printf '不能给进程 %s 发信号\n' %%PID%% >&2; exit 3; }
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Starts a process that outlives the ssh session (ADR-0007): its own session
+/// (`setsid`), stdin from `/dev/null`, output appended to the remote log file,
+/// and the pid printed for the remote running record.
+///
+/// The pid is `$!` as the shell saw it. Our sessions have no job control (bash
+/// says so on stderr), so the background child is not a process-group leader and
+/// `setsid` does not need to fork — `$!` is the process itself.
+const SPAWN: &str = r#"set -u
+dsh_log=%%LOG%%
+mkdir -p "$(dirname "$dsh_log")" || exit 2
+nohup setsid %%ARGV%% >> "$dsh_log" 2>&1 < /dev/null &
+printf '<<<DSH-JSON>>>{"pid":%s}<<<DSH-END>>>' "$!"
+"#;
+
+/// Fills a script's slots. The values are already quoted by the caller; a value
+/// is inserted once and never re-scanned, so a value that happens to spell
+/// another slot cannot inject anything.
+fn fill(script: &str, slots: &[(&str, String)]) -> String {
+    let mut out = script.to_string();
+    for (slot, value) in slots {
+        out = out.replace(slot, value);
+    }
+    out
+}
+
+pub fn read_file_script(path: &str) -> String {
+    fill(READ_FILE, &[("%%PATH%%", quote(path))])
+}
+
+pub fn write_file_script(path: &str, contents: &[u8]) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(contents);
+    fill(
+        WRITE_FILE,
+        &[("%%PATH%%", quote(path)), ("%%BASE64%%", quote(&encoded))],
+    )
+}
+
+pub fn list_dir_script(path: &str) -> String {
+    fill(
+        LIST_DIR,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATH%%", quote(path)),
+        ],
+    )
+}
+
+pub fn stop_pid_script(pid: i32) -> String {
+    fill(STOP_PID, &[("%%PID%%", pid.to_string())])
+}
+
+/// The script for one detached process: `argv` is the command line (already the
+/// argv the launcher would run locally, never a shell string), `log_path` the
+/// remote file its output is appended to.
+pub fn spawn_script(argv: &[String], log_path: &str) -> String {
+    let command = argv
+        .iter()
+        .map(|word| quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fill(
+        SPAWN,
+        &[
+            ("%%LOG%%", quote(log_path)),
+            ("%%ARGV%%", command),
+        ],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Answers of the non-JSON-shaped scripts
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct Blob {
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct Entries {
+    entries: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Pid {
+    pid: i32,
+}
+
+#[derive(Deserialize)]
+struct Ack {
+    ok: bool,
+}
+
+pub fn decode_blob(out: &RemoteOutput) -> Result<Vec<u8>, HostError> {
+    use base64::Engine as _;
+    let blob: Blob = parse_marked(out)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(blob.data.as_bytes())
+        .map_err(|e| HostError::remote_command(format!("远端文件内容无法解码：{e}")))
+}
+
+pub fn decode_names(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
+    Ok(parse_marked::<Entries>(out)?.entries)
+}
+
+pub fn decode_pid(out: &RemoteOutput) -> Result<i32, HostError> {
+    Ok(parse_marked::<Pid>(out)?.pid)
+}
+
+pub fn decode_ack(out: &RemoteOutput) -> Result<(), HostError> {
+    if parse_marked::<Ack>(out)?.ok {
+        Ok(())
+    } else {
+        Err(HostError::remote_command("远端拒绝了这次写入"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The in-memory double
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::ssh::{HostFuture, PortForward};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// A payload wrapped the way the scripts print it, so the fake answers with
+    /// the same shape the remote produces.
+    pub(crate) fn marked(payload: &str) -> String {
+        format!("{}{}{}", super::MARK, payload, super::END)
+    }
+
+    /// One call, as the fake recorded it. Tests assert on the script the
+    /// launcher *would* have run, never on ssh or a real machine.
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) enum FakeCall {
+        Run(String),
+        Spawn(String),
+        StopPid(i32),
+        ReadFile(String),
+        WriteFile(String, Vec<u8>),
+        ListDir(String),
+        OpenForward(PortForward),
+        CloseForward(PortForward),
+    }
+
+    /// What the fake answers the next call with.
+    #[derive(Clone, Debug)]
+    pub(crate) enum FakeAnswer {
+        Output {
+            status: i32,
+            stdout: String,
+            stderr: String,
+        },
+        Pid(i32),
+        Bytes(Vec<u8>),
+        Names(Vec<String>),
+        Done,
+        Fail(HostError),
+    }
+
+    impl FakeAnswer {
+        /// A script that answered with this (already marked) stdout.
+        pub(crate) fn stdout(stdout: impl Into<String>) -> Self {
+            Self::Output {
+                status: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            }
+        }
+
+        /// A remote command that failed, with what it said on stderr.
+        pub(crate) fn failed(status: i32, stderr: impl Into<String>) -> Self {
+            Self::Output {
+                status,
+                stdout: String::new(),
+                stderr: stderr.into(),
+            }
+        }
+
+        /// The transport itself failed — a machine that is off, a key that is
+        /// not accepted, a call that ran out of time.
+        pub(crate) fn fail(kind: HostErrorKind, message: &str) -> Self {
+            Self::Fail(HostError::new(kind, message))
+        }
+    }
+
+    /// The in-memory [`HostTransport`]: what a test has instead of a remote
+    /// machine. It records every call and answers from a queue, so a test can
+    /// drive the page's states — reachable, unreachable, a machine without
+    /// Node — without a server.
+    pub(crate) struct FakeTransport {
+        calls: Mutex<Vec<FakeCall>>,
+        answers: Mutex<VecDeque<FakeAnswer>>,
+    }
+
+    impl FakeTransport {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                answers: Mutex::new(VecDeque::new()),
+            })
+        }
+
+        /// Queues the answer the next call gets. Chainable so a test reads as
+        /// one sentence.
+        pub(crate) fn answering(self: &Arc<Self>, answer: FakeAnswer) -> Arc<Self> {
+            self.answers.lock().unwrap().push_back(answer);
+            self.clone()
+        }
+
+        pub(crate) fn calls(&self) -> Vec<FakeCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// The script of the last call — what a test looks at to check that the
+        /// launcher asked the remote machine for the right thing.
+        pub(crate) fn last_script(&self) -> String {
+            match self.calls.lock().unwrap().last() {
+                Some(FakeCall::Run(script))
+                | Some(FakeCall::Spawn(script)) => script.clone(),
+                _ => String::new(),
+            }
+        }
+
+        fn next(&self) -> Result<FakeAnswer, HostError> {
+            self.answers.lock().unwrap().pop_front().ok_or_else(|| {
+                HostError::unreachable("测试没有给这次调用排好应答（FakeTransport）")
+            })
+        }
+
+        /// The queued answer, or the transport failure it stands for: a test
+        /// asking for 「这台机器连不上」 gets an `Err`, exactly as the real
+        /// transport would produce one.
+        fn answer(&self) -> Result<FakeAnswer, HostError> {
+            match self.next()? {
+                FakeAnswer::Fail(err) => Err(err),
+                other => Ok(other),
+            }
+        }
+    }
+
+    fn wrong_shape(answer: &FakeAnswer) -> HostError {
+        HostError::remote_command(format!("测试给这次调用排错了应答：{answer:?}"))
+    }
+
+    /// A transport that answers nothing: what the tests of modules that never
+    /// touch a remote host (the local lifecycle, for one) construct `AppState`
+    /// with.
+    pub(crate) fn idle() -> Arc<dyn HostTransport> {
+        FakeTransport::new()
+    }
+
+    /// The stdout a **successful** connection test prints — the sample every
+    /// test that needs a reachable machine shares. It mirrors what
+    /// [`connection_test_script`] builds, field for field.
+    pub(crate) fn connection_stdout(
+        node: Option<(&str, &str)>,
+        pnpm: Option<(&str, &str)>,
+    ) -> String {
+        fn tool(value: Option<(&str, &str)>) -> String {
+            match value {
+                Some((path, version)) => {
+                    format!("{{\"path\":\"{path}\",\"version\":\"{version}\"}}")
+                }
+                None => "null".to_string(),
+            }
+        }
+        marked(&format!(
+            "{{\"os\":\"Linux\",\"release\":\"6.8.0-45-generic\",\"arch\":\"x86_64\",\
+             \"home\":\"/home/demo\",\"data_dir\":\"/home/demo/.local/share/dsh-launcher\",\
+             \"data_dir_exists\":false,\"node\":{},\"pnpm\":{}}}",
+            tool(node),
+            tool(pnpm)
+        ))
+    }
+
+    impl HostTransport for FakeTransport {
+        fn run<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            call: RemoteCall,
+        ) -> HostFuture<'a, Result<RemoteOutput, HostError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(FakeCall::Run(call.script));
+                match self.answer()? {
+                    FakeAnswer::Output {
+                        status,
+                        stdout,
+                        stderr,
+                    } => Ok(RemoteOutput {
+                        status,
+                        stdout,
+                        stderr,
+                    }),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn spawn_detached<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            argv: &'a [String],
+            log_path: &'a str,
+        ) -> HostFuture<'a, Result<i32, HostError>> {
+            let script = spawn_script(argv, log_path);
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(FakeCall::Spawn(script));
+                match self.answer()? {
+                    FakeAnswer::Pid(pid) => Ok(pid),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn stop_pid<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            pid: i32,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(FakeCall::StopPid(pid));
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn read_file<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            path: &'a str,
+        ) -> HostFuture<'a, Result<Vec<u8>, HostError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(FakeCall::ReadFile(path.to_string()));
+                match self.answer()? {
+                    FakeAnswer::Bytes(bytes) => Ok(bytes),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn write_file<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            path: &'a str,
+            contents: Vec<u8>,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(FakeCall::WriteFile(path.to_string(), contents));
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn list_dir<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            path: &'a str,
+        ) -> HostFuture<'a, Result<Vec<String>, HostError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(FakeCall::ListDir(path.to_string()));
+                match self.answer()? {
+                    FakeAnswer::Names(names) => Ok(names),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn open_forward<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            forward: PortForward,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(FakeCall::OpenForward(forward));
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn close_forward<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            forward: PortForward,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(FakeCall::CloseForward(forward));
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{connection_stdout, FakeAnswer, FakeCall, FakeTransport};
+    use super::*;
+    use crate::ssh::{HostTransport, SshTransport};
+    use std::path::PathBuf;
+
+    const TARGET: &str = "zjq_aliyun";
+
+    fn host() -> RemoteHost {
+        RemoteHost {
+            id: "host-lab".into(),
+            target: TARGET.into(),
+            socket: PathBuf::from("/tmp/dsh-launcher-test.sock"),
+        }
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// The happy path: the machine answers, and the page gets its system, its
+    /// home, its data directory and both tools.
+    #[test]
+    fn the_connection_test_reports_what_the_machine_is() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(connection_stdout(
+            Some(("/home/linuxbrew/.linuxbrew/bin/node", "v26.0.0")),
+            Some(("/home/demo/.local/share/pnpm/pnpm", "11.1.2")),
+        )));
+        let transport: &dyn HostTransport = &*fake;
+
+        let test = block_on(connection_test(transport, &host(), None));
+
+        assert!(test.ok, "{:?}", test.message);
+        let system = test.system.unwrap();
+        assert_eq!(system.os, "Linux");
+        assert_eq!(system.arch, "x86_64");
+        assert_eq!(test.home.as_deref(), Some("/home/demo"));
+        assert_eq!(
+            test.data_dir.as_deref(),
+            Some("/home/demo/.local/share/dsh-launcher")
+        );
+        assert!(!test.data_dir_exists, "默认数据目录一开始并不存在");
+        assert_eq!(
+            test.node.as_ref().map(|t| t.version.as_str()),
+            Some("v26.0.0")
+        );
+        assert_eq!(test.pnpm.as_ref().map(|t| t.path.as_str()), Some("/home/demo/.local/share/pnpm/pnpm"));
+    }
+
+    /// A machine without Node or pnpm is still a machine worth connecting to;
+    /// what it lacks is reported as missing, not as a failure and not as a
+    /// plausible-looking version.
+    #[test]
+    fn a_machine_missing_node_or_pnpm_says_so() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(connection_stdout(
+            Some(("/usr/bin/node", "v18.19.1")),
+            None,
+        )));
+        let transport: &dyn HostTransport = &*fake;
+
+        let test = block_on(connection_test(transport, &host(), None));
+
+        assert!(test.ok);
+        assert!(test.node.is_some());
+        assert!(test.pnpm.is_none(), "没有 pnpm 就报没有");
+        assert_eq!(test.node.unwrap().version, "v18.19.1");
+    }
+
+    /// Every one of the four classes has to reach the page intact: the class,
+    /// and a sentence the user can act on.
+    #[test]
+    fn the_four_failure_classes_reach_the_page() {
+        let cases = [
+            (
+                HostErrorKind::Unreachable,
+                "ssh: connect to host lab port 22: Connection refused",
+                "连不上",
+            ),
+            (
+                HostErrorKind::Auth,
+                "Permission denied (publickey).",
+                "认证失败",
+            ),
+            (HostErrorKind::Timeout, "ssh 在 30 秒内没有返回", "超时"),
+            (
+                HostErrorKind::RemoteCommand,
+                "远端命令失败（退出码 127）：base64: not found",
+                "远端命令失败",
+            ),
+        ];
+        for (kind, message, label) in cases {
+            let fake =
+                FakeTransport::new().answering(FakeAnswer::fail(kind, message));
+            let transport: &dyn HostTransport = &*fake;
+
+            let test = block_on(connection_test(transport, &host(), None));
+
+            assert!(!test.ok);
+            assert_eq!(test.kind, Some(kind));
+            let said = test.message.unwrap();
+            assert!(said.contains(message), "{said}");
+            assert_eq!(kind.label(), label);
+            assert!(test.system.is_none(), "失败时不该报机器的结论");
+        }
+    }
+
+    /// A remote script that fails — a missing file, a command that is not
+    /// there — carries the tail of its stderr back, and it is the class
+    /// 「远端命令失败」, not a connection problem.
+    #[test]
+    fn a_failed_remote_script_reports_the_tail_of_its_stderr() {
+        let fake = FakeTransport::new().answering(FakeAnswer::failed(
+            127,
+            "bash: no job control in this shell\nbash: line 3: pnpm: command not found\n",
+        ));
+        let transport: &dyn HostTransport = &*fake;
+
+        let test = block_on(connection_test(transport, &host(), None));
+
+        assert_eq!(test.kind, Some(HostErrorKind::RemoteCommand));
+        let said = test.message.unwrap();
+        assert!(said.contains("pnpm: command not found"), "{said}");
+        assert!(said.contains("退出码 127"), "{said}");
+        assert!(!said.contains("no job control"), "登录 shell 的废话不是失败原因：{said}");
+    }
+
+    /// The configured data directory reaches the script as one quoted word, and
+    /// a path with a space or a quote in it stays one word.
+    #[test]
+    fn the_data_directory_reaches_the_script_quoted() {
+        let script = connection_test_script(Some("/srv/my launcher/it's here"));
+        assert!(
+            script.contains("dsh_configured='/srv/my launcher/it'\\''s here'"),
+            "{script}"
+        );
+        assert!(
+            connection_test_script(None).contains("dsh_configured=\n"),
+            "没有配置时留空，让那台机器自己选默认值"
+        );
+        // The scripts print what the parsing side looks for: one pair of markers,
+        // one place they are defined (script text and parser must not drift).
+        assert!(
+            script.contains(MARK) && script.contains(END),
+            "脚本必须用与解析端同一对标记：{script}"
+        );
+    }
+
+    /// The escaping, end to end: the script a call site builds, run by a real
+    /// shell, must hand back the original path. This is the bug the spec calls
+    /// out as the most likely one — ssh goes through two shells.
+    #[test]
+    fn a_path_with_spaces_and_quotes_survives_a_real_shell() {
+        let path = "/home/me/a b/it's 'quoted'/file.txt";
+        let script = read_file_script(path);
+
+        // Only the line that names the path is exercised: running the whole
+        // script locally would read the local filesystem.
+        let assignment = script
+            .lines()
+            .find(|line| line.starts_with("dsh_path="))
+            .unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{assignment}\nprintf %s \"$dsh_path\""))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), path);
+
+        // And the write script puts its payload in the same shape.
+        let write = write_file_script(path, b"hello");
+        let assignment = write
+            .lines()
+            .find(|line| line.starts_with("dsh_path="))
+            .unwrap();
+        assert!(assignment.ends_with("'/home/me/a b/it'\\''s '\\''quoted'\\''/file.txt'"));
+    }
+
+    /// The script, run by a **real** shell on this machine, answers what the
+    /// parsing side expects. The samples the fake serves were written from this
+    /// shape; this is the test that keeps the script and the parser from
+    /// drifting, and the only thing in the suite that exercises the shell text
+    /// itself (the machine answering happens to be this Mac, which the script
+    /// knows nothing about).
+    #[test]
+    fn the_connection_test_script_answers_parsable_json_on_a_real_shell() {
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-ilc")
+            .arg(connection_test_script(None))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let output = RemoteOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        };
+
+        let facts: Facts = parse_marked(&output).expect("真实 shell 跑出来的答案要能解析");
+
+        assert!(!facts.os.is_empty() && !facts.release.is_empty() && !facts.arch.is_empty());
+        assert_eq!(facts.home, std::env::var("HOME").unwrap_or_default());
+        assert!(
+            facts.data_dir.ends_with("/.local/share/dsh-launcher"),
+            "默认数据目录按那台机器的家目录推：{}",
+            facts.data_dir
+        );
+        assert_eq!(
+            facts.data_dir_exists,
+            std::path::Path::new(&facts.data_dir).is_dir(),
+            "「目录存不存在」要如实回答"
+        );
+        for tool in [facts.node, facts.pnpm].into_iter().flatten() {
+            assert!(
+                tool.path.starts_with('/'),
+                "报出来的路径必须是绝对路径（执行时要用它）：{}",
+                tool.path
+            );
+        }
+    }
+
+    /// The transport's other capabilities: each one is the same plumbing, and
+    /// each one has to reach the remote machine with the right request. The
+    /// callers (installs, profiles, lifecycle, the tunnel) are later tickets'
+    /// work — this only keeps the seam honest.
+    #[test]
+    fn the_other_transport_capabilities_ask_for_the_right_thing() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::Bytes(b"version: 1\n".to_vec()))
+            .answering(FakeAnswer::Names(vec!["web".into(), "lab".into()]))
+            .answering(FakeAnswer::Pid(4242))
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::Done);
+        let transport: &dyn HostTransport = &*fake;
+        let host = host();
+
+        assert_eq!(
+            block_on(transport.read_file(&host, "/home/demo/package.json")).unwrap(),
+            b"version: 1\n"
+        );
+        assert_eq!(
+            block_on(transport.list_dir(&host, "/home/demo/.dsh")).unwrap(),
+            vec!["web".to_string(), "lab".to_string()]
+        );
+        assert_eq!(
+            block_on(transport.spawn_detached(
+                &host,
+                &["/usr/bin/node".to_string(), "/opt/dsh/bin.js".to_string()],
+                "/home/demo/.local/share/dsh-launcher/logs/i-1.log",
+            ))
+            .unwrap(),
+            4242
+        );
+        block_on(transport.stop_pid(&host, 4242)).unwrap();
+        block_on(transport.write_file(&host, "/home/demo/.dsh/icons/i-1.png", vec![1, 2, 3]))
+            .unwrap();
+
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 5);
+        let spawned = match &calls[2] {
+            FakeCall::Spawn(script) => script.clone(),
+            other => panic!("排错了：{other:?}"),
+        };
+        assert!(spawned.contains("nohup setsid"), "{spawned}");
+        assert!(spawned.contains("< /dev/null"), "脱离会话的进程要断掉 stdin：{spawned}");
+        assert!(
+            spawned.contains("'/usr/bin/node' '/opt/dsh/bin.js'"),
+            "argv 逐段引用，调用处不拼 shell 字符串：{spawned}"
+        );
+        assert_eq!(calls[3], FakeCall::StopPid(4242));
+        assert_eq!(
+            calls[4],
+            FakeCall::WriteFile(
+                "/home/demo/.dsh/icons/i-1.png".into(),
+                vec![1, 2, 3]
+            )
+        );
+    }
+
+    /// The real transport is the one that builds the ssh command line, and the
+    /// script it carries is the script from this module — nothing here is a
+    /// stub.
+    #[test]
+    fn the_real_transport_would_dial_with_the_script_built_here() {
+        let host = host();
+        let script = connection_test_script(None);
+        let argv = crate::ssh::ssh_argv(
+            &host.target,
+            &host.socket,
+            &crate::ssh::script_command(&script),
+        );
+        assert_eq!(argv.last().unwrap(), &quote(&script));
+        assert_eq!(argv[argv.len() - 3], crate::ssh::REMOTE_SHELL);
+        assert_eq!(argv[argv.len() - 2], "-ilc");
+        let _ = SshTransport::new();
+    }
+}

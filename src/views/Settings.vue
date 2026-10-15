@@ -4,8 +4,19 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { Host, LauncherUpdateInfo, LogLevel, ThemeMode } from '@/api/types'
+import type {
+  ConnectionTest,
+  HostInput,
+  HostStatus,
+  HostWithStatus,
+  LauncherUpdateInfo,
+  LogLevel,
+  RemoteTool,
+  SshAlias,
+  ThemeMode,
+} from '@/api/types'
 import { useAction } from '@/composables/useAction'
+import { useCopy } from '@/composables/useCopy'
 import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { SHORTCUT_DOCS } from '@/shortcuts'
@@ -63,8 +74,227 @@ const envOk = computed(() => !!store.runtime?.node?.installed && !!store.runtime
 
 // --- Hosts ----------------------------------------------------------------------
 
-/** The machines the launcher manages; 本机 is the built-in one (ADR-0006). */
-const hosts = ref<Host[]>([])
+/**
+ * The machines the launcher manages, each with the status last observed for it.
+ * 本机 is the built-in one: no status badge, no test button, no delete — there
+ * is nothing to dial (ADR-0006).
+ */
+const hosts = ref<HostWithStatus[]>([])
+const sshAliases = ref<SshAlias[]>([])
+/** The host a connection test is in flight for. */
+const testingHostId = ref('')
+/** The last connection-test result, with the host it belongs to. */
+const testResult = ref<{ hostId: string; test: ConnectionTest } | null>(null)
+
+const { copy } = useCopy()
+
+async function loadHosts() {
+  try {
+    hosts.value = await api.listHosts()
+  } catch {
+    hosts.value = []
+  }
+}
+
+/** The add/edit sheet's fields; `extra_env` is a textarea because that is how users think of it. */
+interface HostForm {
+  display_name: string
+  ssh_target: string
+  registry: string
+  data_dir: string
+  extra_env: string
+}
+
+function emptyHostForm(): HostForm {
+  return { display_name: '', ssh_target: '', registry: '', data_dir: '', extra_env: '' }
+}
+
+const hostSheet = ref(false)
+const hostEditingId = ref('')
+const hostForm = ref<HostForm>(emptyHostForm())
+
+const saveHostAction = useAction(
+  (id: string, input: HostInput) => (id ? api.updateHost(id, input) : api.createHost(input)),
+  { success: () => t('settings.hosts.saved') },
+)
+
+/** `KEY=VALUE` lines → the map the backend takes; `null` when a line is unusable. */
+function parseEnvLines(text: string): Record<string, string> | null {
+  const env: Record<string, string> = {}
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const at = line.indexOf('=')
+    if (at <= 0) return null
+    env[line.slice(0, at).trim()] = line.slice(at + 1).trim()
+  }
+  return env
+}
+
+function startAddHost() {
+  hostEditingId.value = ''
+  hostForm.value = emptyHostForm()
+  hostSheet.value = true
+  void loadAliases()
+}
+
+function startEditHost(host: HostWithStatus) {
+  hostEditingId.value = host.id
+  hostForm.value = {
+    display_name: host.display_name,
+    ssh_target: host.ssh_target,
+    registry: host.registry ?? '',
+    data_dir: host.data_dir ?? '',
+    extra_env: Object.entries(host.extra_env ?? {})
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n'),
+  }
+  hostSheet.value = true
+  void loadAliases()
+}
+
+async function loadAliases() {
+  if (sshAliases.value.length) return
+  try {
+    sshAliases.value = await api.listSshAliases()
+  } catch {
+    sshAliases.value = []
+  }
+}
+
+/** The alias as the row shows it: what it points at, when the config says. */
+function aliasTarget(alias: SshAlias): string {
+  const host = alias.user
+    ? `${alias.user}@${alias.host_name ?? alias.alias}`
+    : (alias.host_name ?? '')
+  return [host, alias.port ? `:${alias.port}` : ''].filter(Boolean).join('')
+}
+
+async function saveHost() {
+  const form = hostForm.value
+  if (!form.display_name.trim()) {
+    Message.error(t('settings.hosts.nameRequired'))
+    return
+  }
+  if (!form.ssh_target.trim()) {
+    Message.error(t('settings.hosts.targetRequired'))
+    return
+  }
+  const extraEnv = parseEnvLines(form.extra_env)
+  if (!extraEnv) {
+    Message.error(t('settings.hosts.extraEnvInvalid'))
+    return
+  }
+  const input: HostInput = {
+    display_name: form.display_name.trim(),
+    ssh_target: form.ssh_target.trim(),
+    registry: form.registry.trim() || null,
+    data_dir: form.data_dir.trim() || null,
+    extra_env: extraEnv,
+  }
+  const saved = await saveHostAction.run(hostEditingId.value, input)
+  if (saved === undefined) return
+  hostSheet.value = false
+  await loadHosts()
+}
+
+/**
+ * Tests one host and shows what it found. A machine that cannot be reached is
+ * a result, not a failure: the record stays and the row says 不可达.
+ */
+async function testHost(host: HostWithStatus) {
+  testingHostId.value = host.id
+  // 连接中 right away: the answer can take seconds, and the row has to say what
+  // is going on while it takes them.
+  host.status = { state: 'connecting', message: null }
+  try {
+    const test = await api.testHostConnection(host.id)
+    testResult.value = { hostId: host.id, test }
+  } catch (e) {
+    Message.error(String(e))
+  } finally {
+    // The row's status comes from the backend's own record, not from this
+    // optimistic 连接中: refresh either way, so a failure shows 不可达 too.
+    testingHostId.value = ''
+    await loadHosts()
+  }
+}
+
+function statusLabel(status: HostStatus | null): string {
+  if (!status) return t('settings.hosts.statusUnknown')
+  return t(`settings.hosts.status.${status.state}`)
+}
+
+/** Colour carries state: reachable / unreachable / not asked yet. */
+function statusTone(status: HostStatus | null): string {
+  if (status?.state === 'reachable') return 'dl-tag--run'
+  if (status?.state === 'unreachable') return 'dl-tag--danger'
+  return 'dl-tag--muted'
+}
+
+function systemLine(test: ConnectionTest): string {
+  const system = test.system
+  return system ? `${system.os} ${system.release}（${system.arch}）` : '—'
+}
+
+/** What the connection test found for one tool; a missing command is said out loud. */
+function toolLine(tool: RemoteTool | null): string {
+  if (!tool) return t('settings.hosts.toolMissing')
+  return tool.version ? `${tool.version} · ${tool.path}` : tool.path
+}
+
+function hostName(hostId: string): string {
+  return hosts.value.find((h) => h.id === hostId)?.display_name ?? hostId
+}
+
+/** The result when the machine answered — the facts below only exist then. */
+const passedTest = computed(() => (testResult.value?.test.ok ? testResult.value.test : null))
+
+/** One row per fact the connection test reports: label + mono value. */
+const testFacts = computed(() => {
+  const test = passedTest.value
+  if (!test) return []
+  const dataDir = test.data_dir ?? '—'
+  return [
+    { label: t('settings.hosts.system'), value: systemLine(test) },
+    { label: t('settings.hosts.home'), value: test.home ?? '—' },
+    {
+      label: t('settings.hosts.dataDirResult'),
+      value: test.data_dir_exists ? dataDir : `${dataDir} · ${t('settings.hosts.dataDirMissing')}`,
+    },
+    { label: 'Node', value: toolLine(test.node) },
+    { label: 'pnpm', value: toolLine(test.pnpm) },
+  ]
+})
+
+// --- Host delete ----------------------------------------------------------------
+
+const hostPendingDelete = ref<HostWithStatus | null>(null)
+const removeHostAction = useAction((id: string) => api.deleteHost(id), {
+  success: () => t('settings.hosts.deleted'),
+})
+
+/** What the user can run on the server to see what the launcher left behind. */
+function cleanupCommand(host: HostWithStatus | null): string {
+  if (!host) return ''
+  const dir = host.data_dir || '~/.local/share/dsh-launcher'
+  return `ssh ${host.ssh_target} 'ls -la ${dir}'`
+}
+
+/**
+ * Deleting a host deletes the launcher's records and nothing else. A refusal
+ * (「本机是内置的，不能删除」) leaves the sheet open, so the reason stays on screen
+ * next to the button the user pressed.
+ */
+async function confirmDeleteHost() {
+  const host = hostPendingDelete.value
+  if (!host) return
+  await removeHostAction.run(host.id)
+  await loadHosts()
+  if (hosts.value.some((h) => h.id === host.id)) return
+  hostPendingDelete.value = null
+  if (testResult.value?.hostId === host.id) testResult.value = null
+}
 
 // --- Update -------------------------------------------------------------------
 
@@ -84,11 +314,7 @@ onMounted(async () => {
   } catch {
     dataDir.value = ''
   }
-  try {
-    hosts.value = await api.listHosts()
-  } catch {
-    hosts.value = []
-  }
+  await loadHosts()
 })
 
 const checkUpdateAction = useAction(() => api.checkLauncherUpdate(updateChannel.value))
@@ -315,8 +541,9 @@ onUnmounted(() => {
           </div>
         </section>
 
-        <!-- Hosts: the machines the launcher manages. 本机 is built in and has
-             no delete control — the record cannot be removed. -->
+        <!-- Hosts: the machines the launcher manages. 本机 is built in — no
+             status, no test, no delete: there is nothing to dial. A host that
+             cannot be reached keeps its record and says 不可达. -->
         <section :ref="(el) => setSectionRef('hosts', el)" class="dl-section">
           <div class="dl-section-label">
             {{ t('settings.hosts.title') }}
@@ -324,14 +551,75 @@ onUnmounted(() => {
           </div>
           <div class="dl-surface">
             <div v-for="h in hosts" :key="h.id" class="dl-row">
-              <span class="dl-row-label">
-                {{ h.display_name }}
-                <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{ t('settings.hosts.builtin') }}</span>
-              </span>
-              <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{ h.ssh_target }}</span>
+              <div class="dl-row-info">
+                <span class="dl-row-label">
+                  {{ h.display_name }}
+                  <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{ t('settings.hosts.builtin') }}</span>
+                  <span v-else class="dl-tag" :class="statusTone(h.status)">
+                    {{ statusLabel(h.status) }}
+                  </span>
+                </span>
+                <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{ h.ssh_target }}</span>
+                <span v-if="h.status?.state === 'unreachable' && h.status.message" class="dl-row-desc">
+                  {{ h.status.message }}
+                </span>
+              </div>
+              <div v-if="!h.builtin" class="row-actions">
+                <button
+                  class="dl-btn dl-btn--quiet"
+                  :disabled="testingHostId === h.id"
+                  @click="testHost(h)"
+                >
+                  {{
+                    h.status && h.status.state !== 'connecting'
+                      ? t('settings.hosts.retest')
+                      : t('settings.hosts.test')
+                  }}
+                </button>
+                <button class="dl-btn dl-btn--quiet" @click="startEditHost(h)">
+                  {{ t('settings.hosts.edit') }}
+                </button>
+                <button class="dl-btn dl-btn--ghost" @click="hostPendingDelete = h">
+                  {{ t('settings.hosts.remove') }}
+                </button>
+              </div>
+            </div>
+
+            <!-- The last connection test, kept on screen so the user can read a
+                 machine's conclusions without re-running it. -->
+            <div v-if="testResult" class="dl-row">
+              <div class="dl-row-info">
+                <span class="dl-row-label">
+                  {{ t('settings.hosts.testTitle', { name: hostName(testResult.hostId) }) }}
+                  <span
+                    class="dl-tag"
+                    :class="testResult.test.ok ? 'dl-tag--run' : 'dl-tag--danger'"
+                  >
+                    {{
+                      testResult.test.ok
+                        ? t('settings.hosts.status.reachable')
+                        : t('settings.hosts.status.unreachable')
+                    }}
+                  </span>
+                </span>
+                <span v-if="testResult.test.message" class="dl-row-desc">{{ testResult.test.message }}</span>
+              </div>
+            </div>
+            <div v-for="fact in testFacts" :key="fact.label" class="dl-row">
+              <span class="dl-row-label">{{ fact.label }}</span>
+              <span class="row-path dl-mono" :title="fact.value">{{ fact.value }}</span>
+            </div>
+
+            <div class="dl-row">
+              <button class="dl-btn dl-btn--quiet" @click="startAddHost">
+                ＋ {{ t('settings.hosts.add') }}
+              </button>
             </div>
           </div>
           <p class="section-note">{{ t('settings.hosts.note') }}</p>
+          <p v-if="hosts.some((h) => !h.builtin)" class="section-note">
+            {{ t('settings.hosts.cannotReach') }}
+          </p>
         </section>
 
         <!-- Environment: a compact readout that links to the full check page. -->
@@ -514,6 +802,98 @@ onUnmounted(() => {
         </section>
       </div>
     </div>
+
+    <!-- Add / edit a remote host. Nothing here is dialed: a record is a
+         bookmark, and 「测试连接」 is what talks to the machine. -->
+    <a-modal
+      :visible="hostSheet"
+      :title="hostEditingId ? t('settings.hosts.editTitle') : t('settings.hosts.addTitle')"
+      :ok-text="t('settings.hosts.save')"
+      :cancel-text="t('common.cancel')"
+      :ok-loading="saveHostAction.busy['*']"
+      unmount-on-close
+      @ok="saveHost"
+      @cancel="hostSheet = false"
+    >
+      <div class="dl-field">
+        <span class="dl-field-label">{{ t('settings.hosts.name') }}</span>
+        <a-input v-model="hostForm.display_name" :placeholder="t('settings.hosts.namePlaceholder')" />
+      </div>
+      <div class="dl-field">
+        <span class="dl-field-label">{{ t('settings.hosts.target') }}</span>
+        <a-select
+          v-if="sshAliases.length"
+          :model-value="hostForm.ssh_target"
+          :placeholder="t('settings.hosts.pickAlias')"
+          allow-clear
+          allow-search
+          @change="(v) => (hostForm.ssh_target = String(v ?? ''))"
+        >
+          <a-option v-for="a in sshAliases" :key="a.alias" :value="a.alias">
+            {{ a.alias }}
+            <span v-if="aliasTarget(a)" class="alias-target">{{ aliasTarget(a) }}</span>
+          </a-option>
+        </a-select>
+        <a-input
+          v-model="hostForm.ssh_target"
+          class="dl-mono"
+          :placeholder="t('settings.hosts.targetPlaceholder')"
+        />
+        <span class="dl-field-hint">{{ t('settings.hosts.targetHint') }}</span>
+        <span v-if="!sshAliases.length" class="dl-field-hint">
+          {{ t('settings.hosts.pickAliasEmpty') }}
+        </span>
+      </div>
+      <div class="dl-field">
+        <span class="dl-field-label">{{ t('settings.hosts.registry') }}</span>
+        <a-input v-model="hostForm.registry" :placeholder="t('settings.hosts.registryPlaceholder')" />
+        <span class="dl-field-hint">{{ t('settings.hosts.registryHint') }}</span>
+      </div>
+      <div class="dl-field">
+        <span class="dl-field-label">{{ t('settings.hosts.extraEnv') }}</span>
+        <a-textarea
+          v-model="hostForm.extra_env"
+          :placeholder="t('settings.hosts.extraEnvPlaceholder')"
+          :auto-size="{ minRows: 2, maxRows: 5 }"
+        />
+        <span class="dl-field-hint">{{ t('settings.hosts.extraEnvHint') }}</span>
+      </div>
+      <div class="dl-field">
+        <span class="dl-field-label">{{ t('settings.hosts.dataDir') }}</span>
+        <a-input
+          v-model="hostForm.data_dir"
+          class="dl-mono"
+          :placeholder="t('settings.hosts.dataDirPlaceholder')"
+        />
+        <span class="dl-field-hint">{{ t('settings.hosts.dataDirHint') }}</span>
+      </div>
+    </a-modal>
+
+    <!-- Deleting a host deletes the launcher's records and nothing else: the
+         warning says what stays on the machine, and hands over a command the
+         user can run there themselves (ADR-0006 §5). -->
+    <a-modal
+      :visible="!!hostPendingDelete"
+      :title="t('settings.hosts.deleteTitle', { name: hostPendingDelete?.display_name ?? '' })"
+      :ok-text="t('settings.hosts.remove')"
+      :cancel-text="t('common.cancel')"
+      :ok-loading="removeHostAction.busy['*']"
+      @ok="confirmDeleteHost"
+      @cancel="hostPendingDelete = null"
+    >
+      <p class="delete-warning">{{ t('settings.hosts.deleteWarning') }}</p>
+      <p class="delete-warning">{{ t('settings.hosts.deleteRecords') }}</p>
+      <p class="delete-warning">{{ t('settings.hosts.deleteLeft') }}</p>
+      <div class="cleanup-command">
+        <code class="dl-mono">{{ cleanupCommand(hostPendingDelete) }}</code>
+        <button
+          class="dl-btn dl-btn--quiet"
+          @click="copy(cleanupCommand(hostPendingDelete), 'settings.hosts.deleteCommandCopied')"
+        >
+          {{ t('common.copy') }}
+        </button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -626,6 +1006,40 @@ onUnmounted(() => {
   font-size: var(--dl-text-sm);
   line-height: 1.5;
   color: var(--dl-ink-3);
+}
+
+// The alias picker shows what an alias points at, as a muted suffix: the alias
+// is what the user recognises, the target is what the launcher will dial.
+.alias-target {
+  margin-left: 8px;
+  color: var(--dl-ink-4);
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-xs);
+}
+
+.delete-warning {
+  margin: 0 0 10px;
+  font-size: var(--dl-text-sm);
+  line-height: 1.6;
+  color: var(--dl-ink-2);
+}
+
+.cleanup-command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-2);
+
+  code {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--dl-text-xs);
+    color: var(--dl-ink-2);
+    overflow-wrap: anywhere;
+  }
 }
 
 @media (max-width: 900px) {
