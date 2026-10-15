@@ -105,7 +105,12 @@
     "sharedTag": "Shared",
     "unused": "Unused",
     "browserPickHint": "The browser preview cannot open a directory picker; type the path instead",
-    "homesEmpty": "No DSH_HOME yet"
+    "homesEmpty": "No DSH_HOME yet",
+    "remotePathPlaceholder": "Path on the server, e.g. /home/me/.dsh",
+    "remoteAddNote": "This is a path on that machine: the launcher creates it there if it is missing and only records it once that machine says it is usable.",
+    "copyPath": "Copy path",
+    "pathCopied": "Path copied",
+    "confirmDeleteRemoteHome": "Remove DSH_HOME \"{name}\" from the launcher? Only the record goes: the directory on that machine is left exactly as it is."
   },
   "profiles": {
     "profilesTitle": "Profiles",

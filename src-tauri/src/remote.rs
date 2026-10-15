@@ -318,18 +318,6 @@ pub async fn alive(
     Ok(parse_marked::<Answer>(&out)?.alive)
 }
 
-/// Makes one remote directory, parents included.
-pub async fn ensure_dir(
-    transport: &dyn HostTransport,
-    host: &RemoteHost,
-    path: &str,
-) -> Result<(), HostError> {
-    let out = transport
-        .run(host, RemoteCall::new(ensure_dir_script(path)))
-        .await?;
-    decode_ack(&out)
-}
-
 /// Removes one remote directory tree. Not being there is already the state the
 /// caller asked for. The callers only ever aim this at a path they computed
 /// from that host's own data directory.
@@ -891,6 +879,277 @@ pub fn manual_tool_script(path: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// DSH_HOME 与 Profile
+// ---------------------------------------------------------------------------
+
+/// Makes sure one DSH_HOME exists on that machine and answers where it is.
+///
+/// The path is the user's, typed for a machine they are not sitting at, so
+/// **that machine** is what resolves it: `~` expands against its own `$HOME`
+/// (the launcher's `normalize_dir_path` would expand it against this Mac's),
+/// `..` rows are resolved as text the way the local rule does — no symlink
+/// resolution, so the path the record keeps is the path the user wrote in its
+/// settled spelling — and the directory is created if it is not there yet,
+/// exactly as [`crate::commands::create_home_record_in`] does for 本机.
+///
+/// A path that cannot be used there fails here, with what the machine said,
+/// instead of becoming a record pointing at a directory that does not exist
+/// where the instance will run.
+const HOME_PATH: &str = r#"set -u
+%%ESCAPER%%
+dsh_raw=%%PATH%%
+case "$dsh_raw" in
+  '~') dsh_requested="${HOME:-}" ;;
+  '~/'*) dsh_requested="${HOME:-}/${dsh_raw#\~/}" ;;
+  '~'*) printf '不支持 ~用户名 形式的路径：%s\n' "$dsh_raw" >&2; exit 2 ;;
+  *) dsh_requested="$dsh_raw" ;;
+esac
+case "$dsh_requested" in
+  /*) ;;
+  *) printf '请填写绝对路径（以 / 开头）：%s\n' "$dsh_raw" >&2; exit 3 ;;
+esac
+
+# Settle the path by text: one directory typed two ways is one DSH_HOME.
+dsh_rest=${dsh_requested#/}
+dsh_path=
+while [ -n "$dsh_rest" ]; do
+  dsh_part=${dsh_rest%%/*}
+  if [ "$dsh_rest" = "$dsh_part" ]; then dsh_rest=; else dsh_rest=${dsh_rest#*/}; fi
+  case "$dsh_part" in
+    ''|.) ;;
+    ..) dsh_path=${dsh_path%/*} ;;
+    *) dsh_path="$dsh_path/$dsh_part" ;;
+  esac
+done
+[ -n "$dsh_path" ] || dsh_path=/
+
+if [ -e "$dsh_path" ] && [ ! -d "$dsh_path" ]; then
+  printf '这个路径上已经有一个文件：%s\n' "$dsh_path" >&2
+  exit 4
+fi
+if ! mkdir -p "$dsh_path"; then
+  printf '不能创建这个目录：%s\n' "$dsh_path" >&2
+  exit 5
+fi
+if [ ! -w "$dsh_path" ]; then
+  printf '这个目录不可写：%s\n' "$dsh_path" >&2
+  exit 6
+fi
+printf '<<<DSH-JSON>>>{"path":"%s"}<<<DSH-END>>>' "$(dsh_esc "$dsh_path")"
+"#;
+
+/// That machine's home directory, and whether it already has a `~/.dsh` —
+/// [`crate::config::ensure_user_dsh_home`]'s question asked of the machine that
+/// can answer it (that sweep expands `~` against *this* Mac's home, so it can
+/// only ever be about 本机).
+const USER_HOME: &str = r#"set -u
+%%ESCAPER%%
+dsh_user_home=${HOME:-}
+dsh_dsh_home=
+dsh_exists=false
+if [ -n "$dsh_user_home" ] && [ -d "$dsh_user_home/.dsh" ]; then
+  dsh_dsh_home="$dsh_user_home/.dsh"
+  dsh_exists=true
+fi
+printf '<<<DSH-JSON>>>{"home":"%s","dsh_home":"%s","exists":%s}<<<DSH-END>>>' \
+  "$(dsh_esc "$dsh_user_home")" "$(dsh_esc "$dsh_dsh_home")" "$dsh_exists"
+"#;
+
+/// The profile directories under one DSH_HOME on that machine. Directories
+/// only, and the two reserved names left out, so the list is the same list
+/// [`crate::profile::profiles_dir`] yields here. A HOME with no `profiles/`
+/// yet is an empty list, not an error.
+const PROFILES: &str = r#"set -u
+%%ESCAPER%%
+dsh_dir=%%DIR%%
+dsh_names=
+dsh_sep=
+for dsh_entry in "$dsh_dir"/*/ "$dsh_dir"/.[!.]*/; do
+  [ -d "$dsh_entry" ] || continue
+  dsh_name=${dsh_entry%/}
+  dsh_name=${dsh_name##*/}
+  case "$dsh_name" in
+    node_modules|__temp__) continue ;;
+  esac
+  dsh_names="$dsh_names$dsh_sep\"$(dsh_esc "$dsh_name")\""
+  dsh_sep=,
+done
+printf '<<<DSH-JSON>>>{"profiles":[%s]}<<<DSH-END>>>' "$dsh_names"
+"#;
+
+/// Copies one profile directory on that machine. The checks mirror the local
+/// flow's, so both machines answer the same situation the same way.
+const COPY_PROFILE: &str = r#"set -u
+dsh_from=%%FROM%%
+dsh_to=%%TO%%
+if [ ! -d "$dsh_from" ]; then
+  printf '远端没有这个 Profile 目录：%s\n' "$dsh_from" >&2
+  exit 2
+fi
+if [ -e "$dsh_to" ]; then
+  printf '远端已经有这个目录：%s\n' "$dsh_to" >&2
+  exit 3
+fi
+if ! mkdir -p "$(dirname "$dsh_to")"; then
+  printf '不能创建目录：%s\n' "$(dirname "$dsh_to")" >&2
+  exit 4
+fi
+if ! cp -R "$dsh_from" "$dsh_to"; then
+  printf '复制失败：%s -> %s\n' "$dsh_from" "$dsh_to" >&2
+  exit 5
+fi
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Renames one profile directory on that machine.
+const RENAME_PROFILE: &str = r#"set -u
+dsh_from=%%FROM%%
+dsh_to=%%TO%%
+if [ ! -d "$dsh_from" ]; then
+  printf '远端没有这个 Profile 目录：%s\n' "$dsh_from" >&2
+  exit 2
+fi
+if [ -e "$dsh_to" ]; then
+  printf '远端已经有这个目录：%s\n' "$dsh_to" >&2
+  exit 3
+fi
+if ! mv "$dsh_from" "$dsh_to"; then
+  printf '改名失败：%s -> %s\n' "$dsh_from" "$dsh_to" >&2
+  exit 4
+fi
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Removes one profile directory on that machine.
+const DELETE_PROFILE: &str = r#"set -u
+dsh_target=%%PATH%%
+if [ ! -d "$dsh_target" ]; then
+  printf '远端没有这个 Profile 目录：%s\n' "$dsh_target" >&2
+  exit 2
+fi
+if ! rm -rf "$dsh_target"; then
+  printf '删除失败：%s\n' "$dsh_target" >&2
+  exit 3
+fi
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+pub fn home_path_script(path: &str) -> String {
+    fill(
+        HOME_PATH,
+        &[("%%ESCAPER%%", ESCAPER.to_string()), ("%%PATH%%", quote(path))],
+    )
+}
+
+pub fn user_home_script() -> String {
+    fill(USER_HOME, &[("%%ESCAPER%%", ESCAPER.to_string())])
+}
+
+pub fn profiles_script(profiles_dir: &str) -> String {
+    fill(
+        PROFILES,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%DIR%%", quote(profiles_dir)),
+        ],
+    )
+}
+
+pub fn copy_profile_script(from: &str, to: &str) -> String {
+    fill(
+        COPY_PROFILE,
+        &[("%%FROM%%", quote(from)), ("%%TO%%", quote(to))],
+    )
+}
+
+pub fn rename_profile_script(from: &str, to: &str) -> String {
+    fill(
+        RENAME_PROFILE,
+        &[("%%FROM%%", quote(from)), ("%%TO%%", quote(to))],
+    )
+}
+
+pub fn delete_profile_script(path: &str) -> String {
+    fill(DELETE_PROFILE, &[("%%PATH%%", quote(path))])
+}
+
+/// Creates (or finds) that machine's DSH_HOME for `path` and answers its
+/// absolute path **as that machine resolves it**.
+pub async fn ensure_home_path(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<String, HostError> {
+    let answer: HomePath = json(transport, host, home_path_script(path), DEFAULT_TIMEOUT).await?;
+    Ok(answer.path)
+}
+
+/// That machine's home directory, and whether it already has a `~/.dsh`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RemoteUserHome {
+    pub home: String,
+    pub dsh_home: String,
+    pub exists: bool,
+}
+
+pub async fn user_home(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+) -> Result<RemoteUserHome, HostError> {
+    json(transport, host, user_home_script(), DEFAULT_TIMEOUT).await
+}
+
+/// The profile directories under one DSH_HOME on that machine.
+pub async fn list_profiles(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    profiles_dir: &str,
+) -> Result<Vec<String>, HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(profiles_script(profiles_dir)))
+        .await?;
+    decode_profiles(&out)
+}
+
+/// Copies one profile directory, on that machine.
+pub async fn copy_profile(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    from: &str,
+    to: &str,
+) -> Result<(), HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(copy_profile_script(from, to)))
+        .await?;
+    decode_ack(&out)
+}
+
+/// Renames one profile directory, on that machine.
+pub async fn rename_profile(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    from: &str,
+    to: &str,
+) -> Result<(), HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(rename_profile_script(from, to)))
+        .await?;
+    decode_ack(&out)
+}
+
+/// Removes one profile directory, on that machine.
+pub async fn delete_profile(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<(), HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(delete_profile_script(path)))
+        .await?;
+    decode_ack(&out)
+}
+
 /// Reads one file, as base64 — the ssh channel is text, and version manifests,
 /// icons and patch documents must arrive byte for byte.
 const READ_FILE: &str = r#"set -u
@@ -1017,15 +1276,6 @@ if dsh_alive; then dsh_living=true; else dsh_living=false; fi
 printf '<<<DSH-JSON>>>{"offset":%s,"data":"%s","alive":%s}<<<DSH-END>>>' "$dsh_now" "$dsh_data" "$dsh_living"
 "#;
 
-/// Creates one directory, parents included. The launcher makes the directories
-/// it is about to write into *there*, because that filesystem is the only place
-/// they exist.
-const ENSURE_DIR: &str = r#"set -u
-dsh_path=%%PATH%%
-mkdir -p -- "$dsh_path" || { printf '建不了远端目录 %s\n' "$dsh_path" >&2; exit 2; }
-printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
-"#;
-
 /// Removes one directory tree. A path that is not there is already what the
 /// caller wanted. The caller only ever aims this inside the host's own data
 /// directory (ADR-0006).
@@ -1111,10 +1361,6 @@ pub fn stop_group_script(pid: i32) -> String {
 
 pub fn alive_script(pid: i32) -> String {
     fill(ALIVE, &[("%%PID%%", pid.to_string())])
-}
-
-pub fn ensure_dir_script(path: &str) -> String {
-    fill(ENSURE_DIR, &[("%%PATH%%", quote(path))])
 }
 
 pub fn remove_dir_script(path: &str) -> String {
@@ -1236,6 +1482,16 @@ struct Ack {
     ok: bool,
 }
 
+#[derive(Deserialize)]
+struct HomePath {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct ProfileNames {
+    profiles: Vec<String>,
+}
+
 pub fn decode_blob(out: &RemoteOutput) -> Result<Vec<u8>, HostError> {
     use base64::Engine as _;
     let blob: Blob = parse_marked(out)?;
@@ -1264,6 +1520,14 @@ pub fn decode_ack(out: &RemoteOutput) -> Result<(), HostError> {
     } else {
         Err(HostError::remote_command("远端拒绝了这次写入"))
     }
+}
+
+/// The profile names one machine listed, in the same order the local one sorts
+/// them: the two ways of reading one list must not disagree about it.
+pub fn decode_profiles(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
+    let mut names = parse_marked::<ProfileNames>(out)?.profiles;
+    names.sort();
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------
@@ -2475,6 +2739,7 @@ mod tests {
         }
     }
 
+
     // -----------------------------------------------------------------------
     // Following and stopping a detached command
     // -----------------------------------------------------------------------
@@ -2485,12 +2750,6 @@ mod tests {
         parse_marked::<serde_json::Value>(&out).unwrap()["alive"]
             .as_bool()
             .unwrap()
-    }
-
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// Whether one pid still exists, asked of a real shell.
@@ -2693,17 +2952,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Directories on that machine are made and removed there, by path — the
-    /// only way a cleanup can touch the remote data directory and nothing else.
+    /// Removing a directory on that machine goes by path, and only there: it is
+    /// how a cleanup touches the remote data directory and nothing else. A
+    /// directory that is not there is already what the caller wanted.
     #[test]
-    fn a_remote_cleanup_creates_and_removes_the_directory_it_is_given() {
+    fn a_remote_cleanup_removes_the_directory_it_is_given() {
         let dir = scratch("dsh-dirs");
         let nested = dir.join("homes").join("0.1.0-rc.6");
-
-        let created = local_shell(&ensure_dir_script(&nested.to_string_lossy()));
-        decode_ack(&created).expect("要能建出目录");
-        assert!(nested.is_dir(), "{}", nested.display());
-
+        std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("cordis.patch.yml"), "- id: webserver\n").unwrap();
         let sibling = dir.join("homes").join("0.1.0-rc.5");
         std::fs::create_dir_all(&sibling).unwrap();
@@ -2752,4 +3008,185 @@ mod tests {
         assert_eq!(fake.calls(), vec![FakeCall::StopGroup(4242)]);
         assert!(stop_group_script(4242).contains("-$dsh_pid"));
     }
+
+
+    /// Runs one script the way the transport runs it, with a chosen `HOME` —
+    /// the remote machine's home directory is not this one, and `~` is expanded
+    /// against whichever home the machine's own shell reports.
+    fn local_shell_as(script: &str, home: &Path) -> RemoteOutput {
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-ilc")
+            .arg(script)
+            .env("HOME", home)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        RemoteOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `~` is expanded **by the machine that owns the home directory**, and the
+    /// answer is the settled absolute path — the user typed a path for a server
+    /// they are not sitting at.
+    #[test]
+    fn the_home_script_expands_a_tilde_against_that_machines_home() {
+        let home = scratch("dsh-remote-home");
+        let out = local_shell_as(&home_path_script("~/dsh-homes/lab"), &home);
+        let resolved: HomePath = parse_marked(&out).expect("真实 shell 的答案要能解析");
+
+        assert_eq!(resolved.path, home.join("dsh-homes/lab").to_string_lossy());
+        assert!(
+            home.join("dsh-homes/lab").is_dir(),
+            "远端校验就是在那台机器上真的把目录建出来"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The settled spelling is what makes one directory one DSH_HOME: a path
+    /// typed with `..`, a doubled slash or a trailing slash is the same
+    /// directory, so it must come back as the same record path.
+    #[test]
+    fn the_home_script_settles_the_path_by_text_without_following_links() {
+        let home = scratch("dsh-remote-settle");
+        let raw = format!("{0}/a//../a/b/", home.to_string_lossy());
+
+        let out = local_shell_as(&home_path_script(&raw), &home);
+        let resolved: HomePath = parse_marked(&out).expect("真实 shell 的答案要能解析");
+
+        assert_eq!(resolved.path, home.join("a/b").to_string_lossy());
+        assert_eq!(
+            decode_names(&local_shell(&list_dir_script(&home.to_string_lossy()))).unwrap().len(),
+            1,
+            "只留下一层 a"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A path with a space and a single quote in it is one word all the way
+    /// through both shells; a path that is not absolute is refused **there**,
+    /// with what that machine said.
+    #[test]
+    fn the_home_script_keeps_awkward_paths_and_refuses_a_relative_one() {
+        let home = scratch("dsh-remote-quote");
+        let awkward = home.join("we ird/it's here");
+
+        let out = local_shell_as(&home_path_script(&awkward.to_string_lossy()), &home);
+        let resolved: HomePath = parse_marked(&out).expect("真实 shell 的答案要能解析");
+        assert_eq!(resolved.path, awkward.to_string_lossy());
+        assert!(awkward.is_dir());
+
+        let out = local_shell_as(&home_path_script("relative/homes"), &home);
+        assert_ne!(out.status, 0, "相对路径不该被当成服务器上的目录");
+        assert!(
+            out.stderr.contains("绝对路径"),
+            "拒绝的理由来自远端：{}",
+            out.stderr
+        );
+
+        // `~user/...` is not expanded by the machine's shell and must not
+        // silently become a directory here.
+        let out = local_shell_as(&home_path_script("~someone/.dsh"), &home);
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("~用户名"), "{}", out.stderr);
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The profile list is the same list the local reader yields: directories
+    /// only, and the two reserved names left out. A HOME with no `profiles/`
+    /// yet is an empty list rather than a failure.
+    #[test]
+    fn the_profiles_script_lists_directories_and_skips_the_reserved_names() {
+        let home = scratch("dsh-remote-profiles");
+        let profiles = home.join("profiles");
+        std::fs::create_dir_all(profiles.join("web")).unwrap();
+        std::fs::create_dir_all(profiles.join("demo")).unwrap();
+        std::fs::create_dir_all(profiles.join("__temp__")).unwrap();
+        std::fs::create_dir_all(profiles.join("node_modules")).unwrap();
+        std::fs::write(profiles.join("some-file"), "not a profile").unwrap();
+
+        let out = local_shell(&profiles_script(&profiles.to_string_lossy()));
+        assert_eq!(
+            decode_profiles(&out).unwrap(),
+            vec!["demo".to_string(), "web".to_string()]
+        );
+
+        let empty = home.join("nothing-here");
+        let out = local_shell(&profiles_script(
+            &empty.join("profiles").to_string_lossy(),
+        ));
+        assert!(decode_profiles(&out).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Copy, rename and remove each do one thing on that machine, and each says
+    /// what happened — including the two refusals the local flow makes
+    /// (「不存在」 and 「已存在」) rather than overwriting anything.
+    #[test]
+    fn the_profile_scripts_copy_rename_and_remove_on_that_machine() {
+        let home = scratch("dsh-remote-profile-ops");
+        let profiles = home.join("profiles");
+        std::fs::create_dir_all(profiles.join("web/app")).unwrap();
+        std::fs::write(profiles.join("web/package.json"), "{}").unwrap();
+        let from = profiles.join("web").to_string_lossy().to_string();
+        let to = profiles.join("web copy").to_string_lossy().to_string();
+
+        decode_ack(&local_shell(&copy_profile_script(&from, &to))).unwrap();
+        assert!(profiles.join("web copy/app").is_dir(), "整棵树都复制过去");
+        assert!(profiles.join("web copy/package.json").is_file());
+
+        // A target that is already there, and a source that is not: neither may
+        // silently overwrite or half-create anything.
+        let out = local_shell(&copy_profile_script(&from, &to));
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("远端已经有这个目录"), "{}", out.stderr);
+        let missing = profiles.join("nope").to_string_lossy().to_string();
+        let out = local_shell(&copy_profile_script(&missing, &to));
+        assert_ne!(out.status, 0);
+        assert!(out.stderr.contains("远端没有这个 Profile 目录"), "{}", out.stderr);
+
+        let renamed = profiles.join("renamed").to_string_lossy().to_string();
+        decode_ack(&local_shell(&rename_profile_script(&to, &renamed))).unwrap();
+        assert!(profiles.join("renamed").is_dir());
+        assert!(!profiles.join("web copy").exists());
+
+        decode_ack(&local_shell(&delete_profile_script(&renamed))).unwrap();
+        assert!(!profiles.join("renamed").exists());
+        assert!(profiles.join("web").is_dir(), "删一个不动另一个");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// One question, one answer: whether that machine already has a `~/.dsh`.
+    #[test]
+    fn the_user_home_script_answers_that_machines_home_and_its_dsh_folder() {
+        let home = scratch("dsh-remote-user-home");
+
+        let out = local_shell_as(&user_home_script(), &home);
+        let before: RemoteUserHome = parse_marked(&out).unwrap();
+        assert_eq!(before.home, home.to_string_lossy());
+        assert!(!before.exists, "还没有 ~/.dsh");
+        assert!(before.dsh_home.is_empty());
+
+        std::fs::create_dir_all(home.join(".dsh")).unwrap();
+        let out = local_shell_as(&user_home_script(), &home);
+        let after: RemoteUserHome = parse_marked(&out).unwrap();
+        assert!(after.exists);
+        assert_eq!(after.dsh_home, home.join(".dsh").to_string_lossy());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
 }

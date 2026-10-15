@@ -301,13 +301,34 @@ fn cleaned_path(value: Option<String>) -> Option<std::path::PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// One host's DSH_HOME records; `host_id` absent means 本机.
+///
+/// A remote host's own `~/.dsh` is asked of **that machine** here, with one
+/// ssh — it is the only one that can say whether it has one, and 本机's
+/// equivalent runs at load time ([`crate::config::ensure_user_dsh_home`]).
+/// That question is the only part of this answer a machine is needed for: the
+/// records themselves are the launcher's own (ADR-0006 §2), so a machine that
+/// does not answer leaves the list as it stands instead of emptying it.
+/// 「装了哪些版本」 is where the Library reports that a host did not answer.
 #[tauri::command]
-pub fn list_homes(
+pub async fn list_homes(
     state: State<'_, AppState>,
     host_id: Option<String>,
 ) -> Result<Vec<DshHome>, String> {
+    list_homes_for(&state, host_id.as_deref()).await
+}
+
+pub(crate) async fn list_homes_for(
+    state: &AppState,
+    host_id: Option<&str>,
+) -> Result<Vec<DshHome>, String> {
+    let (host, target) = crate::runtime::env_host(state, host_id)?;
+    if let crate::runtime::EnvHost::Remote(target) = &target {
+        // Best effort, and deliberately so: this asks a question the records do
+        // not depend on, and an unreachable machine is not a reason to withhold
+        // a list the launcher keeps itself.
+        let _ = adopt_user_dsh_home(state, &host, target).await;
+    }
     let cfg = state.config.lock().unwrap();
-    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
     Ok(cfg
         .homes
         .iter()
@@ -316,31 +337,75 @@ pub fn list_homes(
         .collect())
 }
 
+/// Adds that machine's `~/.dsh` as a record when it has one and the launcher
+/// does not know it yet — the remote twin of
+/// [`crate::config::ensure_user_dsh_home`], which expands `~` against *this*
+/// Mac's home and therefore can only ever be about 本机. The path recorded is
+/// the machine's own answer.
+///
+/// One ssh, and no record write when the machine has no `~/.dsh`: a machine
+/// with nothing on it is a machine, not an error. Whether a machine that did
+/// not answer is also not an error is the caller's call, and [`list_homes_for`]
+/// says how it answers that.
+async fn adopt_user_dsh_home(
+    state: &AppState,
+    host: &Host,
+    target: &crate::ssh::RemoteHost,
+) -> Result<(), String> {
+    let answer = crate::remote::user_home(&*state.host_transport, target)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !answer.exists || answer.dsh_home.is_empty() {
+        return Ok(());
+    }
+    let home = DshHome {
+        id: crate::config::user_dsh_home_id(host),
+        name: crate::config::USER_DSH_HOME_NAME.to_string(),
+        path: std::path::PathBuf::from(&answer.dsh_home),
+        host_id: host.id.clone(),
+    };
+    // The check and the write share one lock: two reads of the same host racing
+    // each other must not leave two records for one directory.
+    let mut cfg = state.config.lock().unwrap();
+    if cfg
+        .homes
+        .iter()
+        .any(|h| h.host_id == host.id && host.paths_equal(&h.path, &home.path))
+    {
+        return Ok(());
+    }
+    cfg.homes.push(home);
+    crate::config::save_config(&state.config_path, &cfg)
+}
+
 #[tauri::command]
-pub fn create_home(
+pub async fn create_home(
     state: State<'_, AppState>,
     name: String,
     path: String,
     host_id: Option<String>,
 ) -> Result<DshHome, String> {
-    create_home_record_in(&state, &name, &path, host_id.as_deref())
+    create_home_record_in(&state, &name, &path, host_id.as_deref()).await
 }
 
-/// Shared helper: validates + creates a DSH_HOME record. The path is
-/// normalized first (see [`crate::config::normalize_dir_path`]), so `~/.dsh`
-/// and `/Users/me/.dsh` are recognized as one HOME instead of two records,
-/// and a relative path is refused rather than resolved against the app's cwd.
+/// Shared helper: validates + creates a DSH_HOME record on one host, and
+/// answers the path that host settled on.
+///
+/// The path is a path **on that machine**, so that machine is what resolves it.
+/// 本机 goes through [`crate::config::normalize_dir_path`] and
+/// `std::fs::create_dir_all`; a remote host asks that server instead
+/// ([`crate::remote::ensure_home_path`]) — a local `create_dir_all` aimed at a
+/// remote spelling would leave a stray directory on this Mac, and `~` would
+/// expand to *this* machine's home.
+///
 /// If a HOME with the same path already exists *on the same host*, the existing
 /// record is returned instead of creating a duplicate (prevents duplicate
-/// same-name HOMEs when a dedicated HOME is requested repeatedly).
+/// same-name HOMEs when a dedicated HOME is requested repeatedly). Path equality
+/// is the host's own ([`crate::config::Host::paths_equal`]): 本机 folds case,
+/// a remote Linux host does not, where two spellings are two directories.
 ///
 /// `host_id` absent means 本机.
-///
-/// Only 本机's HOMEs are created here. A remote host's path is a path on that
-/// server: `create_dir_all` on this Mac would leave a stray directory behind
-/// (and `~` would expand to *this* machine's home), so a remote record is
-/// refused until the path is validated where it lives.
-pub(crate) fn create_home_record_in(
+pub(crate) async fn create_home_record_in(
     state: &AppState,
     name: &str,
     path: &str,
@@ -351,34 +416,37 @@ pub(crate) fn create_home_record_in(
         return Err("名称不能为空".to_string());
     }
 
-    let host = {
-        let cfg = state.config.lock().unwrap();
-        crate::config::resolve_host(&cfg, host_id)?.clone()
+    let (host, target) = crate::runtime::env_host(state, host_id)?;
+    let path = match target {
+        crate::runtime::EnvHost::Local => {
+            let path = crate::config::normalize_dir_path(path)?;
+            std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败: {e}"))?;
+            path
+        }
+        crate::runtime::EnvHost::Remote(target) => {
+            let resolved = crate::remote::ensure_home_path(&*state.host_transport, &target, path)
+                .await
+                .map_err(|e| e.to_string())?;
+            std::path::PathBuf::from(resolved)
+        }
     };
-    // The path is a path *on that machine*: `create_dir_all` here would leave a
-    // stray directory on this Mac (and `~` would expand to this machine's home),
-    // so a remote record waits until the path can be validated where it lives.
-    host.local_paths_only("DSH_HOME 目录")?;
-
-    let path_buf = crate::config::normalize_dir_path(path)?;
 
     // Reuse an existing HOME with the same path on the same host.
     let existing = {
         let cfg = state.config.lock().unwrap();
         cfg.homes
             .iter()
-            .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &path_buf))
+            .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &path))
             .cloned()
     };
     if let Some(existing) = existing {
         return Ok(existing);
     }
 
-    std::fs::create_dir_all(&path_buf).map_err(|e| format!("创建目录失败: {e}"))?;
     let home = DshHome {
         id: new_id("h"),
         name: name.to_string(),
-        path: path_buf,
+        path,
         host_id: host.id,
     };
     let mut cfg = state.config.lock().unwrap();
@@ -445,14 +513,26 @@ pub fn remove_home(
     id: String,
     host_id: Option<String>,
 ) -> Result<(), String> {
+    remove_home_record(&state, &id, host_id.as_deref())
+}
+
+/// Forgets one DSH_HOME record. **A record is all it is**: nothing is asked of
+/// the machine that owns the directory, and nothing there is removed — the same
+/// rule as 本机 (ADR-0006), and the reason a remote host needs no transport
+/// here.
+pub(crate) fn remove_home_record(
+    state: &AppState,
+    id: &str,
+    host_id: Option<&str>,
+) -> Result<(), String> {
     let mut cfg = state.config.lock().unwrap();
-    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
+    let host = crate::config::resolve_host(&cfg, host_id)?.clone();
     if cfg.instances.iter().any(|i| i.home_id == id) {
         return Err("该 DSH_HOME 仍被实例引用，无法删除".to_string());
     }
     cfg.homes
         .retain(|h| !(h.id == id && h.host_id == host.id));
-    save_state(&state, &cfg)
+    save_state(state, &cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,17 +1147,142 @@ pub fn set_instance_port(
     Ok(updated)
 }
 
-#[tauri::command(rename_all = "snake_case")]
-pub fn list_profiles(state: State<'_, AppState>, home_id: String) -> Result<Vec<String>, String> {
-    let cfg = state.config.lock().unwrap();
-    let home = cfg
-        .homes
-        .iter()
-        .find(|h| h.id == home_id)
-        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-    let profiles_dir = crate::profile::profiles_dir(&home.path);
+// ---------------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------------
+
+/// One DSH_HOME record plus the machine it lives on.
+///
+/// This is the single place that decides 「this Mac's filesystem or the other
+/// machine's」 for the DSH_HOME and Profile surface (ADR-0006). The path is the
+/// same string either way; what differs is who touches it. 本机 reads and writes
+/// it directly, a remote host only through the transport, and the caller never
+/// has to know which — a profile operation is one call on this type.
+struct HomeOn {
+    home: DshHome,
+    /// `None` when the HOME is on this Mac.
+    remote: Option<crate::ssh::RemoteHost>,
+    transport: std::sync::Arc<dyn crate::ssh::HostTransport>,
+}
+
+impl HomeOn {
+    /// The DSH_HOME record named, resolved to wherever it lives.
+    fn of(state: &AppState, home_id: &str) -> Result<Self, String> {
+        let home = {
+            let cfg = state.config.lock().unwrap();
+            cfg.homes
+                .iter()
+                .find(|h| h.id == home_id)
+                .cloned()
+                .ok_or_else(|| "DSH_HOME 不存在".to_string())?
+        };
+        let (_, location) = crate::runtime::env_host(state, Some(&home.host_id))?;
+        let remote = match location {
+            crate::runtime::EnvHost::Local => None,
+            crate::runtime::EnvHost::Remote(target) => Some(target),
+        };
+        Ok(Self {
+            home,
+            remote,
+            transport: state.host_transport.clone(),
+        })
+    }
+
+    /// The profiles directory under this HOME.
+    fn profiles_dir(&self) -> std::path::PathBuf {
+        crate::profile::profiles_dir(&self.home.path)
+    }
+
+    /// `<profiles>/<name>` on that machine. The name has to be one path segment
+    /// (see [`crate::profile::profile_dir`]), so no caller can join a path that
+    /// escapes `profiles/` — on this Mac or over ssh.
+    fn profile_dir(&self, name: &str) -> Result<std::path::PathBuf, String> {
+        crate::profile::profile_dir(&self.home.path, name)
+    }
+
+    /// The profile directories under this HOME, read wherever it lives. A HOME
+    /// with no `profiles/` yet is an empty list, not an error.
+    async fn list_profiles(&self) -> Result<Vec<String>, String> {
+        let Some(target) = self.remote.as_ref() else {
+            return Ok(list_profile_dirs(&self.profiles_dir()));
+        };
+        crate::remote::list_profiles(
+            &*self.transport,
+            target,
+            &as_text(&self.profiles_dir()),
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// Copies one profile to a new name inside the same HOME. Nothing is
+    /// overwritten: an existing target is refused, with the same answer 本机
+    /// gives.
+    async fn copy_profile(&self, source: &str, name: &str) -> Result<(), String> {
+        let from = self.profile_dir(source)?;
+        let to = self.profile_dir(name)?;
+        let Some(target) = self.remote.as_ref() else {
+            if !from.is_dir() {
+                return Err(format!("Profile「{source}」不存在"));
+            }
+            if to.exists() {
+                return Err(format!("Profile「{name}」已存在"));
+            }
+            return copy_dir_recursive(&from, &to).map_err(|e| format!("复制 Profile 失败: {e}"));
+        };
+        crate::remote::copy_profile(&*self.transport, target, &as_text(&from), &as_text(&to))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Renames one profile inside the same HOME.
+    async fn rename_profile(&self, old_name: &str, new_name: &str) -> Result<(), String> {
+        let from = self.profile_dir(old_name)?;
+        let to = self.profile_dir(new_name)?;
+        let Some(target) = self.remote.as_ref() else {
+            if !from.is_dir() {
+                return Err(format!("Profile「{old_name}」不存在"));
+            }
+            if to.exists() {
+                return Err(format!("Profile「{new_name}」已存在"));
+            }
+            return std::fs::rename(&from, &to).map_err(|e| format!("重命名 Profile 失败: {e}"));
+        };
+        crate::remote::rename_profile(&*self.transport, target, &as_text(&from), &as_text(&to))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Removes one profile inside the same HOME. The two reserved names are
+    /// refused before either filesystem is touched: they belong to the template
+    /// machinery, on both machines.
+    async fn delete_profile(&self, name: &str) -> Result<(), String> {
+        let target_dir = self.profile_dir(name)?;
+        if name == "__temp__" || name == "node_modules" {
+            return Err(format!("「{name}」为保留名称，不能删除"));
+        }
+        let Some(target) = self.remote.as_ref() else {
+            if !target_dir.is_dir() {
+                return Err(format!("Profile「{name}」不存在"));
+            }
+            return std::fs::remove_dir_all(&target_dir)
+                .map_err(|e| format!("删除 Profile 失败: {e}"));
+        };
+        crate::remote::delete_profile(&*self.transport, target, &as_text(&target_dir))
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// A path in the spelling a remote script can carry.
+fn as_text(path: &std::path::Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+/// The profile directories under one `profiles/`, in this Mac's own filesystem.
+fn list_profile_dirs(profiles_dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+    if let Ok(entries) = std::fs::read_dir(profiles_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             // Skip the template and non-profile entries.
@@ -1090,11 +1295,33 @@ pub fn list_profiles(state: State<'_, AppState>, home_id: String) -> Result<Vec<
         }
     }
     out.sort();
-    Ok(out)
+    out
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_profiles(
+    state: State<'_, AppState>,
+    home_id: String,
+) -> Result<Vec<String>, String> {
+    list_profiles_for(&state, &home_id).await
+}
+
+/// One DSH_HOME's profile directories, read where the HOME lives.
+pub(crate) async fn list_profiles_for(
+    state: &AppState,
+    home_id: &str,
+) -> Result<Vec<String>, String> {
+    HomeOn::of(state, home_id)?.list_profiles().await
 }
 
 /// Creates a new profile by copying the `__temp__` template from dedicated homes.
 /// Never creates or overrides `__temp__` in user default ~/.dsh/profiles (issue #5).
+///
+/// 本机 only. The template hunt walks the launcher's own data directory and the
+/// copy is this machine's directory copy; on a remote host both would have to be
+/// asked of that machine, and a DSH_HOME that was just created there has nothing
+/// to copy from yet. The refusal names the way out, so the button that cannot
+/// work here does not leave the user guessing.
 #[tauri::command(rename_all = "snake_case")]
 pub fn create_profile(
     state: State<'_, AppState>,
@@ -1110,12 +1337,20 @@ pub fn create_profile(
             .homes
             .iter()
             .find(|h| h.id == home_id)
+            .cloned()
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        let is_user_default = home.id == "home-user-dsh"
+        let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?;
+        if !host.builtin {
+            return Err(format!(
+                "还不能在「{}」上新建 Profile：请在那台机器的 <DSH_HOME>/profiles 里把一个 Profile 复制成新名字，再点「重新读取 Profile」",
+                host.display_name
+            ));
+        }
+        let is_user_default = home.id == crate::config::USER_DSH_HOME_ID
             || std::env::var("HOME")
                 .map(|h| home.path == std::path::PathBuf::from(h).join(".dsh"))
                 .unwrap_or(false);
-        (home.path.clone(), is_user_default)
+        (home.path, is_user_default)
     };
     let profiles_dir = crate::profile::profiles_dir(&home_path);
 
@@ -1162,7 +1397,7 @@ pub fn create_profile(
 /// The copy is only materialized after the new name is validated, mirroring
 /// create_profile's copy-from-template behavior.
 #[tauri::command(rename_all = "snake_case")]
-pub fn copy_profile(
+pub async fn copy_profile(
     state: State<'_, AppState>,
     home_id: String,
     source: String,
@@ -1170,124 +1405,95 @@ pub fn copy_profile(
 ) -> Result<String, String> {
     let name = name.trim().to_string();
     crate::profile::validate_profile_name(&name)?;
+    copy_profile_for(&state, &home_id, &source, &name).await
+}
 
-    let profiles_dir = {
-        let cfg = state.config.lock().unwrap();
-        let home = cfg
-            .homes
-            .iter()
-            .find(|h| h.id == home_id)
-            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        crate::profile::profiles_dir(&home.path)
-    };
-
-    let from = profiles_dir.join(&source);
-    if !from.is_dir() {
-        return Err(format!("Profile「{source}」不存在"));
-    }
-    let to = profiles_dir.join(&name);
-    if to.exists() {
-        return Err(format!("Profile「{name}」已存在"));
-    }
-
-    copy_dir_recursive(&from, &to).map_err(|e| format!("复制 Profile 失败: {e}"))?;
-    Ok(name)
+/// Copies one profile to a new name inside the same HOME, wherever it lives.
+pub(crate) async fn copy_profile_for(
+    state: &AppState,
+    home_id: &str,
+    source: &str,
+    name: &str,
+) -> Result<String, String> {
+    HomeOn::of(state, home_id)?.copy_profile(source, name).await?;
+    Ok(name.to_string())
 }
 
 /// Renames a profile directory inside the given HOME.
 #[tauri::command(rename_all = "snake_case")]
-pub fn rename_profile(
+pub async fn rename_profile(
     state: State<'_, AppState>,
     home_id: String,
     old_name: String,
     new_name: String,
 ) -> Result<String, String> {
-    crate::profile::validate_profile_name(&new_name)?;
     let new_name = new_name.trim().to_string();
+    crate::profile::validate_profile_name(&new_name)?;
+    rename_profile_for(&state, &home_id, &old_name, &new_name).await
+}
 
-    let profiles_dir = {
-        let cfg = state.config.lock().unwrap();
-        let home = cfg
-            .homes
-            .iter()
-            .find(|h| h.id == home_id)
-            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        crate::profile::profiles_dir(&home.path)
-    };
-
-    let from = profiles_dir.join(&old_name);
-    if !from.is_dir() {
-        return Err(format!("Profile「{old_name}」不存在"));
-    }
-    let to = profiles_dir.join(&new_name);
-    if to.exists() {
-        return Err(format!("Profile「{new_name}」已存在"));
-    }
-
-    std::fs::rename(&from, &to).map_err(|e| format!("重命名 Profile 失败: {e}"))?;
+/// Renames one profile inside the same HOME, wherever it lives, and keeps the
+/// instances that ran with it pointing at the new name.
+pub(crate) async fn rename_profile_for(
+    state: &AppState,
+    home_id: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<String, String> {
+    HomeOn::of(state, home_id)?
+        .rename_profile(old_name, new_name)
+        .await?;
 
     // Keep the instance's default/last profile references in sync.
-    {
-        let mut cfg = state.config.lock().unwrap();
-        for inst in cfg.instances.iter_mut() {
-            if inst.home_id == home_id {
-                if inst.default_profile.as_deref() == Some(old_name.as_str()) {
-                    inst.default_profile = Some(new_name.clone());
-                }
-                if inst.last_profile.as_deref() == Some(old_name.as_str()) {
-                    inst.last_profile = Some(new_name.clone());
-                }
+    let mut cfg = state.config.lock().unwrap();
+    for inst in cfg.instances.iter_mut() {
+        if inst.home_id == home_id {
+            if inst.default_profile.as_deref() == Some(old_name) {
+                inst.default_profile = Some(new_name.to_string());
+            }
+            if inst.last_profile.as_deref() == Some(old_name) {
+                inst.last_profile = Some(new_name.to_string());
             }
         }
-        save_state(&state, &cfg)?;
     }
+    save_state(state, &cfg)?;
 
-    Ok(new_name)
+    Ok(new_name.to_string())
 }
 
 /// Deletes a profile directory inside the given HOME. The default/last profile
 /// references on instances using this HOME are cleared when they point at the
 /// removed profile.
 #[tauri::command(rename_all = "snake_case")]
-pub fn delete_profile(
+pub async fn delete_profile(
     state: State<'_, AppState>,
     home_id: String,
     name: String,
 ) -> Result<(), String> {
-    let profiles_dir = {
-        let cfg = state.config.lock().unwrap();
-        let home = cfg
-            .homes
-            .iter()
-            .find(|h| h.id == home_id)
-            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        crate::profile::profiles_dir(&home.path)
-    };
+    delete_profile_for(&state, &home_id, &name).await
+}
 
-    let target = profiles_dir.join(&name);
-    if !target.is_dir() {
-        return Err(format!("Profile「{name}」不存在"));
-    }
-    if name == "__temp__" || name == "node_modules" {
-        return Err(format!("「{name}」为保留名称，不能删除"));
-    }
+/// Removes one profile inside the same HOME, wherever it lives, and clears the
+/// default/last profile of the instances that pointed at it.
+pub(crate) async fn delete_profile_for(
+    state: &AppState,
+    home_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    HomeOn::of(state, home_id)?.delete_profile(name).await?;
 
-    std::fs::remove_dir_all(&target).map_err(|e| format!("删除 Profile 失败: {e}"))?;
-
-    {
-        let mut cfg = state.config.lock().unwrap();
-        for inst in cfg.instances.iter_mut() {
-            if inst.home_id == home_id {
-                if inst.default_profile.as_deref() == Some(name.as_str()) {
-                    inst.default_profile = None;
-                }
-                if inst.last_profile.as_deref() == Some(name.as_str()) {
-                    inst.last_profile = None;
-                }
+    let mut cfg = state.config.lock().unwrap();
+    for inst in cfg.instances.iter_mut() {
+        if inst.home_id == home_id {
+            if inst.default_profile.as_deref() == Some(name) {
+                inst.default_profile = None;
+            }
+            if inst.last_profile.as_deref() == Some(name) {
+                inst.last_profile = None;
             }
         }
-        save_state(&state, &cfg)?;
     }
+    save_state(state, &cfg)?;
 
     Ok(())
 }
@@ -1908,10 +2114,7 @@ pub fn open_home_directory(
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
-pub(crate) fn save_state(
-    state: &State<'_, AppState>,
-    cfg: &crate::config::Config,
-) -> Result<(), String> {
+pub(crate) fn save_state(state: &AppState, cfg: &crate::config::Config) -> Result<(), String> {
     crate::config::save_config(&state.config_path, cfg)
 }
 
@@ -2241,41 +2444,480 @@ mod tests {
         }
     }
 
-    /// Opening the host selector made a latent write reachable: a DSH_HOME
-    /// record created while a **remote** host is selected must not touch this
-    /// machine's filesystem. The path belongs to that server, `~` there is that
-    /// machine's home — and `create_dir_all` here would either leave a stray
-    /// directory on this Mac or fail with a permission error that says nothing
-    /// about the server, while the record is written against a path that does
-    /// not exist where the instance will run.
+    /// A remote host with one DSH_HOME on it and one instance bound to it: the
+    /// smallest configuration in which 「这个 HOME 的 Profile」 is a question
+    /// about another machine.
+    fn remote_home_cfg(host: &Host, path: &str) -> crate::config::Config {
+        crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            homes: vec![DshHome {
+                id: "h-lab".into(),
+                name: "服务器默认".into(),
+                path: std::path::PathBuf::from(path),
+                host_id: host.id.clone(),
+            }],
+            instances: vec![crate::config::DshInstance {
+                home_id: "h-lab".into(),
+                default_profile: Some("web".into()),
+                last_profile: Some("web".into()),
+                ..instance_record("i-lab", "实验实例", &host.id)
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn remote_stdout(payload: &str) -> crate::remote::testing::FakeAnswer {
+        crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(payload))
+    }
+
+    /// What a remote write answers: the marker-wrapped acknowledgement every
+    /// one of those scripts prints.
+    fn remote_ack() -> crate::remote::testing::FakeAnswer {
+        remote_stdout(r#"{"ok":true}"#)
+    }
+
+    /// A remote DSH_HOME's profiles are that machine's directories, read with
+    /// one ssh — not this Mac's `/home/demo/.dsh/profiles`, which is a
+    /// different directory that happens to share a spelling.
     #[test]
-    fn a_remote_home_record_is_refused_rather_than_made_on_this_machine() {
+    fn a_remote_homes_profiles_are_read_from_that_machine() {
+        let data = ScratchDir::new("remote-profiles");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_stdout(r#"{"profiles":["web","demo"]}"#));
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let listed = block_on(list_profiles_for(&state, "h-lab")).unwrap();
+
+        assert_eq!(listed, vec!["demo", "web"], "和本机一样按名字排序");
+        assert_eq!(fake.calls().len(), 1, "一份列表一次 ssh");
+        let script = fake.last_script();
+        assert!(
+            script.contains("'/home/demo/.dsh/profiles'"),
+            "读的是那台机器上的那个目录：{script}"
+        );
+    }
+
+    /// 「重新读取 Profile」 is this read asked again: nothing is cached in the
+    /// launcher, so a profile edited on the server shows up on the second look.
+    #[test]
+    fn rereading_a_remote_homes_profiles_asks_that_machine_again() {
+        let data = ScratchDir::new("remote-profiles-reread");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_stdout(r#"{"profiles":["web"]}"#))
+            .answering(remote_stdout(r#"{"profiles":["web","lab"]}"#));
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let first = block_on(list_profiles_for(&state, "h-lab")).unwrap();
+        let second = block_on(list_profiles_for(&state, "h-lab")).unwrap();
+
+        assert_eq!(first, vec!["web"]);
+        assert_eq!(second, vec!["lab", "web"], "第二次读的是那台机器现在的答案");
+        assert_eq!(fake.calls().len(), 2);
+    }
+
+    /// Copying a profile on a remote DSH_HOME is one command on that machine,
+    /// naming both ends as paths there — the launcher has no local copy of the
+    /// tree to copy from.
+    #[test]
+    fn copying_a_remote_profile_is_one_command_on_that_machine() {
+        let data = ScratchDir::new("remote-profile-copy");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_ack());
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let name = block_on(copy_profile_for(&state, "h-lab", "web", "my web")).unwrap();
+
+        assert_eq!(name, "my web");
+        assert_eq!(fake.calls().len(), 1, "一次 ssh 做完这次复制");
+        let script = fake.last_script();
+        assert!(
+            script.contains("'/home/demo/.dsh/profiles/web'")
+                && script.contains("'/home/demo/.dsh/profiles/my web'"),
+            "两端都是那台机器上的路径：{script}"
+        );
+    }
+
+    /// Renaming a profile that instances run with keeps their references in
+    /// step, wherever the HOME is. The rename itself happens there; the records
+    /// are the launcher's and move here.
+    #[test]
+    fn renaming_a_remote_profile_happens_there_and_follows_the_instances() {
+        let data = ScratchDir::new("remote-profile-rename");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_ack());
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let renamed = block_on(rename_profile_for(&state, "h-lab", "web", "web2")).unwrap();
+
+        assert_eq!(renamed, "web2");
+        let script = fake.last_script();
+        assert!(
+            script.contains("'/home/demo/.dsh/profiles/web'")
+                && script.contains("'/home/demo/.dsh/profiles/web2'"),
+            "{script}"
+        );
+        let cfg = state.config.lock().unwrap();
+        assert_eq!(
+            cfg.instances[0].default_profile.as_deref(),
+            Some("web2"),
+            "实例的默认 Profile 跟着改名"
+        );
+        assert_eq!(cfg.instances[0].last_profile.as_deref(), Some("web2"));
+    }
+
+    /// Removing a remote profile removes the directory **there** (a profile is
+    /// data on that machine, not a record), and clears the references to it.
+    #[test]
+    fn deleting_a_remote_profile_happens_there_and_clears_the_instances() {
+        let data = ScratchDir::new("remote-profile-delete");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_ack());
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        block_on(delete_profile_for(&state, "h-lab", "web")).unwrap();
+
+        let script = fake.last_script();
+        assert!(
+            script.contains("'/home/demo/.dsh/profiles/web'"),
+            "{script}"
+        );
+        let cfg = state.config.lock().unwrap();
+        assert_eq!(cfg.instances[0].default_profile, None);
+        assert_eq!(cfg.instances[0].last_profile, None);
+    }
+
+    /// The traversal guard holds on the far side too: a name that is not one
+    /// path segment never becomes a path, and nothing is dialed to find out.
+    #[test]
+    fn a_remote_profile_name_that_would_escape_is_refused_before_any_ssh() {
+        let data = ScratchDir::new("remote-profile-escape");
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let err = block_on(copy_profile_for(&state, "h-lab", "../../etc", "x")).unwrap_err();
+
+        assert!(err.contains("名称不合法"), "{err}");
+        assert!(fake.calls().is_empty(), "拒绝发生在拼路径的时候：{:?}", fake.calls());
+    }
+
+    /// 本机's profile operations are unchanged: the same files, directly, with
+    /// no transport involved and nothing dialed.
+    #[test]
+    fn the_local_host_still_reads_and_changes_its_own_profiles() {
+        let data = ScratchDir::new("local-profiles");
+        let home_path = data.path().join("local-dsh");
+        std::fs::create_dir_all(home_path.join("profiles/web")).unwrap();
+        std::fs::write(home_path.join("profiles/web/package.json"), "{}").unwrap();
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local()],
+            homes: vec![DshHome {
+                id: "h1".into(),
+                name: "本机 HOME".into(),
+                path: home_path.clone(),
+                host_id: crate::config::LOCAL_HOST_ID.into(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake.clone());
+
+        let listed = block_on(list_profiles_for(&state, "h1")).unwrap();
+        assert_eq!(listed, vec!["web"]);
+        block_on(copy_profile_for(&state, "h1", "web", "web copy")).unwrap();
+        assert!(home_path.join("profiles/web copy/package.json").is_file());
+        block_on(rename_profile_for(&state, "h1", "web copy", "renamed")).unwrap();
+        assert!(home_path.join("profiles/renamed").is_dir());
+        block_on(delete_profile_for(&state, "h1", "renamed")).unwrap();
+        assert!(!home_path.join("profiles/renamed").exists());
+        assert!(home_path.join("profiles/web").is_dir());
+
+        assert!(
+            fake.calls().is_empty(),
+            "本机的 Profile 操作不经过 ssh：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// The path of a remote DSH_HOME is a path on that server, so the server is
+    /// what settles it: the machine resolves `~`, creates the directory if it
+    /// is missing, and answers where it landed. The record keeps **that**
+    /// answer — never the raw text, and never a path this Mac came up with.
+    ///
+    /// The path is typed by hand for the server, so a space and a single quote
+    /// in it are ordinary; the script that goes over ssh must carry it as one
+    /// word through the local argv **and** the remote shell.
+    #[test]
+    fn a_remote_home_is_validated_on_that_machine_and_saved_with_its_answer() {
         let data = ScratchDir::new("remote-home");
         let host = server_host("host-lab", None);
         let cfg = crate::config::Config {
             hosts: vec![Host::local(), host.clone()],
             ..Default::default()
         };
-        let state = host_state(&data, cfg, crate::remote::testing::idle());
-        let stray = data.path().join("stray-home");
+        let typed = "/home/de mo/it's here/.dsh";
+        let settled = "/home/de mo/it's here/.dsh";
+        let answer = crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
+            &format!(r#"{{"path":"{settled}"}}"#),
+        ));
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(answer.clone())
+            .answering(answer);
+        let state = host_state(&data, cfg, fake.clone());
+
+        let home = block_on(create_home_record_in(&state, "远端 HOME", typed, Some("host-lab")))
+            .unwrap();
+
+        assert_eq!(home.host_id, "host-lab");
+        assert_eq!(home.path.to_string_lossy(), settled, "记录的是那台机器给的路径");
+        assert!(
+            !std::path::Path::new(typed).exists(),
+            "这台 Mac 上不因为这条记录多出任何目录"
+        );
+        let script = fake.last_script();
+        assert!(
+            script.contains(&crate::remote::quote(typed)),
+            "整条路径要作为一个词过两层 shell：{script}"
+        );
+        assert!(
+            script.contains(r"'/home/de mo/it'\''s here/.dsh'"),
+            "空格与单引号都要转义：{script}"
+        );
+
+        // Asking for the same directory again reuses the record it already has.
+        let again = block_on(create_home_record_in(
+            &state,
+            "另一个名字",
+            "/home/de mo/other/../it's here/.dsh",
+            Some("host-lab"),
+        ))
+        .unwrap();
+        assert_eq!(again.id, home.id, "同一台机器上同一个目录只有一条记录");
+    }
+
+    /// A path the machine will not use is refused **by that machine**, and
+    /// nothing is saved: a record pointing at a directory that does not exist
+    /// where the instance will run is worse than no record.
+    #[test]
+    fn a_remote_path_the_machine_refuses_saves_no_record() {
+        let data = ScratchDir::new("remote-home-bad");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::failed(
+                3,
+                "请填写绝对路径（以 / 开头）：relative/homes",
+            ),
+        );
+        let state = host_state(&data, cfg, fake.clone());
 
         let err =
-            create_home_record_in(&state, "远端 HOME", &stray.to_string_lossy(), Some("host-lab"))
+            block_on(create_home_record_in(&state, "远端 HOME", "relative/homes", Some("host-lab")))
                 .unwrap_err();
 
-        assert!(!stray.exists(), "本机不该出现这个目录：{err}");
         assert!(
             state.config.lock().unwrap().homes.is_empty(),
-            "也不留下一条指向它的记录"
+            "远端校验没过就不写记录：{err}"
         );
-        assert!(err.contains("服务器"), "拒绝的理由要指名那台主机：{err}");
-        assert!(err.contains("不在本机"), "{err}");
+        assert!(err.contains("绝对路径"), "理由来自远端：{err}");
+        assert_eq!(fake.calls().len(), 1, "只问了那台机器一次");
+    }
 
-        // 本机 keeps behaving as it always did: the record is created and so is
-        // the directory it points at.
-        let local = create_home_record_in(&state, "本机 HOME", &stray.to_string_lossy(), None).unwrap();
-        assert_eq!(local.host_id, crate::config::LOCAL_HOST_ID);
-        assert!(stray.is_dir());
+    /// Path equality is the host's own: 本机's APFS volume folds case, a remote
+    /// Linux host does not. The same spelling typed twice is one record on
+    /// either machine; two spellings are one record here and two there.
+    #[test]
+    fn a_remote_path_with_different_case_is_a_different_path() {
+        let data = ScratchDir::new("remote-case");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"path":"/home/demo/.dsh"}"#),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"path":"/home/demo/.DSH"}"#),
+            ));
+        let state = host_state(&data, cfg, fake.clone());
+
+        block_on(create_home_record_in(&state, "小写", "/home/demo/.dsh", Some("host-lab")))
+            .unwrap();
+        block_on(create_home_record_in(&state, "大写", "/home/demo/.DSH", Some("host-lab")))
+            .unwrap();
+
+        assert_eq!(
+            state.config.lock().unwrap().homes.len(),
+            2,
+            "Linux 上这是两个目录，就是两条记录"
+        );
+
+        // 本机 keeps folding case: one directory, one record.
+        let scratch = data.path().join("Case");
+        block_on(create_home_record_in(&state, "本机小写", &scratch.to_string_lossy(), None))
+            .unwrap();
+        let same = block_on(create_home_record_in(
+            &state,
+            "本机大写",
+            &data.path().join("cASE").to_string_lossy(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(same.path, scratch, "本机不区分大小写，还是那一条");
+        assert_eq!(state.config.lock().unwrap().homes.len(), 3);
+    }
+
+    /// A remote `~/.dsh` becomes a record the same way 本机's does — except
+    /// that the question is put to the machine that owns the home directory.
+    /// One ssh, one record, and asking twice does not add a second.
+    #[test]
+    fn a_remote_user_dsh_home_becomes_one_record() {
+        let data = ScratchDir::new("remote-user-home");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            ..Default::default()
+        };
+        let answer = crate::remote::testing::marked(
+            r#"{"home":"/home/demo","dsh_home":"/home/demo/.dsh","exists":true}"#,
+        );
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(answer.clone()))
+            .answering(crate::remote::testing::FakeAnswer::stdout(answer));
+        let state = host_state(&data, cfg, fake.clone());
+
+        let first = block_on(list_homes_for(&state, Some("host-lab"))).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].path.to_string_lossy(), "/home/demo/.dsh");
+        assert_eq!(first[0].host_id, "host-lab");
+        assert_eq!(first[0].id, crate::config::user_dsh_home_id(&host));
+
+        let second = block_on(list_homes_for(&state, Some("host-lab"))).unwrap();
+        assert_eq!(second.len(), 1, "第二次问不添第二条记录");
+        assert_eq!(second[0].id, first[0].id);
+    }
+
+    /// A machine without a `~/.dsh` is a machine, not an error: nothing is
+    /// recorded, and the rest of its DSH_HOMEs still come back.
+    #[test]
+    fn a_remote_machine_without_a_user_dsh_home_records_nothing() {
+        let data = ScratchDir::new("remote-no-user-home");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            homes: vec![DshHome {
+                id: "h-lab".into(),
+                name: "实验环境".into(),
+                path: std::path::PathBuf::from("/opt/dsh/lab"),
+                host_id: "host-lab".into(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
+                r#"{"home":"/home/demo","dsh_home":"","exists":false}"#,
+            )),
+        );
+        let state = host_state(&data, cfg, fake.clone());
+
+        let listed = block_on(list_homes_for(&state, Some("host-lab"))).unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "h-lab");
+        assert_eq!(state.config.lock().unwrap().homes.len(), 1);
+    }
+
+    /// Removing a DSH_HOME is removing a record: the directory on that machine
+    /// stays, and the launcher does not even ask about it. Same rule as 本机
+    /// (ADR-0006) — deleting records is the launcher's business, deleting the
+    /// user's directories is not.
+    #[test]
+    fn removing_a_remote_home_record_touches_nothing_on_that_machine() {
+        let data = ScratchDir::new("remote-home-remove");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            homes: vec![DshHome {
+                id: "h-lab".into(),
+                name: "实验环境".into(),
+                path: std::path::PathBuf::from("/opt/dsh/lab"),
+                host_id: "host-lab".into(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake.clone());
+
+        remove_home_record(&state, "h-lab", Some("host-lab")).unwrap();
+
+        assert!(state.config.lock().unwrap().homes.is_empty());
+        assert!(
+            fake.calls().is_empty(),
+            "删记录不该给那台机器发任何命令：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// 本机's side of all of the above is unchanged: the path goes through the
+    /// local rules, the directory is really created here, and nothing is dialed
+    /// to answer a question about this Mac.
+    #[test]
+    fn the_local_host_still_creates_and_lists_its_own_homes() {
+        let data = ScratchDir::new("local-home");
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local()],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake.clone());
+        let dir = data.path().join("local-dsh");
+
+        let home = block_on(create_home_record_in(
+            &state,
+            "本机 HOME",
+            &dir.to_string_lossy(),
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(home.host_id, crate::config::LOCAL_HOST_ID);
+        assert!(dir.is_dir(), "本机照旧把目录建出来");
+        let listed = block_on(list_homes_for(&state, None)).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, home.id);
+        assert!(
+            fake.calls().is_empty(),
+            "本机的问题不经过 ssh：{:?}",
+            fake.calls()
+        );
     }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {

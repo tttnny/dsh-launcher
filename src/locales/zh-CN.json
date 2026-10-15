@@ -105,7 +105,12 @@
     "sharedTag": "共享",
     "unused": "未被引用",
     "browserPickHint": "浏览器预览不支持系统目录选择，请手动输入路径",
-    "homesEmpty": "暂无 DSH_HOME"
+    "homesEmpty": "暂无 DSH_HOME",
+    "remotePathPlaceholder": "服务器上的路径，例如 /home/me/.dsh",
+    "remoteAddNote": "这是那台机器上的路径：启动器会在那边把它建出来（不存在的目录会新建），确认可用之后才记下这条记录。",
+    "copyPath": "复制路径",
+    "pathCopied": "已复制路径",
+    "confirmDeleteRemoteHome": "从启动器移除 DSH_HOME「{name}」？只删这条记录：那台机器上的目录一个字节都不动。"
   },
   "profiles": {
     "profilesTitle": "Profile",

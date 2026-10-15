@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
+import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
@@ -13,13 +14,22 @@ import DlEmpty from '@/components/DlEmpty.vue'
 // sessions and credentials all live under it. Instances point at one, and a
 // HOME that an instance points at cannot be forgotten — that is the only
 // integrity rule this pane enforces.
+//
+// A HOME belongs to one machine (ADR-0006). 本机's is a directory on this Mac;
+// a remote host's is a directory on that server, so its path is typed (there is
+// no picker for another machine's disk) and settled there before the record is
+// saved. Removing a record removes the record only, on either machine.
 
 const { t } = useI18n()
 const router = useRouter()
 const store = useLauncherStore()
+const { copy } = useCopy()
 
 const newName = ref('')
 const newPath = ref('')
+
+/** Whether the pane is showing another machine's DSH_HOMEs. */
+const remote = computed(() => store.currentHost?.builtin === false)
 
 const usedBy = computed(() => (id: string) => store.instancesOfHome(id).length)
 
@@ -88,8 +98,14 @@ function viewProfiles(homeId: string) {
     <div class="dl-surface home-add">
       <DlIcon name="folder" :size="15" class="home-add-glyph" />
       <input v-model="newName" class="dl-input" :placeholder="t('homes.homeNamePlaceholder')" />
-      <input v-model="newPath" class="dl-input dl-input--mono home-path-input" :placeholder="t('homes.homePathPlaceholder')" />
-      <button class="dl-btn dl-btn--quiet" @click="pickDir">{{ t('homes.pickDir') }}</button>
+      <input
+        v-model="newPath"
+        class="dl-input dl-input--mono home-path-input"
+        :placeholder="remote ? t('homes.remotePathPlaceholder') : t('homes.homePathPlaceholder')"
+      />
+      <button v-if="!remote" class="dl-btn dl-btn--quiet" @click="pickDir">
+        {{ t('homes.pickDir') }}
+      </button>
       <button
         class="dl-btn dl-btn--primary"
         :disabled="!newName.trim() || !newPath.trim() || addAction.busy['*']"
@@ -98,6 +114,7 @@ function viewProfiles(homeId: string) {
         {{ t('homes.addHome') }}
       </button>
     </div>
+    <p v-if="remote" class="home-note">{{ t('homes.remoteAddNote') }}</p>
 
     <!-- A DSH_HOME is a record the launcher keeps, so a machine that cannot be
          reached still has its list here; only a failed read of the records
@@ -127,7 +144,19 @@ function viewProfiles(homeId: string) {
         </span>
 
         <div class="home-actions">
+          <!-- Another machine's directory cannot be opened in this Mac's file
+               manager, and a button that fails is worse than none: the path
+               itself is what the user needs, to paste into their own terminal. -->
           <button
+            v-if="remote"
+            class="dl-btn dl-btn--ghost"
+            @click="copy(h.path, 'homes.pathCopied')"
+          >
+            <DlIcon name="copy" :size="13" />
+            {{ t('homes.copyPath') }}
+          </button>
+          <button
+            v-else
             class="dl-btn dl-btn--ghost"
             :disabled="!!dirAction.busy[h.id]"
             @click="dirAction.run(h.id)"
@@ -140,7 +169,11 @@ function viewProfiles(homeId: string) {
             {{ t('homes.viewProfiles') }}
           </button>
           <a-popconfirm
-            :content="t('homes.confirmDeleteHome', { name: h.name })"
+            :content="
+              remote
+                ? t('homes.confirmDeleteRemoteHome', { name: h.name })
+                : t('homes.confirmDeleteHome', { name: h.name })
+            "
             :ok-text="t('homes.deleteHome')"
             :cancel-text="t('common.cancel')"
             :disabled="usedBy(h.id) > 0"
@@ -182,6 +215,12 @@ function viewProfiles(homeId: string) {
   > .dl-input:first-of-type {
     width: 180px;
   }
+}
+
+.home-note {
+  margin: 8px 2px 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-4);
 }
 
 .home-list {

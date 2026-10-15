@@ -498,7 +498,12 @@ async fn do_create_instance(
                 .ok_or_else(|| "缺少专属 DSH_HOME 路径".to_string())?
                 .to_string_lossy()
                 .to_string();
-            create_dedicated_home(state, host, name, &path).await?
+            // The record and its directory, on the host that owns both: 本机
+            // creates it here, a remote host asks that machine (the same call,
+            // because where a path is decides who may create it).
+            crate::commands::create_home_record_in(state, name, &path, Some(&host.id))
+                .await?
+                .id
         }
     };
     let home_path = {
@@ -551,47 +556,6 @@ async fn do_create_instance(
         inst
     };
     Ok(inst.id)
-}
-
-/// Records the dedicated DSH_HOME an install's instance binds to, making the
-/// directory where it lives first: this Mac's own filesystem for 本机, or over
-/// the transport for a remote host.
-///
-/// The record itself is local either way (ADR-0006): only the directory is on
-/// the machine that owns it, and a path that already has a record on that same
-/// host is that HOME rather than a second one.
-async fn create_dedicated_home(
-    state: &State<'_, AppState>,
-    host: &Host,
-    name: &str,
-    path: &str,
-) -> Result<String, String> {
-    if host.builtin {
-        return Ok(crate::commands::create_home_record_in(state, name, path, None)?.id);
-    }
-    let target = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
-    crate::remote::ensure_dir(&*state.host_transport, &target, path)
-        .await
-        .map_err(|e| format!("在那台机器上创建专属 DSH_HOME 目录失败：{e}"))?;
-
-    let path_buf = PathBuf::from(path);
-    let mut cfg = state.config.lock().unwrap();
-    if let Some(existing) = cfg
-        .homes
-        .iter()
-        .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &path_buf))
-    {
-        return Ok(existing.id.clone());
-    }
-    let home = crate::config::DshHome {
-        id: new_id("h"),
-        name: name.to_string(),
-        path: path_buf,
-        host_id: host.id.clone(),
-    };
-    cfg.homes.push(home.clone());
-    crate::commands::save_state(state, &cfg)?;
-    Ok(home.id)
 }
 
 /// Ensures the default `web` profile exists in the given DSH_HOME and that a

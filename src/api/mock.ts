@@ -573,6 +573,38 @@ function refuseRemotePathTouches(host: Host, what: string) {
   }
 }
 
+/**
+ * Each machine's home directory as the preview learned it from 「测试连接」.
+ * `~` in a path typed for another host expands against **that** machine's home
+ * — the backend asks the machine itself (`remote::home_path_script`), and the
+ * preview cannot ask, so it keeps what the connection test reported.
+ */
+const mockHostHomes: Record<string, string> = { [REMOTE_HOST_ID]: '/home/demo' }
+
+/**
+ * Settles a DSH_HOME path **on a remote host**, the way that machine would:
+ * `~` against its own home, `..` (and doubled or trailing slashes) by text, and
+ * a relative path refused. Mirrors `remote::home_path_script`, which is why the
+ * preview refuses the same inputs the real scripts do.
+ */
+function settleRemotePath(host: Host, raw: string): string {
+  const home = mockHostHomes[host.id] ?? '/home/demo'
+  let requested: string
+  if (raw === '~') requested = home
+  else if (raw.startsWith('~/')) requested = `${home}/${raw.slice(2)}`
+  else if (raw.startsWith('~')) throw new Error(`不支持 ~用户名 形式的路径：${raw}`)
+  else requested = raw
+  if (!requested.startsWith('/')) throw new Error(`请填写绝对路径（以 / 开头）：${raw}`)
+
+  const parts: string[] = []
+  for (const segment of requested.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') parts.pop()
+    else parts.push(segment)
+  }
+  return `/${parts.join('/')}`
+}
+
 export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const db = loadDb()
   function fail(msg: string): never {
@@ -650,6 +682,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         pnpm: { path: '/home/demo/.local/share/pnpm/pnpm', version: '11.1.2' },
       }
       mockHostStatuses[id] = { state: 'reachable', message: null }
+      mockHostHomes[id] = test.home ?? mockHostHomes[id] ?? ''
       if (!host.data_dir) {
         host.data_dir = test.data_dir
         saveDb(db)
@@ -664,8 +697,30 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
 
     // --- DSH_HOME ------------------------------------------------------------
     case 'list_homes': {
-      const hostId = hostIdArg(args)
-      return db.homes.filter((h) => (h.host_id ?? LOCAL_HOST_ID) === hostId) as T
+      const host = hostOf(db, hostIdArg(args))
+      // A DSH_HOME is a record the launcher keeps, so a machine the preview
+      // cannot reach still has its list here; the one thing only that machine
+      // can answer — whether it has a `~/.dsh` of its own — is skipped rather
+      // than guessed at.
+      const answers = (mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable'
+      // Its own `~/.dsh` joins the list the first time it is asked — the
+      // question 本机's load-time sweep asks about this Mac (ADR-0006).
+      if (!host.builtin && answers) {
+        const dsh = `${mockHostHomes[host.id] ?? '/home/demo'}/.dsh`
+        const known = db.homes.some(
+          (h) => (h.host_id ?? LOCAL_HOST_ID) === host.id && h.path === dsh,
+        )
+        if (!known) {
+          db.homes.push({
+            id: `home-user-dsh-${host.id}`,
+            name: '用户默认 (~/.dsh)',
+            path: dsh,
+            host_id: host.id,
+          })
+          saveDb(db)
+        }
+      }
+      return db.homes.filter((h) => (h.host_id ?? LOCAL_HOST_ID) === host.id) as T
     }
     case 'default_dedicated_home_path': {
       const name = String(args?.name ?? 'instance')
@@ -678,10 +733,17 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'create_home': {
       const host = hostOf(db, hostIdArg(args))
-      refuseRemotePathTouches(host, 'DSH_HOME 目录')
       const name = String(args?.name ?? '').trim()
-      const path = String(args?.path ?? '').trim()
-      if (!name || !path) fail('名称与路径不能为空')
+      const raw = String(args?.path ?? '').trim()
+      if (!name || !raw) fail('名称与路径不能为空')
+      // 本机's path is this Mac's; another machine's is settled **there**, and
+      // only the answer is recorded — a path that machine will not use is not
+      // saved at all.
+      const path = host.builtin ? raw : settleRemotePath(host, raw)
+      const existing = db.homes.find(
+        (h) => (h.host_id ?? LOCAL_HOST_ID) === host.id && h.path === path,
+      )
+      if (existing) return existing as T
       const home: DshHome = { id: `h-${uuid()}`, name, path, host_id: host.id }
       db.homes.push(home)
       saveDb(db)
@@ -995,6 +1057,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'list_profiles': {
       const homeId = String(args?.home_id)
+      // Profiles are data on the machine that owns the DSH_HOME: a host the
+      // preview cannot reach has no list to show.
+      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
       const home = db.homes.find((h) => h.id === homeId)
       if (!home) fail('DSH_HOME 不存在')
       // Mock: combine the default set with previously created profiles.
@@ -1004,6 +1069,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'create_profile': {
       const homeId = String(args?.home_id)
+      // Profiles are data on the machine that owns the DSH_HOME: a host the
+      // preview cannot reach has no list to show.
+      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
       const name = String(args?.name ?? '').trim()
       if (!name) fail('Profile 名称不能为空')
       if (name === '__temp__' || name === 'node_modules') fail(`「${name}」为保留名称，不能使用`)
@@ -1018,6 +1086,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'copy_profile': {
       const homeId = String(args?.home_id)
+      // Profiles are data on the machine that owns the DSH_HOME: a host the
+      // preview cannot reach has no list to show.
+      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
       const source = String(args?.source ?? '')
       const name = String(args?.name ?? '').trim()
       if (!name) fail('Profile 名称不能为空')
@@ -1035,6 +1106,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'rename_profile': {
       const homeId = String(args?.home_id)
+      // Profiles are data on the machine that owns the DSH_HOME: a host the
+      // preview cannot reach has no list to show.
+      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
       const oldName = String(args?.old_name ?? '')
       const newName = String(args?.new_name ?? '').trim()
       if (!newName) fail('Profile 名称不能为空')
@@ -1061,6 +1135,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'delete_profile': {
       const homeId = String(args?.home_id)
+      // Profiles are data on the machine that owns the DSH_HOME: a host the
+      // preview cannot reach has no list to show.
+      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
       const name = String(args?.name ?? '')
       if (name === '__temp__' || name === 'node_modules') fail(`「${name}」为保留名称，不能删除`)
       const home = db.homes.find((h) => h.id === homeId)
