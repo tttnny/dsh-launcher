@@ -148,14 +148,30 @@ impl Host {
     ///
     /// The local host's is the launcher's own data directory. A remote host
     /// states its own, because its default (that machine's home directory plus
-    /// `~/.local/share/dsh-launcher`) can only be resolved on that machine.
+    /// `~/.local/share/dsh-launcher`) can only be resolved on that machine — and
+    /// the connection test is what settles what the user typed there and writes
+    /// the absolute answer down.
     pub fn data_dir(&self, launcher_data_dir: &Path) -> Result<PathBuf, String> {
         if self.builtin {
             return Ok(launcher_data_dir.to_path_buf());
         }
-        self.data_dir
+        let dir = self
+            .data_dir
             .clone()
-            .ok_or_else(|| format!("主机「{}」还没有远端数据目录", self.display_name))
+            .ok_or_else(|| format!("主机「{}」还没有远端数据目录", self.display_name))?;
+        // A value that is not absolute has not been settled on that machine yet
+        // (`~/dsh` typed into the form, before the first connection test). No
+        // script may be handed it: quoted for the remote shell it is a literal
+        // `~`, resolved against whatever directory that shell starts in — an
+        // empty version list that reads like an answer.
+        if !dir.is_absolute() {
+            return Err(format!(
+                "主机「{}」的远端数据目录还没在那台机器上确定（现在记的是 {}）：在设置里对它点一次「测试连接」，或填一个绝对路径",
+                self.display_name,
+                dir.display()
+            ));
+        }
+        Ok(dir)
     }
 
     /// This host's dedicated DSH_HOME for a version:
