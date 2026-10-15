@@ -71,7 +71,7 @@
     "startAllDone": "已启动 {count} 个实例",
     "stopAllDone": "已停止 {count} 个实例",
     "bulkFailed": "{count} 个失败（{reason}）",
-    "startAllSkipped": "{count} 个主机不可达，未动",
+    "startAllSkipped": "{count} 个在不可达的主机上，未动",
     "create": "创建",
     "created": "实例已创建",
     "homeHint": "同一版本可以绑定到不同的 DSH_HOME，或与其他实例共用一个。",
