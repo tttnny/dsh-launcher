@@ -554,9 +554,17 @@ fn handle_double_click(app: &AppHandle) {
         };
 
         // The same rule the tray's own 「打开」 uses, so a remote instance is
-        // reached through the launcher's forward here too.
+        // reached through the launcher's forward here too. A failure falls through
+        // to the window — what a double click does when there is nothing to open
+        // — but it is said in the log rather than swallowed.
         let url = match target {
-            Some(id) => crate::process::reachable_url_for(&state, &id).await.ok(),
+            Some(id) => match crate::process::reachable_url_for(&state, &id).await {
+                Ok(url) => Some(url),
+                Err(reason) => {
+                    crate::log_warn!("托盘双击打开实例 {id} 失败：{reason}");
+                    None
+                }
+            },
             None => None,
         };
 
