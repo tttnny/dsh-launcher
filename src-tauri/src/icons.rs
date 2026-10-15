@@ -410,6 +410,7 @@ mod tests {
             tasks: tokio::sync::Mutex::new(Default::default()),
             host_transport: transport,
             host_statuses: std::sync::Mutex::new(Default::default()),
+            remote_scan: std::sync::Mutex::new(Default::default()),
         }
     }
 

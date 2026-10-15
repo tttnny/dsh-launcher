@@ -95,6 +95,13 @@ function onRowKeydown(event: KeyboardEvent) {
 }
 const running = computed(() => status.value.state === 'running')
 const starting = computed(() => status.value.state === 'starting')
+/**
+ * 「主机不可达」: the machine that runs this instance did not answer, so its state
+ * is unknown. It is deliberately not 已停止 — that reading is what makes a user
+ * start a second DSH on the server (ADR-0007). The row's answer is therefore a
+ * retry, never a 启动.
+ */
+const unreachable = computed(() => status.value.state === 'unreachable')
 const versionName = computed(
   () => store.versionById(props.inst.version_id)?.version ?? props.inst.version_id,
 )
@@ -122,6 +129,15 @@ const showHost = computed(() => store.allHosts && !!host.value && !host.value.bu
  * 「打开目录」 cannot open what this Mac does not have.
  */
 const remote = computed(() => !!host.value && !host.value.builtin)
+/**
+ * Why the state is what it is, when the state itself cannot say: the last word
+ * about reaching that machine (連不上 / 认证失败 / 超时), or the retry's own
+ * explanation.
+ */
+const statusHint = computed(() => {
+  if (!unreachable.value) return undefined
+  return host.value?.status?.message || t('home.retryHint')
+})
 const envEntries = computed(() => Object.entries(props.inst.env_overrides ?? {}))
 const portLabel = computed(() =>
   props.inst.port ? String(props.inst.port) : t('instances.portRandom'),
@@ -176,6 +192,19 @@ const restartAction = useAction((id: string) => api.restartInstance(id), {
   success: () => t('home.started'),
 })
 const openAction = useAction((id: string) => api.openInstanceWindow(id), { key: (id) => id })
+/**
+ * Ask that machine once more. The answer arrives as a status event (and the
+ * host's own message is re-read so the row can say *why* it was unreachable),
+ * so the click needs no toast of its own.
+ */
+const retryAction = useAction(
+  async (id: string) => {
+    await api.refreshInstanceStatus(id)
+    store.hosts = await api.listHosts()
+    return true
+  },
+  { key: (id) => id },
+)
 
 const busy = computed(
   () =>
@@ -228,6 +257,10 @@ async function onOpen() {
 
 async function onStop() {
   await stopAction.run(props.inst.id)
+}
+
+async function onRetry() {
+  await retryAction.run(props.inst.id)
 }
 
 async function onRestart() {
@@ -358,7 +391,7 @@ onMounted(() => {
           </span>
         </div>
 
-        <span class="dl-status inst-status" :class="`is-${status.state}`">
+        <span class="dl-status inst-status" :class="`is-${status.state}`" :title="statusHint">
           {{ t(`home.status.${status.state}`) }}
         </span>
 
@@ -379,6 +412,18 @@ onMounted(() => {
           >
             <span class="dl-spinner" />
             {{ t('home.status.starting') }}
+          </button>
+          <!-- Unknown is not stopped: the only useful move is to ask again, and
+               a 启动 here is exactly the click that creates a second DSH. -->
+          <button
+            v-else-if="unreachable"
+            class="dl-btn dl-btn--quiet inst-primary"
+            :title="statusHint"
+            :disabled="retryAction.busy[inst.id]"
+            @click="onRetry"
+          >
+            <DlIcon name="refresh" :size="13" />
+            {{ t('home.retryCheck') }}
           </button>
           <button
             v-else
@@ -469,6 +514,10 @@ onMounted(() => {
           <span v-else-if="health.warns > 0" class="fact-warn">
             {{ t('instances.healthWarns', { count: health.warns }) }}
           </span>
+          <!-- The dependency tree of a remote instance is on that machine, and
+               the launcher does not read it: 「没有发现问题」 would be a claim it
+               never checked. -->
+          <span v-else-if="remote" class="fact-sub">{{ t('instances.healthNotChecked') }}</span>
           <span v-else class="fact-sub">{{ t('instances.healthOk') }}</span>
         </span>
       </div>

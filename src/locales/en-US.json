@@ -38,7 +38,8 @@
       "stopped": "Stopped",
       "starting": "Starting",
       "running": "Running",
-      "exited": "Exited"
+      "exited": "Exited",
+      "unreachable": "Host unreachable"
     },
     "healthLogs": "Checks",
     "healthModalTitle": "Dependency checks",
@@ -52,7 +53,9 @@
     "filterError": "Errors",
     "filterWarn": "Warnings",
     "reloadProfiles": "Reload profile list",
-    "profileUnset": "Not set"
+    "profileUnset": "Not set",
+    "retryCheck": "Retry",
+    "retryHint": "Ask that machine about this instance once more."
   },
   "instances": {
     "pageTitle": "Instances",
@@ -89,6 +92,7 @@
     "hostFilter": "Host",
     "hostAll": "All",
     "localTag": "This Mac",
+    "healthNotChecked": "Not checked on a remote host",
     "copyPath": "Copy path",
     "copyCommand": "Copy command",
     "pathCopied": "Remote path copied",
@@ -263,7 +267,8 @@
       "deleteWarning": "This deletes the launcher's record only: nothing on the server is touched, and the instances running there keep running.",
       "deleteRecords": "The versions, DSH_HOMEs and instance records filed under this host go with it, and its instances will no longer show up in the launcher.",
       "deleteLeft": "The remote data directory stays on that machine as it is (versions, dedicated DSH_HOMEs, logs, running record). To look at it yourself, run in a terminal:",
-      "deleteCommandCopied": "Cleanup command copied"
+      "deleteCommandCopied": "Cleanup command copied",
+      "deleteRunning": "“{0}” keep running on that machine and the launcher will no longer see them; stopping them has to happen there."
     },
     "language": "Language",
     "theme": {

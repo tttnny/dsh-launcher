@@ -531,6 +531,11 @@ pub enum InstanceState {
     Starting,
     Running,
     Exited,
+    /// The launcher cannot say what this instance's state is: the machine that
+    /// runs it did not answer. It is deliberately **not** `Stopped` — reading it
+    /// as 已停止 is what makes a user press 启动 and end up with a second DSH on
+    /// a server that was running one all along (ADR-0007 后果).
+    Unreachable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

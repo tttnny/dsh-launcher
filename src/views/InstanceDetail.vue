@@ -70,6 +70,20 @@ onMounted(async () => {
 const current = computed(() => store.instanceById(id.value))
 const status = computed(() => store.statusOf(id.value))
 const running = computed(() => status.value.state === 'running' || status.value.state === 'starting')
+/**
+ * 「主机不可达」 — the machine did not answer, so the state is unknown. The page
+ * offers the retry and never turns it into 已停止 (ADR-0007 后果).
+ */
+const unreachable = computed(() => status.value.state === 'unreachable')
+const hostReason = computed(() => store.hostById(current.value?.host_id)?.status?.message ?? '')
+const retryAction = useAction(
+  async (instanceId: string) => {
+    await api.refreshInstanceStatus(instanceId)
+    store.hosts = await api.listHosts()
+    return true
+  },
+  { key: (instanceId) => instanceId },
+)
 const homeLabel = computed(() => store.homeById(homeId.value ?? '')?.name ?? '—')
 /**
  * The machine this instance runs on. Its version and its DSH_HOMEs live there —
@@ -325,7 +339,7 @@ function removeEnvRow(idx: number) {
         <h1 class="detail-title">
           <InstanceAvatar :id="id" :icon="current?.icon" :size="34" />
           <span class="detail-name">{{ name.trim() || t('instanceEdit.titleEdit') }}</span>
-          <span class="dl-status" :class="`is-${status.state}`">
+          <span class="dl-status" :class="`is-${status.state}`" :title="unreachable ? hostReason : undefined">
             {{ t(`home.status.${status.state}`) }}
           </span>
         </h1>
@@ -342,6 +356,18 @@ function removeEnvRow(idx: number) {
         </p>
       </div>
       <div class="dl-head-actions">
+        <!-- Unknown is not stopped: the machine that runs this instance did not
+             answer, so the one useful move is to ask it again. -->
+        <button
+          v-if="unreachable"
+          class="dl-btn dl-btn--quiet"
+          :title="hostReason"
+          :disabled="retryAction.busy[id]"
+          @click="retryAction.run(id)"
+        >
+          <DlIcon name="refresh" :size="13" />
+          {{ t('home.retryCheck') }}
+        </button>
         <!-- Only a running instance has a plugin manager to talk to. -->
         <button v-if="canManagePlugins(id)" class="dl-btn dl-btn--quiet" @click="openPlugins(id, 'instance-detail')">
           <DlIcon name="plugin" :size="13" />

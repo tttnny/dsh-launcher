@@ -1,4 +1,6 @@
-use crate::config::{DshInstance, DshVersion, Host, InstanceState, InstanceStatus};
+use crate::config::{
+    DshInstance, DshVersion, Host, HostState, HostStatus, InstanceState, InstanceStatus,
+};
 use crate::AppState;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,34 @@ pub struct RemoteRun {
     /// That host's data directory **on that machine**.
     pub data_dir: PathBuf,
     pub log_path: String,
+}
+
+impl RemoteRun {
+    /// Where one instance of `host` runs, as the launcher holds it: the machine,
+    /// the pid that leads its group, when that pid started, and that machine's
+    /// own data directory and log for the instance.
+    fn of(
+        host: &Host,
+        run_host: crate::ssh::RemoteHost,
+        data_dir: PathBuf,
+        instance_id: &str,
+        pid: i32,
+        started_at: Option<u64>,
+    ) -> Self {
+        let log_path = data_dir
+            .join("logs")
+            .join(format!("{instance_id}.log"))
+            .to_string_lossy()
+            .to_string();
+        Self {
+            host_id: host.id.clone(),
+            host: run_host,
+            pid,
+            started_at,
+            data_dir,
+            log_path,
+        }
+    }
 }
 
 /// One instance's entry in a remote host's own running record
@@ -475,10 +505,11 @@ static REMOTE_RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 /// yet is an empty record: the launcher is the one that creates it.
 async fn read_remote_records(
     state: &AppState,
-    run: &RemoteRun,
+    host: &crate::ssh::RemoteHost,
+    data_dir: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let path = remote_record_path(&run.data_dir);
-    let bytes = crate::remote::read_file_optional(&*state.host_transport, &run.host, &path)
+    let path = remote_record_path(data_dir);
+    let bytes = crate::remote::read_file_optional(&*state.host_transport, host, &path)
         .await
         .map_err(|e| format!("读取那台机器上的运行记录失败（{path}）：{e}"))?;
     let Some(bytes) = bytes else {
@@ -496,15 +527,16 @@ async fn read_remote_records(
 
 async fn write_remote_records(
     state: &AppState,
-    run: &RemoteRun,
+    host: &crate::ssh::RemoteHost,
+    data_dir: &Path,
     map: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let path = remote_record_path(&run.data_dir);
+    let path = remote_record_path(data_dir);
     let raw = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))
         .map_err(|e| format!("序列化运行记录失败：{e}"))?;
     state
         .host_transport
-        .write_file(&run.host, &path, raw.into_bytes())
+        .write_file(host, &path, raw.into_bytes())
         .await
         .map_err(|e| format!("写入那台机器上的运行记录失败（{path}）：{e}"))
 }
@@ -517,10 +549,10 @@ pub(crate) async fn remember_remote_run(
     run: &RemoteRun,
 ) -> Result<(), String> {
     let _guard = REMOTE_RECORD_LOCK.lock().await;
-    let mut map = read_remote_records(state, run).await?;
+    let mut map = read_remote_records(state, &run.host, &run.data_dir).await?;
     let value = serde_json::to_value(record).map_err(|e| format!("序列化运行记录失败：{e}"))?;
     map.insert(instance_id.to_string(), value);
-    write_remote_records(state, run, &map).await
+    write_remote_records(state, &run.host, &run.data_dir, &map).await
 }
 
 /// Drops one instance from that machine's record: the process is gone, so the
@@ -535,11 +567,11 @@ pub(crate) async fn forget_remote_run(
     run: &RemoteRun,
 ) -> Result<(), String> {
     let _guard = REMOTE_RECORD_LOCK.lock().await;
-    let mut map = read_remote_records(state, run).await?;
+    let mut map = read_remote_records(state, &run.host, &run.data_dir).await?;
     if map.remove(instance_id).is_none() {
         return Ok(());
     }
-    write_remote_records(state, run, &map).await
+    write_remote_records(state, &run.host, &run.data_dir, &map).await
 }
 
 /// The token of an instance URL, if it carries one. DSH's launch token exists
@@ -847,6 +879,26 @@ pub(crate) async fn spawn_remote_instance(
         .await
         .ok()
         .flatten();
+    // A pid whose start time was never written down cannot be stopped from here
+    // (the stop refuses rather than signal a pid it cannot identify), so the one
+    // read that may fail transiently gets a second try before that is the
+    // answer. Failing twice is recorded honestly as `None`, never as a guess.
+    let started_at = match started_at {
+        Some(_) => started_at,
+        None => {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let retry = crate::remote::process_start_time(&*state.host_transport, &run_host, pid)
+                .await
+                .ok()
+                .flatten();
+            if retry.is_none() {
+                crate::log_warn!(
+                    "读不到远端 pid {pid} 的启动时间：停止时会先要求核对，而不是直接发信号"
+                );
+            }
+            retry
+        }
+    };
 
     let run = RemoteRun {
         host_id: host.id.clone(),
@@ -965,6 +1017,57 @@ async fn start_remote_instance(
             exit_code: None,
         },
     );
+
+    // What that machine already has, before anything is started there. This is
+    // the remote half of the pinned-port preflight in `start_instance_process`:
+    // a pinned port held by something that is not DSH is named instead of dying
+    // with a remote EADDRINUSE, and one held by DSH is the instance itself —
+    // adopted, not started a second time.
+    //
+    // It runs for random ports too, which is where it earns its place: the
+    // record that machine keeps is the only way to notice that an instance the
+    // launcher failed to adopt is *still running*, and starting a second DSH on
+    // the server is the one outcome ADR-0007 exists to prevent.
+    match check_remote_instance(state, inst, host).await {
+        RemoteVerdict::Running {
+            pid,
+            started_at,
+            url,
+            profile: running_profile,
+        } => {
+            state.set_host_status(&host.id, HostStatus::reachable());
+            let run_host = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+            let data_dir = host.data_dir(&state.data_dir)?;
+            adopt_remote_process(
+                app,
+                state,
+                &inst.id,
+                &running_profile,
+                RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at),
+                url,
+            )
+            .await;
+            return Ok(());
+        }
+        RemoteVerdict::Occupied { pid, command } => {
+            return Err(format!(
+                "端口 {} 在「{}」上已被其他进程占用（pid {}，{}），请先释放该端口或修改实例端口",
+                inst.port.unwrap_or(0),
+                host.display_name,
+                pid.map(|p| p.to_string())
+                    .unwrap_or_else(|| "未知".to_string()),
+                if command.is_empty() {
+                    "未知进程"
+                } else {
+                    &command
+                }
+            ));
+        }
+        // Nothing is running there, or the machine could not be asked: the
+        // spawn below is what has something to say about the second case, and
+        // it says it better than this preflight could.
+        RemoteVerdict::Stopped | RemoteVerdict::Unreachable(_) => {}
+    }
 
     let start = match spawn_remote_instance(state, cfg, host, inst, version, profile).await {
         Ok(start) => start,
@@ -1098,6 +1201,604 @@ fn follow_remote_instance(
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Stopping, checking and re-adopting an instance that runs on another machine
+//
+// Everything here is the remote half of what `stop_instance_process` /
+// `adopt_surviving_instances` do locally, and the rules are the same ones — they
+// are simply asked of the machine that owns the process. Two of them matter more
+// than the rest:
+//
+// * A pid is not an identity (ADR-0007 §3): the process start time recorded when
+//   it was started is checked against that machine's `/proc/<pid>/stat` before
+//   anything is signalled, because signalling a reused pid is the one mistake
+//   here that cannot be undone.
+// * 「已停止」 is only ever said about a process the launcher has seen go. A
+//   machine that cannot answer leaves the instance 「主机不可达」
+//   ([`InstanceState::Unreachable`]), never 「已停止」: that is the value that
+//   makes a user start a second DSH on the server (ADR-0007 后果).
+// ---------------------------------------------------------------------------
+
+/// How long a remote stop waits **on that machine** for the process to go. The
+/// wait happens there ([`crate::remote::wait_gone`]), so this is one call and
+/// not one per second.
+const REMOTE_STOP_WAIT_SECS: u64 = 20;
+
+/// How often a live remote instance is asked whether it is still there, and how
+/// much longer the interval gets while that machine cannot answer.
+const REMOTE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const REMOTE_WATCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What one look at a remote instance found: the conclusion the page needs, not
+/// the steps that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteVerdict {
+    /// A DSH-like process holds this instance's port on that machine.
+    Running {
+        pid: i32,
+        started_at: Option<u64>,
+        /// The URL that machine's record kept — the only place the launch token
+        /// survives a launcher restart.
+        url: Option<String>,
+        profile: String,
+    },
+    /// Nothing of this instance is running there.
+    Stopped,
+    /// The instance's **pinned** port is held by something that is not DSH. The
+    /// instance is not running, and a start must name who is in the way instead
+    /// of dying with EADDRINUSE.
+    Occupied {
+        pid: Option<i32>,
+        command: String,
+    },
+    /// The machine could not answer, so nothing can be said about the instance.
+    Unreachable(String),
+}
+
+/// What stopping a remote instance did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteStop {
+    /// Confirmed gone — by the signal, or it was already gone.
+    Stopped,
+    /// Nothing was signalled, and why: a pid that is not the process the
+    /// launcher started, or a start time that cannot be checked at all.
+    NotSignalled(String),
+    /// The signal went and the process did not go.
+    StillRunning(String),
+    /// The machine did not answer.
+    Unreachable(String),
+}
+
+/// The remote half of a stop, from the identity check to the confirmation. The
+/// caller owns the projections (the status event, the tray, the record).
+pub(crate) async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> RemoteStop {
+    let transport = &*state.host_transport;
+    let target = run.host.target.clone();
+
+    // 1. Is the pid still the process the launcher started? The kernel reuses
+    //    pid numbers, and the number alone would be enough to kill somebody
+    //    else's process.
+    let current = match crate::remote::process_start_time(transport, &run.host, run.pid).await {
+        Ok(current) => current,
+        Err(e) => {
+            return RemoteStop::Unreachable(format!(
+                "停止前核对 pid {} 失败（{target}）：{e}",
+                run.pid
+            ))
+        }
+    };
+    match (current, run.started_at) {
+        (None, _) => match crate::remote::alive(transport, &run.host, run.pid).await {
+            // Not there at all: nothing to stop, and nothing to report as a
+            // failure either (the second click on 停止 is not an error).
+            Ok(false) => return RemoteStop::Stopped,
+            Ok(true) => {
+                return RemoteStop::NotSignalled(format!(
+                    "「{target}」上读不到 pid {} 的启动时间（/proc/<pid>/stat 打不开），没法确认它还是启动时那个进程：没有发信号。请在那台机器上核对后自行停止：ssh {target} 'kill -TERM -- -{}'",
+                    run.pid, run.pid
+                ))
+            }
+            Err(e) => {
+                return RemoteStop::Unreachable(format!(
+                    "确认 pid {} 是否还在失败（{target}）：{e}",
+                    run.pid
+                ))
+            }
+        },
+        (Some(now), Some(stored)) if now == stored => {}
+        (Some(now), Some(stored)) => {
+            return RemoteStop::NotSignalled(format!(
+                "pid {} 在「{target}」上已被系统复用（现在的启动时间 {now}，启动时记下的是 {stored}）：没有发信号",
+                run.pid
+            ))
+        }
+        // The start time was never recorded (that machine could not be read at
+        // spawn time). Saying so is the honest half of "check before you signal";
+        // 重试 (which re-establishes the instance) is what fills the record in.
+        (Some(_), None) => {
+            return RemoteStop::NotSignalled(format!(
+                "启动时没能记下 pid {} 的启动时间，现在无法确认它还是那个进程：没有发信号。刷新一次可以重新核对这个 pid；也可以在那台机器上停：ssh {target} 'kill -TERM -- -{}'",
+                run.pid, run.pid
+            ))
+        }
+    }
+
+    // 2. The whole group. A detached spawn runs under `setsid`, so its pid leads
+    //    the group and the signal reaches what the instance started too.
+    if let Err(e) = transport.stop_group(&run.host, run.pid).await {
+        crate::log_warn!("停止远端实例失败（{target}，pid {}）：{e}", run.pid);
+        return RemoteStop::Unreachable(format!(
+            "在「{target}」上给 pid {} 发终止信号失败：{e}",
+            run.pid
+        ));
+    }
+
+    // 3. Only 「那台机器上看不到它了」 counts as stopped.
+    match crate::remote::wait_gone(transport, &run.host, run.pid, REMOTE_STOP_WAIT_SECS).await {
+        Ok(true) => RemoteStop::Stopped,
+        Ok(false) => RemoteStop::StillRunning(format!(
+            "远端进程（{target}，pid {}）在 {REMOTE_STOP_WAIT_SECS} 秒内没有响应终止信号",
+            run.pid
+        )),
+        Err(e) => RemoteStop::Unreachable(format!(
+            "确认 pid {} 是否已停止失败（{target}）：{e}",
+            run.pid
+        )),
+    }
+}
+
+/// One instance's entry out of that machine's own running record.
+async fn recall_remote_run(
+    state: &AppState,
+    host: &crate::ssh::RemoteHost,
+    data_dir: &Path,
+    instance_id: &str,
+) -> Result<Option<RemoteRunRecord>, String> {
+    let map = read_remote_records(state, host, data_dir).await?;
+    Ok(map
+        .get(instance_id)
+        .and_then(|value| serde_json::from_value::<RemoteRunRecord>(value.clone()).ok()))
+}
+
+/// What state one remote instance is in right now, as the machine that runs it
+/// reports it.
+///
+/// The rule is 本机's, asked of that machine (ADR-0007 §2): the port the instance
+/// was pinned to — or the port in the record it left behind — is where to look.
+/// A **pinned** port is evidence by itself as soon as a DSH-like process is
+/// listening on it; a **random** port has to prove itself with the token from
+/// that machine's record, or the port may belong to something else entirely.
+///
+/// The token is spent **there** ([`crate::remote::mint_headers`]): a remote
+/// instance listens on that machine's own loopback, so the same URL asked from
+/// this Mac would reach a different service.
+pub(crate) async fn check_remote_instance(
+    state: &AppState,
+    inst: &DshInstance,
+    host: &Host,
+) -> RemoteVerdict {
+    let Ok(run_host) = crate::ssh::RemoteHost::of(host, &state.data_dir) else {
+        return RemoteVerdict::Unreachable(format!("「{}」是本机，它上面没有远端进程", host.display_name));
+    };
+    let Ok(data_dir) = host.data_dir(&state.data_dir) else {
+        return RemoteVerdict::Unreachable(format!("无法确定「{}」的数据目录", host.display_name));
+    };
+    let transport = &*state.host_transport;
+    let record = match recall_remote_run(state, &run_host, &data_dir, &inst.id).await {
+        Ok(record) => record,
+        Err(e) => return RemoteVerdict::Unreachable(e),
+    };
+    let profile = record
+        .as_ref()
+        .map(|r| r.profile.clone())
+        .or_else(|| inst.last_profile.clone())
+        .or_else(|| inst.default_profile.clone())
+        .unwrap_or_else(|| "web".to_string());
+    let url = record.as_ref().and_then(|r| r.url.clone());
+    // The port to look at: the one the user pinned, or the one that machine's
+    // record saw the instance come up on.
+    let Some(port) = inst.port.or_else(|| url.as_deref().and_then(port_of_url)) else {
+        // No address to look at: a non-web profile has none, and an instance
+        // that never printed a URL left nothing to find.
+        return RemoteVerdict::Stopped;
+    };
+    let owner = match crate::remote::port_owner(transport, &run_host, port).await {
+        Ok(owner) => owner,
+        Err(e) => {
+            return RemoteVerdict::Unreachable(format!(
+                "在「{}」上查端口 {port} 的占用者失败：{e}",
+                host.display_name
+            ))
+        }
+    };
+    let Some(owner) = owner else {
+        return RemoteVerdict::Stopped;
+    };
+    // A listener this user cannot name (somebody else's process, or no
+    // permission to read its name) is still an occupied port — and an occupied
+    // *pinned* port is what the start has to report.
+    let Some(pid) = owner.pid else {
+        return if inst.port.is_some() {
+            RemoteVerdict::Occupied {
+                pid: None,
+                command: owner.command,
+            }
+        } else {
+            RemoteVerdict::Stopped
+        };
+    };
+    if !looks_like_dsh(&owner.command) {
+        return if inst.port.is_some() {
+            RemoteVerdict::Occupied {
+                pid: Some(pid),
+                command: owner.command,
+            }
+        } else {
+            RemoteVerdict::Stopped
+        };
+    }
+    if inst.port.is_none() {
+        // A random port says nothing on its own: the token that machine wrote
+        // down is the only thing that turns a DSH-like listener into *this*
+        // instance.
+        let Some(url) = url.as_deref() else {
+            return RemoteVerdict::Stopped;
+        };
+        let mint = match crate::remote::mint_headers(transport, &run_host, url).await {
+            Ok(mint) => mint,
+            Err(e) => {
+                return RemoteVerdict::Unreachable(format!(
+                    "在「{}」上确认实例 {url} 失败：{e}",
+                    host.display_name
+                ))
+            }
+        };
+        let accepted = mint
+            .cookie
+            .as_deref()
+            .map(|pair| crate::native::cookie_pair_matches(url, pair))
+            .unwrap_or(false);
+        if !accepted {
+            crate::log_debug!(
+                "实例 {} 在那台机器的端口 {port} 上有 DSH 样的进程，但记下的 token 没有被接受（HTTP {}）：不认领",
+                inst.id,
+                mint.status
+            );
+            return RemoteVerdict::Stopped;
+        }
+    }
+    // The pid to record came off that machine's own listener, so this read is
+    // also what repairs a record whose start time was never written.
+    let started_at = crate::remote::process_start_time(transport, &run_host, pid)
+        .await
+        .ok()
+        .flatten();
+    RemoteVerdict::Running {
+        pid,
+        started_at,
+        url,
+        profile,
+    }
+}
+
+/// Registers a process that is already running on a remote host as this
+/// instance's running entry — the remote twin of [`adopt_external_process`],
+/// and what makes a restarted launcher manageable again: the URL with its launch
+/// token comes out of that machine's own running record (ADR-0007 §3).
+async fn adopt_remote_process(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    instance_id: &str,
+    profile: &str,
+    run: RemoteRun,
+    url: Option<String>,
+) {
+    {
+        let mut running = state.running.lock().await;
+        if running.contains_key(instance_id) {
+            return; // A start registered first; it wins.
+        }
+        running.insert(
+            instance_id.to_string(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: profile.to_string(),
+                url: url.clone(),
+                adopted: None,
+                remote: Some(run.clone()),
+            },
+        );
+    }
+    match url.as_deref() {
+        Some(url) => crate::log_info!(
+            "实例 {instance_id} 在「{}」上仍在运行（pid {}），已认领，沿用记下的启动 token（{url}）",
+            run.host.target,
+            run.pid
+        ),
+        None => crate::log_info!(
+            "实例 {instance_id} 在「{}」上仍在运行（pid {}），已认领（没有可用的 token）",
+            run.host.target,
+            run.pid
+        ),
+    }
+    emit_status(
+        app,
+        &InstanceStatus {
+            id: instance_id.to_string(),
+            state: InstanceState::Running,
+            url: url.clone(),
+            profile: Some(profile.to_string()),
+            exit_code: None,
+        },
+    );
+    crate::tray::rebuild_tray_menu(app).await;
+    watch_remote_process(app, instance_id, profile, run);
+}
+
+/// Watches an adopted remote instance: the machine is asked whether the process
+/// is still there, and the answer is what ends the watch.
+///
+/// A machine that cannot answer is not an exit. It is recorded as such — the
+/// host's status says 不可达, which is what makes the instance read 「主机不可达」
+/// rather than 「已停止」 — and the watch keeps trying at a lower rate, so an
+/// instance that comes back (a reboot of the server, a network that returns)
+/// converges without the user doing anything.
+fn watch_remote_process(
+    app: &AppHandle,
+    instance_id: &str,
+    profile: &str,
+    run: RemoteRun,
+) {
+    let app = app.clone();
+    let id = instance_id.to_string();
+    let profile = profile.to_string();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = REMOTE_WATCH_INTERVAL;
+        let mut reported_lost = false;
+        loop {
+            tokio::time::sleep(interval).await;
+            let state = app.state::<AppState>();
+            // Stop coordinating when the entry is gone (the user stopped it) or
+            // was replaced (a start raced this adoption).
+            let mine = state
+                .running
+                .lock()
+                .await
+                .get(&id)
+                .and_then(|entry| entry.remote.as_ref())
+                .map(|entry| entry.pid == run.pid)
+                .unwrap_or(false);
+            if !mine {
+                return;
+            }
+            match crate::remote::alive(&*state.host_transport, &run.host, run.pid).await {
+                Ok(true) => {
+                    if reported_lost {
+                        reported_lost = false;
+                        state.set_host_status(&run.host_id, HostStatus::reachable());
+                        // The URL comes back with it: it is the launch token's
+                        // home, and dropping it would leave a running instance
+                        // unmanageable in the page for no reason.
+                        let url = state
+                            .running
+                            .lock()
+                            .await
+                            .get(&id)
+                            .and_then(|entry| entry.url.clone());
+                        emit_status(
+                            &app,
+                            &InstanceStatus {
+                                id: id.clone(),
+                                state: InstanceState::Running,
+                                url,
+                                profile: Some(profile.clone()),
+                                exit_code: None,
+                            },
+                        );
+                    }
+                    interval = REMOTE_WATCH_INTERVAL;
+                }
+                Ok(false) => {
+                    crate::log_info!("实例 {id} 在「{}」上已退出（pid {}）", run.host.target, run.pid);
+                    unregister_running(
+                        &app,
+                        &state,
+                        &id,
+                        InstanceStatus {
+                            id: id.clone(),
+                            state: InstanceState::Exited,
+                            url: None,
+                            profile: Some(profile.clone()),
+                            exit_code: None,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    crate::log_warn!("实例 {id} 的远端进程暂时问不到（{}）：{e}", run.host.target);
+                    reported_lost = true;
+                    state.set_host_status(
+                        &run.host_id,
+                        HostStatus::unreachable(format!("读取远端实例状态失败：{e}")),
+                    );
+                    emit_status(
+                        &app,
+                        &InstanceStatus {
+                            id: id.clone(),
+                            state: InstanceState::Unreachable,
+                            url: None,
+                            profile: Some(profile.clone()),
+                            exit_code: None,
+                        },
+                    );
+                    interval = REMOTE_WATCH_BACKOFF;
+                }
+            }
+        }
+    });
+}
+
+/// Establishes — or re-establishes — one remote instance's state, and projects
+/// it: an adopted process becomes a running entry, and a machine that answered
+/// 「没有」 says so, so a card left over from an earlier session converges.
+///
+/// This is the one place the launch-time scan and the page's 重试 share, so the
+/// two can never disagree about what that machine said.
+pub(crate) async fn settle_remote_instance(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    inst: &DshInstance,
+    host: &Host,
+) -> InstanceState {
+    // Already running as far as this session is concerned. The one thing worth
+    // re-reading is the process start time: a stop refuses without it, and this
+    // is how a record that missed it gets repaired.
+    let existing = state
+        .running
+        .lock()
+        .await
+        .get(&inst.id)
+        .and_then(|entry| entry.remote.clone());
+    if let Some(run) = existing {
+        if run.started_at.is_none() {
+            if let Ok(Some(at)) =
+                crate::remote::process_start_time(&*state.host_transport, &run.host, run.pid).await
+            {
+                let mut running = state.running.lock().await;
+                if let Some(entry) = running.get_mut(&inst.id) {
+                    if let Some(remote) = entry.remote.as_mut() {
+                        remote.started_at = Some(at);
+                    }
+                }
+            }
+        }
+        finish_remote_scan(state, &host.id);
+        return InstanceState::Running;
+    }
+
+    let verdict = check_remote_instance(state, inst, host).await;
+    // That machine was talked to, whatever the answer was: its instances are no
+    // longer 「还没查」.
+    finish_remote_scan(state, &host.id);
+    let Ok(run_host) = crate::ssh::RemoteHost::of(host, &state.data_dir) else {
+        return InstanceState::Unreachable;
+    };
+    let Ok(data_dir) = host.data_dir(&state.data_dir) else {
+        return InstanceState::Unreachable;
+    };
+    match verdict {
+        RemoteVerdict::Running {
+            pid,
+            started_at,
+            url,
+            profile,
+        } => {
+            state.set_host_status(&host.id, HostStatus::reachable());
+            adopt_remote_process(
+                app,
+                state,
+                &inst.id,
+                &profile,
+                RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at),
+                url,
+            )
+            .await;
+            InstanceState::Running
+        }
+        // A port held by something that is not DSH means this instance is not
+        // running; the occupant is the start path's business, not the card's.
+        RemoteVerdict::Stopped | RemoteVerdict::Occupied { .. } => {
+            state.set_host_status(&host.id, HostStatus::reachable());
+            emit_status(
+                app,
+                &InstanceStatus {
+                    id: inst.id.clone(),
+                    state: InstanceState::Stopped,
+                    url: None,
+                    profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
+                    exit_code: None,
+                },
+            );
+            InstanceState::Stopped
+        }
+        RemoteVerdict::Unreachable(reason) => {
+            state.set_host_status(&host.id, HostStatus::unreachable(reason));
+            emit_status(
+                app,
+                &InstanceStatus {
+                    id: inst.id.clone(),
+                    state: InstanceState::Unreachable,
+                    url: None,
+                    profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
+                    exit_code: None,
+                },
+            );
+            InstanceState::Unreachable
+        }
+    }
+}
+
+/// Marks every remote host's instances as 「还没查」 for the launch-time scan.
+///
+/// Until that scan has asked about a host, nothing is known about its instances,
+/// and the page must not fill that gap with 「已停止」: the click that mistake
+/// leads to starts a second DSH on the server (ADR-0007 后果). The page reads
+/// this as 「启动中」 — a process that is being brought into the launcher's view,
+/// whose 启动 button is therefore not there to press.
+pub fn begin_remote_scan(state: &AppState) {
+    let ids: Vec<String> = {
+        let cfg = state.config.lock().unwrap();
+        cfg.hosts
+            .iter()
+            .filter(|host| !host.builtin)
+            .map(|host| host.id.clone())
+            .collect()
+    };
+    let mut pending = state.remote_scan.lock().unwrap();
+    pending.clear();
+    pending.extend(ids);
+}
+
+/// One host has been asked about: its instances are no longer 「还没查」.
+fn finish_remote_scan(state: &AppState, host_id: &str) {
+    state.remote_scan.lock().unwrap().remove(host_id);
+}
+
+/// Adopts the instances a previous launcher session left running on remote
+/// hosts — the remote half of [`adopt_surviving_instances`], which stays local
+/// on purpose: this Mac's port probe can only ask about this Mac, and a local
+/// process wearing the same port number is not somebody else's instance.
+///
+/// One pass per host, in the background, so a slow or unreachable machine holds
+/// up neither the launcher nor the other machines.
+pub async fn adopt_surviving_remote_instances(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let (hosts, instances) = {
+        let cfg = state.config.lock().unwrap();
+        (cfg.hosts.clone(), cfg.instances.clone())
+    };
+    for host in hosts.into_iter().filter(|host| !host.builtin) {
+        let mine: Vec<DshInstance> = instances
+            .iter()
+            .filter(|inst| inst.host_id == host.id)
+            .cloned()
+            .collect();
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            for inst in &mine {
+                // A start (or a previous session's entry) owns it already.
+                if state.running.lock().await.contains_key(&inst.id) {
+                    continue;
+                }
+                settle_remote_instance(&app, &state, inst, &host).await;
+            }
+            finish_remote_scan(&state, &host.id);
+        });
+    }
 }
 
 pub fn npm() -> &'static str {
@@ -1486,23 +2187,74 @@ pub async fn start_instance_process(
     Ok(())
 }
 
+/// The running entry for one instance, as the stop path needs it: the child's
+/// kill switch, the adopted pid, the remote run, and the profile to report.
+async fn running_snapshot(
+    state: &State<'_, AppState>,
+    instance_id: &str,
+) -> Option<(Arc<Notify>, Option<Adopted>, Option<RemoteRun>, String)> {
+    state
+        .running
+        .lock()
+        .await
+        .get(instance_id)
+        .map(|r| {
+            (
+                r.kill.clone(),
+                r.adopted.clone(),
+                r.remote.clone(),
+                r.profile.clone(),
+            )
+        })
+}
+
 /// Stops a running instance: signals the waiter task to kill the child and
 /// waits for it to reap the process and remove the registry entry. The stop
 /// is idempotent: when the entry is already gone (crashed, stopped from the
 /// tray, duplicate click) a terminal status is re-emitted so a stale
 /// frontend converges instead of erroring with "实例未在运行".
+///
+/// A remote instance is stopped **on the machine that runs it**: by pid, after
+/// the recorded process start time has been checked against that machine's own
+/// `/proc/<pid>/stat` (ADR-0007 §4), and only 「那台机器上看不到它了」 is reported
+/// as 已停止. A machine that does not answer leaves the instance 「主机不可达」.
 pub async fn stop_instance_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
     instance_id: &str,
 ) -> Result<(), String> {
-    let entry = state
-        .running
-        .lock()
-        .await
-        .get(instance_id)
-        .map(|r| (r.kill.clone(), r.adopted.clone(), r.remote.clone()));
-    let Some((kill, adopted, remote)) = entry else {
+    // The instance's own machine decides what 「已停止」 means, so it is looked up
+    // first: an instance on another host is not this Mac's business below.
+    let remote_owner = {
+        let cfg = state.config.lock().unwrap();
+        cfg.instances
+            .iter()
+            .find(|inst| inst.id == instance_id)
+            .cloned()
+            .and_then(|inst| {
+                crate::config::resolve_host(&cfg, Some(&inst.host_id))
+                    .ok()
+                    .filter(|host| !host.builtin)
+                    .map(|host| (inst, host.clone()))
+            })
+    };
+    let mut entry = running_snapshot(state, instance_id).await;
+    if entry.is_none() {
+        if let Some((inst, host)) = remote_owner {
+            // Nothing registered — but on another machine that is not the same
+            // statement as it is here: this session may simply not have asked
+            // yet (its scan is still running). Asking is what makes 「停止」 a
+            // real action instead of a silent 「已停止」 over a running process.
+            settle_remote_instance(app, state, &inst, &host).await;
+            entry = running_snapshot(state, instance_id).await;
+            if entry.is_none() {
+                // That machine answered 「没有在跑」 (or could not be reached, which
+                // was reported as such) — either way there is nothing to stop.
+                return Ok(());
+            }
+        }
+    }
+    let Some((kill, adopted, remote, profile)) = entry else {
         crate::log_debug!("停止实例 {instance_id}：注册表无记录，补发 stopped 状态");
         emit_status(
             app,
@@ -1517,15 +2269,47 @@ pub async fn stop_instance_process(
         return Ok(());
     };
     if let Some(run) = remote {
-        // A remote instance is stopped on the machine that runs it, by pid, with
-        // the recorded process start time checked first (ADR-0007 §4) — that
-        // belongs to the stop/restart/adoption pass, and until it exists this
-        // refuses rather than falling into the poll below, which has no child to
-        // wait for and would end in a timeout the user cannot act on.
-        return Err(format!(
-            "远端实例的停止还没有实现：它跑在「{}」上（pid {}），现在只能在那台机器上停它",
-            run.host.target, run.pid
-        ));
+        crate::log_info!(
+            "收到停止实例 {instance_id} 的请求：在那台机器上结束 pid {}（{}）",
+            run.pid,
+            run.host.target
+        );
+        return match stop_remote_run(state, &run).await {
+            RemoteStop::Stopped => {
+                unregister_running(
+                    app,
+                    state,
+                    instance_id,
+                    InstanceStatus {
+                        id: instance_id.to_string(),
+                        state: InstanceState::Stopped,
+                        url: None,
+                        profile: Some(profile),
+                        exit_code: None,
+                    },
+                )
+                .await;
+                Ok(())
+            }
+            // The machine could not answer, so 「已停止」 is not available: the
+            // instance is reported as what it is — undetermined — and the page
+            // offers the retry instead of a 启动 that would create a second DSH.
+            RemoteStop::Unreachable(reason) => {
+                state.set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
+                emit_status(
+                    app,
+                    &InstanceStatus {
+                        id: instance_id.to_string(),
+                        state: InstanceState::Unreachable,
+                        url: None,
+                        profile: Some(profile),
+                        exit_code: None,
+                    },
+                );
+                Err(reason)
+            }
+            RemoteStop::NotSignalled(reason) | RemoteStop::StillRunning(reason) => Err(reason),
+        };
     }
     if let Some(a) = adopted {
         // Adopted external process: no child handle, terminate by pid. The
@@ -1604,18 +2388,94 @@ pub async fn restart_instance_process(
     start_instance_process(app, state, instance_id, &profile).await
 }
 
-pub async fn list_statuses(state: &State<'_, AppState>) -> Vec<InstanceStatus> {
+/// Why the launcher cannot currently say anything about the instances of a host
+/// — `None` when the last word was 「到得了」, or when there is no word at all.
+fn host_unreachable_reason(state: &AppState, host_id: &str) -> Option<String> {
+    match state.host_status(host_id) {
+        Some(status) if status.state == HostState::Unreachable => {
+            Some(status.message.unwrap_or_else(|| "主机不可达".to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// The profile a status talks about when the process itself has nothing to say.
+fn profile_hint(inst: &DshInstance) -> Option<String> {
+    inst.last_profile.clone().or_else(|| inst.default_profile.clone())
+}
+
+/// Every instance the launcher can say something about right now.
+///
+/// The running table answers for instances that have a process. What is left is
+/// the launch-time scan of each remote host: an instance on a host that has not
+/// been asked about yet is 「启动中」, and one on a host that could not answer is
+/// 「主机不可达」. Both of those live here and must keep living here (ADR-0007
+/// 后果): reading either of them as 「已停止」 is exactly what makes a user press
+/// 启动 and end up with a second DSH on the server.
+pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
+    let (instances, pending) = {
+        let cfg = state.config.lock().unwrap();
+        let pending = state.remote_scan.lock().unwrap().clone();
+        (cfg.instances.clone(), pending)
+    };
     let running = state.running.lock().await;
-    running
+    let mut out: Vec<InstanceStatus> = running
         .iter()
-        .map(|(id, entry)| InstanceStatus {
-            id: id.clone(),
-            state: InstanceState::Running,
-            url: entry.url.clone(),
-            profile: Some(entry.profile.clone()),
-            exit_code: None,
+        .map(|(id, entry)| {
+            // A live entry whose machine has since stopped answering is not
+            // something the launcher can keep asserting: 「运行中」 would be a
+            // claim about a machine it cannot reach.
+            let lost = entry
+                .remote
+                .as_ref()
+                .and_then(|run| host_unreachable_reason(state, &run.host_id));
+            InstanceStatus {
+                id: id.clone(),
+                state: if lost.is_some() {
+                    InstanceState::Unreachable
+                } else {
+                    InstanceState::Running
+                },
+                url: if lost.is_some() {
+                    None
+                } else {
+                    entry.url.clone()
+                },
+                profile: Some(entry.profile.clone()),
+                exit_code: None,
+            }
         })
-        .collect()
+        .collect();
+    for inst in instances {
+        if inst.host_id == crate::config::LOCAL_HOST_ID
+            || inst.host_id.trim().is_empty()
+            || running.contains_key(&inst.id)
+        {
+            // 本机's absence from the running table is 「已停止」, as it has
+            // always been: its own pass answers immediately and completely.
+            continue;
+        }
+        if pending.contains(&inst.host_id) {
+            out.push(InstanceStatus {
+                id: inst.id.clone(),
+                state: InstanceState::Starting,
+                url: None,
+                profile: profile_hint(&inst),
+                exit_code: None,
+            });
+            continue;
+        }
+        if host_unreachable_reason(state, &inst.host_id).is_some() {
+            out.push(InstanceStatus {
+                id: inst.id.clone(),
+                state: InstanceState::Unreachable,
+                url: None,
+                profile: profile_hint(&inst),
+                exit_code: None,
+            });
+        }
+    }
+    out
 }
 
 /// What the running table says about one instance, as needed by callers that
@@ -1830,6 +2690,7 @@ mod tests {
             // transport that answers nothing is the honest stand-in.
             host_transport: crate::remote::testing::idle(),
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1929,6 +2790,7 @@ mod tests {
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             host_transport: fake,
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -2282,6 +3144,357 @@ mod tests {
                 "远端实例不该在退出启动器时收到信号"
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Stopping, checking and re-adopting remote instances
+    //
+    // The transport double is the machine: every test here queues what that
+    // machine would answer and then asserts on the conclusion the launcher
+    // reached and on what it asked for — never on which of its own functions
+    // ran. The Tauri side of these paths (the status event, the tray) has no
+    // double and is not driven here.
+    // -----------------------------------------------------------------------
+
+    /// The cookie name that machine's instance mints for `127.0.0.1:3080` —
+    /// `dsh-auth-<base64url(sha256(authority))>`, computed independently of the
+    /// code under test.
+    const REMOTE_COOKIE: &str = "dsh-auth-VPhEEcLKeqRDBoBalzN2Nm7CnfxKhLE00pKIDWxt1sw=v1.payload.sig";
+
+    /// An `AppState` whose only machine is the transport double.
+    fn transport_state(fake: &std::sync::Arc<FakeTransport>) -> AppState {
+        AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        }
+    }
+
+    /// That machine's own running record for the fixture instance, as the
+    /// launcher reads it back: url (token and all), profile, pid, start time.
+    fn record_doc(url: Option<&str>) -> String {
+        serde_json::json!({
+            "i-remote": {
+                "url": url,
+                "token": READY_TOKEN,
+                "profile": "web",
+                "pid": 4242,
+                "started_at": 117384720,
+            }
+        })
+        .to_string()
+    }
+
+    fn record_answer(url: Option<&str>) -> FakeAnswer {
+        FakeAnswer::stdout(crate::remote::testing::file_stdout(
+            record_doc(url).as_bytes(),
+        ))
+    }
+
+    fn occupied_answer(pid: u32, command: &str) -> FakeAnswer {
+        FakeAnswer::stdout(marked(&format!(
+            r#"{{"occupied":true,"pid":{pid},"command":"{command}"}}"#
+        )))
+    }
+
+    /// One machine, one instance, and the record it left behind — the three
+    /// things every check needs.
+    fn remote_case(
+        fake: &std::sync::Arc<FakeTransport>,
+        host_id: &str,
+        port: Option<u16>,
+    ) -> (AppState, DshInstance, Host) {
+        let state = remote_app_state(fake.clone(), remote_host(host_id), remote_instance(host_id, port));
+        let cfg = state.config.lock().unwrap().clone();
+        let inst = cfg.instances[0].clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        (state, inst, host)
+    }
+
+    /// The whole stop, from the identity check to the confirmation: the signal
+    /// goes to the **process group** a detached spawn leads, and 「那台机器上看
+    /// 不到它了」 is the only thing that counts as stopped.
+    #[tokio::test]
+    async fn a_remote_stop_signals_the_group_and_confirms_before_reporting_stopped() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)))
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::stdout(marked(r#"{"gone":true}"#)));
+        let state = transport_state(&fake);
+
+        let outcome = stop_remote_run(&state, &remote_run()).await;
+
+        assert_eq!(outcome, RemoteStop::Stopped);
+        assert!(
+            fake.calls().contains(&FakeCall::StopGroup(4242)),
+            "要停的是那个进程组，不是单个进程：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// A pid number is not an identity. When the start time on that machine is
+    /// not the one recorded at spawn, the pid now belongs to somebody else — and
+    /// nothing may be signalled.
+    #[tokio::test]
+    async fn a_pid_whose_start_time_does_not_match_is_never_signalled() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            r#"{"started_at":999}"#,
+        )));
+        let state = transport_state(&fake);
+
+        let outcome = stop_remote_run(&state, &remote_run()).await;
+
+        match outcome {
+            RemoteStop::NotSignalled(reason) => assert!(reason.contains("复用"), "{reason}"),
+            other => panic!("一个被复用的 pid 不能当成我们的进程：{other:?}"),
+        }
+        assert!(
+            !fake
+                .calls()
+                .iter()
+                .any(|call| matches!(call, FakeCall::StopGroup(_) | FakeCall::StopPid(_))),
+            "核对不过就不能发信号：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// A machine that cannot be asked is not a stopped instance. Saying 「已停止」
+    /// here is what makes a user start a second DSH on a server that was running
+    /// one all along (ADR-0007 后果).
+    #[tokio::test]
+    async fn a_machine_that_does_not_answer_makes_the_stop_unreachable_not_stopped() {
+        let fake = FakeTransport::new().answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::Unreachable,
+            "ssh 连不上",
+        ));
+        let state = transport_state(&fake);
+
+        let outcome = stop_remote_run(&state, &remote_run()).await;
+
+        assert!(matches!(outcome, RemoteStop::Unreachable(_)), "{outcome:?}");
+        assert!(
+            !fake
+                .calls()
+                .iter()
+                .any(|call| matches!(call, FakeCall::StopGroup(_))),
+            "问不到那台机器时不能盲发信号：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// ADR-0007 §2: a **pinned** port is evidence by itself — a DSH-like process
+    /// listening on it is this instance, token or no token.
+    #[tokio::test]
+    async fn a_pinned_port_with_a_dsh_like_listener_is_adopted() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(occupied_answer(4242, "node"))
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        match verdict {
+            RemoteVerdict::Running {
+                pid,
+                started_at,
+                url,
+                ..
+            } => {
+                assert_eq!(pid, 4242, "认领的 pid 来自那台机器的端口占用者");
+                assert_eq!(started_at, Some(117384720), "顺手记下它的启动时间");
+                assert_eq!(url, None, "钉死端口不要求有 token");
+            }
+            other => panic!("钉死的端口上有 DSH 样的进程就该认领：{other:?}"),
+        }
+    }
+
+    /// The other half of the pinned-port rule: an occupant that is not DSH is
+    /// named, because that is what the user has to move before the instance can
+    /// start on that port.
+    #[tokio::test]
+    async fn a_pinned_port_held_by_something_else_names_the_occupant() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(occupied_answer(731, "nginx"));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        assert_eq!(
+            verdict,
+            RemoteVerdict::Occupied {
+                pid: Some(731),
+                command: "nginx".to_string()
+            }
+        );
+    }
+
+    /// A **random** port says nothing on its own, so it has to prove itself with
+    /// the token that machine wrote down — and the proof is made **there**: a
+    /// remote instance listens on that machine's own loopback, so the same URL
+    /// asked from this Mac would reach a different service.
+    #[tokio::test]
+    async fn a_random_port_is_adopted_when_the_recorded_token_is_accepted_there() {
+        let fake = FakeTransport::new()
+            .answering(record_answer(Some(READY_URL)))
+            .answering(occupied_answer(4242, "node"))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"status":303,"cookie":"{REMOTE_COOKIE}"}}"#
+            ))))
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, None);
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        match verdict {
+            RemoteVerdict::Running { pid, url, .. } => {
+                assert_eq!(pid, 4242);
+                assert_eq!(url.as_deref(), Some(READY_URL), "token 活着，接口就能管它");
+            }
+            other => panic!("token 被接受就该认领：{other:?}"),
+        }
+        let scripts: Vec<String> = fake
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                FakeCall::Run(script) => Some(script),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            scripts
+                .iter()
+                .any(|script| script.contains("curl") && script.contains(READY_TOKEN)),
+            "认证必须在跑着它的那台机器上做：{scripts:?}"
+        );
+    }
+
+    /// The same port, the same DSH-like listener, and a token that is no longer
+    /// accepted: the process on it is not *this* instance, so it is not adopted
+    /// (the local rule, asked of that machine).
+    #[tokio::test]
+    async fn a_random_port_whose_token_is_refused_is_not_adopted() {
+        let fake = FakeTransport::new()
+            .answering(record_answer(Some(READY_URL)))
+            .answering(occupied_answer(4242, "node"))
+            .answering(FakeAnswer::stdout(marked(
+                r#"{"status":401,"cookie":null}"#,
+            )));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, None);
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        assert_eq!(verdict, RemoteVerdict::Stopped);
+    }
+
+    /// The machine could not be asked: nothing can be said about the instance,
+    /// and 「已停止」 is not one of the available answers.
+    #[tokio::test]
+    async fn an_instance_on_a_machine_that_cannot_be_asked_is_unreachable() {
+        let fake = FakeTransport::new().answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::Timeout,
+            "ssh 在 30 秒内没有返回",
+        ));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        assert!(matches!(verdict, RemoteVerdict::Unreachable(_)), "{verdict:?}");
+    }
+
+    /// Until the launch-time scan has asked a machine, its instances are unknown
+    /// — and unknown is reported as 「启动中」, never as 「已停止」. This is the
+    /// window in which a wrong 「已停止」 used to be exactly what made the user
+    /// start a second DSH on the server.
+    #[tokio::test]
+    async fn an_instance_whose_machine_has_not_been_asked_yet_is_not_stopped() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let state = remote_app_state(
+            FakeTransport::new(),
+            remote_host(&host_id),
+            remote_instance(&host_id, Some(3080)),
+        );
+        begin_remote_scan(&state);
+
+        let statuses = list_statuses(&state).await;
+
+        assert_eq!(statuses.len(), 1, "{statuses:?}");
+        assert_eq!(statuses[0].id, "i-remote");
+        assert_eq!(
+            statuses[0].state,
+            InstanceState::Starting,
+            "还没查不等于已停止"
+        );
+    }
+
+    /// Once the machine has answered 「不可达」, its instances say so — and a
+    /// running entry of a host that has since stopped answering is not a claim
+    /// the launcher can keep making either.
+    #[tokio::test]
+    async fn instances_of_an_unreachable_host_read_as_unreachable() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let state = remote_app_state(
+            FakeTransport::new(),
+            remote_host(&host_id),
+            remote_instance(&host_id, Some(3080)),
+        );
+
+        // After the scan, with the machine having said 「连不上」.
+        finish_remote_scan(&state, &host_id);
+        state.set_host_status(&host_id, HostStatus::unreachable("ssh 连不上"));
+        let statuses = list_statuses(&state).await;
+        assert_eq!(statuses.len(), 1, "{statuses:?}");
+        assert_eq!(statuses[0].state, InstanceState::Unreachable);
+
+        // And the same instance, believed to be running here, stops claiming
+        // 运行中 about a machine that cannot be reached.
+        let mut run = remote_run();
+        run.host_id = host_id.clone();
+        state.running.lock().await.insert(
+            "i-remote".to_string(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: Some(READY_URL.into()),
+                adopted: None,
+                remote: Some(run),
+            },
+        );
+        let statuses = list_statuses(&state).await;
+        assert_eq!(statuses.len(), 1, "{statuses:?}");
+        assert_eq!(statuses[0].state, InstanceState::Unreachable, "{statuses:?}");
+
+        // A machine that answers again puts it back to running.
+        state.set_host_status(&host_id, HostStatus::reachable());
+        let statuses = list_statuses(&state).await;
+        assert_eq!(statuses[0].state, InstanceState::Running, "{statuses:?}");
+        assert_eq!(statuses[0].url.as_deref(), Some(READY_URL));
+    }
+
+    /// 本机's half of the same function is untouched: an instance with no process
+    /// contributes nothing, which is what the page has always read as 「已停止」,
+    /// and one that is running is reported as running.
+    #[tokio::test]
+    async fn local_instances_keep_their_own_states() {
+        let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);
+        assert!(
+            list_statuses(&state).await.is_empty(),
+            "本机没有进程 = 已停止，这一档一直是「什么都不报」"
+        );
+
+        let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);
+        state.running.lock().await.insert(
+            "i1".to_string(),
+            running_entry("web", Some("http://127.0.0.1:3088/?token=abc")),
+        );
+        let statuses = list_statuses(&state).await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, InstanceState::Running);
     }
 
     fn instance(id: &str, home_id: &str) -> crate::config::DshInstance {

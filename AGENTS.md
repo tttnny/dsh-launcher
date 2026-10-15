@@ -86,6 +86,28 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 否则那个端口可能是别的程序。这一遍只看本机：远端实例的端口在那台机器上，本机探它
 只会问到这台 Mac（远端那份记录由它自己的认领路径读）。
 
+**远端实例的停止与认领都发生在那一台主机上（契约，见 ADR-0007）**：
+`process::adopt_surviving_remote_instances` 按主机各起一遍（`settle_remote_instance` 是
+它与页面「重试」共用的那一份判断），本机那一遍不许碰远端实例——本机的端口探针只能问这台
+Mac。**发信号之前先核对身份**：读那台机器 `/proc/<pid>/stat` 的启动时间，与
+`RemoteRun.started_at` 不符就**不发信号**（pid 被系统复用了）；读不到时如实说读不到并给出
+在那台机器上停它的命令，绝不悄悄跳过。信号发给**进程组**（`stop_group`），确认也用远端等
+（`remote::wait_gone`，一次 ssh 顶一段等待），只有「那台机器上看不到它了」才算已停止。
+随机端口的 token 认证（`remote::mint_headers` + `native::cookie_pair_matches`）必须**在那台
+机器上**做：远端实例绑的是那台机器的 `127.0.0.1`，从这台 Mac 问同一个 URL 会问到另一个
+服务。
+
+**「主机不可达」是第五个状态，它不是「已停止」（契约）**：`InstanceState::Unreachable`
+（TS 的 `'unreachable'`、`home.status.unreachable`、`.dl-status.is-unreachable`）表示
+「启动器现在没法知道这台机器上这个实例的状态」。启动时那一遍扫描还没问到的远端主机记在
+`AppState.remote_scan` 里，`process::list_statuses` 对它报 `starting`，**绝不报 `stopped`**：
+「已停止」是让用户去点「启动」的那句话，而在服务器上起了第二个 DSH 正是 ADR-0007 存在的
+理由。主机状态（`AppState.host_statuses`）一旦是 `unreachable`，它的实例（包括本会话里
+已经认为在跑的那些）就报 `unreachable`，页面给的是「重试」（`api.refreshInstanceStatus`
+→ `commands::refresh_instance_status` → `settle_remote_instance`），不是「启动」。
+`delete_instance` / `remove_version` 先把停止的错误带出来再删记录：删掉记录就再也没法说出
+服务器上还在跑的是什么了。
+
 **远端实例在那台机器上起，也在那台机器上留名（契约，见 ADR-0007）**：
 `process::start_instance_process` 按实例的主机分叉——本机仍是原来的子进程路径，远端
 走 `HostTransport::spawn_detached`（`setsid`、stdin 接 `/dev/null`、输出追加到

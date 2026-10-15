@@ -321,6 +321,29 @@ const removeHostAction = useAction((id: string) => api.deleteHost(id), {
   success: () => t('settings.hosts.deleted'),
 })
 
+/**
+ * The instances of the host being deleted that are still running **on that
+ * machine**. Deleting a host deletes the launcher's records and nothing else
+ * (ADR-0006 §5, ADR-0007): these processes keep running where they are, with
+ * nothing left in the launcher that names them — so the confirmation names them
+ * one by one instead of saying 「实例」.
+ *
+ * 「主机不可达」 counts as running here: the launcher could not ask, and telling
+ * the user an instance is gone when it may well be up is the mistake this whole
+ * state exists to avoid.
+ */
+const hostRunsOnDelete = computed(() => {
+  const host = hostPendingDelete.value
+  if (!host) return []
+  return store.instances
+    .filter((inst) => (inst.host_id ?? LOCAL_HOST_ID) === host.id)
+    .filter((inst) => {
+      const state = store.statusOf(inst.id).state
+      return state === 'running' || state === 'starting' || state === 'unreachable'
+    })
+    .map((inst) => inst.name)
+})
+
 /** What the user can run on the server to see what the launcher left behind. */
 function cleanupCommand(host: HostWithStatus | null): string {
   if (!host) return ''
@@ -946,6 +969,9 @@ onUnmounted(() => {
       @cancel="hostPendingDelete = null"
     >
       <p class="delete-warning">{{ t('settings.hosts.deleteWarning') }}</p>
+      <p v-if="hostRunsOnDelete.length" class="delete-warning">
+        {{ t('settings.hosts.deleteRunning', hostRunsOnDelete) }}
+      </p>
       <p class="delete-warning">{{ t('settings.hosts.deleteRecords') }}</p>
       <p class="delete-warning">{{ t('settings.hosts.deleteLeft') }}</p>
       <div class="cleanup-command">

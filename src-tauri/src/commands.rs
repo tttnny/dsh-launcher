@@ -846,10 +846,15 @@ pub async fn remove_version(
         (version, inst_ids, host, data_dir)
     };
 
-    // Stop and cascade delete associated instances
+    // Stop and cascade delete associated instances. A stop that did not take is
+    // **not** swallowed: deleting the record of an instance whose process is
+    // still running on that machine would leave the launcher unable to name what
+    // it left behind (ADR-0007 — the launcher forgets, the server keeps running).
     for inst_id in &instance_ids {
         if state.running.lock().await.contains_key(inst_id) {
-            let _ = process::stop_instance_process(&app, &state, inst_id).await;
+            process::stop_instance_process(&app, &state, inst_id)
+                .await
+                .map_err(|e| format!("实例 {inst_id} 没能停下来，版本没有删：{e}"))?;
         }
     }
 
@@ -1041,9 +1046,14 @@ pub async fn delete_instance(
     host_id: Option<String>,
 ) -> Result<(), String> {
     // Stop first: a running process holds the DSH_HOME and would outlive its
-    // own record, leaving an orphan nothing can stop from the UI.
+    // own record, leaving an orphan nothing can stop from the UI. A stop that
+    // did not take is reported rather than swallowed: the record is the only
+    // thing that names the process, and deleting it first is what turns 「停止
+    // 失败」 into 「启动器忘了，服务器上还在跑」 (ADR-0007).
     if state.running.lock().await.contains_key(&id) {
-        let _ = process::stop_instance_process(&app, &state, &id).await;
+        process::stop_instance_process(&app, &state, &id)
+            .await
+            .map_err(|e| format!("实例没能停下来，记录没有删：{e}"))?;
     }
 
     let icon_path = {
@@ -1652,6 +1662,42 @@ pub async fn list_instance_status(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::config::InstanceStatus>, String> {
     Ok(process::list_statuses(&state).await)
+}
+
+/// The page's one retry: ask the instance's own machine again what state it is
+/// in, and report what it says.
+///
+/// It exists because 「主机不可达」 is a statement about a moment — a laptop that
+/// went to sleep, a server that was rebooting — and the launcher must never
+/// turn 「问不到」 into 「已停止」, which is the reading that leads to a second DSH
+/// on that server (ADR-0007 后果). 本机 needs nothing: its instances are this
+/// process's own children and their state is never unknown.
+#[tauri::command]
+pub async fn refresh_instance_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let found = {
+        let cfg = state.config.lock().unwrap();
+        cfg.instances
+            .iter()
+            .find(|inst| inst.id == id)
+            .cloned()
+            .map(|inst| {
+                crate::config::resolve_host(&cfg, Some(&inst.host_id))
+                    .map(|host| (inst, host.clone()))
+            })
+    };
+    match found {
+        None => Err("实例不存在".to_string()),
+        Some(Err(e)) => Err(e),
+        Some(Ok((_inst, host))) if host.builtin => Ok(()),
+        Some(Ok((inst, host))) => {
+            process::settle_remote_instance(&app, &state, &inst, &host).await;
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]
@@ -3255,6 +3301,7 @@ mod tests {
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             host_transport: transport,
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 

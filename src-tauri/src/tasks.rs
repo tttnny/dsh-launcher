@@ -2535,6 +2535,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
             tasks: tokio::sync::Mutex::new(Default::default()),
             host_transport: transport,
             host_statuses: Default::default(),
+            remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 

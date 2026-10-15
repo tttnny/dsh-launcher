@@ -163,6 +163,12 @@ export const api = {
   /** Opens an external http(s) URL in the system browser. */
   openExternal: (url: string) => call<void>('open_external', { url }),
   listInstanceStatus: () => call<InstanceStatus[]>('list_instance_status'),
+  /**
+   * The page's one retry: ask the instance's own machine again what state it is
+   * in. It is what turns 「主机不可达」 back into an answer, and it is why that
+   * state never has to be guessed at (ADR-0007).
+   */
+  refreshInstanceStatus: (id: string) => call<void>('refresh_instance_status', { id }),
 
   getSettings: () => call<LauncherSettings>('get_settings'),
   updateSettings: (settings: Partial<LauncherSettings>) => call<LauncherSettings>('update_settings', { settings }),

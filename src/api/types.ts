@@ -206,7 +206,16 @@ export interface LauncherUpdateInfo {
   published_at: string | null
 }
 
-export type InstanceState = 'stopped' | 'starting' | 'running' | 'exited'
+/**
+ * What an instance's process is doing, as the launcher can tell right now.
+ *
+ * `unreachable` is not a relabelling of `stopped`: it means the machine that
+ * runs the instance did not answer, so nothing is known about the process. The
+ * two must stay apart — reading 「主机不可达」 as 「已停止」 is what makes a user
+ * press 启动 and end up with a second DSH on a server that was running one all
+ * along (ADR-0007).
+ */
+export type InstanceState = 'stopped' | 'starting' | 'running' | 'exited' | 'unreachable'
 
 export interface InstanceStatus {
   id: string

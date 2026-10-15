@@ -27,6 +27,8 @@
     "stopped": "实例已停止",
     "stop": "停止",
     "restart": "重启",
+    "retryCheck": "重试",
+    "retryHint": "再向那台机器问一次这个实例的状态。",
     "openBrowser": "打开",
     "openTerminal": "打开终端",
     "terminalOpened": "已打开终端：{label}",
@@ -38,7 +40,8 @@
       "stopped": "已停止",
       "starting": "启动中",
       "running": "运行中",
-      "exited": "已退出"
+      "exited": "已退出",
+      "unreachable": "主机不可达"
     },
     "healthLogs": "自检",
     "healthModalTitle": "依赖自检",
@@ -89,6 +92,7 @@
     "healthOk": "没有异常",
     "healthErrors": "{count} 个错误",
     "healthWarns": "{count} 个警告",
+    "healthNotChecked": "远端实例还没有自检过",
     "copyPath": "复制路径",
     "copyCommand": "复制命令",
     "pathCopied": "远端路径已复制",
@@ -263,7 +267,8 @@
       "deleteWarning": "只删启动器里的这条记录：服务器上什么都不动，在那台机器上跑着的实例会继续跑。",
       "deleteRecords": "启动器里归属这台主机的版本、DSH_HOME 与实例记录会一起消失，此后它上面的实例在启动器里看不到了。",
       "deleteLeft": "远端数据目录原样留在那台机器上（版本、专属 DSH_HOME、日志、运行记录）。想在服务器上自己看一眼，可以在终端里跑：",
-      "deleteCommandCopied": "清理命令已复制"
+      "deleteCommandCopied": "清理命令已复制",
+      "deleteRunning": "「{0}」会继续在那台机器上跑，启动器里再也看不到它们——要停只能在服务器上停。"
     },
     "language": "界面语言",
     "theme": {
