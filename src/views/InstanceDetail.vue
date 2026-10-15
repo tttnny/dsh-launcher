@@ -7,6 +7,7 @@ import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
 import { usePluginLink } from '@/composables/usePluginLink'
 import { useLauncherStore } from '@/stores/launcher'
+import { LOCAL_HOST_ID } from '@/api/types'
 import type { DshInstance } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 import InstanceAvatar from '@/components/InstanceAvatar.vue'
@@ -69,6 +70,16 @@ const current = computed(() => store.instanceById(id.value))
 const status = computed(() => store.statusOf(id.value))
 const running = computed(() => status.value.state === 'running' || status.value.state === 'starting')
 const homeLabel = computed(() => store.homeById(homeId.value ?? '')?.name ?? '—')
+/**
+ * The machine this instance runs on. Its version and its DSH_HOMEs live there —
+ * an instance is one binding on one host (ADR-0006 §1) — so the two selects below
+ * list that machine's resources and nothing else: a combination spanning two
+ * machines is not one the backend could accept.
+ */
+const hostId = computed(() => current.value?.host_id ?? LOCAL_HOST_ID)
+const host = computed(() => store.hostById(hostId.value))
+const hostVersions = computed(() => store.versionsByHost[hostId.value] ?? [])
+const hostHomes = computed(() => store.homesByHost[hostId.value] ?? [])
 
 /**
  * The form's identity, used to tell "nothing to save" from "the user changed
@@ -306,6 +317,10 @@ function removeEnvRow(idx: number) {
           </span>
         </h1>
         <p class="dl-head-sub detail-sub">
+          <template v-if="host && !host.builtin">
+            <span>{{ host.display_name }}</span>
+            <span class="detail-dot">·</span>
+          </template>
           <span class="dl-mono">{{ store.versionById(versionId ?? '')?.version ?? '—' }}</span>
           <span class="detail-dot">·</span>
           <span>{{ homeLabel }}</span>
@@ -359,7 +374,7 @@ function removeEnvRow(idx: number) {
                 <span class="dl-row-label">{{ t('instanceEdit.version') }}</span>
               </div>
               <a-select v-model="versionId" style="width: 230px">
-                <a-option v-for="v in store.versions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
+                <a-option v-for="v in hostVersions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
               </a-select>
             </div>
 
@@ -368,7 +383,7 @@ function removeEnvRow(idx: number) {
                 <span class="dl-row-label">{{ t('instanceEdit.home') }}</span>
               </div>
               <a-select v-model="homeId" style="width: 230px" @change="onHomePicked">
-                <a-option v-for="h in store.homes" :key="h.id" :value="h.id">
+                <a-option v-for="h in hostHomes" :key="h.id" :value="h.id">
                   {{ h.name }} — {{ h.path }}
                 </a-option>
               </a-select>

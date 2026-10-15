@@ -80,12 +80,21 @@ pub fn version_bin_ready(version_dir: &Path) -> bool {
 /// Whether the installed `dsh-web-app` bundle accepts `--no-open` (added in
 /// 0.1.0-rc.8). Feature-detect the flag in the bundle's startup script: the
 /// flag is a string literal in `lib/startup.js`, so presence is an exact
-/// signal that survives pre-release version-number formats. The bundle lives
-/// under pnpm's store; we scan `node_modules/.pnpm/**/@deepseek-ai/dsh-web-app/lib/startup.js`.
+/// signal that survives pre-release version-number formats.
 pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
+    match std::fs::read_to_string(web_app_startup_script(version_dir)) {
+        Ok(raw) => supports_no_open(&raw),
+        Err(_) => false,
+    }
+}
+
+/// Where that bundle's startup script lives inside a version tree. Separated
+/// from the reading so a caller that has the file's text from somewhere else —
+/// the machine that owns the version tree — asks the same question of it.
+pub fn web_app_startup_script(version_dir: &Path) -> PathBuf {
     // Source checkouts keep the bundle at its workspace path; npm trees hoist
     // one canonical copy into the pnpm public store.
-    let startup = if is_repo_checkout(version_dir) {
+    if is_repo_checkout(version_dir) {
         version_dir
             .join("packages")
             .join("bundle")
@@ -104,11 +113,14 @@ pub fn web_app_supports_no_open(version_dir: &Path) -> bool {
             .join("dsh-web-app")
             .join("lib")
             .join("startup.js")
-    };
-    let Ok(raw) = std::fs::read_to_string(&startup) else {
-        return false;
-    };
-    raw.contains("--no-open") || raw.contains("no-open")
+    }
+}
+
+/// Whether one bundle's startup script accepts `--no-open` — the flag the
+/// launcher needs because it opens the instance URL in the system browser
+/// itself, so DSH must not open one too.
+pub fn supports_no_open(startup_script: &str) -> bool {
+    startup_script.contains("--no-open") || startup_script.contains("no-open")
 }
 
 /// The base `node <bin>` invocation shared by every DSH spawn; callers then
@@ -149,6 +161,23 @@ fn dsh_base(node: &Path, version_dir: &Path) -> Result<Command, String> {
 /// instance's home), the launcher marker, then the user's overrides
 /// (DSH_HOME is reserved and never overridden).
 pub fn instance_env(cfg: &Config, instance_id: &str) -> Result<Vec<(String, String)>, String> {
+    instance_env_for(cfg, instance_id, &crate::config::Host::local())
+}
+
+/// The same policy, composed for the machine the instance runs on.
+///
+/// 本机's environment is what it always was, the launcher's proxy included.
+/// Another machine's never carries the launcher's proxy settings: those describe
+/// *this* Mac's network exit, and what that host goes out through is decided by
+/// its own record's environment variables (ADR-0006 §3 / issue #9
+/// 「远程出口由主机记录决定」). Those ride last, the position the proxy holds on
+/// 本机 — the general network setting of the machine outranks one instance's own
+/// choice of variable.
+pub fn instance_env_for(
+    cfg: &Config,
+    instance_id: &str,
+    host: &crate::config::Host,
+) -> Result<Vec<(String, String)>, String> {
     let inst = cfg
         .instances
         .iter()
@@ -172,9 +201,18 @@ pub fn instance_env(cfg: &Config, instance_id: &str) -> Result<Vec<(String, Stri
         }
         env.push((k.clone(), v.clone()));
     }
-    // Launcher proxy applied to dsh: overrides the instance's own proxy vars.
-    if cfg.settings.proxy_enabled && cfg.settings.proxy_apply_dsh {
-        crate::proxy::override_env(&mut env, &cfg.settings);
+    if host.builtin {
+        // Launcher proxy applied to dsh: overrides the instance's own proxy vars.
+        if cfg.settings.proxy_enabled && cfg.settings.proxy_apply_dsh {
+            crate::proxy::override_env(&mut env, &cfg.settings);
+        }
+    } else {
+        for (k, v) in &host.extra_env {
+            if k == "DSH_HOME" {
+                continue; // reserved here too
+            }
+            env.push((k.clone(), v.clone()));
+        }
     }
     Ok(env)
 }
@@ -204,18 +242,51 @@ pub fn instance_command(
     web_port: Option<u16>,
 ) -> Result<Command, String> {
     let mut cmd = dsh_base(node, version_dir)?;
-    cmd.arg("--profile").arg(profile);
+    let no_open = web_port.is_some() && web_app_supports_no_open(version_dir);
+    cmd.args(instance_flags(profile, web_port, no_open));
+    Ok(cmd)
+}
+
+/// The flags one instance run carries, in order, after the `bin.js`:
+/// `--profile P [--port N] [--no-open]`.
+///
+/// `no_open` is the caller's answer because on another machine it comes from
+/// that machine's own copy of the bundle ([`supports_no_open`] over the file it
+/// reads there). The rest — that `--host` is never among them, and that port 0
+/// means a random free port — holds wherever the process ends up.
+pub fn instance_flags(profile: &str, web_port: Option<u16>, no_open: bool) -> Vec<String> {
+    let mut args = vec!["--profile".to_string(), profile.to_string()];
     if let Some(port) = web_port {
-        cmd.arg("--port").arg(port.to_string());
-        // `--no-open` was added to dsh-web-app in 0.1.0-rc.8: the launcher
-        // opens the instance URL in the system browser itself (contract), so
-        // the app must not open one too. Feature-detect rather than comparing
-        // pre-release versions.
-        if web_app_supports_no_open(version_dir) {
-            cmd.arg("--no-open");
+        args.push("--port".to_string());
+        args.push(port.to_string());
+        if no_open {
+            args.push("--no-open".to_string());
         }
     }
-    Ok(cmd)
+    args
+}
+
+/// The whole command line of one instance run: the resolved interpreter, the
+/// version's `bin.js`, then [`instance_flags`].
+///
+/// [`instance_command`] is this plus a `tokio::process::Command`, which a
+/// remote launcher cannot use: the process it starts is started by that
+/// machine's own shell, detached from the ssh session. Handing the same words
+/// to the transport is what keeps the flag policy from drifting between the two
+/// machines.
+pub fn instance_argv(
+    node: &Path,
+    version_dir: &Path,
+    profile: &str,
+    web_port: Option<u16>,
+    no_open: bool,
+) -> Vec<String> {
+    let mut argv = vec![
+        node.to_string_lossy().to_string(),
+        version_bin(version_dir).to_string_lossy().to_string(),
+    ];
+    argv.extend(instance_flags(profile, web_port, no_open));
+    argv
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +419,154 @@ pub fn terminal_env_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_instance() -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: "i1".into(),
+            name: "主实例".into(),
+            version_id: "v1".into(),
+            home_id: "h1".into(),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
+            env_overrides: [("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        }
+    }
+
+    fn remote_instance() -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: "i9".into(),
+            name: "服务器实例".into(),
+            version_id: "v9".into(),
+            home_id: "h9".into(),
+            host_id: "host-server".into(),
+            env_overrides: [("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        }
+    }
+
+    fn remote_host() -> crate::config::Host {
+        crate::config::Host {
+            id: "host-server".into(),
+            display_name: "服务器".into(),
+            ssh_target: "zjq_aliyun".into(),
+            registry: None,
+            extra_env: [(
+                "HTTPS_PROXY".to_string(),
+                "http://10.0.0.9:3128".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            data_dir: Some(PathBuf::from("/home/demo/.local/share/dsh-launcher")),
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        }
+    }
+
+    fn config_with_proxy() -> crate::config::Config {
+        crate::config::Config {
+            homes: vec![
+                crate::config::DshHome {
+                    id: "h1".into(),
+                    name: "本机 HOME".into(),
+                    path: PathBuf::from("/Users/me/.dsh"),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+                crate::config::DshHome {
+                    id: "h9".into(),
+                    name: "服务器 HOME".into(),
+                    path: PathBuf::from("/home/demo/.dsh"),
+                    host_id: "host-server".into(),
+                },
+            ],
+            versions: Vec::new(),
+            instances: vec![local_instance(), remote_instance()],
+            hosts: vec![crate::config::Host::local(), remote_host()],
+            settings: crate::config::LauncherSettings {
+                proxy_enabled: true,
+                proxy_apply_dsh: true,
+                proxy_url: "http://127.0.0.1".into(),
+                proxy_port: 7890,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn env_of(env: &[(String, String)], key: &str) -> Option<String> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// 本机's environment is the one the launcher has always built, and the
+    /// host-aware form has to leave it exactly as it was — proxy included, and
+    /// proxy-over-instance-override included.
+    #[test]
+    fn the_local_instance_environment_is_what_it_always_was() {
+        let cfg = config_with_proxy();
+        assert_eq!(
+            instance_env(&cfg, "i1").unwrap(),
+            instance_env_for(&cfg, "i1", &crate::config::Host::local()).unwrap()
+        );
+
+        let env = instance_env(&cfg, "i1").unwrap();
+        assert_eq!(env_of(&env, "DSH_HOME").as_deref(), Some("/Users/me/.dsh"));
+        assert_eq!(env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(), Some("主实例"));
+        assert_eq!(env_of(&env, "DSH_TELEMETRY_DISABLED").as_deref(), Some("1"));
+        assert_eq!(
+            env_of(&env, "HTTPS_PROXY").as_deref(),
+            Some("http://127.0.0.1:7890"),
+            "本机实例仍带本机代理"
+        );
+    }
+
+    /// Another machine's instance carries its own machine's facts: that host's
+    /// DSH_HOME, the instance's name and own variables, and the host record's
+    /// environment variables — and **not** the launcher's proxy, which describes
+    /// this Mac's network exit.
+    #[test]
+    fn a_remote_instance_carries_its_hosts_environment_and_not_the_launchers_proxy() {
+        let cfg = config_with_proxy();
+        let env = instance_env_for(&cfg, "i9", &remote_host()).unwrap();
+
+        assert_eq!(env_of(&env, "DSH_HOME").as_deref(), Some("/home/demo/.dsh"));
+        assert_eq!(env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(), Some("服务器实例"));
+        assert_eq!(env_of(&env, "DSH_TELEMETRY_DISABLED").as_deref(), Some("1"));
+        assert_eq!(
+            env_of(&env, "HTTPS_PROXY").as_deref(),
+            Some("http://10.0.0.9:3128"),
+            "远端的出口由主机记录里的额外环境变量决定"
+        );
+        assert!(
+            !env.iter().any(|(_, v)| v.contains("127.0.0.1:7890")),
+            "本机代理一个字节都不该过去：{env:?}"
+        );
+        assert!(env_of(&env, "NO_PROXY").is_none(), "{env:?}");
+    }
+
+    /// DSH_HOME is reserved on both machines: neither an instance override nor a
+    /// host's blanket settings may move it away from the record's own value.
+    #[test]
+    fn dsh_home_is_reserved_on_every_host() {
+        let mut cfg = config_with_proxy();
+        cfg.instances[1]
+            .env_overrides
+            .insert("DSH_HOME".into(), "/tmp/hijacked".into());
+        cfg.hosts[1]
+            .extra_env
+            .insert("DSH_HOME".into(), "/tmp/hijacked".into());
+
+        let env = instance_env_for(&cfg, "i9", &remote_host()).unwrap();
+        assert_eq!(env_of(&env, "DSH_HOME").as_deref(), Some("/home/demo/.dsh"));
+    }
 
     #[test]
     fn web_app_supports_no_open_feature_detects_flag() {

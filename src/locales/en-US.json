@@ -65,6 +65,7 @@
     "create": "Create",
     "created": "Instance created",
     "homeHint": "The same version can be bound to different DSH_HOMEs, or share one with another instance.",
+    "hostScope": "A machine's resources are its own: only DSH versions and DSH_HOMEs on {host} can be picked below.",
     "noVersionsTitle": "No DSH version installed yet",
     "noVersionsDesc": "Install one in the Library first, then come back to create an instance.",
     "emptyTitle": "No instances yet",

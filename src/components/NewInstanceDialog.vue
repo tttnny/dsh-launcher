@@ -15,9 +15,11 @@ const props = defineProps<{
   /**
    * Pre-fills the sheet from an existing instance ("duplicate"). The profile
    * is not part of it: a copy is a new binding, and the profile is picked at
-   * launch time.
+   * launch time. `hostId` comes along because a copy binds on the machine the
+   * original runs on — the sheet then offers that machine's versions and
+   * DSH_HOMEs, not the current host's.
    */
-  preset?: { name: string; versionId: string; homeId: string } | null
+  preset?: { name: string; versionId: string; homeId: string; hostId?: string } | null
 }>()
 const emit = defineEmits<{
   (e: 'update:visible', v: boolean): void
@@ -30,6 +32,17 @@ const store = useLauncherStore()
 const name = ref('')
 const versionId = ref<string | undefined>(undefined)
 const homeId = ref<string | undefined>(undefined)
+
+/**
+ * The machine this sheet binds on: the instance being copied, or 当前主机. An
+ * instance is one binding on one host (ADR-0006 §1), so both selects list that
+ * host's resources only — an impossible combination is not offered in the first
+ * place rather than refused on submit.
+ */
+const hostId = computed(() => props.preset?.hostId ?? store.currentHostId)
+const host = computed(() => store.hostById(hostId.value))
+const versions = computed(() => store.versionsByHost[hostId.value] ?? [])
+const homes = computed(() => store.homesByHost[hostId.value] ?? [])
 
 /** `base`, then `base 2`, `base 3`… — instance names are unique. */
 function uniqueName(base: string): string {
@@ -54,8 +67,8 @@ function reset() {
   const existing = new Set(store.instances.map((i) => i.name))
   while (existing.has(`${t('instances.namePrefix')}${n}`)) n += 1
   name.value = `${t('instances.namePrefix')}${n}`
-  versionId.value = store.versions[0]?.id
-  homeId.value = store.homes[0]?.id
+  versionId.value = versions.value[0]?.id
+  homeId.value = homes.value[0]?.id
 }
 
 watch(
@@ -67,14 +80,14 @@ watch(
 
 // A new instance is a fresh binding, so it can only use a version that is
 // already installed — installing is the Versions tab's job, not this sheet's.
-const noVersions = computed(() => store.versions.length === 0)
-const noHomes = computed(() => store.homes.length === 0)
+const noVersions = computed(() => versions.value.length === 0)
+const noHomes = computed(() => homes.value.length === 0)
 
 const createAction = useAction(
   // The instance is bound on the machine whose versions and DSH_HOMEs the two
   // selects are listing — the current host (ADR-0006 §3: a binding never spans
   // two machines).
-  () => api.createInstance(name.value.trim(), versionId.value!, homeId.value!, store.currentHostId),
+  () => api.createInstance(name.value.trim(), versionId.value!, homeId.value!, hostId.value),
   { success: () => t('instances.created') },
 )
 const saving = computed(() => createAction.busy['*'])
@@ -118,6 +131,9 @@ function close() {
     </div>
 
     <div v-else class="new-instance-body">
+      <p v-if="host && !host.builtin" class="dl-field-hint">
+        {{ t('instances.hostScope', { host: host.display_name }) }}
+      </p>
       <div class="dl-field">
         <label class="dl-field-label">{{ t('instanceEdit.name') }}</label>
         <input
@@ -131,14 +147,14 @@ function close() {
       <div class="dl-field">
         <label class="dl-field-label">{{ t('instanceEdit.version') }}</label>
         <a-select v-model="versionId" style="width: 100%">
-          <a-option v-for="v in store.versions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
+          <a-option v-for="v in versions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
         </a-select>
       </div>
 
       <div class="dl-field">
         <label class="dl-field-label">{{ t('instanceEdit.home') }}</label>
         <a-select v-model="homeId" style="width: 100%">
-          <a-option v-for="h in store.homes" :key="h.id" :value="h.id">
+          <a-option v-for="h in homes" :key="h.id" :value="h.id">
             {{ h.name }} — {{ h.path }}
           </a-option>
         </a-select>

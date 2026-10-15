@@ -193,6 +193,14 @@ pub(crate) fn assert_profile_lan_bind_port(home: &Path, profile: &str, port: u16
     }
 }
 
+/// The document [`assert_profile_lan_bind_port`] rewrites, for a caller that has
+/// to fetch it from the machine that owns the profile first. `None` for a name
+/// that is not a single path segment — the local path touches nothing then
+/// either.
+pub(crate) fn lan_bind_patch_path(home: &Path, profile: &str) -> Option<PathBuf> {
+    profile_dir(home, profile).ok().map(|dir| patch_path(&dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
