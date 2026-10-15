@@ -162,7 +162,16 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
 </script>
 
 <template>
-  <div v-if="!selectedHomeId" class="dl-surface">
+  <!-- The HOME axis is this pane's spine, and it is a list of records: a host
+       that cannot be reached still has it. A failed read of the records is what
+       this says, rather than showing an empty shelf that looks like "no HOMEs". -->
+  <div v-if="store.homeError" class="dl-surface dl-failure">
+    <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+    <p class="dl-failure-text">{{ store.homeError }}</p>
+    <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+  </div>
+
+  <div v-else-if="!selectedHomeId" class="dl-surface">
     <DlEmpty icon="profile" :description="t('profiles.noHomeSelected')" />
   </div>
 

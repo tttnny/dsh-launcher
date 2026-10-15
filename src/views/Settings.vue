@@ -73,10 +73,21 @@ async function patchSettings(patch: Parameters<typeof api.updateSettings>[0]) {
 // --- Environment --------------------------------------------------------------
 
 // The readout answers for one host: the toolchain is per host, because a path is
-// a fact about one machine's filesystem (ADR-0005 追加). 本机 is the default, and
-// the store's copy of that answer is what the app itself checked at startup.
-const envHostId = ref(LOCAL_HOST_ID)
-const envRuntime = ref<RuntimeStatus | null>(store.runtime)
+// a fact about one machine's filesystem (ADR-0005 追加). The host is the
+// launcher's one 当前主机 (ADR-0006 §3) — the same state the Library's picker and
+// the board's filter read — so the section reports whichever machine those pages
+// are showing, and «切换主机» here moves them too.
+const envHostId = computed({
+  get: () => store.currentHostId,
+  set: (id: string) => void store.selectHost(id),
+})
+// 本机's answer is already in the store; a remote host starts empty, so its row
+// never wears the local machine's paths while its own answer is on the way.
+const envRuntime = ref<RuntimeStatus | null>(
+  store.currentHostId === LOCAL_HOST_ID ? store.runtime : null,
+)
+/** Why this host's paths cannot be shown (an unreachable machine, a bad target). */
+const envError = ref('')
 
 const envOk = computed(
   () => !!envRuntime.value?.node?.installed && !!envRuntime.value?.pnpm?.installed,
@@ -87,14 +98,20 @@ async function loadEnv() {
   try {
     const answer = await api.getRuntimeStatus(false, wanted)
     if (wanted !== envHostId.value) return
+    envError.value = ''
     envRuntime.value = answer
   } catch (e) {
-    Message.error(String(e))
+    if (wanted !== envHostId.value) return
+    // A machine that could not be reached has no conclusions to report. Leaving
+    // the row to say 「找不到」 would claim that machine has no toolchain.
+    envError.value = String(e)
+    envRuntime.value = null
   }
 }
 
 watch(envHostId, () => {
   envRuntime.value = null
+  envError.value = ''
   void loadEnv()
 })
 
@@ -675,14 +692,19 @@ onUnmounted(() => {
                 <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
               </a-select>
             </div>
-            <div class="dl-row">
+            <!-- A machine that did not answer has no paths to report: the row
+                 says why, instead of claiming the tools are missing. -->
+            <div v-if="envError" class="dl-row">
+              <span class="dl-error-text">{{ envError }}</span>
+            </div>
+            <div v-if="!envError" class="dl-row">
               <span class="dl-row-label">Node.js</span>
               <span class="row-path dl-mono" :title="envRuntime?.node?.path ?? ''">
                 {{ envRuntime?.node?.path ?? t('settings.environment.notFound') }}
               </span>
               <span class="dl-chip">{{ envRuntime?.node?.version ?? t('settings.environment.missing') }}</span>
             </div>
-            <div class="dl-row">
+            <div v-if="!envError" class="dl-row">
               <span class="dl-row-label">pnpm</span>
               <span class="row-path dl-mono" :title="envRuntime?.pnpm?.path ?? ''">
                 {{ envRuntime?.pnpm?.path ?? t('settings.environment.notFound') }}
