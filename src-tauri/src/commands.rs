@@ -1388,11 +1388,12 @@ pub(crate) async fn list_profiles_for(
 /// Creates a new profile by copying the `__temp__` template from dedicated homes.
 /// Never creates or overrides `__temp__` in user default ~/.dsh/profiles (issue #5).
 ///
-/// 本机 only. The template hunt walks the launcher's own data directory and the
-/// copy is this machine's directory copy; on a remote host both would have to be
-/// asked of that machine, and a DSH_HOME that was just created there has nothing
-/// to copy from yet. The refusal names the way out, so the button that cannot
-/// work here does not leave the user guessing.
+/// 本机 only. The template hunt walks `<数据目录>/homes/*` and the copy that
+/// makes the new profile is a directory copy on this Mac; a HOME on another
+/// machine keeps both of those **there**, and this path can only read and write
+/// this Mac's filesystem — asked of a remote HOME it would answer with whatever
+/// happens to sit at the same path here. The refusal names the way out, so the
+/// button that cannot work here does not leave the user guessing.
 #[tauri::command(rename_all = "snake_case")]
 pub fn create_profile(
     state: State<'_, AppState>,

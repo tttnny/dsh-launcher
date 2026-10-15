@@ -467,8 +467,8 @@ async fn run_create_instance_task(
     .await;
 }
 
-async fn do_create_instance(
-    app: &AppHandle,
+async fn do_create_instance<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &State<'_, AppState>,
     request: &InstallRequest<'_>,
 ) -> Result<String, String> {
@@ -596,8 +596,8 @@ async fn do_create_instance(
 /// was materialized), terminates it, then copies `profiles/web` to
 /// `profiles/__temp__`. The profile for a fresh HOME is created the first time
 /// a DSH process runs with that HOME, so this is a one-time cost per HOME.
-async fn ensure_web_profile_template(
-    app: &AppHandle,
+async fn ensure_web_profile_template<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     home_path: &std::path::Path,
@@ -3166,6 +3166,108 @@ help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n
         assert!(
             state.config.lock().unwrap().versions.is_empty(),
             "没有装成的东西不该被登记"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The install task that makes a dedicated DSH_HOME on another machine also
+    /// gives that HOME its `web` profile, and it does so **on that machine**: the
+    /// version was installed there, so the first DSH run that materializes
+    /// `profiles/web` belongs there too. 本机's twin of that step
+    /// (`ensure_web_profile_template`) runs while the version installs; without
+    /// the remote half, the instance the task just made has no Profile to launch
+    /// with and 「启动」 is a button that does nothing (issue #9).
+    #[tokio::test]
+    async fn a_remote_install_task_prepares_the_new_home_on_that_machine() {
+        const HOME: &str = "/home/demo/.local/share/dsh-launcher/homes/lab-web";
+        // 1. That machine creates the HOME and answers its settled absolute path.
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(&format!(
+            r#"{{"path":"{HOME}"}}"#
+        ))));
+        for answer in crate::remote::testing::prime_home_answers(
+            "http://127.0.0.1:41234/?token=LauncherPrimeTokenForTests",
+        ) {
+            fake.answering(answer);
+        }
+        let (state, root, host) = state_for_install(fake.clone(), "install-home");
+        // That machine already has the version: this is the HOME-and-instance
+        // half of the task, not the download.
+        state.config.lock().unwrap().versions.push(DshVersion {
+            id: "v-lab".into(),
+            version: "0.2.0-rc.2".into(),
+            dir: PathBuf::from(format!("{REMOTE_DATA_DIR}/versions/0.2.0-rc.2")),
+            host_id: host.id.clone(),
+        });
+        let app = install_app(state);
+        let state = app.state::<AppState>();
+        running_install_task(&app, "t-1").await;
+        let reserved = host.dedicated_home_path(&state.data_dir, "lab-web").unwrap();
+        {
+            // The enqueue's own record: this host, this version, this reserved
+            // HOME path (what `start_create_instance_task` leaves behind).
+            let mut tasks = state.tasks.lock().await;
+            let task = tasks.get_mut("t-1").unwrap();
+            task.host_id = host.id.clone();
+            task.version = "0.2.0-rc.2".to_string();
+            task.reserved_home_path = Some(reserved.clone());
+        }
+        let home_id: Option<String> = None;
+
+        let instance_id = do_create_instance(
+            app.handle(),
+            &state,
+            &InstallRequest {
+                task_id: "t-1",
+                name: "lab-web",
+                version: "0.2.0-rc.2",
+                home_id: &home_id,
+                reserved_home_path: Some(&reserved),
+                host: &host,
+            },
+        )
+        .await
+        .expect("版本已经在那台机器上，建实例这一步不该失败");
+
+        // The instance is bound to that machine's HOME, at the path the machine
+        // itself resolved.
+        let cfg = state.config.lock().unwrap();
+        let inst = cfg.instances.iter().find(|i| i.id == instance_id).unwrap();
+        assert_eq!(inst.host_id, host.id);
+        let bound = cfg.homes.iter().find(|h| h.id == inst.home_id).unwrap();
+        assert_eq!(bound.path, Path::new(HOME));
+        drop(cfg);
+
+        // The warm-up it needs was asked of that machine, for that HOME.
+        let calls = fake.calls();
+        let spawn = calls
+            .iter()
+            .find_map(|call| match call {
+                FakeCall::Spawn(script) => Some(script.clone()),
+                _ => None,
+            })
+            .expect("那台机器上要先跑一次 DSH，`profiles/web` 才会出现");
+        assert!(spawn.contains(&format!("'DSH_HOME={HOME}'")), "{spawn}");
+        assert!(spawn.contains("'--profile' 'web'"), "{spawn}");
+        assert!(
+            spawn.contains(&format!("{REMOTE_DATA_DIR}/logs/")),
+            "那一次启动的输出留在那台机器上：{spawn}"
+        );
+
+        // And none of it happened here: every step names that machine's paths,
+        // and no directory appeared under this Mac's own data directory.
+        let local = state.data_dir.to_string_lossy().to_string();
+        for call in &calls {
+            if let FakeCall::Run(script) | FakeCall::Spawn(script) = call {
+                assert!(
+                    !script.contains(&local) && !script.contains("/Users/"),
+                    "在别的机器上建 HOME 不该在本机路径上动手：{script}"
+                );
+            }
+        }
+        assert!(
+            !state.data_dir.join("homes").exists(),
+            "本机不该为那台机器上的实例建出这个 HOME：{:?}",
+            state.data_dir
         );
         std::fs::remove_dir_all(&root).ok();
     }
