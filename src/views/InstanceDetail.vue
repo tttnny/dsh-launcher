@@ -53,7 +53,7 @@ const envValid = computed(() => envRows.value.every((r) => !envKeyError(r)))
 onMounted(async () => {
   const inst =
     store.instanceById(id.value) ??
-    (await api.listInstances()).find((i) => i.id === id.value)
+    (await api.listInstances(null, true)).find((i) => i.id === id.value)
   if (!inst) {
     Message.error(t('instanceEdit.notFound'))
     void router.replace({ name: 'instances' })
@@ -142,7 +142,7 @@ const saveAction = useAction(
       env_overrides: envOverrides,
       default_profile: defaultProfile.value ?? null,
     }
-    return api.updateInstance(updated)
+    return api.updateInstance(updated, inst.host_id)
   },
   { success: () => t('instanceEdit.saved') },
 )
@@ -261,7 +261,9 @@ const terminalAction = useAction(() => api.openInstanceTerminal(id.value), {
 // --- Delete -------------------------------------------------------------------
 
 const deleteAction = useAction(async () => {
-  await api.deleteInstance(id.value)
+  // The record's host decides where it lives: the same instance id read back
+  // from another machine is a different record (ADR-0006).
+  await api.deleteInstance(id.value, current.value?.host_id)
   return true
 })
 

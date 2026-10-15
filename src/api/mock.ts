@@ -58,6 +58,9 @@ function localHost(): Host {
 /** The preview's remote machine, so host-aware pages have two of them to show. */
 const REMOTE_HOST_ID = 'host-aliyun'
 
+/** 本机's data directory as the preview spells it (sample paths are Windows-style). */
+const LOCAL_DATA_DIR = 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher'
+
 function remoteHost(): Host {
   return {
     id: REMOTE_HOST_ID,
@@ -92,9 +95,9 @@ function seedDb(): MockDb {
       { id: 'h-remote', name: '服务器默认', path: '/home/demo/.dsh', host_id: REMOTE_HOST_ID },
     ],
     versions: [
-      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6', host_id: LOCAL_HOST_ID },
-      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5', host_id: LOCAL_HOST_ID },
-      { id: 'v-remote', version: '0.1.0-rc.6', dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6', dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6', host_id: REMOTE_HOST_ID },
+      { id: 'v-rc6', version: '0.1.0-rc.6', dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.6`, dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.6`, bin_ready: true, host_id: LOCAL_HOST_ID },
+      { id: 'v-rc5', version: '0.1.0-rc.5', dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.5`, dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.5`, bin_ready: true, host_id: LOCAL_HOST_ID },
+      { id: 'v-remote', version: '0.1.0-rc.6', dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6', dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6', bin_ready: true, host_id: REMOTE_HOST_ID },
     ],
     instances: [
       {
@@ -163,17 +166,23 @@ function loadDb(): MockDb {
       for (const v of db.versions) {
         v.dedicated_home =
           v.dedicated_home ??
-          `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${v.version}`
+          `${LOCAL_DATA_DIR}\\homes\\${v.version}`
+        // Bin readiness is what the machine answers; a version stored before
+        // the field existed was installed by the launcher, so it is ready.
+        v.bin_ready = v.bin_ready ?? true
       }
       // Backfill host ownership, which every record gained at once: whatever
       // was stored before the field existed can only belong to 本机.
+      // A preview stored before remote hosts existed knows only 本机; it gains
+      // the sample remote machine once, so host-aware pages have two to show.
+      // A stored db that already carries a host list is left as it is: the
+      // sample machine must not come back after the user deletes it.
+      const storedHosts = Array.isArray(db.hosts)
       db.hosts = db.hosts ?? [localHost()]
       for (const h of db.homes) h.host_id = h.host_id ?? LOCAL_HOST_ID
       for (const v of db.versions) v.host_id = v.host_id ?? LOCAL_HOST_ID
       for (const i of db.instances) i.host_id = i.host_id ?? LOCAL_HOST_ID
-      // A preview stored before remote hosts existed knows only 本机; it gains
-      // the sample remote machine once, so host-aware pages have two to show.
-      if (!db.hosts.some((h) => !h.builtin)) db.hosts.push(remoteHost())
+      if (!storedHosts) db.hosts.push(remoteHost())
       return db
     }
   } catch {
@@ -468,6 +477,39 @@ function hostViews(db: MockDb): HostWithStatus[] {
   return db.hosts.map((h) => ({ ...h, status: mockHostStatuses[h.id] ?? null }))
 }
 
+/** One host of the preview's db, by the id a call named (本机 when it named none). */
+function hostOf(db: MockDb, hostId: string): Host {
+  return db.hosts.find((h) => h.id === hostId) ?? db.hosts[0] ?? localHost()
+}
+
+/** The data directory the preview pretends a host has. */
+function hostDirOf(db: MockDb, hostId: string): string {
+  return hostOf(db, hostId).data_dir ?? LOCAL_DATA_DIR
+}
+
+/**
+ * A host the preview marks 不可达 answers nothing: the backend's per-host reads
+ * fail there too, and a page that showed a list anyway would be showing the
+ * launcher's memory instead of the machine's answer.
+ */
+function refuseUnreachable(host: Host) {
+  if ((mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable') {
+    throw new Error(
+      `连不上：${mockHostStatuses[host.id]?.message ?? `ssh ${host.ssh_target} 没有回应`}`,
+    )
+  }
+}
+
+/**
+ * The launcher only touches 本机's paths with its own filesystem calls; a remote
+ * host's path is a path on that server. Mirrors `Host::local_paths_only`.
+ */
+function refuseRemotePathTouches(host: Host, what: string) {
+  if (!host.builtin) {
+    throw new Error(`「${host.display_name}」上的${what}不在本机，启动器不会在本机动它`)
+  }
+}
+
 export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const db = loadDb()
   function fail(msg: string): never {
@@ -565,13 +607,19 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'default_dedicated_home_path': {
       const name = String(args?.name ?? 'instance')
       const safe = name.replace(/[^\w一-龥.-]+/g, '_')
-      return `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${safe}` as T
+      const hostDir = hostDirOf(db, hostIdArg(args))
+      // The sample paths are Windows-style on 本机 and POSIX on the remote
+      // machine; the joined path follows whichever the host's directory is.
+      const sep = hostDir.includes('\\') ? '\\' : '/'
+      return `${hostDir}${sep}homes${sep}${safe}` as T
     }
     case 'create_home': {
+      const host = hostOf(db, hostIdArg(args))
+      refuseRemotePathTouches(host, 'DSH_HOME 目录')
       const name = String(args?.name ?? '').trim()
       const path = String(args?.path ?? '').trim()
       if (!name || !path) fail('名称与路径不能为空')
-      const home: DshHome = { id: `h-${uuid()}`, name, path, host_id: LOCAL_HOST_ID }
+      const home: DshHome = { id: `h-${uuid()}`, name, path, host_id: host.id }
       db.homes.push(home)
       saveDb(db)
       return home as T
@@ -584,10 +632,27 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return undefined as T
     }
     case 'list_versions': {
-      const hostId = hostIdArg(args)
-      return db.versions.filter((v) => (v.host_id ?? LOCAL_HOST_ID) === hostId) as T
+      const host = hostOf(db, hostIdArg(args))
+      // A machine the preview cannot reach answers with an error, not with a
+      // list: 「装了哪些」 is a claim only that machine can make.
+      refuseUnreachable(host)
+      return db.versions
+        .filter((v) => (v.host_id ?? LOCAL_HOST_ID) === host.id)
+        .map((v) => ({ ...v, bin_ready: v.bin_ready ?? true })) as T
     }
-    case 'fetch_available_versions':
+    case 'fetch_available_versions': {
+      const host = hostOf(db, hostIdArg(args))
+      // Only a host with a registry of its own is asked over ssh; a host
+      // without one is listed from the same registry this Mac uses, so the
+      // list is the local one either way in the preview.
+      if (host.registry) {
+        refuseUnreachable(host)
+        return [
+          { version: '0.1.0-rc.6', released_at: '2026-08-01T12:00:00Z', source: 'npm' },
+          { version: '0.0.9-mirror.2', released_at: '2026-05-20T08:00:00Z', source: 'npm' },
+          { version: '0.1.2-alpha.1', released_at: '2026-10-01T08:00:00Z', source: 'github' },
+        ] as T
+      }
       return [
         { version: '0.1.2-alpha.1', released_at: '2026-10-01T08:00:00Z', source: 'github' },
         { version: '0.1.0-rc.6', released_at: '2026-08-01T12:00:00Z' },
@@ -595,6 +660,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         { version: '0.1.0-rc.4', released_at: '2026-07-01T10:00:00Z' },
         { version: '0.1.0-rc.3', released_at: '2026-06-15T08:00:00Z' },
       ] as T
+    }
     case 'start_install_version_task': {
       const version = String(args?.version ?? '').trim()
       return mockCall('start_create_instance_task', { name: version, version, home_id: null, dedicated: true })
@@ -616,7 +682,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       let dedicatedPath: string | null = null
       if (dedicated) {
         const safe = name.replace(/[^\w一-龥.-]+/g, '_')
-        dedicatedPath = `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${safe}`
+        dedicatedPath = `${LOCAL_DATA_DIR}\\homes\\${safe}`
       }
       if (!dedicated && (!homeIdArg || !db.homes.some((h) => h.id === homeIdArg))) {
         fail('请选择 DSH_HOME')
@@ -685,8 +751,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           ver = {
             id: mockNewId('v'),
             version,
-            dir: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\${version}`,
-            dedicated_home: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${version}`,
+            dir: `${LOCAL_DATA_DIR}\\versions\\${version}`,
+            dedicated_home: `${LOCAL_DATA_DIR}\\homes\\${version}`,
+            bin_ready: true,
             host_id: LOCAL_HOST_ID,
           }
           cur.versions.push(ver)
@@ -746,6 +813,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_version': {
       const id = String(args?.id)
+      refuseRemotePathTouches(hostOf(db, hostIdArg(args)), '版本目录')
       if (db.instances.some((i) => i.version_id === id)) fail('该版本仍被实例引用，无法删除')
       const removed = db.versions.find((v) => v.id === id)
       db.versions = db.versions.filter((v) => v.id !== id)
@@ -759,6 +827,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return undefined as T
     }
     case 'list_instances': {
+      // The board's 全部 view is an explicit request; silence still means 本机.
+      if (args?.allHosts) return db.instances as T
       const hostId = hostIdArg(args)
       return db.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId) as T
     }
@@ -766,16 +836,21 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const name = String(args?.name ?? '').trim()
       const versionId = String(args?.versionId ?? '')
       const homeId = String(args?.homeId ?? '')
+      const hostId = hostIdArg(args)
       if (!name) fail('实例名称不能为空')
       if (db.instances.some((i) => i.name === name)) fail('同名实例已存在')
-      if (!db.versions.some((v) => v.id === versionId)) fail('DSH 版本不存在')
-      if (!db.homes.some((h) => h.id === homeId)) fail('DSH_HOME 不存在')
+      const version = db.versions.find((v) => v.id === versionId)
+      if (!version) fail('DSH 版本不存在')
+      if ((version.host_id ?? LOCAL_HOST_ID) !== hostId) fail('DSH 版本不属于该主机')
+      const home = db.homes.find((h) => h.id === homeId)
+      if (!home) fail('DSH_HOME 不存在')
+      if ((home.host_id ?? LOCAL_HOST_ID) !== hostId) fail('DSH_HOME 不属于该主机')
       const inst: DshInstance = {
         id: mockNewId('i'),
         name,
         version_id: versionId,
         home_id: homeId,
-        host_id: LOCAL_HOST_ID,
+        host_id: hostId,
         env_overrides: {},
         default_profile: null,
         last_profile: null,
@@ -786,7 +861,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'delete_instance': {
       const id = String(args?.id)
-      if (!db.instances.some((i) => i.id === id)) fail('实例不存在')
+      const hostId = hostIdArg(args)
+      const inst = db.instances.find((i) => i.id === id)
+      if (!inst || (inst.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
       db.instances = db.instances.filter((i) => i.id !== id)
       delete db.running[id]
       if (db.settings.last_instance_id === id) db.settings.last_instance_id = null
@@ -795,10 +872,15 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'update_instance': {
       const input = args?.input as DshInstance
+      const hostId = hostIdArg(args)
+      const existing = db.instances.find((i) => i.id === input.id)
+      if (!existing || (existing.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
       if (db.instances.some((i) => i.name === input.name && i.id !== input.id)) fail('同名实例已存在')
-      db.instances = db.instances.map((i) => (i.id === input.id ? input : i))
+      // The binding's host is the record's, not the form's.
+      const updated = { ...input, host_id: existing.host_id }
+      db.instances = db.instances.map((i) => (i.id === input.id ? updated : i))
       saveDb(db)
-      return input as T
+      return updated as T
     }
     case 'set_instance_port': {
       const id = String(args?.instance_id)
@@ -961,12 +1043,21 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'open_launcher_directory':
     case 'open_launcher_log':
     case 'open_instance_log':
-    case 'open_instance_directory':
-    case 'open_home_directory':
       // Browser preview has no file manager; the target path is reported as-is.
-      return 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher' as T
+      return LOCAL_DATA_DIR as T
+    case 'open_instance_directory': {
+      const inst = db.instances.find((i) => i.id === String(args?.instanceId))
+      const home = db.homes.find((h) => h.id === inst?.home_id)
+      refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
+      return LOCAL_DATA_DIR as T
+    }
+    case 'open_home_directory': {
+      const home = db.homes.find((h) => h.id === String(args?.homeId))
+      refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
+      return LOCAL_DATA_DIR as T
+    }
     case 'get_launcher_directory':
-      return 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher' as T
+      return LOCAL_DATA_DIR as T
     case 'pending_deep_link':
       return null as T
     case 'set_instance_icon':

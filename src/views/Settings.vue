@@ -91,6 +91,10 @@ const { copy } = useCopy()
 async function loadHosts() {
   try {
     hosts.value = await api.listHosts()
+    // The same list is what the Library's host picker and the board's filter
+    // read: a host added, renamed or deleted here has to reach those pages, and
+    // so does the fallback when the current host is the one that went away.
+    store.setHosts(hosts.value)
   } catch {
     hosts.value = []
   }

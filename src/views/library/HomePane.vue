@@ -37,9 +37,12 @@ async function pickDir() {
   }
 }
 
-const addAction = useAction((name: string, path: string) => api.createHome(name, path), {
-  success: () => t('settings.saved'),
-})
+// Both actions name the host the pane is showing: a DSH_HOME belongs to one
+// machine, and the record must never be filed under another (ADR-0006).
+const addAction = useAction(
+  (name: string, path: string) => api.createHome(name, path, store.currentHostId),
+  { success: () => t('settings.saved') },
+)
 
 async function onAdd() {
   const home = await addAction.run(newName.value, newPath.value)
@@ -51,7 +54,7 @@ async function onAdd() {
 
 const removeAction = useAction(
   async (id: string) => {
-    await api.removeHome(id)
+    await api.removeHome(id, store.currentHostId)
     return true
   },
   { success: () => t('settings.saved') },

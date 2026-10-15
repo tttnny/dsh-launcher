@@ -84,6 +84,12 @@ pub async fn json<T: DeserializeOwned>(
     parse_marked(&out)
 }
 
+/// How long a version listing may take. `npm view` on a mirror that has never
+/// answered this machine before is slower than any script whose answer is
+/// already local, and it is the one remote call whose result the user waits
+/// for standing still.
+const NPM_VIEW_TIMEOUT: Duration = Duration::from_secs(60);
+
 // ---------------------------------------------------------------------------
 // The connection test
 // ---------------------------------------------------------------------------
@@ -192,6 +198,59 @@ pub async fn connection_test(
     }
 }
 
+/// The versions one remote machine has installed, read from that machine.
+///
+/// The launcher's records say which versions the user asked for on that host;
+/// only the machine can say what is really in its versions directory and
+/// whether each version's bin is there — a directory left behind by an install
+/// that stopped early is not a version anyone can start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteInstalledVersion {
+    /// The directory's name under `versions/`, which is the version string.
+    pub name: String,
+    pub dir: String,
+    /// Whether that version's bin exists and is not empty. The layout is the
+    /// local launcher's (`launch::version_bin`), applied on that machine.
+    pub bin_ready: bool,
+}
+
+/// What one machine's `npm view` said about `@deepseek-ai/dsh`: the version
+/// list and the publish times, both **as text** — the same two strings the
+/// local `npm view` hands over, so one conversion serves both sources.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct NpmListings {
+    pub versions: String,
+    pub time: String,
+}
+
+/// The versions installed under `versions_dir`, as the machine describes them.
+pub async fn installed_versions(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    versions_dir: &str,
+) -> Result<Vec<RemoteInstalledVersion>, HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(installed_versions_script(versions_dir)))
+        .await?;
+    decode_installed_versions(&out)
+}
+
+/// What `@deepseek-ai/dsh` can be installed from on one machine, asked of that
+/// machine's own npm against the registry its host record names.
+pub async fn available_versions(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    registry: &str,
+) -> Result<NpmListings, HostError> {
+    json(
+        transport,
+        host,
+        available_versions_script(registry),
+        NPM_VIEW_TIMEOUT,
+    )
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // Scripts
 // ---------------------------------------------------------------------------
@@ -246,6 +305,80 @@ dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s","data_dir":
   "$(dsh_tool pnpm)")
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
+
+/// The versions installed under one directory, with whether each one's bin is
+/// ready.
+///
+/// The layout is [`crate::launch::version_bin`]'s, applied on that machine: a
+/// repo checkout carries `apps/cli/lib/bin.js`, an npm tree carries
+/// `node_modules/@deepseek-ai/dsh/lib/bin.js`, and a version whose install
+/// stopped early has neither. A versions directory that is not there yet is an
+/// empty list — a machine with nothing installed is a machine, not an error.
+const INSTALLED_VERSIONS: &str = r#"set -u
+%%ESCAPER%%
+dsh_dir=%%PATH%%
+dsh_rows=
+dsh_sep=
+for dsh_entry in "$dsh_dir"/*; do
+  [ -d "$dsh_entry" ] || continue
+  if [ -f "$dsh_entry/apps/cli/package.json" ]; then
+    dsh_bin="$dsh_entry/apps/cli/lib/bin.js"
+  else
+    dsh_bin="$dsh_entry/node_modules/@deepseek-ai/dsh/lib/bin.js"
+  fi
+  if [ -s "$dsh_bin" ]; then dsh_ready=true; else dsh_ready=false; fi
+  dsh_rows="$dsh_rows$dsh_sep{\"name\":\"$(dsh_esc "${dsh_entry##*/}")\",\"dir\":\"$(dsh_esc "$dsh_entry")\",\"bin_ready\":$dsh_ready}"
+  dsh_sep=,
+done
+printf '<<<DSH-JSON>>>{"versions":[%s]}<<<DSH-END>>>' "$dsh_rows"
+"#;
+
+/// `@deepseek-ai/dsh` as **that machine's** npm sees it, against the registry
+/// its host record names — a machine whose registry is its own can install
+/// versions this Mac's npm has never heard of, and listing them from here would
+/// offer the user a list that cannot be installed there.
+///
+/// The two listings travel as JSON *text*, the shape the local `npm view` hands
+/// over, so one conversion serves both sources.
+const AVAILABLE_VERSIONS: &str = r#"set -u
+%%ESCAPER%%
+dsh_npm=$(command -v npm 2>/dev/null || true)
+if [ -z "$dsh_npm" ]; then
+  printf '这台机器上没有 npm\n' >&2
+  exit 2
+fi
+dsh_versions=$("$dsh_npm" view @deepseek-ai/dsh versions --json --registry %%REGISTRY%% 2>/dev/null || true)
+if [ -z "$dsh_versions" ]; then
+  printf 'npm view 没有从 %%REGISTRY%% 拿到版本列表\n' >&2
+  exit 3
+fi
+dsh_time=$("$dsh_npm" view @deepseek-ai/dsh time --json --registry %%REGISTRY%% 2>/dev/null || true)
+dsh_json=$(printf '{"versions":"%s","time":"%s"}' "$(dsh_esc "$dsh_versions")" "$(dsh_esc "$dsh_time")")
+printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
+"#;
+
+/// The installed-versions script for one host's `versions` directory (that
+/// host's data directory plus `/versions`, which the caller resolves).
+pub fn installed_versions_script(versions_dir: &str) -> String {
+    fill(
+        INSTALLED_VERSIONS,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATH%%", quote(versions_dir)),
+        ],
+    )
+}
+
+/// The versions-query script for one registry.
+pub fn available_versions_script(registry: &str) -> String {
+    fill(
+        AVAILABLE_VERSIONS,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%REGISTRY%%", quote(registry)),
+        ],
+    )
+}
 
 /// The connection test's script. `data_dir` is the host's configured data
 /// directory (`None` = let that machine pick its default).
@@ -393,6 +526,11 @@ struct Entries {
 }
 
 #[derive(Deserialize)]
+struct Installed {
+    versions: Vec<RemoteInstalledVersion>,
+}
+
+#[derive(Deserialize)]
 struct Pid {
     pid: i32,
 }
@@ -412,6 +550,12 @@ pub fn decode_blob(out: &RemoteOutput) -> Result<Vec<u8>, HostError> {
 
 pub fn decode_names(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
     Ok(parse_marked::<Entries>(out)?.entries)
+}
+
+pub fn decode_installed_versions(
+    out: &RemoteOutput,
+) -> Result<Vec<RemoteInstalledVersion>, HostError> {
+    Ok(parse_marked::<Installed>(out)?.versions)
 }
 
 pub fn decode_pid(out: &RemoteOutput) -> Result<i32, HostError> {
@@ -731,7 +875,7 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{connection_stdout, FakeAnswer, FakeCall, FakeTransport};
+    use super::testing::{connection_stdout, marked, FakeAnswer, FakeCall, FakeTransport};
     use super::*;
     use crate::ssh::{HostTransport, SshTransport};
     use std::path::PathBuf;
@@ -752,6 +896,25 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    /// Runs one script on **this** machine's shell, in the same shape the
+    /// transport runs it on a remote one. The scripts know nothing about which
+    /// machine they are on, so what a real shell prints here is what a real
+    /// shell prints there — the only thing in the suite that exercises the
+    /// shell text itself.
+    fn local_shell(script: &str) -> RemoteOutput {
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-ilc")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        RemoteOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        }
     }
 
     /// The happy path: the machine answers, and the page gets its system, its
@@ -919,17 +1082,7 @@ mod tests {
     /// knows nothing about).
     #[test]
     fn the_connection_test_script_answers_parsable_json_on_a_real_shell() {
-        let out = std::process::Command::new("/bin/bash")
-            .arg("-ilc")
-            .arg(connection_test_script(None))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap();
-        let output = RemoteOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-        };
+        let output = local_shell(&connection_test_script(None));
 
         let facts: Facts = parse_marked(&output).expect("真实 shell 跑出来的答案要能解析");
 
@@ -951,6 +1104,129 @@ mod tests {
                 "报出来的路径必须是绝对路径（执行时要用它）：{}",
                 tool.path
             );
+        }
+    }
+
+    /// What a machine has under its versions directory, told the way the page
+    /// needs it: one row per version, with its directory and whether the bin is
+    /// ready. A half-installed version is not something anyone can start, and
+    /// the machine that owns the directory is the only one that can say so.
+    #[test]
+    fn the_installed_versions_script_answers_each_versions_path_and_bin_readiness() {
+        let scratch = std::env::temp_dir().join(format!("dsh-versions-{}", uuid::Uuid::new_v4()));
+        let versions = scratch.join("versions");
+        // An npm tree, the layout an installed release has...
+        let npm_tree = versions.join("0.1.0-rc.6");
+        std::fs::create_dir_all(npm_tree.join("node_modules/@deepseek-ai/dsh/lib")).unwrap();
+        std::fs::write(
+            npm_tree.join("node_modules/@deepseek-ai/dsh/lib/bin.js"),
+            "// dsh\n",
+        )
+        .unwrap();
+        // ...a repo checkout, the other layout...
+        let checkout = versions.join("0.1.0-rc.5");
+        std::fs::create_dir_all(checkout.join("apps/cli/lib")).unwrap();
+        std::fs::write(checkout.join("apps/cli/package.json"), "{}").unwrap();
+        std::fs::write(checkout.join("apps/cli/lib/bin.js"), "// dsh\n").unwrap();
+        // ...and an install that stopped before its bin existed.
+        std::fs::create_dir_all(versions.join("0.1.0-rc.4")).unwrap();
+
+        let out = local_shell(&installed_versions_script(&versions.to_string_lossy()));
+        let found = decode_installed_versions(&out).expect("真实 shell 跑出来的答案要能解析");
+
+        let by_name = |name: &str| found.iter().find(|v| v.name == name).unwrap().clone();
+        assert_eq!(found.len(), 3);
+        assert_eq!(by_name("0.1.0-rc.6").dir, npm_tree.to_string_lossy());
+        assert!(by_name("0.1.0-rc.6").bin_ready, "装好的版本 bin 就绪");
+        assert_eq!(by_name("0.1.0-rc.5").dir, checkout.to_string_lossy());
+        assert!(by_name("0.1.0-rc.5").bin_ready, "repo checkout 也是就绪");
+        assert!(!by_name("0.1.0-rc.4").bin_ready, "bin 没写出来就不是就绪");
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The remote bin check is the local launcher's rule applied on that
+    /// machine, and the two must name the same files: a version the machine
+    /// calls ready has to be one the launcher could start there.
+    #[test]
+    fn the_remote_bin_check_uses_the_local_launchers_two_layouts() {
+        let script = installed_versions_script("/opt/dsh/versions");
+        let scratch = std::env::temp_dir().join(format!("dsh-layout-{}", uuid::Uuid::new_v4()));
+
+        let npm_tree = scratch.join("versions/1.0.0");
+        std::fs::create_dir_all(&npm_tree).unwrap();
+        assert_eq!(
+            crate::launch::version_bin(&npm_tree),
+            npm_tree.join("node_modules/@deepseek-ai/dsh/lib/bin.js")
+        );
+        assert!(
+            script.contains("$dsh_entry/node_modules/@deepseek-ai/dsh/lib/bin.js"),
+            "{script}"
+        );
+
+        let checkout = scratch.join("versions/1.0.1");
+        std::fs::create_dir_all(checkout.join("apps/cli")).unwrap();
+        std::fs::write(checkout.join("apps/cli/package.json"), "{}").unwrap();
+        assert_eq!(
+            crate::launch::version_bin(&checkout),
+            checkout.join("apps/cli/lib/bin.js")
+        );
+        assert!(
+            script.contains("$dsh_entry/apps/cli/lib/bin.js")
+                && script.contains("$dsh_entry/apps/cli/package.json"),
+            "{script}"
+        );
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The registry a host record names is a fact about *that* machine's npm:
+    /// it has to reach the script as one quoted word.
+    #[test]
+    fn the_versions_query_reaches_the_machine_quoted() {
+        let script = available_versions_script("https://npm.example.com/it's mirror");
+        assert!(
+            script.contains("--registry 'https://npm.example.com/it'\\''s mirror'"),
+            "{script}"
+        );
+    }
+
+    /// npm's two listings come back as the text the local path reads, so one
+    /// conversion in the caller serves both sources.
+    #[test]
+    fn the_versions_query_answers_both_npm_listings() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            "{\"versions\":\"[\\\"0.1.0-rc.6\\\"]\",\"time\":\"{\\\"0.1.0-rc.6\\\":\\\"2026-08-01T12:00:00Z\\\"}\"}",
+        )));
+        let transport: &dyn HostTransport = &*fake;
+
+        let listings = block_on(available_versions(
+            transport,
+            &host(),
+            "https://npm.example.com",
+        ))
+        .unwrap();
+
+        assert_eq!(listings.versions, "[\"0.1.0-rc.6\"]");
+        assert!(listings.time.contains("2026-08-01"), "{}", listings.time);
+    }
+
+    /// A machine that is not there says so — the page must not be handed a
+    /// plausible-looking empty list instead.
+    #[test]
+    fn an_unreachable_machine_fails_both_queries() {
+        for answer in [
+            FakeAnswer::fail(HostErrorKind::Unreachable, "连接被拒绝"),
+            FakeAnswer::failed(2, "npm: command not found"),
+        ] {
+            let fake = FakeTransport::new().answering(answer);
+            let transport: &dyn HostTransport = &*fake;
+
+            let versions = block_on(installed_versions(transport, &host(), "/opt/dsh/versions"));
+            let available = block_on(available_versions(transport, &host(), "https://npm.example.com"));
+
+            assert!(versions.is_err(), "{versions:?}");
+            assert!(available.is_err(), "{available:?}");
         }
     }
 

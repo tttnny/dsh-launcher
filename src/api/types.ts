@@ -109,6 +109,13 @@ export interface DshVersion {
   dedicated_home: string
   /** The host this version is installed on. */
   host_id?: string
+  /**
+   * Whether that version's bin is there and not empty. Only the machine that
+   * owns the directory can answer this, so a remote host reports it over ssh: a
+   * directory an install stopped inside is a record to see and delete, not a
+   * version anyone can start.
+   */
+  bin_ready: boolean
 }
 
 export interface DshInstance {

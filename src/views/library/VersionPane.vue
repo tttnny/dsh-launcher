@@ -33,6 +33,14 @@ const installedVersions = computed(() =>
   [...store.versions].sort((a, b) => collator.compare(b.version, a.version)),
 )
 
+/**
+ * Installing a version names the machine it goes on, and an install only runs
+ * where the launcher can drive npm and write the version directory — this Mac.
+ * A remote host's tab still shows what that host could install; the button says
+ * why it is not the one that does it.
+ */
+const canInstallHere = computed(() => store.currentHost?.builtin === true)
+
 // Remote versions split into what can be installed and what already is.
 const installable = computed(() => sortedDesc.value.filter((v) => !installedSet.value.has(v.version)))
 
@@ -117,7 +125,7 @@ async function onCancelInstall(taskId: string) {
 
 const removeAction = useAction(
   async (id: string, version: string) => {
-    await api.removeVersion(id)
+    await api.removeVersion(id, store.currentHostId)
     await store.refreshVersions()
     await store.refreshInstances()
     await store.refreshHomes()
@@ -130,14 +138,29 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
 </script>
 
 <template>
-  <!-- Installed first: the versions you have are the ones you act on. -->
+  <!-- Installed first: the versions you have are the ones you act on. A host
+       that could not be reached has **no** list here — the previous one is not
+       this host's answer (ADR-0006), so the section says what the machine said
+       instead of showing it. -->
   <section class="dl-section">
     <div class="dl-section-label">
       {{ t('versions.installedTitle') }}
       <span class="dl-section-count">{{ installedVersions.length }}</span>
+      <span class="ver-label-spacer" />
+      <DlRefreshButton
+        class="dl-icon-btn"
+        :title="t('common.refresh')"
+        :action="() => store.loadHostResources(store.currentHostId)"
+      />
     </div>
 
-    <div v-if="installedVersions.length === 0" class="dl-surface">
+    <div v-if="store.hostError" class="dl-surface ver-unreachable">
+      <p class="ver-unreachable-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="ver-unreachable-text">{{ store.hostError }}</p>
+      <p class="ver-unreachable-hint">{{ t('library.hostErrorHint') }}</p>
+    </div>
+
+    <div v-else-if="installedVersions.length === 0" class="dl-surface">
       <DlEmpty icon="version" :description="t('versions.emptyInstalled')" />
     </div>
 
@@ -147,7 +170,10 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         <div class="ver-main">
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
-            <span class="dl-tag dl-tag--run">{{ t('versions.installedTag') }}</span>
+            <span v-if="v.bin_ready" class="dl-tag dl-tag--run">{{ t('versions.installedTag') }}</span>
+            <span v-else class="dl-tag dl-tag--warn" :title="t('versions.binMissingHint')">
+              {{ t('versions.binMissing') }}
+            </span>
           </div>
           <span class="ver-path dl-mono" :title="v.dir">{{ v.dir }}</span>
         </div>
@@ -197,12 +223,16 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         class="dl-icon-btn"
         :title="t('common.refresh')"
         :disabled="store.remoteLoading"
-        :action="store.refreshRemoteVersions"
+        :action="() => store.refreshRemoteVersions(true)"
       />
     </div>
 
     <div class="dl-surface">
-      <div v-if="visibleInstallable.length === 0" class="dl-row-none">
+      <!-- A failed query shows what the machine said, never the previous list:
+           the installable set is a fact about that host's registry. -->
+      <div v-if="store.remoteError" class="dl-row-none">{{ store.remoteError }}</div>
+
+      <div v-else-if="visibleInstallable.length === 0" class="dl-row-none">
         {{
           store.remoteLoading
             ? t('common.loading')
@@ -210,6 +240,12 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
               ? t('versions.searchEmpty')
               : t('versions.noData')
         }}
+      </div>
+
+      <!-- The list is that host's, but the install button is this Mac's: say so
+           once, instead of leaving a row of greyed-out buttons unexplained. -->
+      <div v-if="!canInstallHere && visibleInstallable.length > 0" class="dl-row-none">
+        {{ t('versions.installLocalOnly') }}
       </div>
 
       <div v-for="v in visibleInstallable" :key="v.version" class="ver-row">
@@ -247,7 +283,8 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         <button
           v-if="!installOf(v.version)"
           class="dl-btn dl-btn--quiet ver-install"
-          :disabled="!!installAction.busy[v.version]"
+          :disabled="!!installAction.busy[v.version] || !canInstallHere"
+          :title="canInstallHere ? undefined : t('versions.installLocalOnly')"
           @click="onInstall(v)"
         >
           {{ t('versions.installNow') }}
@@ -265,6 +302,32 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
   .ver-label-spacer {
     flex: 1;
   }
+}
+
+.ver-unreachable {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+}
+
+.ver-unreachable-title {
+  margin: 0;
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.ver-unreachable-text {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-danger);
+}
+
+.ver-unreachable-hint {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
 }
 
 .ver-channels {

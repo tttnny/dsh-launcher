@@ -18,6 +18,9 @@ const { t } = useI18n()
 const store = useLauncherStore()
 const { selectionByInstance } = useProfiles()
 
+/** The 全部 option of the host filter: a view, not a host. */
+const HOST_ALL = 'all'
+
 const query = ref('')
 /**
  * The row the user was handed back to (`?focus=<id>`) — the plugin manager
@@ -41,15 +44,28 @@ function duplicateInstance(id: string) {
   newDialogVisible.value = true
 }
 
-const runningCount = computed(
-  () => store.instances.filter((i) => store.statusOf(i.id).state === 'running').length,
-)
+/**
+ * The host filter: 「全部」 or one machine, and picking a machine sets the one
+ * 当前主机 the Library also reads — two places each keeping their own idea of
+ * "which machine am I looking at" is what ADR-0006 §3 forbids.
+ */
+const hostFilter = computed({
+  get: () => (store.allHosts ? HOST_ALL : store.currentHostId),
+  set: (value: string) => {
+    if (value === HOST_ALL) {
+      store.setAllHosts(true)
+      return
+    }
+    store.setAllHosts(false)
+    void store.selectHost(value)
+  },
+})
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = !q
-    ? store.instances
-    : store.instances.filter(
+    ? store.visibleInstances
+    : store.visibleInstances.filter(
         (i) => i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q),
       )
   // Live instances float to the top: the board is a control surface, and the
@@ -61,10 +77,16 @@ const filtered = computed(() => {
   })
 })
 
+const runningCount = computed(
+  () => filtered.value.filter((i) => store.statusOf(i.id).state === 'running').length,
+)
+
 // --- Start all / stop all -----------------------------------------------------
 
+// They act on the rows the board is showing — a filter that says 「只看这台机器」
+// and buttons that reach every machine would disagree with each other.
 const startAllAction = useAction(async () => {
-  const targets = store.instances.filter((i) => {
+  const targets = filtered.value.filter((i) => {
     const st = store.statusOf(i.id).state
     return st !== 'running' && st !== 'starting' && !!selectionByInstance[i.id]
   })
@@ -75,13 +97,13 @@ const startAllAction = useAction(async () => {
 })
 
 const stopAllAction = useAction(async () => {
-  const targets = store.instances.filter((i) => store.statusOf(i.id).state === 'running')
+  const targets = filtered.value.filter((i) => store.statusOf(i.id).state === 'running')
   await Promise.allSettled(targets.map((i) => api.stopInstance(i.id)))
   return targets.length
 })
 
 const anyRunning = computed(() => runningCount.value > 0)
-const anyStopped = computed(() => store.instances.length > runningCount.value)
+const anyStopped = computed(() => filtered.value.length > runningCount.value)
 </script>
 
 <template>
@@ -130,7 +152,8 @@ const anyStopped = computed(() => store.instances.length > runningCount.value)
 
     <template v-else>
       <!-- Toolbar: search + a live summary. Kept above the list rather than in
-           each row, so the board stays a table of facts. -->
+           each row, so the board stays a table of facts. The host filter sits
+           with the search: both narrow what the board shows. -->
       <div class="board-toolbar">
         <div class="dl-input dl-search board-search">
           <DlIcon name="search" :size="14" />
@@ -140,8 +163,24 @@ const anyStopped = computed(() => store.instances.length > runningCount.value)
           </button>
         </div>
 
+        <span class="board-host-label">{{ t('instances.hostFilter') }}</span>
+        <div class="dl-segmented board-hosts">
+          <button :class="{ 'is-active': hostFilter === HOST_ALL }" @click="hostFilter = HOST_ALL">
+            {{ t('instances.hostAll') }}
+          </button>
+          <button
+            v-for="h in store.hosts"
+            :key="h.id"
+            :class="{ 'is-active': hostFilter === h.id }"
+            :title="h.ssh_target || t('instances.localTag')"
+            @click="hostFilter = h.id"
+          >
+            {{ h.display_name }}
+          </button>
+        </div>
+
         <span class="board-summary dl-tnum">
-          {{ t('instances.summary', { total: store.instances.length, running: runningCount }) }}
+          {{ t('instances.summary', { total: filtered.length, running: runningCount }) }}
         </span>
 
         <span class="board-spacer" />
@@ -194,6 +233,18 @@ const anyStopped = computed(() => store.instances.length > runningCount.value)
 // Only the width is local: the field itself is `.dl-search` in index.scss.
 .board-search {
   width: 260px;
+}
+
+.board-host-label {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+}
+
+// The host filter can carry several machine names; it wraps instead of pushing
+// the summary and the health button off the row.
+.board-hosts {
+  flex-wrap: wrap;
+  max-width: 46%;
 }
 
 .board-summary {

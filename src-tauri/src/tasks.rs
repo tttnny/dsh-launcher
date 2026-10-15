@@ -413,7 +413,7 @@ async fn do_create_instance(
                 .ok_or_else(|| "缺少专属 DSH_HOME 路径".to_string())?
                 .to_string_lossy()
                 .to_string();
-            crate::commands::create_home_record(state, name, &path, None)?.id
+            crate::commands::create_home_record_in(state, name, &path, None)?.id
         }
     };
     let home_path = {
