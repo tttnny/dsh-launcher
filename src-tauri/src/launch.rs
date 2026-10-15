@@ -304,16 +304,42 @@ pub fn template_boot_command(
     port: u16,
 ) -> Result<Command, String> {
     let mut cmd = dsh_base(node, version_dir)?;
-    cmd.arg("--profile")
-        .arg("web")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
+    cmd.args(template_boot_flags(port))
         .env("DSH_HOME", home_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     Ok(cmd)
+}
+
+/// The whole command line of one template boot, for the machine that runs it:
+/// the resolved interpreter, the version's `bin.js`, then
+/// [`template_boot_flags`]. [`template_boot_command`] is this plus a
+/// `tokio::process::Command` on 本机; another machine's boot is handed to the
+/// transport as these words, so the flag policy cannot drift between the two
+/// machines — the same reason [`instance_argv`] exists beside
+/// [`instance_command`].
+pub fn template_boot_argv(node: &Path, version_dir: &Path, port: u16) -> Vec<String> {
+    let mut argv = vec![
+        node.to_string_lossy().to_string(),
+        version_bin(version_dir).to_string_lossy().to_string(),
+    ];
+    argv.extend(template_boot_flags(port));
+    argv
+}
+
+/// The flags one template boot carries: `--profile web --host 127.0.0.1
+/// --port N`. Port `0` means "the machine's own kernel picks a free one", which
+/// is what a boot nobody keeps has to ask for: it must never take a port an
+/// instance might want.
+fn template_boot_flags(port: u16) -> Vec<String> {
+    vec![
+        "--profile".to_string(),
+        "web".to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ]
 }
 
 // ---------------------------------------------------------------------------

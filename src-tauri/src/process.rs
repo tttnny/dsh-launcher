@@ -680,22 +680,49 @@ fn web_profile_document(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// What one machine says about a profile's nature: whether a start has to treat
+/// it as a DSH web application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileNature {
+    /// That machine has the profile's own `package.json` and it declares the web
+    /// bundle.
+    Web,
+    /// It has the document, and it does not: no web flags for this profile.
+    NotWeb,
+    /// There is no document yet — the profile is what this start materializes.
+    /// The launcher has an answer for this case (the port policy), and DSH's own
+    /// default port is not it.
+    Unmaterialized,
+}
+
 /// The same question asked of the machine that owns the profile: the document
 /// travels, the rule does not.
-async fn is_web_profile_remote(
+///
+/// 「没有这份文档」 is not the same answer as 「这份文档没写 web」: the first is a
+/// profile the start is about to create, and [`ProfileNature`] keeps the two
+/// apart so the caller can send the port it means instead of letting DSH fall
+/// back to its own default (see [`spawn_remote_instance`]).
+async fn profile_nature_remote(
     state: &AppState,
     run_host: &crate::ssh::RemoteHost,
     home_path: &Path,
     profile: &str,
-) -> bool {
+) -> ProfileNature {
     let pkg = profile_package_json(home_path, profile);
-    match state
-        .host_transport
-        .read_file(run_host, &pkg.to_string_lossy())
+    match crate::remote::read_file_optional(&*state.host_transport, run_host, &pkg.to_string_lossy())
         .await
     {
-        Ok(bytes) => web_profile_document(&String::from_utf8_lossy(&bytes)),
-        Err(_) => false,
+        Ok(Some(bytes)) => {
+            if web_profile_document(&String::from_utf8_lossy(&bytes)) {
+                ProfileNature::Web
+            } else {
+                ProfileNature::NotWeb
+            }
+        }
+        Ok(None) => ProfileNature::Unmaterialized,
+        // The machine did not answer. Nothing is guessed from that: the spawn
+        // that follows will say what is wrong, and it says it better.
+        Err(_) => ProfileNature::NotWeb,
     }
 }
 
@@ -892,15 +919,32 @@ pub(crate) async fn spawn_remote_instance(
     // a port; the answer comes from that machine's copy of the profile, so a
     // profile whose name is not literally "web" is still recognized — and one
     // that is, but is not a web app there, is not.
+    //
+    // A profile with **no** document there yet is the third case, and it is the
+    // one that must not be read as 「not a web app」: this start is about to
+    // materialize it, and a start with no port falls back to DSH's own default
+    // (3080) — a port something else may already hold on that machine, which
+    // turns a start into an unexplained death instead of the launcher's own port
+    // policy. So an unmaterialized profile gets the intended port like any web
+    // profile does (`0` = that machine's kernel picks a free one; a pinned port
+    // was preflighted, and its occupant was named before anything was started).
     let home_path = cfg
         .homes
         .iter()
         .find(|h| h.id == inst.home_id)
         .map(|h| h.path.clone());
-    let is_web = match home_path.as_deref() {
-        Some(home) => is_web_profile_remote(state, &run_host, home, profile).await,
-        None => profile == "web",
+    let nature = match home_path.as_deref() {
+        Some(home) => profile_nature_remote(state, &run_host, home, profile).await,
+        // No HOME record to ask about: the profile's own name is all there is.
+        None => {
+            if profile == "web" {
+                ProfileNature::Web
+            } else {
+                ProfileNature::NotWeb
+            }
+        }
     };
+    let is_web = nature != ProfileNature::NotWeb;
     let web_port = is_web.then(|| inst.port.unwrap_or(0));
 
     if let (true, Some(home)) = (is_web, home_path.as_deref()) {
@@ -993,6 +1037,258 @@ pub(crate) async fn spawn_remote_instance(
     }
 
     Ok(RemoteStart { run, offset })
+}
+
+/// How many bytes of a priming boot's output the launcher keeps for the failure
+/// message, and for how long it waits for the web URL.
+const REMOTE_PRIME_LOG_LINES: usize = 200;
+const REMOTE_PRIME_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Gives a brand-new DSH_HOME on another machine the same start it gets here.
+///
+/// A DSH_HOME DSH has never run in has no `profiles/` at all, and DSH
+/// materializes `profiles/web` on its **first** run. 本机's dedicated HOME gets
+/// that from `tasks::ensure_web_profile_template` while the version installs;
+/// without the twin of that step, a fresh remote HOME leaves the page with an
+/// empty Profile list and 「启动」 with nothing to launch.
+///
+/// So that machine runs the same throwaway boot the local path runs — `node
+/// bin.js --profile web --host 127.0.0.1 --port 0`, DSH_HOME pointed at the HOME
+/// — and is stopped again once it has printed its URL; `profiles/web` is then
+/// copied to `profiles/__temp__`, the template later profiles are derived from,
+/// with the port the boot happened to bind scrubbed out of the copy.
+///
+/// A HOME that already has a profile is left completely alone: this is for the
+/// HOME nobody has run DSH in, not a repair for one that has.
+pub(crate) async fn ensure_remote_web_profile_template(
+    state: &AppState,
+    host: &Host,
+    version: &DshVersion,
+    home_path: &Path,
+) -> Result<(), String> {
+    let transport = &*state.host_transport;
+    let run_host = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+    let data_dir = host.data_dir(&state.data_dir)?;
+    let profiles = crate::profile::profiles_dir(home_path);
+
+    // A HOME that already has a profile is the user's own business: the first
+    // boot is what makes a Profile exist, and this is only for the HOME where
+    // none does yet.
+    let listed = crate::remote::list_profiles(transport, &run_host, &profiles.to_string_lossy())
+        .await
+        .map_err(|e| format!("无法读取「{}」上的 Profile 列表：{e}", host.display_name))?;
+    if !listed.is_empty() {
+        return Ok(());
+    }
+
+    let bin = crate::launch::version_bin(&version.dir);
+    let ready = crate::remote::file_ready(transport, &run_host, &bin.to_string_lossy())
+        .await
+        .map_err(|e| format!("无法确认那台机器上的 {}：{e}", bin.display()))?;
+    if !ready {
+        return Err(format!(
+            "版本 {} 安装不完整（缺少 {}），请重新安装",
+            version.version,
+            bin.display()
+        ));
+    }
+
+    let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
+    // `--port 0`: the kernel on that machine picks a free port for a boot nobody
+    // keeps, so it can never take one an instance wants.
+    let mut argv = vec![
+        "/usr/bin/env".to_string(),
+        format!("DSH_HOME={}", home_path.to_string_lossy()),
+    ];
+    argv.extend(crate::launch::template_boot_argv(&node, &version.dir, 0));
+
+    let log_path = remote_prime_log_path(&data_dir, home_path);
+    // Read the log's size **before** the process exists: a previous attempt's URL
+    // line is not this one's, and a HOME primed twice must not mistake one for
+    // the other.
+    let offset = crate::remote::log_size(transport, &run_host, &log_path)
+        .await
+        .map_err(|e| format!("无法读取那台机器上的日志（{log_path}）：{e}"))?;
+    let pid = state
+        .host_transport
+        .spawn_detached(&run_host, &argv, &log_path)
+        .await
+        .map_err(|e| format!("在「{}」上启动失败：{e}", host.display_name))?;
+    let started_at = crate::remote::process_start_time(transport, &run_host, pid)
+        .await
+        .ok()
+        .flatten();
+    let run = RemoteRun {
+        host_id: host.id.clone(),
+        host: run_host,
+        remote_url: None,
+        pid,
+        started_at,
+        data_dir: data_dir.clone(),
+        log_path: log_path.clone(),
+    };
+
+    let mut offset = offset;
+    let mut pending = String::new();
+    let mut tail: Vec<String> = Vec::new();
+    let mut ready = false;
+    let deadline = std::time::Instant::now() + REMOTE_PRIME_WAIT;
+    loop {
+        let chunk = crate::remote::tail(
+            transport,
+            &run.host,
+            &log_path,
+            offset,
+            pid,
+            REMOTE_TAIL_WAIT_SECS,
+        )
+        .await
+        .map_err(|e| format!("读取那台机器上的日志失败（{log_path}）：{e}"))?;
+        offset = chunk.offset;
+        pending.push_str(&chunk.text);
+        while let Some(cut) = pending.find('\n') {
+            let line = pending[..cut].trim_end_matches('\r').to_string();
+            pending.drain(..=cut);
+            if line.trim().is_empty() {
+                continue;
+            }
+            if url_in(&line).is_some() {
+                ready = true;
+            }
+            if tail.len() >= REMOTE_PRIME_LOG_LINES {
+                tail.remove(0);
+            }
+            tail.push(line);
+        }
+        if ready || !chunk.alive || std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    // Stop it before anything else: the boot was only there to make `profiles/`
+    // exist, and a DSH left running would hold a port on that machine for good.
+    if let Some(said) = prime_stop_failure(host, pid, stop_remote_run(state, &run).await) {
+        return Err(said);
+    }
+
+    if !ready {
+        return Err(format!(
+            "在「{}」上生成 web profile 超时或失败：{}",
+            host.display_name,
+            prime_log_summary(&tail)
+        ));
+    }
+
+    // The template later profiles are derived from, made the way 本机 makes it.
+    let web_dir = profiles.join("web");
+    let temp_dir = profiles.join("__temp__");
+    crate::remote::copy_profile(
+        transport,
+        &run.host,
+        &web_dir.to_string_lossy(),
+        &temp_dir.to_string_lossy(),
+    )
+    .await
+    .map_err(|e| format!("复制 __temp__ profile 失败：{e}"))?;
+    scrub_remote_profile_port_pin(state, &run.host, &temp_dir).await;
+    crate::log_info!(
+        "「{}」上 {} 的 web profile 模板已建好（pid {pid}）",
+        host.display_name,
+        home_path.display()
+    );
+    Ok(())
+}
+
+/// That machine's log for one HOME's priming boot. A file per HOME, because two
+/// HOMEs primed at once must not read each other's URL line — and not the
+/// instance's own log, which 「日志」 shows the user.
+fn remote_prime_log_path(data_dir: &Path, home_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(home_path.to_string_lossy().as_bytes());
+    let short: String = digest.iter().take(6).map(|byte| format!("{byte:02x}")).collect();
+    data_dir
+        .join("logs")
+        .join(format!("profile-{short}.log"))
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Why a priming boot that is still there could not be stopped, or `None` when
+/// it did stop. A process the launcher cannot identify is never signalled
+/// (ADR-0007 §3), and one that will not go stays where it is — either way the
+/// user is told, because a DSH left running on their server is theirs to clean
+/// up, not the launcher's to forget.
+fn prime_stop_failure(host: &Host, pid: i32, outcome: RemoteStop) -> Option<String> {
+    match outcome {
+        RemoteStop::Stopped => None,
+        RemoteStop::Unreachable(reason) => Some(format!(
+            "「{}」上生成 web profile 的进程（pid {pid}）没能停下：{reason}",
+            host.display_name
+        )),
+        RemoteStop::NotSignalled(reason)
+        | RemoteStop::Reused(reason)
+        | RemoteStop::StillRunning(reason) => Some(format!(
+            "「{}」上生成 web profile 的进程（pid {pid}）还在：{reason}",
+            host.display_name
+        )),
+    }
+}
+
+/// Why a priming boot never printed a URL: the last thing it said, errors
+/// first. The same shape the local template boot reports with, so both machines
+/// fail the same way.
+fn prime_log_summary(tail: &[String]) -> String {
+    let errors: Vec<&String> = tail
+        .iter()
+        .filter(|line| line.to_lowercase().contains("error"))
+        .collect();
+    let source: &[&String] = if errors.is_empty() {
+        &tail.iter().collect::<Vec<_>>()
+    } else {
+        &errors
+    };
+    let said = source
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if said.is_empty() {
+        "DSH 没有打印出任何输出".to_string()
+    } else {
+        said
+    }
+}
+
+/// Scrubs the port pin out of a copied profile's patch document, on the machine
+/// that holds the copy ([`crate::profile::scrub_profile_port_pin`] is the local
+/// twin). Best effort: a template with a pin costs the next start a port, not a
+/// functioning HOME.
+async fn scrub_remote_profile_port_pin(
+    state: &AppState,
+    run_host: &crate::ssh::RemoteHost,
+    profile_dir: &Path,
+) {
+    let patch = profile_dir.join("cordis.patch.yml");
+    let path = patch.to_string_lossy().to_string();
+    let raw = match crate::remote::read_file_optional(&*state.host_transport, run_host, &path).await
+    {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+        Ok(None) | Err(_) => return,
+    };
+    let scrubbed = crate::profile::scrub_port_pin(&raw);
+    if scrubbed == raw {
+        return;
+    }
+    if let Err(e) = state
+        .host_transport
+        .write_file(run_host, &path, scrubbed.into_bytes())
+        .await
+    {
+        crate::log_warn!("清掉那台机器上 profile 模板的端口钉死失败（{path}）: {e}");
+    }
 }
 
 /// What one read of a remote instance's log says.
@@ -2961,7 +3257,9 @@ mod tests {
             // 1. 版本目录里的 bin.js 在不在（那台机器自己回答）。
             FakeAnswer::stdout(marked(r#"{"ready":true}"#)),
             // 2. 那个 profile 的 package.json：是不是 web 应用。
-            FakeAnswer::Bytes(web_profile_document_fixture()),
+            FakeAnswer::stdout(crate::remote::testing::file_stdout(
+                &web_profile_document_fixture(),
+            )),
             // 3. profile 的 lan-bind 文档：还没有，没有要改的行。
             FakeAnswer::failed(2, "远端没有这个文件：cordis.patch.yml"),
             // 4.-6. profile 自己那份 pnpm store：先看它已链接到哪个 store，
@@ -3021,6 +3319,156 @@ mod tests {
             data_dir: PathBuf::from(REMOTE_DATA),
             log_path: format!("{REMOTE_DATA}/logs/i-remote.log"),
         }
+    }
+
+    /// A priming boot's answers, in the order the launcher asks them.
+    fn remote_prime_answers() -> Vec<FakeAnswer> {
+        crate::remote::testing::prime_home_answers(READY_URL)
+    }
+
+    /// A brand-new DSH_HOME on another machine has to reach the same place a
+    /// local one does, and that means that machine runs DSH once against it:
+    /// `profiles/web` only appears on a HOME's first run, and without it the
+    /// page offers no Profile to launch with — 「启动」 is a button that does
+    /// nothing.
+    #[tokio::test]
+    async fn a_brand_new_remote_home_gets_its_web_profile_made_there() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let fake = FakeTransport::new();
+        for answer in remote_prime_answers() {
+            fake.answering(answer);
+        }
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(&host_id),
+            remote_instance(&host_id, None),
+        );
+        let cfg = state.config.lock().unwrap().clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        let version = cfg.versions[0].clone();
+
+        ensure_remote_web_profile_template(&state, &host, &version, Path::new(REMOTE_HOME))
+            .await
+            .unwrap();
+
+        let calls = fake.calls();
+        let spawn = calls
+            .iter()
+            .find_map(|call| match call {
+                FakeCall::Spawn(script) => Some(script.clone()),
+                _ => None,
+            })
+            .expect("那台机器上要先跑一次 DSH，`profiles/web` 才会出现");
+        assert!(spawn.contains("nohup setsid"), "那次启动也要脱离会话：{spawn}");
+        assert!(spawn.contains("'--profile' 'web'"), "{spawn}");
+        assert!(
+            spawn.contains(&format!("'DSH_HOME={REMOTE_HOME}'")),
+            "跑在那个 HOME 上才有模板：{spawn}"
+        );
+        assert!(
+            spawn.contains("'--port' '0'"),
+            "端口由那台机器自己挑，这一次启动不能去抢实例要用的端口：{spawn}"
+        );
+
+        // 模板：`profiles/web` 复制成 `profiles/__temp__`（在那台机器上）。
+        let copied = calls.iter().any(|call| match call {
+            FakeCall::Run(script) => {
+                script.contains(&format!("dsh_from='{REMOTE_HOME}/profiles/web'"))
+                    && script.contains(&format!("dsh_to='{REMOTE_HOME}/profiles/__temp__'"))
+            }
+            _ => false,
+        });
+        assert!(copied, "模板要在那台机器上复制出来：{calls:?}");
+
+        // 模板里不能留下这次启动钉住的端口，否则从它派生出的每个 Profile 都会
+        // 去抢同一个端口，并且压过启动器给的 `--port`。
+        let written = last_write_of(&fake, &format!("{REMOTE_HOME}/profiles/__temp__/cordis.patch.yml"));
+        let document = String::from_utf8_lossy(&written);
+        assert!(document.contains("port: 0"), "{document}");
+        assert!(
+            !document.contains(crate::remote::testing::PRIME_PINNED_PORT),
+            "{document}"
+        );
+    }
+
+    /// A HOME that already has a profile is the user's own: the launcher does not
+    /// run DSH against it, does not copy anything, and cannot be made to touch it
+    /// by creating an instance on that host.
+    #[tokio::test]
+    async fn a_remote_home_that_already_has_profiles_is_left_alone() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            r#"{"profiles":["web"]}"#,
+        )));
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(&host_id),
+            remote_instance(&host_id, None),
+        );
+        let cfg = state.config.lock().unwrap().clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        let version = cfg.versions[0].clone();
+
+        ensure_remote_web_profile_template(&state, &host, &version, Path::new(REMOTE_HOME))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "只问了一句「有什么 Profile」就够了：{:?}",
+            fake.calls()
+        );
+    }
+
+    /// A profile whose own document is not on that machine yet is one **this**
+    /// start materializes — and a start that is given no port falls back to
+    /// DSH's own default (3080), which is exactly the port another service may
+    /// already hold there. So the launcher's port policy applies to this start
+    /// too: the intended port (`0` = that machine's kernel picks a free one, or
+    /// the pinned port, whose occupant the preflight already names), never DSH's
+    /// default.
+    ///
+    /// From the page this can only happen on another machine: the profile list
+    /// 本机 offers is the directory listing, so a name with no directory behind
+    /// it is not something the page can send.
+    #[tokio::test]
+    async fn a_start_on_a_profile_that_is_not_materialized_yet_still_carries_the_port() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let node = "/usr/bin/node";
+        let fake = FakeTransport::new();
+        let mut answers = remote_start_answers(node);
+        // 那个 profile 在那台机器上还没有自己的 package.json。
+        answers[1] = FakeAnswer::failed(2, "远端没有这个文件：profiles/web/package.json");
+        for answer in answers {
+            fake.answering(answer);
+        }
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(&host_id),
+            remote_instance(&host_id, None),
+        );
+        let cfg = state.config.lock().unwrap().clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        let inst = cfg.instances[0].clone();
+        let version = cfg.versions[0].clone();
+
+        spawn_remote_instance(&state, &cfg, &host, &inst, &version, "web")
+            .await
+            .unwrap();
+
+        let script = fake
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                FakeCall::Spawn(script) => Some(script),
+                _ => None,
+            })
+            .expect("启动要起一个脱离会话的进程");
+        assert!(
+            script.contains("'--port' '0'"),
+            "不能让它落到 DSH 自己的 3080 上：{script}"
+        );
     }
 
     /// The whole point of ADR-0007's detached spawn: the instance is started by
