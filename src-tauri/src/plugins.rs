@@ -1110,6 +1110,7 @@ mod tests {
             // remote transport plays no part in these tests.
             host_transport: crate::remote::testing::idle(),
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+            forwards: Default::default(),
         }
     }
 

@@ -120,6 +120,13 @@ const envEntries = computed(() => Object.entries(props.inst.env_overrides ?? {})
 const portLabel = computed(() =>
   props.inst.port ? String(props.inst.port) : t('instances.portRandom'),
 )
+/**
+ * Where a remote instance really is, as that machine printed it. It is stated
+ * next to the address that works here, because the two are different addresses
+ * whenever this Mac already had the port — and 「打开」 is always the one that
+ * works here.
+ */
+const remoteUrl = computed(() => status.value.remote_url ?? null)
 /** The in-app self-check entries recorded for this instance. */
 const health = computed(() => {
   const mine = store.healthLogs.filter((l) => l.instanceId === props.inst.id)
@@ -305,8 +312,11 @@ onMounted(() => {
       </div>
 
       <!-- The live URL is the only thing on the row that gets the run colour:
-           it is what "running" actually means and what the user clicks. -->
+           it is what "running" actually means and what the user clicks. A
+           remote instance's address here is the forwarded one, so the row says
+           which address it is showing and the card states both. -->
       <div v-if="running && status.url" class="inst-url">
+        <span v-if="remoteUrl" class="inst-url-label">{{ t('instances.localAddress') }}</span>
         <button class="inst-url-link" @click="onOpen">
           <DlIcon name="link" :size="12" />
           <span class="dl-mono">{{ status.url }}</span>
@@ -424,6 +434,35 @@ onMounted(() => {
         <span class="fact-label">{{ t('instanceEdit.port') }}</span>
         <span class="fact-value dl-mono">{{ portLabel }}</span>
       </div>
+      <!-- The two addresses of a remote instance, stated apart: where it really
+           is, and where it is reachable from here. They are the same address
+           only when the remote port was free on this Mac. -->
+      <div v-if="remoteUrl" class="fact">
+        <span class="fact-label">{{ t('instances.remoteAddress') }}</span>
+        <span class="fact-value fact-chips">
+          <span class="fact-chip dl-mono" :title="remoteUrl">{{ remoteUrl }}</span>
+          <button
+            class="dl-icon-btn"
+            :title="t('common.copy')"
+            @click="copy(remoteUrl!)"
+          >
+            <DlIcon name="copy" :size="12" />
+          </button>
+        </span>
+      </div>
+      <div v-if="remoteUrl && status.url" class="fact">
+        <span class="fact-label">{{ t('instances.localAddress') }}</span>
+        <span class="fact-value fact-chips">
+          <span class="fact-chip dl-mono" :title="status.url">{{ status.url }}</span>
+          <button
+            class="dl-icon-btn"
+            :title="t('common.copy')"
+            @click="copy(status.url!)"
+          >
+            <DlIcon name="copy" :size="12" />
+          </button>
+        </span>
+      </div>
       <div class="fact">
         <span class="fact-label">
           {{ t('instanceEdit.env') }}
@@ -456,6 +495,11 @@ onMounted(() => {
         </span>
       </div>
       </div>
+
+      <!-- What the two addresses above mean, in one line: the row is the
+           control surface, and this is the sentence that keeps a remote
+           instance from reading as if DSH were bound on this Mac. -->
+      <p v-if="remoteUrl" class="facts-note">{{ t('instances.addressHint') }}</p>
 
       <!-- The action bar is grouped by what an action acts on, and the groups
            are laid out on their own lines: the machine first, then the binding.
@@ -716,6 +760,14 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 
+// One line under the facts, for what the two addresses above mean: the row
+// states them, and this says which one a click uses.
+.facts-note {
+  margin: 10px 0 0;
+  font-size: var(--dl-text-xs);
+  color: var(--dl-ink-4);
+}
+
 .fact-chips {
   display: flex;
   gap: 6px;
@@ -764,6 +816,14 @@ onMounted(() => {
   align-items: center;
   gap: 2px;
   margin-top: 3px;
+
+  // Which address this is: a remote instance is opened at the forwarded one,
+  // and the row says so before the URL rather than after it.
+  .inst-url-label {
+    color: var(--dl-ink-4);
+    font-size: var(--dl-text-xs);
+    white-space: nowrap;
+  }
 
   .inst-url-link {
     display: inline-flex;

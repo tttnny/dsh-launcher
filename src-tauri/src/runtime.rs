@@ -1875,6 +1875,7 @@ mod tests {
             tasks: Default::default(),
             host_transport: transport,
             host_statuses: Default::default(),
+            forwards: Default::default(),
         }
     }
 

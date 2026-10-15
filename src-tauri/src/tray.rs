@@ -484,15 +484,27 @@ fn quit(app: &AppHandle) {
     app.exit(0);
 }
 
+/// Opens one running instance in the system browser, from the tray.
+///
+/// It goes through the same rule the instance row does
+/// ([`crate::process::reachable_url_for`]): a remote instance is opened at the
+/// address **this Mac** can reach it at, through the launcher's port forward,
+/// and never at the address DSH printed on its own machine — that address means
+/// a different service here, and the token in it would be handed to whatever
+/// answers. The tray has no page to report a failure on, so a failure says why
+/// in a dialog instead of doing nothing.
 fn open_instance_from_tray(app: &AppHandle, instance_id: &str) {
     let app = app.clone();
     let id = instance_id.to_string();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let url = state.running.lock().await.get(&id).map(|r| r.url.clone());
-        let url = match url {
-            Some(Some(u)) => u,
-            _ => return,
+        let url = match crate::process::reachable_url_for(&state, &id).await {
+            Ok(url) => url,
+            Err(reason) => {
+                crate::log_warn!("托盘打开实例 {id} 失败：{reason}");
+                report_to_user(&app, &reason);
+                return;
+            }
         };
         // 与 open_external 保持一致：先裁空白再做 http(s) 校验。
         let url = url.trim().to_string();
@@ -503,8 +515,19 @@ fn open_instance_from_tray(app: &AppHandle, instance_id: &str) {
         crate::log_info!("托盘在系统浏览器打开实例 {id}：{url}");
         if let Err(e) = open::that(&url) {
             crate::log_warn!("托盘打开实例失败: {e}");
+            report_to_user(&app, &format!("打开浏览器失败：{e}"));
         }
     });
+}
+
+/// Says one thing to the user from a place with no page to say it on. The tray
+/// menu has no window, so a failure there would otherwise be silence.
+fn report_to_user(app: &AppHandle, message: &str) {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .message(message.to_string())
+        .title("dsh-launcher")
+        .show(|_| {});
 }
 
 fn stop_instance_from_tray(app: &AppHandle, instance_id: &str) {
@@ -521,15 +544,23 @@ fn handle_double_click(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         // 仅当唯一运行实例时直达其页面（系统浏览器），否则显示主窗口。
-        let running = state.running.lock().await;
-        let target_url = if running.len() == 1 {
-            running.values().next().and_then(|e| e.url.clone())
-        } else {
-            None
+        let target = {
+            let running = state.running.lock().await;
+            if running.len() == 1 {
+                running.keys().next().cloned()
+            } else {
+                None
+            }
         };
-        drop(running);
 
-        if let Some(url) = target_url {
+        // The same rule the tray's own 「打开」 uses, so a remote instance is
+        // reached through the launcher's forward here too.
+        let url = match target {
+            Some(id) => crate::process::reachable_url_for(&state, &id).await.ok(),
+            None => None,
+        };
+
+        if let Some(url) = url {
             // 与 open_external 保持一致：先裁空白再做 http(s) 校验。
             let url = url.trim().to_string();
             if !(url.starts_with("http://") || url.starts_with("https://")) {

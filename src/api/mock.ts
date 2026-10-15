@@ -1167,13 +1167,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       db.running[id] = starting
       saveDb(db)
       emitStatus(starting)
+      const remote = !hostOf(db, inst.host_id ?? LOCAL_HOST_ID).builtin
       setTimeout(() => {
         const cur = loadDb()
         if (cur.running[id]?.state !== 'starting') return
         const running: InstanceStatus = {
           id,
           state: 'running',
-          url: `http://127.0.0.1:${30000 + Math.floor(Math.random() * 20000)}`,
+          // 本机可达的地址：远端实例走启动器的端口转发，远端位置另说一处。
+          // 样本故意让两个端口不同（远端 3080 在本机被占的情形），好让界面上
+          // 「远端位置」与「本机地址」这两件事在浏览器预览里也看得出区别。
+          url: remote
+            ? 'http://127.0.0.1:41080/?token=demo-token-remote-instance'
+            : `http://127.0.0.1:${30000 + Math.floor(Math.random() * 20000)}`,
+          remote_url: remote ? 'http://127.0.0.1:3080/?token=demo-token-remote-instance' : null,
           profile,
           exit_code: null,
         }
