@@ -111,8 +111,8 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 **本机之外的主机，启动器不碰本机文件系统（契约）**：`Host::local_paths_only` 是那条规则
 ——远程主机的 DSH_HOME、版本目录都在那台机器上，拿本机的 `fs` 去建或删只会命中这台 Mac
 上同名的路径（`create_home_record`、`remove_version`、`open_home_directory`、
-`open_instance_directory` 都这么守着，浏览器 mock 照同一条规则拒绝）。远程的建与删要等
-各自的远端实现接上，别把这条守卫当成「远程不支持」的长期答案。
+`open_instance_directory` 都这么守着，浏览器 mock 照同一条规则拒绝）。要在远端建或删，
+就走传输层（`remote.rs` 里那些脚本），别在本机上照路径操作。
 
 **实例行是控制面，展开卡片只是事实（契约）**：行本身讲的是「这台实例是什么、在不在跑」
 ——名字、版本 / DSH_HOME、运行时的 URL、选 Profile、状态、主操作，行尾一个只作指示的
