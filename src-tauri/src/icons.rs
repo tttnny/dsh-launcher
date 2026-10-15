@@ -411,6 +411,7 @@ mod tests {
             host_transport: transport,
             host_statuses: std::sync::Mutex::new(Default::default()),
             remote_scan: std::sync::Mutex::new(Default::default()),
+            forwards: Default::default(),
         }
     }
 

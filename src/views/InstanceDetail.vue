@@ -69,6 +69,9 @@ onMounted(async () => {
 
 const current = computed(() => store.instanceById(id.value))
 const status = computed(() => store.statusOf(id.value))
+/** Where a remote instance really is, as that machine printed it — stated next
+ * to the forwarded address so the two are never read as one. */
+const remoteUrl = computed(() => status.value.remote_url ?? null)
 const running = computed(() => status.value.state === 'running' || status.value.state === 'starting')
 /**
  * 「主机不可达」 — the machine did not answer, so the state is unknown. The page
@@ -353,6 +356,19 @@ function removeEnvRow(idx: number) {
           <span>{{ homeLabel }}</span>
           <span class="detail-dot">·</span>
           <span class="dl-mono detail-id" :title="id">{{ id }}</span>
+        </p>
+        <!-- Both addresses of a remote instance, stated apart: where it really
+             is, and where it is reachable from here (ADR-0008). The row above
+             the board states the same pair; a page opened straight at this
+             instance must not have to be read without them. -->
+        <p v-if="remoteUrl" class="dl-head-sub detail-sub detail-addresses">
+          <span class="detail-dot">{{ t('instances.remoteAddress') }}</span>
+          <span class="dl-mono detail-id" :title="remoteUrl">{{ remoteUrl }}</span>
+          <template v-if="status.url">
+            <span class="detail-dot">·</span>
+            <span>{{ t('instances.localAddress') }}</span>
+            <span class="dl-mono detail-id" :title="status.url">{{ status.url }}</span>
+          </template>
         </p>
       </div>
       <div class="dl-head-actions">

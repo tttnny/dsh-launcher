@@ -16,6 +16,7 @@ mod ssh;
 mod tasks;
 mod toolchain;
 mod tray;
+mod tunnel;
 mod update;
 mod windows;
 
@@ -33,6 +34,11 @@ pub struct AppState {
     /// The one boundary every remote action crosses. A test substitutes an
     /// in-memory double here instead of needing a real machine.
     pub host_transport: Arc<dyn ssh::HostTransport>,
+    /// The port forwards to remote hosts this launcher session opened, so the
+    /// exit path can withdraw exactly what it opened and nothing else
+    /// (ADR-0008). Launcher state, not machine state: they live and die with
+    /// this process.
+    pub forwards: tunnel::Forwards,
     /// What the launcher last learned about reaching each host. Runtime only:
     /// 「现在连不上」 is a fact about the network and the moment, not part of the
     /// host record — a machine that is switched off is still a machine the user
@@ -168,6 +174,7 @@ pub fn run() {
                 host_transport: Arc::new(ssh::SshTransport::new()),
                 host_statuses: StdMutex::new(HashMap::new()),
                 remote_scan: StdMutex::new(std::collections::HashSet::new()),
+                forwards: tunnel::Forwards::default(),
             });
 
             // Resolve the toolchain once at startup and persist it, so the
@@ -305,10 +312,13 @@ pub fn run() {
                 api.prevent_exit();
             }
             // Terminate child processes when the launcher exits so no DSH
-            // instance is left orphaned.
+            // instance is left orphaned, and withdraw the port forwards this
+            // session opened — the ssh connection is the launcher's own, so
+            // nothing the user configured is touched (ADR-0008 §1).
             tauri::RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
                 process::kill_all(&state);
+                tunnel::close_all_blocking(&state);
             }
             _ => {}
         });

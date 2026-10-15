@@ -45,6 +45,11 @@ pub struct RemoteRun {
     pub host_id: String,
     /// The machine, as the transport dials it.
     pub host: crate::ssh::RemoteHost,
+    /// The address the instance printed on **its own** machine, token included,
+    /// once its log has shown it. It is a fact about that machine: the forward's
+    /// target, and what the card shows as 「远端位置」. What this Mac reaches the
+    /// instance at is the running entry's own `url` (ADR-0008).
+    pub remote_url: Option<String>,
     /// The pid `setsid` started — also the id of the process group a stop
     /// signals as a whole.
     pub pid: i32,
@@ -77,6 +82,7 @@ impl RemoteRun {
         Self {
             host_id: host.id.clone(),
             host: run_host,
+            remote_url: None,
             pid,
             started_at,
             data_dir,
@@ -247,6 +253,7 @@ async fn adopt_external_process(
             id: instance_id.to_string(),
             state: InstanceState::Running,
             url: Some(url),
+            remote_url: None,
             profile: Some(profile.to_string()),
             exit_code: None,
         },
@@ -286,6 +293,7 @@ async fn adopt_external_process(
                     id: watcher_id.clone(),
                     state: InstanceState::Exited,
                     url: None,
+                    remote_url: None,
                     profile: Some(watcher_profile),
                     exit_code: None,
                 },
@@ -460,6 +468,63 @@ pub(crate) fn recall_profile(data_dir: &std::path::Path, instance_id: &str) -> O
 /// not manageable; the reverse — adopted with a token — is both.
 pub(crate) fn manageable_url(entry: &RunningEntry) -> Option<&str> {
     entry.url.as_deref().filter(|u| u.contains("token="))
+}
+
+/// Puts one remote instance's address on this Mac, for an instance whose own
+/// machine has just been found running it (ADR-0008).
+///
+/// `remote_url` is the address DSH printed on **its** machine — the forward's
+/// target, and what the card shows as 「远端位置」. What comes back is the address
+/// that works here, or `None` when the forward will not come up: that costs the
+/// address, not the instance, which is running on that machine either way and
+/// whose next 打开 builds the forward again and says why if it still cannot.
+pub(crate) async fn local_address_for(
+    state: &AppState,
+    instance_id: &str,
+    host: &crate::ssh::RemoteHost,
+    remote_url: &str,
+) -> Option<String> {
+    match crate::tunnel::reachable_url(state, host, remote_url).await {
+        Ok(local) => Some(local),
+        Err(e) => {
+            crate::log_warn!("实例 {instance_id} 的端口转发没建起来：{e}");
+            None
+        }
+    }
+}
+
+/// The address **this Mac** can open a running instance at, bringing the
+/// launcher's port forward up if the connection that carried it went away
+/// (ADR-0008).
+///
+/// 本机's instances answer with their own URL, unchanged. A remote one answers
+/// with the address its own machine printed, translated to loopback with the
+/// path and the launch token carried over — which is the address the system
+/// browser is handed, and the one the plugins page talks to. It is deliberately
+/// not taken from the entry as it stands: a forward lives only as long as the
+/// ssh connection under it, so the entry's copy can be an address that died
+/// while the Mac slept, and this is where that is noticed and repaired.
+pub(crate) async fn reachable_url_for(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<String, String> {
+    let entry = state.running.lock().await;
+    let Some(entry) = entry.get(instance_id) else {
+        return Err("实例未在运行或尚未就绪".to_string());
+    };
+    match &entry.remote {
+        None => entry
+            .url
+            .clone()
+            .ok_or_else(|| "实例未在运行或尚未就绪".to_string()),
+        Some(run) => {
+            let remote_url = run
+                .remote_url
+                .as_deref()
+                .ok_or_else(|| "实例未在运行或尚未就绪".to_string())?;
+            crate::tunnel::reachable_url(state, &run.host, remote_url).await
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -903,6 +968,7 @@ pub(crate) async fn spawn_remote_instance(
     let run = RemoteRun {
         host_id: host.id.clone(),
         host: run_host,
+        remote_url: None,
         pid,
         started_at,
         data_dir,
@@ -1013,6 +1079,7 @@ async fn start_remote_instance(
             id: inst.id.clone(),
             state: InstanceState::Starting,
             url: None,
+            remote_url: None,
             profile: Some(profile.to_string()),
             exit_code: None,
         },
@@ -1079,6 +1146,7 @@ async fn start_remote_instance(
                     id: inst.id.clone(),
                     state: InstanceState::Stopped,
                     url: None,
+                    remote_url: None,
                     profile: Some(profile.to_string()),
                     exit_code: None,
                 },
@@ -1161,13 +1229,22 @@ fn follow_remote_instance(
             };
             offset = read.offset;
 
-            if let Some(url) = read.url.filter(|_| !announced) {
+            if let Some(remote_url) = read.url.filter(|_| !announced) {
                 announced = true;
-                crate::log_info!("实例 {id} 已就绪：{url}");
+                crate::log_info!("实例 {id} 已就绪：{remote_url}");
+                // The address DSH printed is about **that** machine. What this
+                // Mac can open is the same address brought over on a loopback
+                // forward (ADR-0008), and it is brought up now rather than at
+                // the first click: the row has both addresses to state, and the
+                // plugins page talks to the instance through the forward too.
+                let local_url = local_address_for(&state, &id, &run.host, &remote_url).await;
                 {
                     let mut running = state.running.lock().await;
                     if let Some(entry) = running.get_mut(&id) {
-                        entry.url = Some(url.clone());
+                        entry.url = local_url.clone();
+                        if let Some(run) = entry.remote.as_mut() {
+                            run.remote_url = Some(remote_url.clone());
+                        }
                     }
                 }
                 emit_status(
@@ -1175,7 +1252,8 @@ fn follow_remote_instance(
                     &InstanceStatus {
                         id: id.clone(),
                         state: InstanceState::Running,
-                        url: Some(url),
+                        url: local_url,
+                        remote_url: Some(remote_url),
                         profile: Some(profile.clone()),
                         exit_code: None,
                     },
@@ -1192,6 +1270,7 @@ fn follow_remote_instance(
                         id: id.clone(),
                         state: InstanceState::Exited,
                         url: None,
+                        remote_url: None,
                         profile: Some(profile.clone()),
                         exit_code: None,
                     },
@@ -1487,14 +1566,26 @@ pub(crate) async fn check_remote_instance(
 /// instance's running entry — the remote twin of [`adopt_external_process`],
 /// and what makes a restarted launcher manageable again: the URL with its launch
 /// token comes out of that machine's own running record (ADR-0007 §3).
+///
+/// That address is about **that** machine, so it is kept as the run's own
+/// address —「远端位置」, and the forward's target — while the entry is given the
+/// address this Mac can reach: the same one on a loopback forward (ADR-0008),
+/// which is what 「打开」, the tray and the plugins page read.
 async fn adopt_remote_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
     instance_id: &str,
     profile: &str,
-    run: RemoteRun,
-    url: Option<String>,
+    mut run: RemoteRun,
+    remote_url: Option<String>,
 ) {
+    let local_url = match remote_url.as_deref() {
+        Some(remote) => {
+            run.remote_url = Some(remote.to_string());
+            local_address_for(state, instance_id, &run.host, remote).await
+        }
+        None => None,
+    };
     {
         let mut running = state.running.lock().await;
         if running.contains_key(instance_id) {
@@ -1505,15 +1596,15 @@ async fn adopt_remote_process(
             RunningInstance {
                 kill: Arc::new(Notify::new()),
                 profile: profile.to_string(),
-                url: url.clone(),
+                url: local_url.clone(),
                 adopted: None,
                 remote: Some(run.clone()),
             },
         );
     }
-    match url.as_deref() {
-        Some(url) => crate::log_info!(
-            "实例 {instance_id} 在「{}」上仍在运行（pid {}），已认领，沿用记下的启动 token（{url}）",
+    match remote_url.as_deref() {
+        Some(remote) => crate::log_info!(
+            "实例 {instance_id} 在「{}」上仍在运行（pid {}），已认领，沿用记下的启动 token（{remote}）",
             run.host.target,
             run.pid
         ),
@@ -1528,7 +1619,8 @@ async fn adopt_remote_process(
         &InstanceStatus {
             id: instance_id.to_string(),
             state: InstanceState::Running,
-            url: url.clone(),
+            url: local_url,
+            remote_url,
             profile: Some(profile.to_string()),
             exit_code: None,
         },
@@ -1593,6 +1685,7 @@ fn watch_remote_process(
                                 id: id.clone(),
                                 state: InstanceState::Running,
                                 url,
+                                remote_url: run.remote_url.clone(),
                                 profile: Some(profile.clone()),
                                 exit_code: None,
                             },
@@ -1610,6 +1703,7 @@ fn watch_remote_process(
                             id: id.clone(),
                             state: InstanceState::Exited,
                             url: None,
+                            remote_url: None,
                             profile: Some(profile.clone()),
                             exit_code: None,
                         },
@@ -1630,6 +1724,7 @@ fn watch_remote_process(
                             id: id.clone(),
                             state: InstanceState::Unreachable,
                             url: None,
+                            remote_url: run.remote_url.clone(),
                             profile: Some(profile.clone()),
                             exit_code: None,
                         },
@@ -1718,6 +1813,7 @@ pub(crate) async fn settle_remote_instance(
                     id: inst.id.clone(),
                     state: InstanceState::Stopped,
                     url: None,
+                    remote_url: None,
                     profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
                     exit_code: None,
                 },
@@ -1732,6 +1828,7 @@ pub(crate) async fn settle_remote_instance(
                     id: inst.id.clone(),
                     state: InstanceState::Unreachable,
                     url: None,
+                    remote_url: None,
                     profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
                     exit_code: None,
                 },
@@ -2034,6 +2131,7 @@ pub async fn start_instance_process(
             id: instance_id.to_string(),
             state: InstanceState::Starting,
             url: None,
+            remote_url: None,
             profile: Some(profile.to_string()),
             exit_code: None,
         },
@@ -2127,6 +2225,7 @@ pub async fn start_instance_process(
                         InstanceState::Exited
                     },
                     url: None,
+                    remote_url: None,
                     profile: Some(waiter_profile),
                     exit_code: code,
                 },
@@ -2164,6 +2263,7 @@ pub async fn start_instance_process(
                             id: reader_id.clone(),
                             state: InstanceState::Running,
                             url: Some(url),
+                            remote_url: None,
                             profile: Some(reader_profile.clone()),
                             exit_code: None,
                         },
@@ -2262,6 +2362,7 @@ pub async fn stop_instance_process(
                 id: instance_id.to_string(),
                 state: InstanceState::Stopped,
                 url: None,
+                remote_url: None,
                 profile: None,
                 exit_code: None,
             },
@@ -2284,6 +2385,7 @@ pub async fn stop_instance_process(
                         id: instance_id.to_string(),
                         state: InstanceState::Stopped,
                         url: None,
+                        remote_url: None,
                         profile: Some(profile),
                         exit_code: None,
                     },
@@ -2302,6 +2404,7 @@ pub async fn stop_instance_process(
                         id: instance_id.to_string(),
                         state: InstanceState::Unreachable,
                         url: None,
+                        remote_url: run.remote_url.clone(),
                         profile: Some(profile),
                         exit_code: None,
                     },
@@ -2412,6 +2515,11 @@ fn profile_hint(inst: &DshInstance) -> Option<String> {
 /// 「主机不可达」. Both of those live here and must keep living here (ADR-0007
 /// 后果): reading either of them as 「已停止」 is exactly what makes a user press
 /// 启动 and end up with a second DSH on the server.
+///
+/// Every status says two addresses for an instance on another machine: the one
+/// that works **here** (`url`, which is what 「打开」 and the plugins page use)
+/// and the one that machine printed (`remote_url`), so the page can state both
+/// (ADR-0008).
 pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
     let (instances, pending) = {
         let cfg = state.config.lock().unwrap();
@@ -2441,6 +2549,7 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
                 } else {
                     entry.url.clone()
                 },
+                remote_url: entry.remote.as_ref().and_then(|run| run.remote_url.clone()),
                 profile: Some(entry.profile.clone()),
                 exit_code: None,
             }
@@ -2460,6 +2569,7 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
                 id: inst.id.clone(),
                 state: InstanceState::Starting,
                 url: None,
+                remote_url: None,
                 profile: profile_hint(&inst),
                 exit_code: None,
             });
@@ -2470,6 +2580,7 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
                 id: inst.id.clone(),
                 state: InstanceState::Unreachable,
                 url: None,
+                remote_url: None,
                 profile: profile_hint(&inst),
                 exit_code: None,
             });
@@ -2691,6 +2802,7 @@ mod tests {
             host_transport: crate::remote::testing::idle(),
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
+            forwards: Default::default(),
         }
     }
 
@@ -2791,6 +2903,7 @@ mod tests {
             host_transport: fake,
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
+            forwards: Default::default(),
         }
     }
 
@@ -2862,6 +2975,7 @@ mod tests {
                 target: "zjq_aliyun".into(),
                 socket: PathBuf::from("/launcher/ssh/abc.sock"),
             },
+            remote_url: None,
             pid: 4242,
             started_at: Some(117384720),
             data_dir: PathBuf::from(REMOTE_DATA),
@@ -3096,6 +3210,162 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_slice(&written).unwrap();
         assert!(doc.get("i-remote").is_none(), "{doc}");
         assert_eq!(doc["i-other"]["url"], "http://127.0.0.1:1/?token=keep", "{doc}");
+    }
+
+    /// A port this Mac has free right now, for a remote instance to have used.
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// The remote addresses a run asked for a forward to, in order.
+    fn forwarded(fake: &FakeTransport) -> Vec<(String, u16)> {
+        fake.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                FakeCall::OpenForward { forward, .. } => {
+                    Some((forward.remote_host, forward.remote_port))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What 「打开」 needs for a remote instance: the address **this Mac** can
+    /// reach. The instance printed its own address from where it stands, which
+    /// on this Mac is a different service — so the launcher forwards that port
+    /// and hands over the same address on loopback, token and path unchanged.
+    #[tokio::test]
+    async fn a_remote_instances_open_hands_over_the_address_on_this_mac() {
+        let fake = FakeTransport::new().answering(FakeAnswer::Done);
+        let port = free_port();
+        let remote_url = format!("http://127.0.0.1:{port}/?token={READY_TOKEN}");
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let mut run = remote_run();
+        run.remote_url = Some(remote_url.clone());
+        state.running.lock().await.insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: Some(run),
+            },
+        );
+
+        let opened = reachable_url_for(&state, "i-remote").await.unwrap();
+
+        assert_eq!(opened, remote_url, "换掉的是本机地址，token 与路径原样");
+        assert_eq!(
+            forwarded(&fake),
+            vec![("127.0.0.1".to_string(), port)],
+            "转发目标就是运行记录里的地址"
+        );
+    }
+
+    /// The launch-time scan and the ready path hold a remote instance the same
+    /// way: the address that machine's record carries is the forward's target, and
+    /// what this Mac gets is the same address on loopback — so 「打开」 after a
+    /// launcher restart lands on that machine's instance, logged in, rather than
+    /// on whatever else answers on this Mac at that port.
+    #[tokio::test]
+    async fn a_recorded_remote_address_is_forwarded_for_this_mac() {
+        let fake = FakeTransport::new().answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let port = free_port();
+        let remote_url = format!("http://127.0.0.1:{port}/?token={READY_TOKEN}");
+
+        let local = local_address_for(&state, "i-remote", &remote_run().host, &remote_url)
+            .await
+            .expect("转发建起来了就该给出本机地址");
+
+        assert_eq!(local, remote_url, "换掉的是地址的主人，token 与路径原样");
+        assert_eq!(
+            forwarded(&fake),
+            vec![("127.0.0.1".to_string(), port)],
+            "转发目标就是运行记录里的地址"
+        );
+    }
+
+    /// A forward that will not come up costs the address, not the instance: it is
+    /// running on that machine either way, and the next 打开 builds the forward
+    /// again and says why if it still cannot. So this answers with no address
+    /// rather than an error a caller would have to drop the instance over.
+    #[tokio::test]
+    async fn a_forward_that_will_not_come_up_costs_only_the_address() {
+        let fake = FakeTransport::new().answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::Unreachable,
+            "ssh: connect to host zjq_aliyun port 22: Connection refused",
+        ));
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let remote_url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
+
+        assert!(local_address_for(&state, "i-remote", &remote_run().host, &remote_url)
+            .await
+            .is_none(),);
+    }
+
+    /// 本机's path is untouched: an instance running here is already reachable
+    /// here, so 「打开」 hands over its own URL and asks for no forward.
+    #[tokio::test]
+    async fn a_local_instance_opens_at_its_own_address_without_a_forward() {
+        let fake = FakeTransport::new();
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
+        state.running.lock().await.insert(
+            "i-local".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: Some(url.clone()),
+                adopted: None,
+                remote: None,
+            },
+        );
+
+        assert_eq!(reachable_url_for(&state, "i-local").await.unwrap(), url);
+        assert!(forwarded(&fake).is_empty(), "本机不需要转发：{:?}", fake.calls());
+    }
+
+    /// The board states both addresses for a remote instance: the one that
+    /// works from here (what 「打开」 uses, and what the plugins page talks to)
+    /// and where the instance really is, so nobody thinks DSH is bound here.
+    #[tokio::test]
+    async fn the_status_of_a_remote_instance_carries_both_addresses() {
+        let remote_url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
+        let local_url = format!("http://127.0.0.1:41000/?token={READY_TOKEN}");
+        let state = app_state(Vec::new(), Vec::new());
+        let mut run = remote_run();
+        run.remote_url = Some(remote_url.clone());
+        state.running.lock().await.insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: Some(local_url.clone()),
+                adopted: None,
+                remote: Some(run),
+            },
+        );
+
+        let statuses = list_statuses(&state).await;
+
+        let status = statuses.iter().find(|s| s.id == "i-remote").unwrap();
+        assert_eq!(status.url.as_deref(), Some(local_url.as_str()));
+        assert_eq!(status.remote_url.as_deref(), Some(remote_url.as_str()));
     }
 
     /// ⌘Q stops this Mac's instances and nothing else (ADR-0007 §1-2): a remote

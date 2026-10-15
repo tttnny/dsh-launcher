@@ -220,7 +220,14 @@ export type InstanceState = 'stopped' | 'starting' | 'running' | 'exited' | 'unr
 export interface InstanceStatus {
   id: string
   state: InstanceState
+  /** Where the instance can be opened **from this Mac**: for a remote instance
+   * the forwarded loopback address, not the one DSH printed on its own machine
+   * (ADR-0008). */
   url: string | null
+  /** Where a remote instance really is: the address DSH printed on its own
+   * machine. `null` for 本机's instances. Stated separately from `url` because
+   * the two differ whenever the remote port was taken here. */
+  remote_url?: string | null
   profile: string | null
   exit_code: number | null
 }

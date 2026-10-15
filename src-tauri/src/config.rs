@@ -538,11 +538,21 @@ pub enum InstanceState {
     Unreachable,
 }
 
+/// One instance's state, as the board reads it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstanceStatus {
     pub id: String,
     pub state: InstanceState,
+    /// Where the instance can be opened **from this Mac**. For a remote instance
+    /// that is the forwarded loopback address, not the one DSH printed on its
+    /// own machine (ADR-0008).
     pub url: Option<String>,
+    /// Where the instance really is, for a remote one: the address DSH printed
+    /// on its own machine. `None` for 本机's instances. Stated separately from
+    /// `url` because the two differ whenever the remote port was taken here, and
+    /// a reader must not think DSH is bound on this Mac.
+    #[serde(default)]
+    pub remote_url: Option<String>,
     pub profile: Option<String>,
     pub exit_code: Option<i32>,
 }

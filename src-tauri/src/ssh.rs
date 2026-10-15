@@ -217,6 +217,35 @@ pub struct PortForward {
     pub remote_port: u16,
 }
 
+/// The `-L` spec for one forward: `[bind_address:]port:host:hostport`.
+///
+/// The bind address is spelled out as loopback rather than left implicit. A
+/// bare `port:host:port` is bound according to `GatewayPorts`, which a user's
+/// own `~/.ssh/config` may leave on — and an instance's address offered to this
+/// Mac's network is exactly what the whole feature refuses to do (ADR-0008).
+/// The remote end travels verbatim: the address DSH printed from its own point
+/// of view is the address the forward has to reach.
+pub fn forward_spec(forward: &PortForward) -> String {
+    format!(
+        "127.0.0.1:{}:{}:{}",
+        forward.local_port, forward.remote_host, forward.remote_port
+    )
+}
+
+/// The argv words of one `-O` control request on an **established** connection:
+/// `forward`/`cancel` carry the `-L` spec, `exit` ends the connection and needs
+/// nothing. ssh does not dial a machine for `-O`; it talks to the master that
+/// owns the launcher's socket, which is why these calls fail instantly when
+/// there is none.
+fn control_command(action: &str, forward: Option<&PortForward>) -> Vec<String> {
+    let mut argv = vec!["-O".to_string(), action.to_string()];
+    if let Some(forward) = forward {
+        argv.push("-L".to_string());
+        argv.push(forward_spec(forward));
+    }
+    argv
+}
+
 /// The one boundary every remote action crosses, injectable so a test
 /// substitutes an in-memory double. Production is [`SshTransport`].
 ///
@@ -300,6 +329,15 @@ pub trait HostTransport: Send + Sync {
         host: &'a RemoteHost,
         forward: PortForward,
     ) -> HostFuture<'a, Result<(), HostError>>;
+
+    /// Ends the launcher's own multiplexed connection to that host, and with it
+    /// every forward that was riding it. The user's own connections use their
+    /// own socket; nothing of theirs is touched. A host with no connection up
+    /// is already in the state this asks for.
+    fn close_connection<'a>(
+        &'a self,
+        host: &'a RemoteHost,
+    ) -> HostFuture<'a, Result<(), HostError>>;
 }
 
 /// The real transport: the system `ssh`, through the launcher's own control
@@ -374,23 +412,33 @@ impl SshTransport {
     /// Adds or cancels one `-L` forward on the launcher's own multiplexed
     /// connection. That connection is already up whenever the launcher has
     /// talked to the host, which every other call here ensures by using the
-    /// same socket.
+    /// same socket — **and which adding a forward has to ensure itself**: `ssh
+    /// -O forward` is a request to a master, it does not start one, so a
+    /// launcher that has not talked to the host yet would be refused the first
+    /// time the user opens an instance.
     async fn forward(
         &self,
         host: &RemoteHost,
         action: &str,
         forward: &PortForward,
     ) -> Result<(), HostError> {
-        let command = vec![
-            "-O".to_string(),
-            action.to_string(),
-            "-L".to_string(),
-            format!(
-                "{}:{}:{}",
-                forward.local_port, forward.remote_host, forward.remote_port
-            ),
-        ];
+        if action == "forward" {
+            self.script(host, RemoteCall::new(crate::remote::hello_script()))
+                .await?;
+        }
+        let command = control_command(action, Some(forward));
         self.dial(host, &command, CONTROL_TIMEOUT).await.map(|_| ())
+    }
+
+    /// Ends the launcher's own connection to one host, which takes every forward
+    /// riding it with it. Nothing is dialed to do it: no master means there is
+    /// nothing of ours left on that machine, which is the state this call is
+    /// asking for. The user's own connections live on their own socket and are
+    /// not touched.
+    async fn end_connection(&self, host: &RemoteHost) -> Result<(), HostError> {
+        self.dial(host, &control_command("exit", None), CONTROL_TIMEOUT)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -495,6 +543,13 @@ impl HostTransport for SshTransport {
         forward: PortForward,
     ) -> HostFuture<'a, Result<(), HostError>> {
         Box::pin(async move { self.forward(host, "cancel", &forward).await })
+    }
+
+    fn close_connection<'a>(
+        &'a self,
+        host: &'a RemoteHost,
+    ) -> HostFuture<'a, Result<(), HostError>> {
+        Box::pin(async move { self.end_connection(host).await })
     }
 }
 
@@ -879,6 +934,50 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&echoed.stdout), script);
+    }
+
+    /// A forward's local end is bound to loopback **by spelling it out**:
+    /// `port:host:port` alone is bound according to `GatewayPorts`, and a user's
+    /// `~/.ssh/config` may turn that on — which would offer the instance's own
+    /// address to this Mac's network. The remote end is carried verbatim, so an
+    /// instance bound to that machine's LAN address is forwarded to that address.
+    #[test]
+    fn a_forward_spec_spells_out_the_loopback_bind() {
+        let loopback = PortForward {
+            local_port: 3080,
+            remote_host: "127.0.0.1".into(),
+            remote_port: 3080,
+        };
+        assert_eq!(forward_spec(&loopback), "127.0.0.1:3080:127.0.0.1:3080");
+
+        let lan = PortForward {
+            local_port: 41000,
+            remote_host: "192.168.1.5".into(),
+            remote_port: 4000,
+        };
+        assert_eq!(forward_spec(&lan), "127.0.0.1:41000:192.168.1.5:4000");
+    }
+
+    /// One `-O` control request rides the connection the launcher already has;
+    /// adding a forward carries the `-L` spec, and ending the connection carries
+    /// nothing. Both are requests to an established master, which is why a
+    /// caller must not read them as "start a connection".
+    #[test]
+    fn control_requests_carry_the_forward_spec_only_when_they_need_one() {
+        let forward = PortForward {
+            local_port: 3080,
+            remote_host: "127.0.0.1".into(),
+            remote_port: 3080,
+        };
+        assert_eq!(
+            control_command("forward", Some(&forward)),
+            vec!["-O", "forward", "-L", "127.0.0.1:3080:127.0.0.1:3080"]
+        );
+        assert_eq!(
+            control_command("cancel", Some(&forward)),
+            vec!["-O", "cancel", "-L", "127.0.0.1:3080:127.0.0.1:3080"]
+        );
+        assert_eq!(control_command("exit", None), vec!["-O", "exit"]);
     }
 
     /// A free target may carry its own ssh arguments, and they belong before the

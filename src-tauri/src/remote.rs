@@ -1499,6 +1499,15 @@ else
 fi
 "#;
 
+/// The smallest thing the launcher can ask a machine to do: exit 0. It exists so
+/// the launcher's multiplexed connection is up before something has to ride it —
+/// `ssh -O forward` is a request to a master, it does not start one (ADR-0008).
+const HELLO: &str = "true";
+
+pub fn hello_script() -> String {
+    HELLO.to_string()
+}
+
 /// How many bytes a log already holds. A file that is not there yet is zero:
 /// every caller here reads the size of a log it is about to append to.
 const LOG_SIZE: &str = r#"set -u
@@ -2019,6 +2028,10 @@ pub(crate) mod testing {
 
     /// One call, as the fake recorded it. Tests assert on the script the
     /// launcher *would* have run, never on ssh or a real machine.
+    ///
+    /// Each forward call names the host it was aimed at: two instances on one
+    /// machine must share a single connection, and that is only checkable when
+    /// the calls say which machine they were for.
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) enum FakeCall {
         Run(String),
@@ -2028,8 +2041,15 @@ pub(crate) mod testing {
         ReadFile(String),
         WriteFile(String, Vec<u8>),
         ListDir(String),
-        OpenForward(PortForward),
-        CloseForward(PortForward),
+        OpenForward {
+            host: RemoteHost,
+            forward: PortForward,
+        },
+        CloseForward {
+            host: RemoteHost,
+            forward: PortForward,
+        },
+        CloseConnection(RemoteHost),
     }
 
     /// What the fake answers the next call with.
@@ -2369,14 +2389,14 @@ pub(crate) mod testing {
 
         fn open_forward<'a>(
             &'a self,
-            _host: &'a RemoteHost,
+            host: &'a RemoteHost,
             forward: PortForward,
         ) -> HostFuture<'a, Result<(), HostError>> {
             Box::pin(async move {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push(FakeCall::OpenForward(forward));
+                self.calls.lock().unwrap().push(FakeCall::OpenForward {
+                    host: host.clone(),
+                    forward,
+                });
                 match self.answer()? {
                     FakeAnswer::Done => Ok(()),
                     other => Err(wrong_shape(&other)),
@@ -2386,14 +2406,30 @@ pub(crate) mod testing {
 
         fn close_forward<'a>(
             &'a self,
-            _host: &'a RemoteHost,
+            host: &'a RemoteHost,
             forward: PortForward,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(FakeCall::CloseForward {
+                    host: host.clone(),
+                    forward,
+                });
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
+        fn close_connection<'a>(
+            &'a self,
+            host: &'a RemoteHost,
         ) -> HostFuture<'a, Result<(), HostError>> {
             Box::pin(async move {
                 self.calls
                     .lock()
                     .unwrap()
-                    .push(FakeCall::CloseForward(forward));
+                    .push(FakeCall::CloseConnection(host.clone()));
                 match self.answer()? {
                     FakeAnswer::Done => Ok(()),
                     other => Err(wrong_shape(&other)),

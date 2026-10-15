@@ -1876,6 +1876,7 @@ mod tests {
             host_transport: transport,
             host_statuses: Default::default(),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
+            forwards: Default::default(),
         }
     }
 

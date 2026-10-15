@@ -1706,28 +1706,14 @@ pub async fn open_instance_window(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let entry = state
-        .running
-        .lock()
-        .await
-        .get(&id)
-        .map(|r| (r.url.clone(), r.remote.is_some()));
-    let Some((url, remote)) = entry else {
-        return Err("实例未在运行或尚未就绪".to_string());
-    };
-    let Some(url) = url else {
-        return Err("实例未在运行或尚未就绪".to_string());
-    };
-    if remote {
-        // DSH prints its own address from its own point of view (`127.0.0.1`
-        // on that machine), which on this Mac is a different service — and the
-        // token in the query string would be handed to whatever answers there.
-        // The address a browser here can reach comes from a port forward
-        // (ADR-0008), not from the instance's own URL.
-        return Err(
-            "这是远端实例：它的地址要经 ssh 转发才能在本机打开（ADR-0008），现在还不能打开".to_string(),
-        );
-    }
+    // What gets opened is the address **this Mac** can reach: a 本机 instance's
+    // own URL, or a remote instance's address brought over on the launcher's
+    // port forward — carrying the launch token unchanged, so one click lands
+    // logged in (ADR-0008 §3). DSH prints its own address from its own point of
+    // view (`127.0.0.1` on that machine), which on this Mac is a different
+    // service, and the token in its query string would be handed to whatever
+    // answers there.
+    let url = process::reachable_url_for(&state, &id).await?;
     // 实例页改由系统浏览器承载：复用 open_external 的 http(s) 校验与日志。
     open_external(url)
 }
@@ -3302,6 +3288,7 @@ mod tests {
             host_transport: transport,
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
+            forwards: Default::default(),
         }
     }
 
