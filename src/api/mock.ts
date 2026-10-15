@@ -173,13 +173,16 @@ function loadDb(): MockDb {
       }
       // Backfill host ownership, which every record gained at once: whatever
       // was stored before the field existed can only belong to 本机.
+      // A preview stored before remote hosts existed knows only 本机; it gains
+      // the sample remote machine once, so host-aware pages have two to show.
+      // A stored db that already carries a host list is left as it is: the
+      // sample machine must not come back after the user deletes it.
+      const storedHosts = Array.isArray(db.hosts)
       db.hosts = db.hosts ?? [localHost()]
       for (const h of db.homes) h.host_id = h.host_id ?? LOCAL_HOST_ID
       for (const v of db.versions) v.host_id = v.host_id ?? LOCAL_HOST_ID
       for (const i of db.instances) i.host_id = i.host_id ?? LOCAL_HOST_ID
-      // A preview stored before remote hosts existed knows only 本机; it gains
-      // the sample remote machine once, so host-aware pages have two to show.
-      if (!db.hosts.some((h) => !h.builtin)) db.hosts.push(remoteHost())
+      if (!storedHosts) db.hosts.push(remoteHost())
       return db
     }
   } catch {

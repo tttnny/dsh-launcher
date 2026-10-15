@@ -321,6 +321,49 @@ export const useLauncherStore = defineStore('launcher', {
       this.allHosts = value
     },
 
+    /**
+     * Replaces the host list the Library's picker and the board's filter read.
+     * Editing hosts belongs to the Settings page; this is how an add, a rename
+     * or a delete reaches the pages that use them — including the fall back
+     * when the host that went away is the current one.
+     */
+    setHosts(hosts: HostWithStatus[]) {
+      let currentWentStale = false
+      let hostListChanged = hosts.length !== this.hosts.length
+      for (const host of hosts) {
+        const before = this.hosts.find((h) => h.id === host.id)
+        if (!before) {
+          // A machine the launcher had not listed before.
+          hostListChanged = true
+          continue
+        }
+        // Anything that decides what that machine answers — where it is, where
+        // its data lives, which registry it lists from — makes the cached
+        // answers worthless: keeping them would present them as current.
+        const changed =
+          before.ssh_target !== host.ssh_target ||
+          before.data_dir !== host.data_dir ||
+          before.registry !== host.registry
+        if (!changed) continue
+        delete this.versionsByHost[host.id]
+        delete this.remoteVersionsByHost[host.id]
+        delete this.hostErrors[host.id]
+        delete this.remoteErrors[host.id]
+        if (host.id === this.currentHostId) currentWentStale = true
+      }
+      this.hosts = hosts
+      if (!hosts.some((h) => h.id === this.currentHostId)) {
+        // The current host was deleted. 本机 is the one machine that is always
+        // there, and every page can show it.
+        this.currentHostId = hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
+        currentWentStale = true
+      }
+      if (currentWentStale) void this.loadHostResources(this.currentHostId)
+      // Deleting a host takes its instance records with it: a board that kept
+      // the rows would offer actions on records the launcher no longer has.
+      if (hostListChanged) void this.refreshInstances()
+    },
+
     async refreshInstances() {
       this.instances = await api.listInstances(null, true)
     },
