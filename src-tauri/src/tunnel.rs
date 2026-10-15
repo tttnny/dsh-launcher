@@ -369,11 +369,11 @@ mod tests {
         assert_ne!(forward.local_port, port, "本机这个端口已经被占了");
         assert_eq!(local, instance_url(forward.local_port));
         assert!(
-            !TcpStream::connect_timeout(
+            TcpStream::connect_timeout(
                 &SocketAddr::from(([127, 0, 0, 1], forward.local_port)),
                 PROBE_TIMEOUT
             )
-            .is_ok(),
+            .is_err(),
             "落到的端口是空闲的"
         );
         drop(taken);
@@ -481,6 +481,35 @@ mod tests {
         fake.answering(FakeAnswer::Done);
         reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
         assert_eq!(asked(&fake).len(), 4);
+    }
+
+    /// The exit path is not an async context, so it goes through the blocking
+    /// bridge — and that bridge withdraws the same thing, so quitting the
+    /// launcher does not leave a port held on this Mac.
+    #[test]
+    fn the_exit_path_withdraws_what_the_session_opened() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = FakeTransport::new().answering(FakeAnswer::Done);
+        let state = app_state(fake.clone());
+        let host = host("host-a", TARGET);
+        runtime
+            .block_on(reachable_url(
+                &state,
+                &host,
+                &instance_url(free_local_port()),
+            ))
+            .unwrap();
+        fake.answering(FakeAnswer::Done).answering(FakeAnswer::Done);
+
+        close_all_blocking(&state);
+
+        let (forwards, connections) = withdrawn(&fake);
+        assert_eq!(forwards.len(), 1, "每条转发都要撤掉");
+        assert_eq!(connections.len(), 1, "连接也要关掉");
+        assert!(state.forwards.open.blocking_lock().is_empty());
     }
 
     /// The first failure the user can hit. It has to name the machine's own
