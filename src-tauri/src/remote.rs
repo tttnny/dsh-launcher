@@ -284,6 +284,22 @@ pub struct TailChunk {
     pub alive: bool,
 }
 
+/// How much longer than the wait it asks for one remote call may take: the ssh
+/// connection (which may spend [`crate::ssh`'s connect timeout on a machine
+/// that is slow to answer), an interactive login shell starting, the work over
+/// there, and the answer coming back.
+const WAIT_OVERHEAD_SECS: u64 = 30;
+
+/// The budget for a call whose script waits `wait_secs` **on that machine**.
+///
+/// A call that runs out of time has to mean the launcher could not hear back,
+/// not that a quiet install plus a loaded server happened to exceed a budget
+/// chosen somewhere else — that mistake turned a late log read into 「安装失败」
+/// and threw away a version that had just finished (issue #14 验收).
+fn budget_for(wait_secs: u64) -> Duration {
+    Duration::from_secs(wait_secs + WAIT_OVERHEAD_SECS)
+}
+
 /// Reads a remote log from `offset`, waiting **on that machine** for output, for
 /// the process to go, or for the budget, whichever comes first.
 pub async fn tail(
@@ -301,7 +317,7 @@ pub async fn tail(
         alive: bool,
     }
     let script = tail_script(log_path, offset, pid, wait_secs);
-    let out = transport.run(host, RemoteCall::within(script, DEFAULT_TIMEOUT)).await?;
+    let out = transport.run(host, RemoteCall::within(script, budget_for(wait_secs))).await?;
     let chunk: Chunk = parse_marked(&out)?;
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -379,7 +395,7 @@ pub async fn wait_gone(
     let out = transport
         .run(
             host,
-            RemoteCall::within(wait_gone_script(pid, wait_secs), DEFAULT_TIMEOUT),
+            RemoteCall::within(wait_gone_script(pid, wait_secs), budget_for(wait_secs)),
         )
         .await?;
     Ok(parse_marked::<Answer>(&out)?.gone)

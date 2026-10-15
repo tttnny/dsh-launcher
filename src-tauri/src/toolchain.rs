@@ -10,7 +10,7 @@
 
 use crate::AppState;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, State};
+use tauri::State;
 
 /// Lowest pnpm major the launcher drives installs with.
 ///
@@ -263,8 +263,8 @@ pub(crate) fn pnpm_missing_error() -> String {
 /// installed pnpm was not used. A pnpm the user picked by hand on the setup
 /// page is the one this drives, so version installs and source builds run the
 /// same binary the page reports.
-pub(crate) async fn ensure_pnpm_for_task(
-    app: &AppHandle,
+pub(crate) async fn ensure_pnpm_for_task<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
@@ -309,8 +309,8 @@ pub(crate) async fn ensure_pnpm_for_task(
 /// A machine without a pnpm the launcher can drive fails with the command that
 /// installs one **there** (reusing the page's own recipe), because the launcher
 /// never installs Node or pnpm on another computer by itself.
-pub(crate) async fn ensure_pnpm_for_task_on(
-    app: &AppHandle,
+pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     host_id: Option<&str>,

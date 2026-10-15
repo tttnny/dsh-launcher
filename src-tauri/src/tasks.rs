@@ -25,6 +25,17 @@ const REMOTE_TAIL_WAIT_SECS: u64 = 10;
 const REMOTE_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const REMOTE_STOP_TICK: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How many times a log read that ran out of time is asked again before the
+/// launcher gives up on hearing back, and how long it waits in between.
+///
+/// A read that runs out of time is about the launcher's connection, not the
+/// install: the command is detached and keeps writing its log the whole time, so
+/// asking again reads everything that happened meanwhile and costs nothing but
+/// the wait. Three timeouts in a row (a call that already has the wait it asked
+/// for plus a generous overhead) is a machine the launcher has lost touch with.
+const MAX_FOLLOW_TIMEOUTS: u32 = 2;
+const FOLLOW_TIMEOUT_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
@@ -750,7 +761,12 @@ fn rand_port_offset() -> u16 {
     (nanos % 30000) as u16
 }
 
-pub(crate) async fn push_task_log(app: &AppHandle, state: &State<'_, AppState>, task_id: &str, line: &str) {
+pub(crate) async fn push_task_log<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &State<'_, AppState>,
+    task_id: &str,
+    line: &str,
+) {
     let mut tasks = state.tasks.lock().await;
     if let Some(task) = tasks.get_mut(task_id) {
         // Cap the retained log (mirrors stream_pipe's MAX_LOG_LINES).
@@ -788,8 +804,8 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
 /// machine the version belongs to, and another machine has its own install
 /// ([`install_version_remote`]) — with the same shape, and not one local
 /// filesystem call in it.
-async fn install_version_streamed(
-    app: &AppHandle,
+async fn install_version_streamed<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     host: &Host,
@@ -823,10 +839,10 @@ async fn install_version_streamed(
 
     // pnpm (>=10) ignores dependency build scripts by default, which would
     // skip native modules like node-pty / koffi. A workspace manifest inside
-    // the install dir opts back into running all build scripts; on pnpm 11
-    // this also carries the `allowBuilds` section (see
-    // crate::plugins::ensure_build_scripts_allowed).
-    crate::plugins::ensure_build_scripts_allowed(&dir)?;
+    // the install dir opts back into running all build scripts — with the
+    // packages pnpm reports if it turns out this pnpm only accepts names
+    // (see [`BuildApprovals`]).
+    crate::plugins::ensure_build_scripts_allowed(&dir, &[])?;
 
     // Make sure a pnpm executable is available before installing: use the
     // system one if present, otherwise bootstrap the latest pnpm into the
@@ -922,8 +938,8 @@ pub(crate) fn install_layout(
 /// data directory and every command run there. Nothing in here touches this
 /// Mac's filesystem: the version directory, the pnpm store and the logs are all
 /// on the machine that owns them (ADR-0006).
-async fn install_version_remote(
-    app: &AppHandle,
+async fn install_version_remote<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     host: &Host,
@@ -951,7 +967,7 @@ async fn install_version_remote(
     .await
     .map_err(|e| e.to_string())?;
 
-    let result = if on_npm {
+    let result: Result<(), RemoteStepFailure> = if on_npm {
         install_remote_from_npm(app, state, task_id, &target, &layout, &pnpm, version).await
     } else {
         push_task_log(
@@ -963,17 +979,33 @@ async fn install_version_remote(
             ),
         )
         .await;
-        install_remote_from_source(app, state, task_id, &target, &layout, &pnpm, version).await
+        install_remote_from_source(app, state, task_id, &target, &layout, &pnpm, version)
+            .await
+            .map_err(RemoteStepFailure::failed)
     };
 
-    if result.is_err() && on_npm {
+    if let Err(e) = &result {
         // The local rule, applied where the directory actually is: an
         // unfinished npm tree makes a retry's semantics unclear, and the
         // version is not registered yet so nothing can reference it.
-        remove_remote_dir(state, &target, &layout.dir, &layout.data_dir).await;
-        push_task_log(app, state, task_id, "已清理未完成的版本目录").await;
+        //
+        // A tree the launcher could not **hear about** is not that: the install
+        // may be running there right now, and deleting its directory is how a
+        // version that had just finished was thrown away (issue #14 验收).
+        if on_npm && e.discardable() {
+            remove_remote_dir(state, &target, &layout.dir, &layout.data_dir).await;
+            push_task_log(app, state, task_id, "已清理未完成的版本目录").await;
+        } else if on_npm {
+            push_task_log(
+                app,
+                state,
+                task_id,
+                "版本目录保持原样：没能读到那台机器上的安装日志，那里可能还在安装。",
+            )
+            .await;
+        }
     }
-    result?;
+    result.map_err(RemoteStepFailure::message)?;
 
     register_version(state, version, layout.dir, &host.id)
 }
@@ -983,25 +1015,34 @@ async fn install_version_remote(
 /// machine's pnpm store and version directory are cleared — the store is a pure
 /// cache, and one interrupted download can leave entries that fail **every**
 /// later install with integrity errors (see [`install_via_pnpm`]).
-async fn install_remote_from_npm(
-    app: &AppHandle,
+async fn install_remote_from_npm<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     target: &crate::ssh::RemoteHost,
     layout: &InstallLayout,
     pnpm: &Path,
     version: &str,
-) -> Result<(), String> {
+) -> Result<(), RemoteStepFailure> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt: u32 = 1;
+    // Every round writes its own log file: the machine **appends** to the one it
+    // is given, and a follower that started at the top of a previous round's log
+    // would read that round's exit status and call this one finished before it
+    // had begun.
+    let mut round: u32 = 0;
+    let mut approvals = BuildApprovals::default();
     loop {
+        round += 1;
         // The workspace manifest that opts pnpm back into dependency build
         // scripts is written before the install, exactly as it is locally —
         // over the transport, because it lives in the version directory there.
-        ensure_remote_build_scripts_allowed(state, target, &layout.dir).await?;
+        ensure_remote_build_scripts_allowed(state, target, &layout.dir, approvals.approved())
+            .await
+            .map_err(RemoteStepFailure::failed)?;
 
         let argv = remote_npm_install_argv(pnpm, layout, version);
-        let log_path = remote_step_log_path(&layout.data_dir, task_id, &format!("npm-{attempt}"));
+        let log_path = remote_step_log_path(&layout.data_dir, task_id, &format!("npm-{round}"));
 
         let outcome = match run_remote_streamed(
             app,
@@ -1023,33 +1064,55 @@ async fn install_remote_from_npm(
         // `None` is a command that was killed before it could record how it
         // exited: the log then carries the only evidence there is.
         let failed_code = match outcome {
-            RemoteCommandOutcome::Cancelled => return Err("任务已取消".to_string()),
+            RemoteCommandOutcome::Cancelled => {
+                return Err(RemoteStepFailure::failed("任务已取消"));
+            }
             RemoteCommandOutcome::Exited(0) => break,
             RemoteCommandOutcome::Exited(code) => Some(code),
             RemoteCommandOutcome::Killed => None,
         };
 
-        // pnpm 11 blocks dependency build scripts unless every package with an
-        // install script is listed under `allowBuilds`. On the first attempt it
-        // writes a `set this to true or false` placeholder into
-        // pnpm-workspace.yaml and fails with ERR_PNPM_IGNORED_BUILDS; the
-        // rewrite at the top of the next round converts that placeholder to
-        // `true`, so one retry has native deps (node-pty, koffi, …) build.
-        if attempt == 1 && mentions_ignored_builds(&logs) {
-            push_task_log(
-                app,
-                state,
-                task_id,
-                "pnpm 11 拦截了构建脚本，正在批准 allowBuilds 后重试…",
-            )
-            .await;
-            continue;
+        // pnpm runs a dependency's build script only once it is approved, and
+        // the majors are approved differently: pnpm 11 leaves a `set this to
+        // true or false` placeholder in the version directory's manifest, which
+        // the top of the next round rewrites into an approval, while pnpm 12
+        // writes nothing and only reports the names — those names go into the
+        // manifest. Either way the approval is in place before the next round,
+        // and a refusal that comes back after it ends the install instead of
+        // repeating it forever.
+        if mentions_ignored_builds(&logs) {
+            match approvals.step(&logs) {
+                ApprovalStep::Approve(fresh) => {
+                    push_task_log(app, state, task_id, &approval_round_note(&fresh)).await;
+                    continue;
+                }
+                ApprovalStep::Rewrite => {
+                    push_task_log(
+                        app,
+                        state,
+                        task_id,
+                        "pnpm 拦截了构建脚本，正在批准 allowBuilds 后重试…",
+                    )
+                    .await;
+                    continue;
+                }
+                ApprovalStep::GiveUp => {
+                    return Err(RemoteStepFailure::failed(build_approval_failure(
+                        &approvals,
+                        &remote_install_failure(&logs, failed_code, &log_path),
+                    )));
+                }
+            }
         }
         if attempt >= MAX_ATTEMPTS {
-            return Err(remote_install_failure(&logs, failed_code, &log_path));
+            return Err(RemoteStepFailure::failed(remote_install_failure(
+                &logs,
+                failed_code,
+                &log_path,
+            )));
         }
         if !task_is_running(state, task_id).await {
-            return Err("任务已取消".to_string());
+            return Err(RemoteStepFailure::failed("任务已取消"));
         }
         if attempt + 1 == MAX_ATTEMPTS {
             push_task_log(
@@ -1083,8 +1146,8 @@ async fn install_remote_from_npm(
 /// version directory IS the checkout, so the CLI entry is
 /// `apps/cli/lib/bin.js`, the layout [`crate::launch::version_bin`] uses for a
 /// checkout.
-async fn install_remote_from_source(
-    app: &AppHandle,
+async fn install_remote_from_source<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     target: &crate::ssh::RemoteHost,
@@ -1130,7 +1193,9 @@ async fn install_remote_from_source(
         );
         let log_path = remote_step_log_path(&layout.data_dir, task_id, "clone");
         let outcome =
-            run_remote_streamed(app, state, task_id, target, &log_path, argv, "git clone").await?;
+            run_remote_streamed(app, state, task_id, target, &log_path, argv, "git clone")
+            .await
+            .map_err(RemoteStepFailure::message)?;
         let logs = task_logs(state, task_id).await;
         let code = outcome.status(&logs, &log_path)?;
         if code != 0 {
@@ -1159,13 +1224,16 @@ async fn install_remote_from_source(
     let log_path = remote_step_log_path(&layout.data_dir, task_id, "deps");
     let outcome =
         run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install（源码）")
-            .await?;
+            .await
+            .map_err(RemoteStepFailure::message)?;
     let logs = task_logs(state, task_id).await;
     let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
         return Err(remote_install_failure(&logs, Some(code), &log_path));
     }
-    ensure_remote_pending_builds(app, state, task_id, target, layout, pnpm).await?;
+    ensure_remote_pending_builds(app, state, task_id, target, layout, pnpm)
+        .await
+        .map_err(RemoteStepFailure::message)?;
 
     // 3. Build. Per the upstream README, `pnpm run build` prepares every
     //    repository artifact; `pnpm dsh web` then runs without rebuilding.
@@ -1176,7 +1244,9 @@ async fn install_remote_from_source(
     );
     let log_path = remote_step_log_path(&layout.data_dir, task_id, "build");
     let outcome =
-        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build").await?;
+        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build")
+            .await
+            .map_err(RemoteStepFailure::message)?;
     let logs = task_logs(state, task_id).await;
     let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
@@ -1206,14 +1276,14 @@ async fn install_remote_from_source(
 /// 0.1.3-alpha.2) and DSH fails to boot with an opaque MODULE_NOT_FOUND, so
 /// `pnpm rebuild` runs there and a tree still incomplete afterwards is refused
 /// instead of registered.
-async fn ensure_remote_pending_builds(
-    app: &AppHandle,
+async fn ensure_remote_pending_builds<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     target: &crate::ssh::RemoteHost,
     layout: &InstallLayout,
     pnpm: &Path,
-) -> Result<(), String> {
+) -> Result<(), RemoteStepFailure> {
     let modules = layout.dir.join("node_modules").join(".modules.yaml");
     let path = modules.to_string_lossy().to_string();
     let mut pending = remote_pending_builds(state, target, &path).await;
@@ -1239,17 +1309,23 @@ async fn ensure_remote_pending_builds(
     let outcome =
         run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm rebuild").await?;
     let logs = task_logs(state, task_id).await;
-    let code = outcome.status(&logs, &log_path)?;
+    let code = outcome
+        .status(&logs, &log_path)
+        .map_err(RemoteStepFailure::failed)?;
     if code != 0 {
-        return Err(remote_install_failure(&logs, Some(code), &log_path));
+        return Err(RemoteStepFailure::failed(remote_install_failure(
+            &logs,
+            Some(code),
+            &log_path,
+        )));
     }
     pending = remote_pending_builds(state, target, &path).await;
     if !pending.is_empty() {
         let shown = pending.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
-        return Err(format!(
+        return Err(RemoteStepFailure::failed(format!(
             "pnpm rebuild 后仍有 {} 个依赖未完成构建: {shown}",
             pending.len()
-        ));
+        )));
     }
     push_task_log(app, state, task_id, "依赖构建脚本补建完成").await;
     Ok(())
@@ -1350,6 +1426,49 @@ fn remote_step_log_path(data_dir: &Path, task_id: &str, step: &str) -> String {
         .to_string()
 }
 
+/// Why one remote step of an install ended without saying how it went, and what
+/// that means for the tree it was working on.
+///
+/// The distinction is the whole point: an install that **failed** leaves a
+/// half-written tree that nothing can register, while one whose log the launcher
+/// could not read has left no evidence of anything at all — that machine may
+/// still be installing, and deleting its tree is how a version that had just
+/// finished was thrown away (`a_follow_that_times_out_after_the_install_finished…`,
+/// issue #14 验收).
+#[derive(Debug)]
+struct RemoteStepFailure {
+    message: String,
+    /// The launcher lost the log rather than the command failing.
+    log_lost: bool,
+}
+
+impl RemoteStepFailure {
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            log_lost: false,
+        }
+    }
+
+    /// The launcher could not read a log that machine is (or may be) still
+    /// writing.
+    fn log_lost(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            log_lost: true,
+        }
+    }
+
+    fn message(self) -> String {
+        self.message
+    }
+
+    /// Whether the tree on that machine is the launcher's to delete.
+    fn discardable(&self) -> bool {
+        !self.log_lost
+    }
+}
+
 /// What became of one remote command the launcher started.
 ///
 /// There are three endings, not two: a command that finished (and recorded how),
@@ -1385,15 +1504,15 @@ impl RemoteCommandOutcome {
 ///
 /// `Err` is the transport's failure — the launcher could not start the command
 /// or could not read its log. How the command itself ended is the `Ok` value.
-async fn run_remote_streamed(
-    app: &AppHandle,
+async fn run_remote_streamed<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     target: &crate::ssh::RemoteHost,
     log_path: &str,
     argv: Vec<String>,
     what: &str,
-) -> Result<RemoteCommandOutcome, String> {
+) -> Result<RemoteCommandOutcome, RemoteStepFailure> {
     // A cancelled task starts nothing. The click can land between two of this
     // task's commands — during the pause before a retry, say — and a command
     // started after it would be one nobody is waiting for, on a machine the user
@@ -1409,7 +1528,15 @@ async fn run_remote_streamed(
     let transport = state.host_transport.clone();
     let run = spawn_remote_run(state, target, &argv, log_path)
         .await
-        .map_err(|e| format!("{what} 启动失败：{e}"))?;
+        .map_err(|e| match e.kind {
+            // The command may have started before the call ran out of time, and
+            // a tree somebody may be writing into is not the launcher's to
+            // delete — the same rule the follow below follows.
+            crate::ssh::HostErrorKind::Timeout => RemoteStepFailure::log_lost(format!(
+                "{what} 启动失败：{e}。没能确认那条命令在那台机器上有没有起来。"
+            )),
+            _ => RemoteStepFailure::failed(format!("{what} 启动失败：{e}")),
+        })?;
     {
         let mut tasks = state.tasks.lock().await;
         if let Some(task) = tasks.get_mut(task_id) {
@@ -1425,20 +1552,21 @@ async fn run_remote_streamed(
 
 /// Reads a remote command's log until it says how it ended: the wrapper's exit
 /// status line, or the process being gone without one.
-async fn follow_remote_log(
-    app: &AppHandle,
+async fn follow_remote_log<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     transport: &Arc<dyn crate::ssh::HostTransport>,
     run: &RemoteRun,
     log_path: &str,
     what: &str,
-) -> Result<RemoteCommandOutcome, String> {
+) -> Result<RemoteCommandOutcome, RemoteStepFailure> {
     let mut offset = 0u64;
     let mut pending = String::new();
     let mut status = None;
+    let mut timeouts: u32 = 0;
     loop {
-        let chunk = crate::remote::tail(
+        let chunk = match crate::remote::tail(
             &**transport,
             &run.host,
             log_path,
@@ -1447,7 +1575,28 @@ async fn follow_remote_log(
             REMOTE_TAIL_WAIT_SECS,
         )
         .await
-        .map_err(|e| format!("{what} 读取远端日志失败：{e}"))?;
+        {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                if e.kind == crate::ssh::HostErrorKind::Timeout && timeouts < MAX_FOLLOW_TIMEOUTS {
+                    timeouts += 1;
+                    push_task_log(
+                        app,
+                        state,
+                        task_id,
+                        &format!("{what} 读取日志超时（{e}），正在重新读取…"),
+                    )
+                    .await;
+                    tokio::time::sleep(FOLLOW_TIMEOUT_PAUSE).await;
+                    continue;
+                }
+                // The command is detached: it may be running there right now,
+                // and a log the launcher cannot read is no evidence about it.
+                return Err(RemoteStepFailure::log_lost(format!(
+                    "{what} 读取远端日志失败：{e}。读不到日志不等于命令失败：那台机器上它可能还在跑。"
+                )));
+            }
+        };
         offset = chunk.offset;
         pending.push_str(&chunk.text);
         status = status.or(drain_log_lines(app, state, task_id, &mut pending).await);
@@ -1461,7 +1610,11 @@ async fn follow_remote_log(
             // gone. One read with no wait, and whatever is there is all there is.
             let last = crate::remote::tail(&**transport, &run.host, log_path, offset, run.pid, 0)
                 .await
-                .map_err(|e| format!("{what} 读取远端日志失败：{e}"))?;
+                .map_err(|e| {
+                    RemoteStepFailure::log_lost(format!(
+                        "{what} 读取远端日志失败：{e}。读不到日志不等于命令失败：那台机器上它可能还在跑。"
+                    ))
+                })?;
             pending.push_str(&last.text);
             let status = status.or(drain_log_lines(app, state, task_id, &mut pending).await);
             return Ok(match status {
@@ -1491,8 +1644,8 @@ async fn clear_remote_run(state: &State<'_, AppState>, task_id: &str) {
 /// Splits newly read log text into whole lines, logging each one: a chunk can
 /// end mid-line, and half a line is not something anyone can read. Returns the
 /// exit status if the wrapper's status line was among them.
-async fn drain_log_lines(
-    app: &AppHandle,
+async fn drain_log_lines<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     pending: &mut String,
@@ -1517,6 +1670,7 @@ async fn ensure_remote_build_scripts_allowed(
     state: &State<'_, AppState>,
     target: &crate::ssh::RemoteHost,
     dir: &Path,
+    approve: &[String],
 ) -> Result<(), String> {
     let manifest = dir.join("pnpm-workspace.yaml");
     let path = manifest.to_string_lossy().to_string();
@@ -1526,7 +1680,7 @@ async fn ensure_remote_build_scripts_allowed(
         .await
         .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
         .unwrap_or_default();
-    let Some(document) = crate::plugins::build_scripts_manifest(&raw) else {
+    let Some(document) = crate::plugins::build_scripts_manifest(&raw, approve) else {
         return Ok(());
     };
     state
@@ -1791,11 +1945,137 @@ fn mentions_ignored_builds(logs: &[String]) -> bool {
     })
 }
 
+/// How many rounds one install may spend on build-script approvals: one for the
+/// names pnpm reported, one for the refusal pnpm recorded in the manifest
+/// itself. A refusal that comes back after both is a mechanism the launcher does
+/// not know, and no number of further rounds changes its answer.
+const MAX_APPROVAL_ROUNDS: u32 = 2;
+
+/// The build-script approvals an install has written into the version
+/// directory's `pnpm-workspace.yaml`, and what a failed round asks for next.
+///
+/// Both install paths carry one — this Mac's and another machine's — so a
+/// refusal is answered the same way wherever it happens and, above all, answered
+/// **finitely**: the approved names only ever grow, a round is spent on every
+/// answer that could change the outcome, and the refusal that meets an answer it
+/// has already been given ends the install with a reason instead of another
+/// round (issue #14 验收).
+#[derive(Default)]
+struct BuildApprovals {
+    approved: Vec<String>,
+    rounds: u32,
+}
+
+/// What one failed round asks the install to do next.
+enum ApprovalStep {
+    /// Write these names into the manifest and install again.
+    Approve(Vec<String>),
+    /// Install again unchanged: pnpm 11 records its refusal inside the manifest
+    /// itself (`node-pty: set this to true or false`), which the next round's
+    /// rewrite turns into an approval.
+    Rewrite,
+    /// Nothing left to try.
+    GiveUp,
+}
+
+impl BuildApprovals {
+    fn approved(&self) -> &[String] {
+        &self.approved
+    }
+
+    fn step(&mut self, logs: &[String]) -> ApprovalStep {
+        if self.rounds >= MAX_APPROVAL_ROUNDS {
+            return ApprovalStep::GiveUp;
+        }
+        self.rounds += 1;
+        let fresh: Vec<String> = ignored_build_packages(logs)
+            .into_iter()
+            .filter(|name| !self.approved.contains(name))
+            .collect();
+        if fresh.is_empty() {
+            return ApprovalStep::Rewrite;
+        }
+        self.approved.extend(fresh.clone());
+        ApprovalStep::Approve(fresh)
+    }
+}
+
+/// What the page is told when pnpm's own report is turned into approvals.
+fn approval_round_note(names: &[String]) -> String {
+    format!(
+        "pnpm 拒绝运行 {} 个依赖的构建脚本（{}），已按它报出的包名写进 allowBuilds，正在重试…",
+        names.len(),
+        names.join("、")
+    )
+}
+
+/// What the page is told when the approvals ran out: which packages were
+/// approved, how many rounds were spent on it, and whatever the round failed
+/// for on top of that. The logs of the last round carry the rest.
+fn build_approval_failure(approvals: &BuildApprovals, reason: &str) -> String {
+    let names = approvals
+        .approved
+        .iter()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    let approved = if names.is_empty() {
+        "（pnpm 没有报出任何包名）".to_string()
+    } else {
+        format!("（{names}）")
+    };
+    format!(
+        "pnpm 仍然拒绝运行依赖的构建脚本：已经把它报出的包名{approved}写进 allowBuilds 并重试过 {} 轮，还是同样的错误。\
+         这个版本的 pnpm 用了启动器还不认识的批准方式，装不成这个版本。{reason}",
+        approvals.rounds
+    )
+}
+
+/// The package names pnpm reported as refused, in the order it printed them.
+///
+/// Both majors name them in the same line — `Ignored build scripts:
+/// koffi@3.1.1, node-pty@1.2.0-beta.15` — wrapped over as many lines as the
+/// list needs, so the list is read from that line until one that no longer ends
+/// in a comma. They are the only approval pnpm 12 accepts: it has no wildcard,
+/// and the launcher may not guess a name it did not print.
+fn ignored_build_packages(logs: &[String]) -> Vec<String> {
+    const MARK: &str = "Ignored build scripts:";
+    let Some(at) = logs.iter().position(|line| line.contains(MARK)) else {
+        return Vec::new();
+    };
+    let mut list = logs[at][logs[at].find(MARK).unwrap() + MARK.len()..]
+        .trim()
+        .to_string();
+    for line in &logs[at + 1..] {
+        if !list.ends_with(',') {
+            break;
+        }
+        list.push(' ');
+        list.push_str(line.trim());
+    }
+    list.split(',').filter_map(build_package_name).collect()
+}
+
+/// One `name@version` entry of that list as just its name: the version pnpm
+/// reported is not part of an approval, and a scoped name's own `@` is not a
+/// version separator.
+fn build_package_name(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    match entry.rfind('@') {
+        Some(at) if at > 0 => Some(entry[..at].to_string()),
+        _ => Some(entry.to_string()),
+    }
+}
+
 /// The pnpm install + native-build completion phase of an npm version
 /// install. Split out of `install_version_streamed` so its failure cleanup
 /// covers every error path uniformly.
-async fn install_via_pnpm(
-    app: &AppHandle,
+async fn install_via_pnpm<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     dir: &std::path::Path,
@@ -1811,7 +2091,13 @@ async fn install_via_pnpm(
     // the only reliable recovery for that state.
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt: u32 = 1;
+    let mut approvals = BuildApprovals::default();
     loop {
+        // Written every round, because the rounds answer different refusals:
+        // the names pnpm reported, or pnpm's own placeholders from the round
+        // before (see [`BuildApprovals`]).
+        crate::plugins::ensure_build_scripts_allowed(dir, approvals.approved())?;
+
         let mut cmd = tokio::process::Command::new(pnpm_prog);
         crate::process::hide_console(&mut cmd);
         // Network robustness: the default fetch timeout (60s) and retries (2)
@@ -1835,22 +2121,32 @@ async fn install_via_pnpm(
         match run_streamed_command(app, state, task_id, cmd, "pnpm install").await {
             Ok(()) => break,
             Err(e) => {
-                // pnpm 11 blocks dependency build scripts unless every package
-                // with an install script is listed under `allowBuilds`. On the
-                // first attempt it writes a `set this to true or false`
-                // placeholder into pnpm-workspace.yaml and fails with
-                // ERR_PNPM_IGNORED_BUILDS; convert that placeholder to `true`
-                // and retry once so native deps (node-pty, koffi, …) build.
-                if attempt == 1 && task_log_mentions_ignored_builds(state, task_id) {
-                    push_task_log(
-                        app,
-                        state,
-                        task_id,
-                        "pnpm 11 拦截了构建脚本，正在批准 allowBuilds 后重试…",
-                    )
-                    .await;
-                    crate::plugins::ensure_build_scripts_allowed(dir)?;
-                    continue;
+                // A refused build script is the one failure that has an answer
+                // the launcher can write down: the names pnpm reported, or the
+                // placeholder pnpm left in the manifest itself. Both are the
+                // next round's manifest, and neither may repeat.
+                let logs = task_logs(state, task_id).await;
+                if mentions_ignored_builds(&logs) {
+                    match approvals.step(&logs) {
+                        ApprovalStep::Approve(fresh) => {
+                            push_task_log(app, state, task_id, &approval_round_note(&fresh))
+                                .await;
+                            continue;
+                        }
+                        ApprovalStep::Rewrite => {
+                            push_task_log(
+                                app,
+                                state,
+                                task_id,
+                                "pnpm 拦截了构建脚本，正在批准 allowBuilds 后重试…",
+                            )
+                            .await;
+                            continue;
+                        }
+                        ApprovalStep::GiveUp => {
+                            return Err(build_approval_failure(&approvals, &e));
+                        }
+                    }
                 }
                 if attempt >= MAX_ATTEMPTS {
                     return Err(e);
@@ -1874,7 +2170,6 @@ async fn install_via_pnpm(
                     }
                     std::fs::create_dir_all(dir)
                         .map_err(|e| format!("创建版本目录失败: {e}"))?;
-                    crate::plugins::ensure_build_scripts_allowed(dir)?;
                 } else {
                     push_task_log(
                         app,
@@ -1898,8 +2193,8 @@ async fn install_via_pnpm(
 /// missing compiled native addons (fs-ext since dsh 0.1.3-alpha.2) and DSH
 /// fails to boot with an opaque MODULE_NOT_FOUND, so a half-built version is
 /// refused instead of registered.
-async fn ensure_pending_builds(
-    app: &AppHandle,
+async fn ensure_pending_builds<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     dir: &std::path::Path,
@@ -2005,8 +2300,8 @@ async fn github_tag_exists(version: &str) -> Result<bool, String> {
 /// IS the checkout, so the CLI entry is `apps/cli/lib/bin.js` (see
 /// `crate::process::version_bin`). This takes much longer than an npm
 /// install: a full monorepo dependency install plus a full build.
-async fn install_version_from_repo(
-    app: &AppHandle,
+async fn install_version_from_repo<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     version: &str,
@@ -2116,16 +2411,6 @@ fn parse_pending_builds(raw: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether the task's streamed log mentions pnpm's ignored-build-scripts
-/// failure (ERR_PNPM_IGNORED_BUILDS / "Ignored build scripts").
-fn task_log_mentions_ignored_builds(state: &State<'_, AppState>, task_id: &str) -> bool {
-    let tasks = state.tasks.try_lock().map(|t| t.clone()).ok();
-    tasks
-        .and_then(|t| t.get(task_id).map(|t| t.logs.clone()))
-        .map(|logs| mentions_ignored_builds(&logs))
-        .unwrap_or(false)
-}
-
 // ---------------------------------------------------------------------------
 
 enum StreamPipe {
@@ -2146,7 +2431,7 @@ impl tokio::io::AsyncRead for StreamPipe {
     }
 }
 
-async fn stream_pipe(app: AppHandle, task_id: String, pipe: StreamPipe) {
+async fn stream_pipe<R: tauri::Runtime>(app: tauri::AppHandle<R>, task_id: String, pipe: StreamPipe) {
     let state = app.state::<AppState>();
     let mut lines = BufReader::new(pipe).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -2185,8 +2470,8 @@ pub(crate) fn push_log_locked(task: &mut TaskInfo, line: &str) {
     task.logs.push(line.to_string());
 }
 
-pub(crate) fn emit_progress(
-    app: &AppHandle,
+pub(crate) fn emit_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     id: &str,
     state: TaskState,
     percent: u32,
@@ -2205,7 +2490,7 @@ pub(crate) fn emit_progress(
     );
 }
 
-fn emit_log(app: &AppHandle, id: &str, line: &str) {
+fn emit_log<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str, line: &str) {
     let _ = app.emit(
         TASK_LOG_EVENT,
         TaskLog {
@@ -2218,8 +2503,8 @@ fn emit_log(app: &AppHandle, id: &str, line: &str) {
 /// Runs a piped child command as a task: streams stdout/stderr into the task
 /// log, exposes the child for cancellation, and nudges the percent upward
 /// while it runs. Returns Err when the command fails or is cancelled.
-pub(crate) async fn run_streamed_command(
-    app: &AppHandle,
+pub(crate) async fn run_streamed_command<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     mut cmd: tokio::process::Command,
@@ -2572,6 +2857,433 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
             forwards: Default::default(),
         }
+    }
+
+    /// A windowless app to hand the install paths: they report what they do
+    /// through an `AppHandle`, and macOS can only build a real one on the main
+    /// thread — which a test thread is not.
+    fn install_app(state: AppState) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        app
+    }
+
+    /// The task record a running install leaves behind, so the lines it reports
+    /// have somewhere to land.
+    async fn running_install_task(app: &tauri::App<tauri::test::MockRuntime>, id: &str) {
+        let state = app.state::<AppState>();
+        let mut tasks = state.tasks.lock().await;
+        tasks.insert(
+            id.to_string(),
+            TaskInfo {
+                id: id.to_string(),
+                kind: "install-version".to_string(),
+                label: "下载 DSH 并创建实例".to_string(),
+                version: "0.1.0-rc.6".to_string(),
+                host_id: "host-lab".to_string(),
+                state: TaskState::Running,
+                percent: 0,
+                created_at: now_millis(),
+                message: None,
+                instance_id: None,
+                instance_name: None,
+                reserved_home_path: None,
+                logs: Vec::new(),
+                child: None,
+                remote: None,
+            },
+        );
+    }
+
+    /// What pnpm 12 prints when it refuses to run a dependency's build script,
+    /// followed by the wrapper's exit line — the shape a task log holds after
+    /// one failed attempt.
+    const IGNORED_BUILDS_LOG: &str = "Progress: resolved 531, reused 0, downloaded 534, added 531, done\n\
+Error: ERR_PNPM_IGNORED_BUILDS\n  \u{00d7} adding a new package\n  \
+\u{2570}\u{2500}\u{25b6} Ignored build scripts: @deepseek-ai/dsh-subprocess-local@0.2.0-rc.2,\n      \
+@google/genai@2.21.0, koffi@3.1.1, node-pty@1.2.0-beta.15,\n      protobufjs@7.6.6\n  \
+help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n        to run scripts.\n\
+<<<DSH-EXIT>>>1<<<DSH-END>>>\n";
+
+    /// What one round of a remote install costs the fake, in order: read the
+    /// workspace manifest, write it back, start the install, read its log.
+    fn answer_one_install_round(fake: &Arc<FakeTransport>, log: &str) {
+        fake.answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::RemoteCommand,
+            "cat: 没有那个文件或目录",
+        ))
+        .answering(FakeAnswer::Done)
+        .answering(FakeAnswer::Pid(4242))
+        .answering(FakeAnswer::stdout(
+            crate::remote::testing::tail_stdout_after_exit(log, 0),
+        ));
+    }
+
+    /// pnpm 12 takes no wildcard: `onlyBuiltDependencies: ['*']` and an empty
+    /// `allowBuilds:` both leave every build script refused, and what it prints
+    /// in `Ignored build scripts: …` is the only list of names there is. An
+    /// install that keeps hearing the same refusal must end — with a failure
+    /// that says which packages it tried to approve, not with a progress bar
+    /// that never finishes (issue #14 验收).
+    #[tokio::test]
+    async fn a_remote_install_that_keeps_refusing_build_scripts_ends_in_a_failure() {
+        let fake = FakeTransport::new();
+        for _ in 0..8 {
+            answer_one_install_round(&fake, IGNORED_BUILDS_LOG);
+        }
+        let app = install_app(state_with(fake.clone()));
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+        let layout = install_layout(&remote_host(), Path::new("/launcher"), "0.1.0-rc.6").unwrap();
+
+        let outcome = install_remote_from_npm(
+            app.handle(),
+            &state,
+            "t-1",
+            &remote_target(),
+            &layout,
+            Path::new("/home/demo/.local/share/pnpm/pnpm"),
+            "0.1.0-rc.6",
+        )
+        .await;
+
+        let err = outcome.expect_err("同一份拒绝一直重试下去不是安装成功");
+        let starts = fake
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, FakeCall::Spawn(_)))
+            .count();
+        assert!(
+            starts <= 3,
+            "同一份拒绝不能被反复重试，一共起了 {starts} 次安装"
+        );
+        assert!(
+            err.discardable(),
+            "这是安装自己的失败，那半棵树可以清掉：{err:?}"
+        );
+        let said = err.message();
+        assert!(
+            said.contains("构建脚本"),
+            "失败要说清是构建脚本批准这一步：{said}"
+        );
+        assert!(said.contains("koffi"), "理由要点出 pnpm 报出的包名：{said}");
+        assert!(said.contains("allowBuilds"), "要说清试过什么办法：{said}");
+    }
+
+    /// The other half of the same contract: the names pnpm reported end up in
+    /// the version directory's manifest, and the round after that one installs.
+    /// `allowBuilds:` empty (what the launcher used to write) approves nothing
+    /// on pnpm 12.
+    #[tokio::test]
+    async fn a_remote_install_approves_the_packages_that_machine_reported() {
+        let fake = FakeTransport::new();
+        answer_one_install_round(&fake, IGNORED_BUILDS_LOG);
+        answer_one_install_round(
+            &fake,
+            "Done in 30.9s using pnpm v12.11.2\n<<<DSH-EXIT>>>0<<<DSH-END>>>\n",
+        );
+        // The finished install's `.modules.yaml` read: nothing pending.
+        fake.answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::RemoteCommand,
+            "cat: 没有那个文件或目录",
+        ));
+        let app = install_app(state_with(fake.clone()));
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+        let layout = install_layout(&remote_host(), Path::new("/launcher"), "0.1.0-rc.6").unwrap();
+
+        let outcome = install_remote_from_npm(
+            app.handle(),
+            &state,
+            "t-1",
+            &remote_target(),
+            &layout,
+            Path::new("/home/demo/.local/share/pnpm/pnpm"),
+            "0.1.0-rc.6",
+        )
+        .await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+
+        let written: Vec<String> = fake
+            .calls()
+            .iter()
+            .filter_map(|call| match call {
+                FakeCall::WriteFile(path, bytes) if path.ends_with("pnpm-workspace.yaml") => {
+                    Some(String::from_utf8_lossy(bytes).to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written.len(), 2, "每一轮都要写出这一轮的清单：{written:?}");
+        let approved = written.last().unwrap();
+        assert!(approved.contains("  koffi: true"), "{approved}");
+        assert!(approved.contains("  node-pty: true"), "{approved}");
+        assert!(
+            approved.contains("\"@deepseek-ai/dsh-subprocess-local\": true"),
+            "{approved}"
+        );
+    }
+
+    /// A launcher state whose one other machine is the fake, with a scratch
+    /// directory for the config an install writes into. The caller removes the
+    /// returned root.
+    fn state_for_install(
+        transport: Arc<dyn crate::ssh::HostTransport>,
+        tag: &str,
+    ) -> (AppState, PathBuf, Host) {
+        let root = std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The machine's own id: the probe answer is cached per host for a
+        // while, so a test that reused another's id would read that one's
+        // answer instead of asking the fake.
+        let host = Host {
+            id: format!("host-{tag}"),
+            ..remote_host()
+        };
+        let state = AppState {
+            config_path: root.join("config.json"),
+            data_dir: root.join("data"),
+            config: std::sync::Mutex::new(crate::config::Config {
+                hosts: vec![Host::local(), host.clone()],
+                ..Default::default()
+            }),
+            running: Default::default(),
+            tasks: Default::default(),
+            host_transport: transport,
+            host_statuses: Default::default(),
+            remote_scan: Default::default(),
+            forwards: Default::default(),
+        };
+        (state, root, host)
+    }
+
+    /// Whether the launcher asked that machine to delete anything — the only
+    /// way a version directory there disappears.
+    fn removed_anything(fake: &Arc<FakeTransport>) -> bool {
+        fake.calls().iter().any(|call| match call {
+            FakeCall::Run(script) => script.contains("rm -rf"),
+            _ => false,
+        })
+    }
+
+    /// The three answers every install on the fake begins with: that machine's
+    /// environment probe, its npm knowing the version, and the version
+    /// directory's workspace manifest not existing yet.
+    fn answer_install_start(fake: &Arc<FakeTransport>) {
+        fake.answering(FakeAnswer::stdout(
+            crate::remote::testing::environment_stdout(
+                crate::remote::testing::remote_tool(
+                    "/home/linuxbrew/.linuxbrew/bin/node",
+                    "v26.4.0",
+                    "system",
+                ),
+                crate::remote::testing::remote_tool(
+                    "/home/linuxbrew/.linuxbrew/bin/pnpm",
+                    "12.11.2",
+                    "system",
+                ),
+                &["brew"],
+            ),
+        ))
+        .answering(FakeAnswer::stdout(marked("{\"exists\":true}")))
+        .answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::RemoteCommand,
+            "cat: 没有那个文件或目录",
+        ))
+        .answering(FakeAnswer::Done)
+        .answering(FakeAnswer::Pid(4242));
+    }
+
+    /// A log read that runs out of time is not the install failing: the command
+    /// is detached and keeps writing its log while the launcher is not reading
+    /// it. The walk caught the launcher doing the opposite — a version whose log
+    /// already said `<<<DSH-EXIT>>>0<<<DSH-END>>>` was deleted because one ssh
+    /// call to read that log came back late (issue #14 验收).
+    #[tokio::test]
+    async fn a_follow_that_times_out_after_the_install_finished_keeps_the_version() {
+        let fake = FakeTransport::new();
+        answer_install_start(&fake);
+        fake.answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::Timeout,
+            "ssh lab 在 40 秒内没有返回",
+        ))
+        .answering(FakeAnswer::stdout(
+            crate::remote::testing::tail_stdout_after_exit(
+                "Done in 30.9s using pnpm v12.11.2\n<<<DSH-EXIT>>>0<<<DSH-END>>>\n",
+                0,
+            ),
+        ))
+        .answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::RemoteCommand,
+            "cat: 没有那个文件或目录",
+        ));
+        let (state, root, host) = state_for_install(fake.clone(), "follow-timeout");
+        let app = install_app(state);
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+
+        let outcome = install_version_remote(app.handle(), &state, "t-1", &host, "0.1.0-rc.6").await;
+
+        let record = outcome.expect("装好的版本不该因为一次读日志超时被丢掉");
+        assert_eq!(record.version, "0.1.0-rc.6");
+        assert!(
+            !removed_anything(&fake),
+            "一次读日志超时不是删掉版本目录的理由：{:?}",
+            fake.calls()
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// And when no read ever comes back, the launcher says what it knows and
+    /// leaves the tree alone: a machine that stopped answering may be halfway
+    /// through an install, and a tree nobody could hear about is not the
+    /// launcher's to delete.
+    #[tokio::test]
+    async fn a_follow_that_never_answers_leaves_the_version_directory_alone() {
+        let fake = FakeTransport::new();
+        answer_install_start(&fake);
+        for _ in 0..5 {
+            fake.answering(FakeAnswer::fail(
+                crate::ssh::HostErrorKind::Timeout,
+                "ssh lab 在 40 秒内没有返回",
+            ));
+        }
+        let (state, root, host) = state_for_install(fake.clone(), "follow-dead");
+        let app = install_app(state);
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+
+        let err = install_version_remote(app.handle(), &state, "t-1", &host, "0.1.0-rc.6")
+            .await
+            .expect_err("读不到日志不能说安装成功");
+
+        assert!(err.contains("读取远端日志失败"), "{err}");
+        assert!(
+            !removed_anything(&fake),
+            "读不到日志时那台机器上可能还在装，版本目录要留下：{:?}",
+            fake.calls()
+        );
+        assert!(
+            state.config.lock().unwrap().versions.is_empty(),
+            "没有装成的东西不该被登记"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stand-in pnpm: a shell script that answers the way the major it is
+    /// pretending to be does. `accepts` names a package the script treats as
+    /// approved — one `name: true` line in the manifest it is handed.
+    fn fake_pnpm(root: &Path, tag: &str, accepts: Option<&str>) -> PathBuf {
+        let script = root.join(format!("pnpm-{tag}"));
+        let manifest = root.join("versions/0.1.0-rc.6/pnpm-workspace.yaml");
+        let count = root.join(format!("runs-{tag}"));
+        let gate = match accepts {
+            Some(name) => format!(
+                "if grep -q '{name}: true' {} 2>/dev/null; then echo 'Done in 1.2s using pnpm v12.11.2'; exit 0; fi\n",
+                manifest.display()
+            ),
+            None => String::new(),
+        };
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho run >> {}\n{gate}\
+printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
+'  \u{2570}\u{2500}\u{25b6} Ignored build scripts: @deepseek-ai/dsh-subprocess-local@0.2.0-rc.2,' \\\n  \
+'      koffi@3.1.1, node-pty@1.2.0-beta.15'\nexit 1\n",
+                count.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script
+    }
+
+    /// A scratch version directory, and the store next to it.
+    fn local_install_scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "dsh-install-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join("versions/0.1.0-rc.6")).unwrap();
+        std::fs::create_dir_all(root.join("store")).unwrap();
+        root
+    }
+
+    fn pnpm_runs(root: &Path, tag: &str) -> usize {
+        std::fs::read_to_string(root.join(format!("runs-{tag}")))
+            .map(|log| log.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// The same story on this Mac: pnpm refuses the build scripts, reports
+    /// which ones, and the install the launcher runs next has them approved.
+    #[tokio::test]
+    async fn a_local_install_approves_the_packages_pnpm_reported() {
+        let root = local_install_scratch("local-approve");
+        let dir = root.join("versions/0.1.0-rc.6");
+        let pnpm = fake_pnpm(&root, "approve", Some("koffi"));
+        let app = install_app(state_with(crate::remote::testing::idle()));
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+
+        let outcome = install_via_pnpm(
+            app.handle(),
+            &state,
+            "t-1",
+            &dir,
+            &root.join("store"),
+            &pnpm,
+            "0.1.0-rc.6",
+        )
+        .await;
+
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(pnpm_runs(&root, "approve"), 2, "被拒一次，批准后一次装成");
+        let manifest = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        assert!(manifest.contains("  koffi: true"), "{manifest}");
+        assert!(
+            manifest.contains("\"@deepseek-ai/dsh-subprocess-local\": true"),
+            "scoped 包名也要写进去：{manifest}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// And when the approval does not change the answer — the case that used to
+    /// retry forever at 0% — the local install ends with the reason instead.
+    #[tokio::test]
+    async fn a_local_install_that_keeps_refusing_ends_in_a_failure() {
+        let root = local_install_scratch("local-refuse");
+        let dir = root.join("versions/0.1.0-rc.6");
+        let pnpm = fake_pnpm(&root, "refuse", None);
+        let app = install_app(state_with(crate::remote::testing::idle()));
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+
+        let err = install_via_pnpm(
+            app.handle(),
+            &state,
+            "t-1",
+            &dir,
+            &root.join("store"),
+            &pnpm,
+            "0.1.0-rc.6",
+        )
+        .await
+        .expect_err("一直拒绝下去不是安装成功");
+
+        assert!(
+            pnpm_runs(&root, "refuse") <= 3,
+            "同一份拒绝不能被反复重试，跑了 {} 次",
+            pnpm_runs(&root, "refuse")
+        );
+        assert!(err.contains("构建脚本"), "{err}");
+        assert!(err.contains("koffi"), "理由要点出 pnpm 报出的包名：{err}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The local install is what it was: the same three paths under the
