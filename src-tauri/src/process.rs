@@ -1451,13 +1451,13 @@ async fn recall_remote_run(
 /// machine, and where its data directory is — or the reason this Mac cannot
 /// work them out. Both are facts about the *host*, not about one instance, so
 /// both are reported the same way wherever they block a call: a host the
-/// launcher cannot place is a host it cannot ask.
+/// launcher cannot place is a host it cannot ask. The directory's own reason is
+/// kept as [`Host::data_dir`] wrote it: it is what the row shows as the
+/// explanation of 「主机不可达」, and it carries the way out of that state.
 fn remote_parts(host: &Host, launcher_data_dir: &Path) -> Result<(crate::ssh::RemoteHost, PathBuf), String> {
     let run_host = crate::ssh::RemoteHost::of(host, launcher_data_dir)
         .map_err(|_| format!("「{}」是本机，它上面没有远端进程", host.display_name))?;
-    let data_dir = host
-        .data_dir(launcher_data_dir)
-        .map_err(|_| format!("无法确定「{}」的数据目录", host.display_name))?;
+    let data_dir = host.data_dir(launcher_data_dir)?;
     Ok((run_host, data_dir))
 }
 
@@ -3715,6 +3715,34 @@ mod tests {
         let verdict = check_remote_instance(&state, &inst, &host).await;
 
         assert!(matches!(verdict, RemoteVerdict::Unreachable(_)), "{verdict:?}");
+    }
+
+    /// A host whose data directory is still what the user typed (`~/dsh`, before
+    /// that machine ever settled it) cannot be asked anything about its
+    /// instances. The reason reaches the row as 「主机不可达」的说明, so it has to
+    /// carry the way out: without the instruction to test the connection, 重试
+    /// answers with the same sentence forever.
+    #[tokio::test]
+    async fn a_machine_whose_data_directory_is_not_settled_says_how_to_settle_it() {
+        let fake = FakeTransport::new();
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, mut host) = remote_case(&fake, &host_id, Some(3080));
+        host.data_dir = Some(PathBuf::from("~/dsh"));
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        match verdict {
+            RemoteVerdict::Unreachable(reason) => {
+                assert!(reason.contains("~/dsh"), "理由要说出现在记的是什么：{reason}");
+                assert!(reason.contains("测试连接"), "理由还要说怎么办：{reason}");
+            }
+            other => panic!("远端数据目录没 settle 就没法问那台机器：{other:?}"),
+        }
+        assert!(
+            fake.calls().is_empty(),
+            "literal 波浪号不能拿去问那台机器：{:?}",
+            fake.calls()
+        );
     }
 
     /// Until the launch-time scan has asked a machine, its instances are unknown
