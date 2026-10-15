@@ -78,7 +78,7 @@ const pnpmOk = computed(() => statusOf('pnpm')?.installed ?? false)
 // Node is what DSH needs to boot; pnpm is needed to install a version and to
 // manage plugins, and the launcher no longer installs one itself.
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
-const belowRecommended = computed(() => store.runtime?.node_below_recommended ?? false)
+const belowRecommended = computed(() => runtime.value?.node_below_recommended ?? false)
 
 const requirements = computed(() => runtime.value?.requirements)
 const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
