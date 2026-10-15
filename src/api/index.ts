@@ -100,9 +100,15 @@ export const api = {
   /**
    * Downloads & installs a DSH version **on one host**, auto-creates dedicated
    * HOME, and registers the 1:1 instance. `hostId` absent means 本机.
+   *
+   * The key sent is `host_id`, because that is the name this command reads:
+   * it declares `rename_all = "snake_case"` (the rule for commands with
+   * underscore parameters), and Tauri looks an argument up by exactly that
+   * key. A camelCase key is not an error there — it is read as 「absent」, so
+   * the install would go to 本机 while the page names another machine.
    */
   startInstallVersionTask: (version: string, hostId?: string) =>
-    call<string>('start_install_version_task', { version, hostId }),
+    call<string>('start_install_version_task', { version, host_id: hostId }),
 
   listTasks: () => call<TaskInfo[]>('list_tasks'),
   removeTask: (id: string) => call<void>('remove_task', { id }),
