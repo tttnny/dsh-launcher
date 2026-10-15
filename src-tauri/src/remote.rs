@@ -402,9 +402,10 @@ pub async fn read_file_optional(
 /// The exit status [`READ_FILE`] uses for 「这台机器上没有这个文件」.
 const READ_FILE_MISSING: i32 = 2;
 
-/// Removes one remote directory tree. Not being there is already the state the
-/// caller asked for. The callers only ever aim this at a path they computed
-/// from that host's own data directory.
+/// Removes one remote path. Not being there is already the state the caller
+/// asked for. The callers aim it at a directory they computed from that host's
+/// own data directory (a version tree, the dedicated DSH_HOME) — and at the one
+/// file an instance may own, the icon inside its HOME.
 pub async fn remove_dir(
     transport: &dyn HostTransport,
     host: &RemoteHost,
