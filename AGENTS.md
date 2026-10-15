@@ -135,6 +135,27 @@ profile 的 lan-bind 端口与 pnpm store）全部经传输层，**不要**在�
 发现 URL、发现进程没了（`remote::tail` 在远端等，不是一秒一次 ssh）。`kill_all`（退出
 启动器）跳过远端实例：它们在别人机器上跑，本来就该活过这一次退出。
 
+**一台机器上一个全新的 DSH_HOME 先在那儿跑一次 DSH（契约）**：`profiles/web` 是 DSH
+第一次在一个 HOME 里运行时才建出来的。本机那份由安装任务在建实例时补
+（`tasks::ensure_web_profile_template`），另一台机器由
+`process::ensure_remote_web_profile_template` 在**那台机器上**做同一件事：起一次
+`node bin.js --profile web --host 127.0.0.1 --port 0`、等它打出 URL、按 pid 核对后停掉、
+把 `profiles/web` 复制成 `profiles/__temp__`、再清掉复制件里那次启动钉住的端口。两个
+建实例的入口都要走它——安装任务（`do_create_instance`）与「新建实例」
+（`commands::create_instance_in`）——少了这一步，那个 HOME 下一个 Profile 都选不出来，
+「启动」点了不会动。**判据是「那个 HOME 下一个 Profile 都没有」，不是「这是启动器建的
+HOME」**：已经有 Profile 的 HOME 一个字节都不碰，本机那条路径也不因此改变。
+
+**启动器自己的 ssh 控制 socket 有 86 字节的预算（契约）**：ssh 不直接绑 `ControlPath`，
+它先绑 `<ControlPath>.<16 个随机字符>` 再硬链接过去，104 字节的 Unix socket 地址里留给
+启动器的因此只有 86——macOS 默认数据目录算出来是 89 字节，ssh 直接拒绝（本机 OpenSSH
+实测：86 可以、87 就报 `too long for Unix domain socket`）。所以 `ssh::socket_path`
+能放进数据目录就放，放不下就退到 `$HOME/.dsh-launcher-ssh/`，名字里带上数据目录与 ssh
+目标两样东西的哈希：一个 socket 就是一条 ssh 连接，两份配置不能共用一条。`$TMPDIR` 不行
+（`/var/folders/…` 一样长），`/tmp` 不行（别人可以先在那个位置上建 socket）。ssh 那两句
+原始报错（`ControlPath too long`、`too long for Unix domain socket`）由 `ssh::ssh_failure`
+换成一句能读的话——它说的不是那台机器，别把人引到「确认机器开着」上去。
+
 **打开远端实例 = 先把那个地址挪到本机回环（契约，见 ADR-0008）**：`src-tauri/src/tunnel.rs`
 是唯一建端口转发的地方——按主机合并，同一个 `ControlSocket` 上给每个运行中的实例加一条
 `-L 127.0.0.1:<本地端口>:<运行记录里那个 URL 的 host:port>`，**本地侧一律只绑回环**

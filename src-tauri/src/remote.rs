@@ -2410,6 +2410,59 @@ pub(crate) mod testing {
         tail_stdout_with(text, offset, false)
     }
 
+    /// What one machine answers while a brand-new DSH_HOME of its own is given
+    /// the first DSH run that materializes `profiles/web`: the empty profile
+    /// list, the version's `bin.js`, its own Node, the log's size, the detached
+    /// boot and its pid's start time, the URL that boot printed, the identity
+    /// check and the stop, the copy of `web` to `__temp__`, and the port that
+    /// boot pinned scrubbed back out of the copy.
+    ///
+    /// Shared because the two callers that need a fresh HOME prepared — an
+    /// install that makes one, and an instance bound to one a user made — are
+    /// driven by the same sequence, and a second copy of it in a test would
+    /// drift from the first.
+    pub(crate) fn prime_home_answers(ready_url: &str) -> Vec<FakeAnswer> {
+        vec![
+            // 1. 那个 HOME 下一个 Profile 都还没有。
+            FakeAnswer::stdout(marked(r#"{"profiles":[]}"#)),
+            // 2. 版本目录里的 bin.js 在不在。
+            FakeAnswer::stdout(marked(r#"{"ready":true}"#)),
+            // 3. 那台机器自己的绝对 Node。
+            FakeAnswer::stdout(environment_stdout(
+                remote_tool("/home/linuxbrew/.linuxbrew/bin/node", "v26.4.0", "system"),
+                remote_tool_missing(vec![]),
+                &[],
+            )),
+            // 4. 起进程之前日志有多少字节。
+            FakeAnswer::stdout(marked(r#"{"offset":0}"#)),
+            // 5. 脱离会话地跑一次 DSH。
+            FakeAnswer::Pid(PRIME_PID),
+            // 6. 这个 pid 自己的启动时间。
+            FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
+            // 7. 它起来了并打印了 URL —— `profiles/web` 现在在那台机器上。
+            FakeAnswer::stdout(tail_stdout(&format!("dsh web: {ready_url}\n"), 320)),
+            // 8. 停之前核对 pid：启动时间对得上。
+            FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
+            // 9. 给它所在的进程组发终止信号。
+            FakeAnswer::Done,
+            // 10. 那台机器确认它走了。
+            FakeAnswer::stdout(marked(r#"{"gone":true}"#)),
+            // 11. web → __temp__。
+            FakeAnswer::stdout(marked(r#"{"ok":true}"#)),
+            // 12. 模板的补丁文档：这次启动把端口钉在了里面。
+            FakeAnswer::stdout(file_stdout(b"- id: webserver\n  port: 20017\n")),
+            // 13. 把那一行改回 0。
+            FakeAnswer::Done,
+        ]
+    }
+
+    /// The pid a priming boot is answered with.
+    pub(crate) const PRIME_PID: i32 = 5150;
+
+    /// The port [`prime_home_answers`]' patch document pins, which the launcher
+    /// has to scrub back out of the template.
+    pub(crate) const PRIME_PINNED_PORT: &str = "20017";
+
     fn tail_stdout_with(text: &str, offset: u64, alive: bool) -> String {
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());

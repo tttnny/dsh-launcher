@@ -1001,22 +1001,75 @@ pub(crate) fn list_instances_for(
 ///
 /// `host_id` absent means 本机.
 #[tauri::command]
-pub fn create_instance(
+pub async fn create_instance(
     state: State<'_, AppState>,
     name: String,
     version_id: String,
     home_id: String,
     host_id: Option<String>,
 ) -> Result<DshInstance, String> {
+    create_instance_in(&state, &name, &version_id, &home_id, host_id.as_deref()).await
+}
+
+/// The body of [`create_instance`], shared with the tests.
+///
+/// Async because a HOME on another machine may need work doing **there** before
+/// the record is worth having: DSH materializes a HOME's first Profile when it
+/// runs in it, so a brand-new remote HOME has none, and an instance bound to one
+/// has nothing for 「启动」 to launch with
+/// ([`crate::process::ensure_remote_web_profile_template`]). 本机's twin of that
+/// step belongs to the install task that makes a dedicated HOME
+/// (`tasks::ensure_web_profile_template`), so it stays there: this only fills the
+/// gap a remote HOME has.
+pub(crate) async fn create_instance_in(
+    state: &AppState,
+    name: &str,
+    version_id: &str,
+    home_id: &str,
+    host_id: Option<&str>,
+) -> Result<DshInstance, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("实例名称不能为空".to_string());
     }
+    // The three records are read, checked and cloned out under one lock, so the
+    // priming below (which is ssh, and must never run under a `std::sync` guard)
+    // cannot hold the config while it waits on another machine.
+    let (host, version, home) = {
+        let cfg = state.config.lock().unwrap();
+        let host = crate::config::resolve_host(&cfg, host_id)?.clone();
+        // Names are unique **per host**: two machines may each have an instance
+        // called 「web」, and the row, the tray and the plugin link all keep telling
+        // them apart by host. A name only has to be unambiguous where it is used.
+        if cfg
+            .instances
+            .iter()
+            .any(|i| i.name == name && i.host_id == host.id)
+        {
+            return Err("同名实例已存在".to_string());
+        }
+        let Some(version) = cfg.versions.iter().find(|v| v.id == version_id).cloned() else {
+            return Err("DSH 版本不存在".to_string());
+        };
+        if version.host_id != host.id {
+            return Err("DSH 版本不属于该主机".to_string());
+        }
+        let Some(home) = cfg.homes.iter().find(|h| h.id == home_id).cloned() else {
+            return Err("DSH_HOME 不存在".to_string());
+        };
+        if home.host_id != host.id {
+            return Err("DSH_HOME 不属于该主机".to_string());
+        }
+        (host, version, home)
+    };
+
+    // A HOME that already has a Profile is left untouched.
+    if !host.builtin {
+        crate::process::ensure_remote_web_profile_template(state, &host, &version, &home.path)
+            .await?;
+    }
+
     let mut cfg = state.config.lock().unwrap();
-    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
-    // Names are unique **per host**: two machines may each have an instance
-    // called 「web」, and the row, the tray and the plugin link all keep telling
-    // them apart by host. A name only has to be unambiguous where it is used.
     if cfg
         .instances
         .iter()
@@ -1024,23 +1077,11 @@ pub fn create_instance(
     {
         return Err("同名实例已存在".to_string());
     }
-    let Some(version) = cfg.versions.iter().find(|v| v.id == version_id) else {
-        return Err("DSH 版本不存在".to_string());
-    };
-    if version.host_id != host.id {
-        return Err("DSH 版本不属于该主机".to_string());
-    }
-    let Some(home) = cfg.homes.iter().find(|h| h.id == home_id) else {
-        return Err("DSH_HOME 不存在".to_string());
-    };
-    if home.host_id != host.id {
-        return Err("DSH_HOME 不属于该主机".to_string());
-    }
     let inst = DshInstance {
         id: new_id("i"),
         name,
-        version_id,
-        home_id,
+        version_id: version_id.to_string(),
+        home_id: home_id.to_string(),
         host_id: host.id,
         env_overrides: Default::default(),
         default_profile: None,
@@ -1049,7 +1090,7 @@ pub fn create_instance(
         port: None,
     };
     cfg.instances.push(inst.clone());
-    save_state(&state, &cfg)?;
+    save_state(state, &cfg)?;
     Ok(inst)
 }
 
@@ -3316,6 +3357,59 @@ mod tests {
             .block_on(future)
     }
 
+    /// The URL a priming boot prints when `profiles/web` has been materialized.
+    const PRIME_URL: &str = "http://127.0.0.1:41234/?token=LauncherPrimeTokenForTests";
+
+    /// A DSH_HOME on another machine that DSH has never run in has no Profile at
+    /// all — and a Profile is what a start is launched with, so the page shows an
+    /// empty select and 「启动」 is a button that does nothing. Creating an
+    /// instance against such a HOME therefore prepares it **there** first: that
+    /// machine runs DSH once, which is what makes `profiles/web` exist, and the
+    /// instance the user just made is one they can actually launch.
+    #[test]
+    fn creating_an_instance_on_a_fresh_remote_home_prepares_that_home_there() {
+        let data = ScratchDir::new("remote-instance-fresh-home");
+        let host = server_host("host-lab", None);
+        let fake = crate::remote::testing::FakeTransport::new();
+        for answer in crate::remote::testing::prime_home_answers(PRIME_URL) {
+            fake.answering(answer);
+        }
+        let mut cfg = remote_home_cfg(&host, "/home/demo/dsh-lab");
+        cfg.versions.push(crate::config::DshVersion {
+            id: "v-lab".into(),
+            version: "0.2.0-rc.2".into(),
+            dir: std::path::PathBuf::from(
+                "/home/demo/.local/share/dsh-launcher/versions/0.2.0-rc.2",
+            ),
+            host_id: host.id.clone(),
+        });
+        let state = host_state(&data, cfg, fake.clone());
+
+        let inst = block_on(create_instance_in(
+            &state,
+            "验收实例",
+            "v-lab",
+            "h-lab",
+            Some("host-lab"),
+        ))
+        .unwrap();
+
+        assert_eq!(inst.home_id, "h-lab");
+        let spawn = fake
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                crate::remote::testing::FakeCall::Spawn(script) => Some(script),
+                _ => None,
+            })
+            .expect("那台机器上要先跑一次 DSH，`profiles/web` 才会出现");
+        assert!(spawn.contains("'--profile' 'web'"), "{spawn}");
+        assert!(
+            spawn.contains("'DSH_HOME=/home/demo/dsh-lab'"),
+            "跑在用户选的那个 HOME 上才有 Profile：{spawn}"
+        );
+    }
+
     /// An `AppState` around one scratch config file, with the transport a test
     /// chose. The local lifecycle modules build theirs the same way.
     fn host_state(
@@ -4391,5 +4485,211 @@ mod tests {
             script.contains(&format!("dsh_bytes={}", crate::remote::LOG_TAIL_BYTES)),
             "只拉最后一段，不是整个文件：{script}"
         );
+    }
+
+    /// The whole gap on a real machine: a DSH_HOME that DSH has never run in
+    /// must come out of instance creation with a Profile the page can launch
+    /// with. This is what the acceptance walk could not do on `zjq_aliyun` — an
+    /// empty Profile list and a 启动 that does nothing — driven through the two
+    /// commands the page calls, over real ssh, against real DSH.
+    ///
+    /// It needs a version **already installed on that machine** under that
+    /// machine's own data directory (`<远端数据目录>/versions/<版本>`); it does
+    /// not install one, because installing is nobody's business here. What it
+    /// creates — a fresh DSH_HOME and the DSH boot that fills it — it removes
+    /// again, except the log of that boot, which is named in the failure output
+    /// if anything goes wrong.
+    ///
+    /// ```text
+    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
+    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_fresh_home
+    /// ```
+    #[test]
+    #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST），且那台机器上装有版本"]
+    fn a_real_fresh_remote_home_comes_back_with_a_profile() {
+        let Ok(target) = std::env::var("DSH_LAUNCHER_TEST_SSH_HOST") else {
+            eprintln!("跳过：没有设置 DSH_LAUNCHER_TEST_SSH_HOST");
+            return;
+        };
+        let version_number =
+            std::env::var("DSH_LAUNCHER_TEST_REMOTE_VERSION").unwrap_or_else(|_| "0.2.0-rc.2".into());
+        let data = ScratchDir::new("real-fresh-home");
+        let transport = std::sync::Arc::new(crate::ssh::SshTransport::new());
+        let host = crate::config::Host {
+            id: "host-real".into(),
+            display_name: format!("验收机（{target}）"),
+            ssh_target: target.clone(),
+            registry: None,
+            extra_env: Default::default(),
+            // The launcher's own convention for another machine's data
+            // directory, worked out by asking that machine — not by assuming
+            // this Mac's spelling of it.
+            data_dir: None,
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        };
+        let state = host_state(
+            &data,
+            crate::config::Config {
+                hosts: vec![Host::local(), host.clone()],
+                ..Default::default()
+            },
+            transport.clone(),
+        );
+        let run_host = crate::ssh::RemoteHost::of(&host, data.path()).unwrap();
+        let home_of_that_machine = block_on(crate::remote::user_home(
+            &*transport,
+            &run_host,
+        ))
+        .unwrap()
+        .home;
+        let remote_data = std::path::PathBuf::from(&home_of_that_machine)
+            .join(".local/share/dsh-launcher");
+        let version_dir = remote_data.join("versions").join(&version_number);
+
+        {
+            let mut cfg = state.config.lock().unwrap();
+            cfg.hosts[1].data_dir = Some(remote_data.clone());
+            cfg.versions.push(crate::config::DshVersion {
+                id: "v-real".into(),
+                version: version_number.clone(),
+                dir: version_dir.clone(),
+                host_id: host.id.clone(),
+            });
+        }
+
+        let probe = format!("probe-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let home = block_on(create_home_record_in(
+            &state,
+            "验收 HOME",
+            &remote_data.join("homes").join(&probe).to_string_lossy(),
+            Some(&host.id),
+        ))
+        .unwrap();
+        let instance = block_on(create_instance_in(
+            &state,
+            "验收实例",
+            "v-real",
+            &home.id,
+            Some(&host.id),
+        ))
+        .unwrap_or_else(|e| panic!("建实例失败：{e}"));
+        let profiles = block_on(list_profiles_for(&state, &home.id))
+            .unwrap_or_else(|e| panic!("列 Profile 失败：{e}"));
+
+        // What the page needs: something to select, and 「启动」 with a profile
+        // to launch with.
+        assert!(
+            profiles.contains(&"web".to_string()),
+            "那台机器上 {} 下的 Profile 是 {profiles:?}",
+            home.path.display()
+        );
+        assert_eq!(instance.home_id, home.id);
+
+        // The template later profiles come from, made on that machine.
+        let temp = home.path.join("profiles").join("__temp__");
+        let manifest = block_on(crate::remote::read_file_optional(
+            &*transport,
+            &run_host,
+            &temp.join("package.json").to_string_lossy(),
+        ))
+        .unwrap_or_else(|e| panic!("{} 下读不到模板：{e}", temp.display()));
+        assert!(
+            manifest.is_some(),
+            "模板里要有 package.json：{}",
+            temp.display()
+        );
+
+        // And the end of the walk it could not take: launch it there and see the
+        // URL it prints. The port is the launcher's own choice (`--port 0` for an
+        // unpinned instance), so this also says the first start on a fresh HOME
+        // does not land on DSH's default 3080.
+        let cfg = state.config.lock().unwrap().clone();
+        let version = cfg.versions[0].clone();
+        let start = block_on(crate::process::spawn_remote_instance(
+            &state,
+            &cfg,
+            &cfg.hosts[1],
+            &instance,
+            &version,
+            "web",
+        ))
+        .unwrap_or_else(|e| {
+            let _ = block_on(crate::remote::remove_dir(
+                &*transport,
+                &run_host,
+                &home.path.to_string_lossy(),
+            ));
+            panic!("在「{target}」上启动失败：{e}")
+        });
+
+        let mut url = None;
+        let mut offset = start.offset;
+        let mut pending = String::new();
+        for _ in 0..12 {
+            let read = block_on(crate::process::read_remote_log(
+                &state,
+                &instance.id,
+                "web",
+                &start.run,
+                offset,
+                &mut pending,
+            ))
+            .unwrap_or_else(|e| panic!("读那台机器上的日志失败：{e}"));
+            offset = read.offset;
+            if let Some(found) = read.url {
+                url = Some(found);
+                break;
+            }
+            if !read.alive {
+                break;
+            }
+        }
+        // Stop it before asserting anything about the URL: a failure must not
+        // leave a DSH running on somebody's server.
+        let stopped = block_on(crate::process::stop_remote_run(&state, &start.run));
+        assert_eq!(
+            stopped,
+            crate::process::RemoteStop::Stopped,
+            "那台机器上的实例没停下来"
+        );
+        assert!(
+            url.is_some(),
+            "实例起来了但没打印 URL（日志：{}）",
+            start.run.log_path
+        );
+        let url = url.unwrap();
+        assert!(url.contains("token="), "URL 要带 token：{url}");
+
+        // Leave that machine as it was found: the probe HOME, the copy of the
+        // boot's log, the instance's log and the run record — nothing else.
+        block_on(crate::remote::remove_dir(
+            &*transport,
+            &run_host,
+            &home.path.to_string_lossy(),
+        ))
+        .unwrap();
+        let logs = remote_data.join("logs");
+        let log_files = block_on(crate::ssh::HostTransport::list_dir(
+            &*transport,
+            &run_host,
+            &logs.to_string_lossy(),
+        ))
+        .unwrap_or_default();
+        for name in log_files {
+            if name.starts_with("profile-") || name.starts_with(&instance.id) {
+                let _ = block_on(crate::remote::remove_dir(
+                    &*transport,
+                    &run_host,
+                    &logs.join(&name).to_string_lossy(),
+                ));
+            }
+        }
+        let _ = block_on(crate::remote::remove_dir(
+            &*transport,
+            &run_host,
+            &remote_data.join("running.json").to_string_lossy(),
+        ));
     }
 }

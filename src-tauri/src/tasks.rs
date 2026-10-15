@@ -526,14 +526,24 @@ async fn do_create_instance(
     // profile and `__temp__` template materialized. When the caller selects an
     // existing HOME, that HOME is already established and its profiles should
     // not be touched during instance creation.
-    //
-    // Only 本机 bootstraps it here: materializing the template means starting
-    // DSH against that HOME and stopping it again, and on another machine that
-    // is an instance launch with its own lifecycle (a later ticket). A remote
-    // dedicated HOME gets its `profiles/web` the first time DSH runs there,
-    // which is where the local template is copied from anyway.
     if home_id.is_none() && host.builtin {
         ensure_web_profile_template(app, state, task_id, &home_path, &version_record).await?;
+    }
+    // The same first run, asked of the machine that owns the HOME: `profiles/web`
+    // is made by DSH's first run there too, and an instance bound to a HOME that
+    // has no Profile has nothing to launch with. That machine does it itself —
+    // the version has just been installed for it — and a HOME that already has a
+    // profile (a dedicated HOME is new, but a user's own is not) is left alone.
+    if !host.builtin {
+        push_task_log(
+            app,
+            state,
+            task_id,
+            &format!("正在「{}」上生成 web profile 模板…", host.display_name),
+        )
+        .await;
+        crate::process::ensure_remote_web_profile_template(state, host, &version_record, &home_path)
+            .await?;
     }
 
     // 3. Create the instance record.
