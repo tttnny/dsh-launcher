@@ -120,6 +120,7 @@ const removeAction = useAction(
     await api.removeVersion(id)
     await store.refreshVersions()
     await store.refreshInstances()
+    await store.refreshHomes()
     return version
   },
   { key: (id) => id, success: (version) => t('versions.versionDeleted', { version }) },

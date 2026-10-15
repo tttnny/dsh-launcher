@@ -104,7 +104,8 @@ pnpm dev            # 仅浏览器预览：localStorage mock，无 Rust 后端
 - `config.json`：DSH_HOME / 版本 / 实例 / 设置
 - `running.json`：实例就绪时打印的 URL（含启动 token），用于启动器重启后接管仍在运行的实例
 - `versions/<版本>/`：各版本隔离安装目录
-- `homes/<版本名>/`：版本专属 DSH_HOME（安装版本时创建；删除版本时按路径删除，见 ADR-0002）
+- `homes/<版本名>/`：版本专属 DSH_HOME（安装版本时创建；删除版本时按同一路径规则连目录
+  与记录一起删除，见 ADR-0002）
 - `<DSH_HOME>/icons/<实例 id>.png`：实例自定义图标（随实例删除）
 - `logs/`：启动器与实例运行日志
 - `scripts/`：为「打开终端」生成的临时包装脚本

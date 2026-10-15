@@ -1,5 +1,6 @@
 use crate::config::{
-    new_id, sanitize_name, DshHome, DshInstance, LauncherSettings, RemoteVersion, SettingsPatch,
+    new_id, paths_equal, sanitize_name, DshHome, DshInstance, LauncherSettings, RemoteVersion,
+    SettingsPatch,
 };
 use crate::{process, AppState};
 use std::collections::BTreeMap;
@@ -103,6 +104,20 @@ pub(crate) fn remove_dedicated_home(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("删除专属 DSH_HOME 失败: {e}")),
     }
+}
+
+/// Drops the version's dedicated DSH_HOME record, by the same path rule its
+/// directory is removed with (ADR-0002). A record left behind outlives what it
+/// names: the DSH_HOME list keeps offering the deleted version's HOME, and
+/// opening it puts the directory back, which makes the startup orphan sweep
+/// read it as a real HOME from then on.
+pub(crate) fn remove_dedicated_home_record(
+    cfg: &mut crate::config::Config,
+    data_dir: &std::path::Path,
+    version: &str,
+) {
+    let home = dedicated_home_path(data_dir, version);
+    cfg.homes.retain(|h| !paths_equal(&h.path, &home));
 }
 
 #[tauri::command]
@@ -302,6 +317,7 @@ pub async fn remove_version(
             }
         }
         cfg.versions.retain(|v| v.id != id);
+        remove_dedicated_home_record(&mut cfg, &state.data_dir, &version.version);
         save_state(&state, &cfg)?;
     }
 
@@ -1398,6 +1414,41 @@ mod tests {
         assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
         assert!(user_dsh.join("sessions").is_dir(), "~/.dsh 不受影响");
         assert!(user_home.join("sessions").is_dir(), "用户指定的 HOME 不受影响");
+    }
+
+    /// The record goes with the directory, by the same path rule: `~/.dsh` and
+    /// a user-specified HOME are DSH_HOMEs too and must survive — a name that
+    /// merely looks like the version's is not enough.
+    #[test]
+    fn remove_dedicated_home_record_drops_only_that_path() {
+        let data_dir = std::path::Path::new("/data/launcher");
+        let mut cfg = crate::config::Config {
+            homes: vec![
+                crate::config::DshHome {
+                    id: "h-version".into(),
+                    name: "0.1.0-rc.6".into(),
+                    path: dedicated_home_path(data_dir, "0.1.0-rc.6"),
+                },
+                crate::config::DshHome {
+                    id: "h-user-dsh".into(),
+                    name: "用户默认".into(),
+                    path: std::path::PathBuf::from("/Users/me/.dsh"),
+                },
+                crate::config::DshHome {
+                    id: "h-sibling".into(),
+                    name: "0.1.0-rc.5".into(),
+                    path: dedicated_home_path(data_dir, "0.1.0-rc.5"),
+                },
+            ],
+            ..Default::default()
+        };
+
+        remove_dedicated_home_record(&mut cfg, data_dir, "0.1.0-rc.6");
+
+        assert_eq!(
+            cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h-user-dsh", "h-sibling"],
+        );
     }
 
     /// An instance is a binding, not a directory: deleting one must leave its

@@ -527,7 +527,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'remove_version': {
       const id = String(args?.id)
       if (db.instances.some((i) => i.version_id === id)) fail('该版本仍被实例引用，无法删除')
+      const removed = db.versions.find((v) => v.id === id)
       db.versions = db.versions.filter((v) => v.id !== id)
+      // The version's dedicated DSH_HOME record goes with it, by the same path
+      // rule the backend deletes the directory with.
+      if (removed) {
+        const dedicated = removed.dedicated_home.replace(/\\/g, '/').toLowerCase()
+        db.homes = db.homes.filter((h) => h.path.replace(/\\/g, '/').toLowerCase() !== dedicated)
+      }
       saveDb(db)
       return undefined as T
     }
