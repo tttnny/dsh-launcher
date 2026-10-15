@@ -2034,6 +2034,60 @@ mod tests {
         );
     }
 
+    /// Adoption is not a refusal on the read path either (AGENTS.md): an adopted
+    /// remote instance the launcher holds a launch token for is listed as
+    /// managed, over the address this Mac reaches it at — the same rule the
+    /// write path follows.
+    #[tokio::test]
+    async fn an_adopted_remote_instance_with_a_token_is_still_listed_over_the_forward() {
+        let host = remote_host();
+        let hosts = HostServer::new().answering(HostAnswer::Done);
+        let state = app_state_with(
+            vec![host.clone()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        put_running(
+            &state,
+            "i2",
+            running_entry("web", stale_local_url(), true, Some(remote_run(&host, &remote_url()))),
+        )
+        .await;
+
+        let server = PluginServer::new(
+            COOKIE,
+            vec![ok_response(serde_json::json!([
+                {
+                    "name": "ds-bot",
+                    "enabled": true,
+                    "installed": true,
+                    "removable": true,
+                    "optional": false,
+                    "rows": [{ "entryId": "bot" }]
+                }
+            ]))],
+        );
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Managed, "有 token 的接管实例照样能管");
+        assert_eq!(view.instance_id.as_deref(), Some("i2"));
+        let forwards = forwarded(&hosts);
+        assert_eq!(forwards.len(), 1, "一条实例地址一条转发");
+        assert_eq!(
+            server.minted(),
+            vec![format!(
+                "http://127.0.0.1:{}/?token={TOKEN}",
+                forwards[0].local_port
+            )],
+            "列的是这个 Mac 够得着的地址，不是那台机器上的地址"
+        );
+    }
+
     /// A write goes exactly where the read goes. And adoption is not a refusal
     /// (AGENTS.md): what decides is the token, so an adopted remote instance the
     /// launcher holds a launch token for is written to over the forward and
