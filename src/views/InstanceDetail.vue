@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
+import { useCopy } from '@/composables/useCopy'
 import { usePluginLink } from '@/composables/usePluginLink'
 import { useLauncherStore } from '@/stores/launcher'
 import { LOCAL_HOST_ID } from '@/api/types'
@@ -81,6 +82,8 @@ const homeLabel = computed(() => store.homeById(homeId.value ?? '')?.name ?? 'â€
  */
 const hostId = computed(() => current.value?.host_id ?? LOCAL_HOST_ID)
 const host = computed(() => store.hostById(hostId.value))
+/** On another machine: its DSH_HOME is a directory there, not on this Mac. */
+const remote = computed(() => !!host.value && !host.value.builtin)
 const hostVersions = computed(() => store.versionsByHost[hostId.value] ?? [])
 const hostHomes = computed(() => store.homesByHost[hostId.value] ?? [])
 
@@ -271,6 +274,16 @@ const logAction = useAction(() => api.openInstanceLog(id.value), {
 const terminalAction = useAction(() => api.openInstanceTerminal(id.value), {
   success: (label) => t('home.terminalOpened', { label }),
 })
+// A remote DSH_HOME is a directory on that machine: what the user can use from
+// here is the path and one command, not a file manager that cannot reach it.
+const { copy } = useCopy()
+const remoteCopyAction = useAction(async (what: 'path' | 'command') => {
+  const location = await api.instanceRemoteLocation(id.value)
+  await copy(
+    what === 'path' ? location.path : location.command,
+    what === 'path' ? 'instances.pathCopied' : 'instances.commandCopied',
+  )
+})
 
 // --- Delete -------------------------------------------------------------------
 
@@ -354,7 +367,17 @@ function removeEnvRow(idx: number) {
           <DlIcon name="terminal" :size="13" />
           {{ t('home.openTerminal') }}
         </button>
-        <button class="dl-btn dl-btn--quiet" @click="dirAction.run()">
+        <template v-if="remote">
+          <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('path')">
+            <DlIcon name="copy" :size="13" />
+            {{ t('instances.copyPath') }}
+          </button>
+          <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('command')">
+            <DlIcon name="copy" :size="13" />
+            {{ t('instances.copyCommand') }}
+          </button>
+        </template>
+        <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
           <DlIcon name="folder" :size="13" />
           {{ t('instanceEdit.openDir') }}
         </button>

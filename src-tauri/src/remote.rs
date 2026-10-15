@@ -402,9 +402,10 @@ pub async fn read_file_optional(
 /// The exit status [`READ_FILE`] uses for 「这台机器上没有这个文件」.
 const READ_FILE_MISSING: i32 = 2;
 
-/// Removes one remote directory tree. Not being there is already the state the
-/// caller asked for. The callers only ever aim this at a path they computed
-/// from that host's own data directory.
+/// Removes one remote path. Not being there is already the state the caller
+/// asked for. The callers aim it at a directory they computed from that host's
+/// own data directory (a version tree, the dedicated DSH_HOME) — and at the one
+/// file an instance may own, the icon inside its HOME.
 pub async fn remove_dir(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -577,19 +578,26 @@ pub fn fallback_bins() -> Vec<&'static str> {
     ]
 }
 
-/// One command the user runs **on this Mac** to install a tool on a remote host.
+/// One command the user runs **on this Mac** to run a script on a remote host.
 ///
 /// Quoted for two shells because it goes through two: the user's own shell has
 /// to hand ssh a single argument, and ssh joins its arguments with spaces and
-/// lets the remote shell split them again. The inner quotes are what make the
-/// recipe reach `bash -ilc` as one word — the same shape
-/// [`script_command`] uses, so the install runs in the shell the probe read.
+/// lets the login shell at the other end split them again. The inner quotes are
+/// what make the script reach `bash -ilc` as one word — the same shape
+/// [`crate::ssh::script_command`] uses, so the command runs in the shell the
+/// probe read.
 ///
-/// A recipe therefore must not contain a double quote; the ones below are
-/// written without one.
+/// The outer quoting is single-quote escaping rather than a plain pair of
+/// quotes, so a script that quotes a path **itself** — `ls -la '<一个带空格的
+/// 目录>'`, where the directory may also carry a single quote — survives the
+/// user's own shell. A command therefore must not contain a double quote: the
+/// inner pair would end early, and the ones below are written without one.
 pub fn ssh_command(target: &str, recipe: &str) -> String {
     let shell = crate::ssh::REMOTE_SHELL;
-    format!("ssh {target} '{shell} -ilc \"{recipe}\"'")
+    format!(
+        "ssh {target} {}",
+        crate::commands::shell_quote(&format!("{shell} -ilc \"{recipe}\""))
+    )
 }
 
 /// The Node install recipe for the machine the probe found these managers on:
@@ -1593,6 +1601,140 @@ pub fn measured_argv(argv: &[String], cwd: &str) -> Vec<String> {
 pub fn exit_status_of(line: &str) -> Option<i32> {
     let rest = line.trim().strip_prefix(EXIT_MARK)?;
     rest.strip_suffix(END)?.trim().parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// The two machine actions that read something there
+// ---------------------------------------------------------------------------
+
+/// The shell text a terminal on this Mac runs on the other machine: land in the
+/// instance's DSH_HOME with the same variables and PATH the local instance
+/// terminal gets.
+///
+/// A local session is a `scripts/term_<id>.sh` file the launcher writes and the
+/// terminal executes; there is nothing to write on another machine, so the
+/// terminal is handed one command line instead ([`terminal_command`], which
+/// carries this script over). The interpreter is the one the user gets in a
+/// terminal on that machine — their login shell, on a pty.
+pub fn terminal_script(home: &str, env: &[(String, String)], path_dirs: &[String]) -> String {
+    let mut script = String::new();
+    // The version's own `node_modules/.bin` first, so a bare `dsh` is the CLI
+    // the launcher runs. 本机 writes a wrapper there for source checkouts; a
+    // remote directory cannot be written to without asking, and pnpm's own
+    // `.bin/dsh` needs no flag of ours — a directory that is not there costs
+    // nothing in PATH.
+    if !path_dirs.is_empty() {
+        let joined = path_dirs
+            .iter()
+            .map(|dir| quote(dir))
+            .collect::<Vec<_>>()
+            .join(":");
+        script.push_str(&format!("export PATH={joined}:\"$PATH\"\n"));
+    }
+    for (key, value) in env {
+        script.push_str(&format!("export {key}={}\n", quote(value)));
+    }
+    script.push_str(&format!("cd {}\n", quote(home)));
+    script.push_str("clear\n");
+    script.push_str("exec \"${SHELL:-/bin/bash}\" -l\n");
+    script
+}
+
+/// The one command line a terminal on this Mac is handed to open a session on
+/// `target` that lands where the instance lives.
+///
+/// Two shells sit between the click and the session: the one inside the
+/// terminal parses this line, and the login shell at the other end parses what
+/// ssh hands it. The script is quoted for the first ([`crate::commands::shell_quote`]),
+/// so what ssh sends is the script's own text; the quoting *inside* the script —
+/// every path and every value in it goes through [`quote`] — is what carries it
+/// through the second. `-t` is what makes the far end a terminal session rather
+/// than a one-shot command.
+pub fn terminal_command(target: &str, script: &str) -> String {
+    format!("ssh -t {target} {}", crate::commands::shell_quote(script))
+}
+
+/// How much of a remote log the launcher copies home before opening it. A DSH
+/// log grows without limit; the last stretch is the part anyone reads, and
+/// bounding it keeps one click to a few hundred kilobytes regardless of how
+/// long the instance has been printing.
+pub const LOG_TAIL_BYTES: usize = 256 * 1024;
+
+/// The last stretch of one remote log, as the machine handed it over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogTail {
+    /// The bytes at the end of the file, as text. Empty when the file is not
+    /// there or holds nothing yet.
+    pub text: String,
+    /// Whether that machine has the file at all — an instance that has never
+    /// printed anything has no log, which is a fact and not a failure.
+    pub exists: bool,
+}
+
+/// Reads the last `max_bytes` of one file on that machine.
+///
+/// Not [`tail`]: that one follows a log **from an offset**, waiting there for
+/// what a run appends next, and asking it for the end would mean reading the
+/// size first and hoping nothing grows in between. Opening a log is a one-shot
+/// question about a file that may be gigabytes long, so it is `tail -c` on the
+/// far side — one call, and bounded no matter how big the file is.
+pub async fn log_tail(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    log_path: &str,
+    max_bytes: usize,
+) -> Result<LogTail, HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(log_tail_script(log_path, max_bytes)))
+        .await?;
+    decode_log_tail(&out)
+}
+
+/// The bounded tail read for one log file.
+pub fn log_tail_script(log_path: &str, max_bytes: usize) -> String {
+    fill(
+        LOG_TAIL,
+        &[
+            ("%%LOG%%", quote(log_path)),
+            ("%%BYTES%%", max_bytes.to_string()),
+        ],
+    )
+}
+
+/// The last stretch of one file, from its end. A file that is not there is an
+/// empty answer **and** says so, so the caller can tell 「还没有日志」 from
+/// 「日志里什么都还没写」.
+///
+/// The cut lands where the byte count says, which may be in the middle of a
+/// line: this is a copy of a log for a human to read, not a file to parse.
+const LOG_TAIL: &str = r#"set -u
+dsh_log=%%LOG%%
+dsh_bytes=%%BYTES%%
+if [ -f "$dsh_log" ]; then
+  dsh_there=true
+  dsh_data=$(tail -c "$dsh_bytes" "$dsh_log" 2>/dev/null | base64 | tr -d '\n')
+else
+  dsh_there=false
+  dsh_data=
+fi
+printf '<<<DSH-JSON>>>{"exists":%s,"data":"%s"}<<<DSH-END>>>' "$dsh_there" "$dsh_data"
+"#;
+
+pub fn decode_log_tail(out: &RemoteOutput) -> Result<LogTail, HostError> {
+    #[derive(Deserialize)]
+    struct Tail {
+        exists: bool,
+        data: String,
+    }
+    use base64::Engine as _;
+    let tail: Tail = parse_marked(out)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(tail.data.as_bytes())
+        .map_err(|e| HostError::remote_command(format!("远端日志无法解码：{e}")))?;
+    Ok(LogTail {
+        text: String::from_utf8_lossy(&bytes).to_string(),
+        exists: tail.exists,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2912,6 +3054,45 @@ mod tests {
         );
     }
 
+    /// The same round trip when the recipe quotes a path of its own — what
+    /// 「这一台的目录」 needs, since a DSH_HOME may hold a space or a single
+    /// quote and the command has to survive the user's shell with it.
+    #[test]
+    fn a_command_quoting_a_path_survives_both_shells() {
+        let path = "/home/demo/o'brien dir";
+        let command = ssh_command(TARGET, &format!("printf %s {}", quote(path)));
+        assert!(command.starts_with("ssh zjq_aliyun "), "{command}");
+
+        // What the user's shell hands ssh: three words, whatever the path holds.
+        let handed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s@@@' {command}"))
+            .output()
+            .unwrap();
+        let handed_text = String::from_utf8_lossy(&handed.stdout).to_string();
+        let words: Vec<&str> = handed_text.split("@@@").collect();
+        assert_eq!(
+            words.len(),
+            4,
+            "ssh 只该拿到一个参数：{words:?}（路径把它拆开了）"
+        );
+        assert_eq!(words[0], "ssh");
+        assert_eq!(words[1], TARGET);
+
+        // What ssh hands the login shell, and what that shell then runs.
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(words[2])
+            .output()
+            .expect("本机要有 /bin/sh");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            path,
+            "远端最后执行的是：{}",
+            words[2]
+        );
+    }
+
     /// The recipes extend the manager the machine already has, and the one for a
     /// machine with none leaves it with both nvm and a Node.
     #[test]
@@ -3445,6 +3626,169 @@ mod tests {
         assert!(profiles.join("web").is_dir(), "删一个不动另一个");
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // The terminal session on the other machine
+    // -----------------------------------------------------------------------
+
+    /// A terminal on this Mac that lands in the instance's DSH_HOME **there**:
+    /// one command line, two shells. The path may hold a space and a single
+    /// quote, so the script is quoted once for the shell in the user's terminal
+    /// and once for the login shell at the other end — and running it for real
+    /// is what proves both.
+    #[test]
+    fn the_terminal_command_lands_in_the_homes_directory_through_both_shells() {
+        // A directory that really carries both characters: the round trip is
+        // observed, not trusted.
+        let dir = std::env::temp_dir().join(format!("dsh t11'q-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = dir.to_string_lossy().to_string();
+
+        let env = vec![
+            ("DSH_HOME".to_string(), home.clone()),
+            (
+                "DSH_LAUNCHER_INSTANCE".to_string(),
+                "服务器 实例".to_string(),
+            ),
+        ];
+        let path_dirs = vec!["/home/demo/.local/share/dsh-launcher/versions/0.1.0/node_modules/.bin"
+            .to_string()];
+        let script = terminal_script(&home, &env, &path_dirs);
+        let command = terminal_command(TARGET, &script);
+        assert!(command.starts_with("ssh -t zjq_aliyun "), "{command}");
+
+        // What the user's own shell hands ssh. The separator is not a newline:
+        // the script itself has them, and argv is what is being read here.
+        assert!(!script.contains("@@@"), "分隔符不能出现在脚本里：{script}");
+        let handed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s@@@' {command}"))
+            .output()
+            .unwrap();
+        let handed_text = String::from_utf8_lossy(&handed.stdout).to_string();
+        let mut words: Vec<String> = handed_text.split("@@@").map(str::to_string).collect();
+        assert_eq!(words.pop().as_deref(), Some(""), "最后一个 @@ 后面不该有东西");
+        assert_eq!(words[0], "ssh");
+        assert_eq!(words[1], "-t", "远端会话要有终端，否则 shell 不是交互的");
+        assert_eq!(words[2], TARGET);
+        assert_eq!(words.len(), 4, "ssh 只该拿到一个参数（脚本可能被换行拆开了）");
+
+        // What ssh hands the remote login shell: its arguments joined with
+        // spaces. Running that here is what the machine does with it — the
+        // session ends up in the DSH_HOME with the launcher's variables set.
+        // The exec'd login shell reads the piped lines, which is how the state
+        // in front of the exec is read back.
+        let remote = words[3..].join(" ");
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&remote)
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "dumb")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut().unwrap();
+            stdin
+                .write_all(b"printf '>>>%s\\n' \"$PWD\" \"$DSH_HOME\" \"$DSH_LAUNCHER_INSTANCE\"\n")
+                .unwrap();
+        }
+        let out = child.wait_with_output().unwrap();
+        let printed: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .split(">>>")
+            .skip(1)
+            .map(|chunk| chunk.lines().next().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            printed,
+            vec![
+                home.clone(),
+                home.clone(),
+                "服务器 实例".to_string()
+            ],
+            "远端会话要 cd 进那个目录，并带上这两个变量：{:?} / {:?} / {:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            out.status
+        );
+        assert!(
+            script.contains(&format!(
+                "export PATH={}:",
+                quote(path_dirs[0].as_str())
+            )),
+            "版本的 bin 目录要排在最前（远端不写 wrapper，pnpm 自己的 .bin 就是入口）：{script}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // The last stretch of a remote log
+    // -----------------------------------------------------------------------
+
+    /// Opening a remote log copies home only the end of it: a DSH log grows
+    /// without limit, and one that has been running for weeks is not something
+    /// to hand back whole.
+    #[test]
+    fn the_log_tail_script_reads_the_last_bytes_of_one_file() {
+        let dir = scratch("dsh-remote-log-tail");
+        let log = dir.join("i1.log");
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&log, &text).unwrap();
+
+        let out = local_shell(&log_tail_script(&log.to_string_lossy(), 40));
+        let tail = decode_log_tail(&out).unwrap();
+        assert!(tail.exists);
+        assert_eq!(tail.text, text[text.len() - 40..], "只读到末尾那一段");
+        assert!(tail.text.len() <= 40);
+
+        // A log that is not there yet is an answer, not a failure: an instance
+        // that has never printed anything has an empty log.
+        let out = local_shell(&log_tail_script(
+            &dir.join("nothing.log").to_string_lossy(),
+            40,
+        ));
+        let missing = decode_log_tail(&out).unwrap();
+        assert!(!missing.exists);
+        assert!(missing.text.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same read through the seam: one call, and the one thing a test can
+    /// hold the launcher to — it asked for the log on the right machine and
+    /// asked for no more than the bound.
+    #[test]
+    fn the_log_tail_asks_that_machine_for_a_bounded_stretch_of_the_log() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            &serde_json::json!({"exists": true, "data": base64::engine::general_purpose::STANDARD.encode("hello\n")}).to_string(),
+        )));
+        let transport: &dyn HostTransport = &*fake;
+
+        let tail = block_on(log_tail(
+            transport,
+            &host(),
+            "/home/demo/.local/share/dsh-launcher/logs/i1.log",
+            LOG_TAIL_BYTES,
+        ))
+        .unwrap();
+
+        assert_eq!(tail.text, "hello\n");
+        assert!(tail.exists);
+        let script = fake.last_script();
+        assert!(
+            script.contains(&quote("/home/demo/.local/share/dsh-launcher/logs/i1.log")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("dsh_bytes={LOG_TAIL_BYTES}"))
+                && script.contains("tail -c \"$dsh_bytes\""),
+            "读的不是有界的一段：{script}"
+        );
     }
 
     /// One question, one answer: whether that machine already has a `~/.dsh`.
