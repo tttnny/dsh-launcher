@@ -58,9 +58,11 @@ function retryHost() {
   void store.loadHostResources(hostId.value)
 }
 
-/** `base`, then `base 2`, `base 3`… — instance names are unique. */
+/** `base`, then `base 2`, `base 3`… — instance names are unique **on their own
+ *  host** (ADR-0006 §1), so only this machine's names are in the way: `web` on
+ *  another machine says nothing about `web` here. */
 function uniqueName(base: string): string {
-  const existing = new Set(store.instances.map((i) => i.name))
+  const existing = new Set(store.instancesOfHost(hostId.value).map((i) => i.name))
   if (!existing.has(base)) return base
   let n = 2
   while (existing.has(`${base} ${n}`)) n += 1
@@ -77,8 +79,9 @@ function reset() {
     homeId.value = preset.homeId
     return
   }
-  let n = store.instances.length + 1
-  const existing = new Set(store.instances.map((i) => i.name))
+  const onThisHost = store.instancesOfHost(hostId.value)
+  let n = onThisHost.length + 1
+  const existing = new Set(onThisHost.map((i) => i.name))
   while (existing.has(`${t('instances.namePrefix')}${n}`)) n += 1
   name.value = `${t('instances.namePrefix')}${n}`
   versionId.value = versions.value[0]?.id
