@@ -1220,6 +1220,62 @@ fi
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
+/// One profile's own files on the machine that owns it: the `package.json` the
+/// profile declares its layers and dependencies in, and the version of every
+/// package installed under its `node_modules`.
+///
+/// One call for the whole profile, not one per package: this is the projection
+/// the plugins page falls back to whenever no instance answers, and a connection
+/// per file would make the fallback slower than what it stands in for (the same
+/// rule the dependency self-check follows). The `package.json` travels as base64
+/// because it is a document and not a line of text; each version is picked out
+/// of its own manifest here, so a caller gets the one field it needs without a
+/// round trip per package.
+const PROFILE_PACKAGES: &str = r#"set -u
+%%ESCAPER%%
+dsh_dir=%%PATH%%
+dsh_manifest=null
+if [ -f "$dsh_dir/package.json" ]; then
+  dsh_manifest="\"$(base64 < "$dsh_dir/package.json" | tr -d '\n')\""
+fi
+
+# One installed package: the name the profile spells it by (the directory's own
+# name, scope included) and the version its manifest states. A manifest that
+# states none leaves the version empty, which reads as 「不知道版本」.
+dsh_row() {
+  dsh_pkg="$2/package.json"
+  [ -f "$dsh_pkg" ] || return 0
+  dsh_version=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$dsh_pkg" 2>/dev/null | head -n 1 || true)
+  if [ -z "$dsh_version" ]; then
+    dsh_version=$(tr -d '\n' < "$dsh_pkg" | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 || true)
+  fi
+  dsh_version=$(printf '%s' "$dsh_version" | cut -d'"' -f4)
+  dsh_rows="$dsh_rows$dsh_sep{\"name\":\"$(dsh_esc "$1")\",\"version\":\"$(dsh_esc "$dsh_version")\"}"
+  dsh_sep=,
+}
+
+dsh_rows=
+dsh_sep=
+dsh_nm="$dsh_dir/node_modules"
+if [ -d "$dsh_nm" ]; then
+  for dsh_entry in "$dsh_nm"/*; do
+    [ -d "$dsh_entry" ] || continue
+    dsh_leaf=${dsh_entry##*/}
+    case "$dsh_leaf" in
+      .*) ;;
+      @*)
+        for dsh_inner in "$dsh_entry"/*; do
+          [ -d "$dsh_inner" ] || continue
+          dsh_row "$dsh_leaf/${dsh_inner##*/}" "$dsh_inner"
+        done
+        ;;
+      *) dsh_row "$dsh_leaf" "$dsh_entry" ;;
+    esac
+  done
+fi
+printf '<<<DSH-JSON>>>{"manifest":%s,"installed":[%s]}<<<DSH-END>>>' "$dsh_manifest" "$dsh_rows"
+"#;
+
 pub fn home_path_script(path: &str) -> String {
     fill(
         HOME_PATH,
@@ -1257,6 +1313,17 @@ pub fn rename_profile_script(from: &str, to: &str) -> String {
 
 pub fn delete_profile_script(path: &str) -> String {
     fill(DELETE_PROFILE, &[("%%PATH%%", quote(path))])
+}
+
+/// The script that reads one profile's own files on that machine.
+pub fn profile_packages_script(profile_dir: &str) -> String {
+    fill(
+        PROFILE_PACKAGES,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATH%%", quote(profile_dir)),
+        ],
+    )
 }
 
 /// Creates (or finds) that machine's DSH_HOME for `path` and answers its
@@ -1333,6 +1400,31 @@ pub async fn delete_profile(
         .run(host, RemoteCall::new(delete_profile_script(path)))
         .await?;
     decode_ack(&out)
+}
+
+/// One profile's own files, as that machine answered: the `package.json` it
+/// declares its layers in (its bytes, or `None` when the profile has none), and
+/// the version of every package installed under its `node_modules`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteProfilePackages {
+    pub manifest: Option<Vec<u8>>,
+    pub installed: std::collections::BTreeMap<String, String>,
+}
+
+/// Reads one profile's own files on the machine that owns it, in one call.
+///
+/// Nothing here is a claim about the instance: this is the file projection the
+/// plugins page uses when no instance answers (ADR-0001 — the running DSH owns
+/// plugin state), and it stays thinner than a live list on purpose.
+pub async fn profile_packages(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    profile_dir: &str,
+) -> Result<RemoteProfilePackages, HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(profile_packages_script(profile_dir)))
+        .await?;
+    decode_profile_packages(&out)
 }
 
 /// Reads one file, as base64 — the ssh channel is text, and version manifests,
@@ -2009,6 +2101,46 @@ pub fn decode_profiles(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
     Ok(names)
 }
 
+#[derive(Deserialize)]
+struct ProfilePackageRow {
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProfilePackages {
+    #[serde(default)]
+    manifest: Option<String>,
+    #[serde(default)]
+    installed: Vec<ProfilePackageRow>,
+}
+
+/// One profile's files out of the answer: the manifest's bytes and the installed
+/// versions. A manifest that is not valid base64 reads as 「没有 manifest」 — the
+/// same answer as a profile without one, because nothing can be projected out of
+/// it either way — and a package whose version the script could not find is left
+/// out rather than reported as an empty version.
+pub fn decode_profile_packages(out: &RemoteOutput) -> Result<RemoteProfilePackages, HostError> {
+    use base64::Engine as _;
+    let answer: ProfilePackages = parse_marked(out)?;
+    let manifest = answer
+        .manifest
+        .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).ok());
+    let installed = answer
+        .installed
+        .into_iter()
+        .filter_map(|row| match row.version {
+            Some(version) if !version.is_empty() => Some((row.name, version)),
+            _ => None,
+        })
+        .collect();
+    Ok(RemoteProfilePackages {
+        manifest,
+        installed,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The in-memory double
 // ---------------------------------------------------------------------------
@@ -2196,6 +2328,22 @@ pub(crate) mod testing {
     /// is still there.
     pub(crate) fn tail_stdout(text: &str, offset: u64) -> String {
         tail_stdout_with(text, offset, true)
+    }
+
+    /// The stdout the profile read answers with: the profile's `package.json`,
+    /// base64-encoded, and one row per installed package. Mirrors what
+    /// [`PROFILE_PACKAGES`] prints, field for field.
+    pub(crate) fn profile_packages_stdout(manifest: &str, installed: &[(&str, &str)]) -> String {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(manifest.as_bytes());
+        let rows: Vec<String> = installed
+            .iter()
+            .map(|(name, version)| format!("{{\"name\":\"{name}\",\"version\":\"{version}\"}}"))
+            .collect();
+        marked(&format!(
+            "{{\"manifest\":\"{data}\",\"installed\":[{}]}}",
+            rows.join(",")
+        ))
     }
 
     /// The same read when the process is gone — the follower's signal that the
@@ -3636,6 +3784,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// One profile read, one answer: the manifest's own bytes and a version for
+    /// every package the profile has installed — a scoped package under its own
+    /// directory name, and a package whose manifest states no version left out
+    /// rather than reported as empty. A profile that is not there is one empty
+    /// answer, not a failure.
+    #[test]
+    fn the_profile_read_returns_the_manifest_and_the_installed_versions() {
+        let dir = scratch("dsh-remote-profile");
+        let web = dir.join("profiles").join("web");
+        std::fs::create_dir_all(web.join("node_modules").join("@scope").join("one")).unwrap();
+        std::fs::create_dir_all(web.join("node_modules").join("plain")).unwrap();
+        std::fs::create_dir_all(web.join("node_modules").join("versionless")).unwrap();
+        let manifest = "{\n  \"dsh\": { \"profile\": { \"bundles\": [\"plain\"] } },\n  \"dependencies\": { \"plain\": \"^1\" }\n}\n";
+        std::fs::write(web.join("package.json"), manifest).unwrap();
+        std::fs::write(
+            web.join("node_modules").join("@scope").join("one").join("package.json"),
+            "{\n  \"name\": \"@scope/one\",\n  \"version\": \"3.1.4\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            web.join("node_modules").join("plain").join("package.json"),
+            r#"{"name":"plain","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            web.join("node_modules").join("versionless").join("package.json"),
+            r#"{"name":"versionless"}"#,
+        )
+        .unwrap();
+
+        let out = local_shell(&profile_packages_script(&web.to_string_lossy()));
+        let files = decode_profile_packages(&out).expect("一次调用读回整个 Profile");
+
+        assert_eq!(files.manifest.as_deref(), Some(manifest.as_bytes()));
+        assert_eq!(files.installed.get("@scope/one").map(String::as_str), Some("3.1.4"));
+        assert_eq!(files.installed.get("plain").map(String::as_str), Some("1.0.0"));
+        assert!(
+            !files.installed.contains_key("versionless"),
+            "清单里没有版本就不报版本：{:?}",
+            files.installed
+        );
+
+        // 没有这个 Profile：读回一个空的答案，而不是一次失败。
+        let absent = local_shell(&profile_packages_script(&dir.join("nope").to_string_lossy()));
+        let files = decode_profile_packages(&absent).unwrap();
+        assert!(files.manifest.is_none());
+        assert!(files.installed.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The local rule for a version's `bin.js` is 「在，而且不是空文件」; a remote
     /// version gets the same question asked of the machine that has the file.
     #[test]
@@ -4004,5 +4202,95 @@ mod tests {
         assert_eq!(after.dsh_home, home.join(".dsh").to_string_lossy());
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The one thing no fake can show: that a real machine's own shell reads a
+    /// real profile — GNU `base64`, `grep -o`, `cut`, the `@scope/pkg` walk and
+    /// the marker envelope — and answers in one call with what the page
+    /// projects from.
+    ///
+    /// ```text
+    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
+    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_profile
+    /// ```
+    ///
+    /// It writes one throwaway profile directory under that machine's `/tmp` and
+    /// removes it again.
+    #[tokio::test]
+    #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
+    async fn a_real_profile_read_answers_from_that_machine() {
+        let Ok(target) = std::env::var("DSH_LAUNCHER_TEST_SSH_HOST") else {
+            eprintln!("跳过：没有设置 DSH_LAUNCHER_TEST_SSH_HOST");
+            return;
+        };
+        let socket_dir = PathBuf::from("/tmp").join(format!(
+            "d10{}",
+            uuid::Uuid::new_v4().simple().to_string().split_at(6).0
+        ));
+        let host = RemoteHost::of(
+            &crate::config::Host {
+                id: "host-real".into(),
+                display_name: "真机".into(),
+                ssh_target: target,
+                registry: None,
+                extra_env: Default::default(),
+                data_dir: None,
+                builtin: false,
+                toolchain: Default::default(),
+                toolchain_overrides: Default::default(),
+            },
+            &socket_dir,
+        )
+        .unwrap();
+        let transport = crate::ssh::SshTransport::new();
+        let transport: &dyn HostTransport = &transport;
+
+        let dir = format!(
+            "/tmp/dsh-profile-real-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let web = format!("{dir}/profiles/web");
+        let manifest = r#"{"dsh":{"profile":{"bundles":["plain"]}},"dependencies":{"plain":"^1"}}"#;
+        transport
+            .write_file(&host, &format!("{web}/package.json"), manifest.as_bytes().to_vec())
+            .await
+            .unwrap();
+        transport
+            .write_file(
+                &host,
+                &format!("{web}/node_modules/plain/package.json"),
+                br#"{"name":"plain","version":"1.2.3"}"#.to_vec(),
+            )
+            .await
+            .unwrap();
+        transport
+            .write_file(
+                &host,
+                &format!("{web}/node_modules/@scope/one/package.json"),
+                br#"{"name":"@scope/one","version":"4.5.6"}"#.to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let files = profile_packages(transport, &host, &web)
+            .await
+            .expect("真机上的一次调用要读回整个 Profile");
+
+        assert_eq!(files.manifest.as_deref(), Some(manifest.as_bytes()));
+        assert_eq!(files.installed.get("plain").map(String::as_str), Some("1.2.3"));
+        assert_eq!(
+            files.installed.get("@scope/one").map(String::as_str),
+            Some("4.5.6")
+        );
+
+        remove_dir(transport, &host, &dir).await.unwrap();
+        assert!(
+            read_file_optional(transport, &host, &format!("{web}/package.json"))
+                .await
+                .unwrap()
+                .is_none(),
+            "临时目录要删干净"
+        );
+        std::fs::remove_dir_all(&socket_dir).ok();
     }
 }

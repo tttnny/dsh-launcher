@@ -4,9 +4,14 @@
 // (build scripts, peer policy, pnpm store pin). The launcher never writes
 // plugin state — the running DSH owns it (ADR-0001).
 
+use crate::config::{DshHome, Host, HostStatus, HostState};
+use crate::native::{
+    BundleItem, NativeChangeResult, NativeClient, NativeTransport, PluginView, PluginViewMode,
+    ReqwestTransport,
+};
 use crate::AppState;
-use crate::native::NativeChangeResult;
 use serde::Deserialize;
+use std::sync::Arc;
 use tauri::State;
 
 /// Public OAuth App client id used to boost unauthenticated GitHub API quota
@@ -25,6 +30,16 @@ pub(crate) fn github_api_url(path: &str) -> String {
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
+
+/// The transport the plugin client talks over in production: HTTP to the address
+/// the running table holds (ADR-0001 — the running DSH owns plugin state). The
+/// `_via` entry points take the transport instead, so a test drives every page
+/// state through the plugin client's own fake without a live instance; which
+/// address the page talks to, and what it says when it cannot, is the same
+/// either way.
+fn http_transport() -> Result<Arc<dyn NativeTransport>, String> {
+    Ok(Arc::new(ReqwestTransport::new()?))
+}
 
 fn http_client() -> Result<reqwest::Client, String> {
     crate::proxy::apply(reqwest::Client::builder())
@@ -79,6 +94,12 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 /// with no usable token and an unreachable one take the read-only path; their
 /// `reason` differs so the two are distinguishable, and so is "not running".
 ///
+/// A remote instance is asked at the address **this Mac** reaches it at: the
+/// launcher's own port forward, re-confirmed (and rebuilt, if it died) before
+/// every call ([`crate::process::reachable_url_for`], ADR-0008). The projection
+/// for the read-only path is read on the machine that owns the profile, and a
+/// machine the launcher cannot reach answers with its own reason instead.
+///
 /// The instance is resolved from the selectors: the same DSH_HOME, running the
 /// selected profile (see [`crate::process::running_for_profile`]). `instance_id`
 /// is the instance the page was opened from, and it wins when it is itself
@@ -96,15 +117,27 @@ pub async fn list_plugins(
 }
 
 /// The body of [`list_plugins`], taking `&AppState` so tests can drive the
-/// read-only states without a Tauri runtime.
+/// read-only states without a Tauri runtime. It builds the HTTP transport
+/// production uses; [`list_plugins_via`] is the same read over a transport the
+/// caller hands in.
 async fn list_plugins_for(
     state: &AppState,
     home_id: &str,
     profile: &str,
     instance_id: Option<&str>,
-) -> Result<crate::native::PluginView, String> {
-    use crate::native::{NativeClient, PluginView, PluginViewMode};
+) -> Result<PluginView, String> {
+    list_plugins_via(state, http_transport()?, home_id, profile, instance_id).await
+}
 
+/// The read itself: which address the page talks to, and what it says when it
+/// cannot talk to one at all.
+async fn list_plugins_via(
+    state: &AppState,
+    transport: Arc<dyn NativeTransport>,
+    home_id: &str,
+    profile: &str,
+    instance_id: Option<&str>,
+) -> Result<PluginView, String> {
     // The read-only reasons are distinct on purpose: the UI shows them
     // verbatim, so each one has to say what happened and what to do.
     const NOT_RUNNING: &str =
@@ -112,35 +145,65 @@ async fn list_plugins_for(
     const ADOPTED: &str =
         "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理补丁层。请从启动器重启该实例。";
 
+    let (home, host) = home_and_host(state, home_id)?;
+
+    // Nothing on that machine can be asked while the launcher cannot reach it:
+    // not the instance, and not the profile files either. Saying so is the whole
+    // answer — asking that machine again is the page's 重试 button — and it is
+    // why this does not fall through to a file projection: those files are over
+    // there, and a local `fs` call aimed at that path answers about this Mac
+    // (ADR-0006).
+    if is_host_unreachable(state, &host) {
+        let reason = host_unreachable_reason(&host, &state.host_status(&host.id));
+        return Ok(PluginView::readonly(
+            PluginViewMode::Unreachable,
+            reason,
+            Vec::new(),
+        ));
+    }
+
     let Some(entry) =
         crate::process::running_for_profile(state, home_id, profile, instance_id).await?
     else {
         // No instance to ask, but the page still answers the question the user
-        // came with ("这个 Profile 装了什么？") from the profile's own files.
-        let bundles = offline_bundles(state, home_id, profile);
+        // came with ("这个 Profile 装了什么？") from the profile's own files,
+        // read where they live.
+        let bundles = profile_projection(state, &host, &home, profile).await;
         return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING, bundles));
     };
     // What decides is the token, not how we came to own the entry: an adopted
     // process whose launch URL we remembered is as manageable as a child of
     // ours, and the bare URL of one we cannot authenticate is not.
-    let Some(url) = crate::process::manageable_url(&entry) else {
+    if crate::process::manageable_url(&entry).is_none() {
         let mode = if entry.adopted {
             PluginViewMode::Adopted
         } else {
             PluginViewMode::NotRunning
         };
         let reason = if entry.adopted { ADOPTED } else { NOT_RUNNING };
-        let bundles = offline_bundles(state, home_id, profile);
+        let bundles = profile_projection(state, &host, &home, profile).await;
         return Ok(PluginView::readonly(mode, reason, bundles));
-    };
-    let url = url.to_string();
+    }
 
+    // The address comes from the running table's own rule rather than from the
+    // entry as it stands: a remote instance's entry holds the address its port
+    // forward had when it was written, and a forward dies with the ssh
+    // connection under it (ADR-0008). Asking here re-confirms or rebuilds it, so
+    // a plugins page opened after this Mac slept reaches the instance instead of
+    // failing to connect; 本机's instances answer with their own URL, unchanged.
+    let url = match crate::process::reachable_url_for(state, &entry.id).await {
+        Ok(url) => url,
+        Err(e) => {
+            let bundles = profile_projection(state, &host, &home, profile).await;
+            return Ok(PluginView::readonly(PluginViewMode::Unreachable, e, bundles));
+        }
+    };
     // A refused session / unreachable instance is read-only rather than a
     // command error: the page still renders with the instance's reason.
-    let client = match NativeClient::connect(&url).await {
+    let client = match NativeClient::connect_with(transport, &url).await {
         Ok(client) => client,
         Err(e) => {
-            let bundles = offline_bundles(state, home_id, profile);
+            let bundles = profile_projection(state, &host, &home, profile).await;
             return Ok(PluginView::readonly(PluginViewMode::Unreachable, e, bundles));
         }
     };
@@ -148,47 +211,123 @@ async fn list_plugins_for(
     Ok(PluginView::managed(bundles, &ui_locale(state), &entry.id))
 }
 
-/// The profile's own files as a layer list, for the states where no instance
-/// can answer. Read-only by construction — it never writes a profile file
-/// (ADR-0001) — and deliberately thinner than the live list: it cannot know
-/// live state, availability, removal rules or a layer's row count, so it
-/// reports only what the files say, and the page labels it as such.
-///
-/// The order is the profile's own: the bundles it selects (which is its
-/// priority order), then the packages it installs but does not mount.
-fn offline_bundles(
-    state: &AppState,
-    home_id: &str,
-    profile: &str,
-) -> Vec<crate::native::BundleItem> {
-    let home = state
-        .config
-        .lock()
-        .unwrap()
+/// The DSH_HOME record and the machine that owns it. Every path in it is a path
+/// **on that machine** — a remote host's DSH_HOME, its profile files and its
+/// instance all live over there (ADR-0006).
+fn home_and_host(state: &AppState, home_id: &str) -> Result<(DshHome, Host), String> {
+    let cfg = state.config.lock().unwrap();
+    let home = cfg
         .homes
         .iter()
         .find(|h| h.id == home_id)
-        .map(|h| std::path::PathBuf::from(&h.path));
-    match home {
-        Some(path) => offline_bundles_in(&path, profile),
-        None => Vec::new(),
+        .cloned()
+        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
+    let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?.clone();
+    Ok((home, host))
+}
+
+/// Whether the launcher currently knows this host is not answering. 本机 is
+/// never in that state: the machine the launcher runs on is here.
+fn is_host_unreachable(state: &AppState, host: &Host) -> bool {
+    !host.builtin
+        && state
+            .host_status(&host.id)
+            .map(|status| status.state == HostState::Unreachable)
+            .unwrap_or(false)
+}
+
+/// What the page says when the machine that owns the DSH_HOME cannot be reached:
+/// the machine's own reason when there is one, and the action that can change
+/// the answer.
+fn host_unreachable_reason(host: &Host, status: &Option<HostStatus>) -> String {
+    let detail = status
+        .as_ref()
+        .and_then(|s| s.message.as_deref())
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+    match detail {
+        Some(detail) => format!(
+            "主机「{}」现在连不上：{detail}。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。",
+            host.display_name
+        ),
+        None => format!(
+            "主机「{}」现在连不上。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。",
+            host.display_name
+        ),
     }
 }
 
-/// [`offline_bundles`] against a HOME path, so tests need no `AppState` config.
-pub(crate) fn offline_bundles_in(
-    home: &std::path::Path,
+/// The profile's own files as a layer list, read **where they live**: 本机's
+/// profile is read with `std::fs`, a remote host's in one call over the
+/// transport. A local `fs` call aimed at a remote path would answer about this
+/// Mac (ADR-0006), and one call rather than one per package is what keeps the
+/// fallback cheap — this projection is used exactly when nothing is running.
+///
+/// Best effort in both directions: an absent profile, an unreadable manifest
+/// and a machine that does not answer all project to nothing, and the page says
+/// which state it is in from its own reason.
+async fn profile_projection(
+    state: &AppState,
+    host: &Host,
+    home: &DshHome,
     profile: &str,
-) -> Vec<crate::native::BundleItem> {
-    use crate::native::BundleItem;
+) -> Vec<BundleItem> {
+    if host.builtin {
+        return offline_bundles_in(&home.path, profile);
+    }
+    let Ok(dir) = crate::profile::profile_dir(&home.path, profile) else {
+        return Vec::new();
+    };
+    let run_host = match crate::ssh::RemoteHost::of(host, &state.data_dir) {
+        Ok(run_host) => run_host,
+        Err(e) => {
+            crate::log_warn!("读取远端 Profile 文件失败：{e}");
+            return Vec::new();
+        }
+    };
+    let files = match crate::remote::profile_packages(
+        &*state.host_transport,
+        &run_host,
+        &dir.to_string_lossy(),
+    )
+    .await
+    {
+        Ok(files) => files,
+        Err(e) => {
+            crate::log_warn!("读取「{}」上的 Profile 文件失败：{e}", host.display_name);
+            return Vec::new();
+        }
+    };
+    offline_bundles_from(
+        files
+            .manifest
+            .as_deref()
+            .and_then(|raw| std::str::from_utf8(raw).ok()),
+        |name| files.installed.get(name).cloned(),
+    )
+}
 
-    let Ok(dir) = crate::profile::profile_dir(home, profile) else {
+/// One profile's own files as a layer list, without a filesystem: `manifest` is
+/// that `package.json`'s text as it was read where it lives, and `version_of`
+/// answers the installed version of one package name — 本机 reads it out of
+/// `node_modules/<name>/package.json`, a remote host already has them from the
+/// one call that fetched the profile's files.
+///
+/// Read-only by construction — it never writes a profile file (ADR-0001) — and
+/// deliberately thinner than the live list: it cannot know live state,
+/// availability, removal rules or a layer's row count, so it reports only what
+/// the files say, and the page labels it as such.
+///
+/// The order is the profile's own: the bundles it selects (which is its
+/// priority order), then the packages it installs but does not mount.
+pub(crate) fn offline_bundles_from<F>(manifest: Option<&str>, version_of: F) -> Vec<BundleItem>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = manifest else {
         return Vec::new();
     };
-    let Ok(raw) = std::fs::read_to_string(dir.join("package.json")) else {
-        return Vec::new();
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Vec::new();
     };
 
@@ -223,10 +362,28 @@ pub(crate) fn offline_bundles_in(
     names
         .into_iter()
         .map(|name| {
-            let version = read_installed_version(&dir, &name);
-            BundleItem::from_profile_files(name.clone(), selected.contains(&name), installed.contains(&name), version)
+            let version = version_of(&name);
+            BundleItem::from_profile_files(
+                name.clone(),
+                selected.contains(&name),
+                installed.contains(&name),
+                version,
+            )
         })
         .collect()
+}
+
+/// [`offline_bundles_from`] against a HOME path on 本机, so tests need no
+/// `AppState` config.
+pub(crate) fn offline_bundles_in(
+    home: &std::path::Path,
+    profile: &str,
+) -> Vec<crate::native::BundleItem> {
+    let Ok(dir) = crate::profile::profile_dir(home, profile) else {
+        return Vec::new();
+    };
+    let manifest = std::fs::read_to_string(dir.join("package.json")).ok();
+    offline_bundles_from(manifest.as_deref(), |name| read_installed_version(&dir, name))
 }
 
 /// The version of an installed package, read from the copy pnpm linked into the
@@ -745,6 +902,22 @@ pub(crate) async fn write_client(
     profile: &str,
     instance_id: Option<&str>,
 ) -> Result<crate::native::NativeClient, String> {
+    write_client_via(state, http_transport()?, home_id, profile, instance_id).await
+}
+
+/// [`write_client`] over a transport the caller hands in: the same resolution,
+/// so a test can assert the address a write is aimed at without a live instance.
+pub(crate) async fn write_client_via(
+    state: &AppState,
+    transport: Arc<dyn NativeTransport>,
+    home_id: &str,
+    profile: &str,
+    instance_id: Option<&str>,
+) -> Result<crate::native::NativeClient, String> {
+    let (_, host) = home_and_host(state, home_id)?;
+    if is_host_unreachable(state, &host) {
+        return Err(host_unreachable_reason(&host, &state.host_status(&host.id)));
+    }
     let Some(entry) =
         crate::process::running_for_profile(state, home_id, profile, instance_id).await?
     else {
@@ -752,14 +925,18 @@ pub(crate) async fn write_client(
     };
     // Same rule as the read path: a token is what makes the instance
     // addressable, however the entry came to exist.
-    let Some(url) = crate::process::manageable_url(&entry) else {
+    if crate::process::manageable_url(&entry).is_none() {
         return Err(if entry.adopted {
             "该实例由系统接管，无法管理插件".to_string()
         } else {
             "实例未在运行，请先启动实例".to_string()
         });
-    };
-    crate::native::NativeClient::connect(url).await
+    }
+    // Where the write goes is the same decision the read makes, and it is made
+    // in the same place: the forwarded address for a remote instance, rebuilt if
+    // the connection under it went away (ADR-0008).
+    let url = crate::process::reachable_url_for(state, &entry.id).await?;
+    crate::native::NativeClient::connect_with(transport, &url).await
 }
 
 /// Translates a native `error.code` refusal into the reason the page shows
@@ -1094,6 +1271,24 @@ mod tests {
         homes: Vec<crate::config::DshHome>,
         instances: Vec<crate::config::DshInstance>,
     ) -> AppState {
+        app_state_with(
+            vec![crate::config::Host::local()],
+            homes,
+            instances,
+            crate::remote::testing::idle(),
+        )
+    }
+
+    /// The state one test runs against, with the machines it knows and the
+    /// transport the remote half of it dials: a host that is not this Mac has
+    /// its DSH_HOMEs, its profile files and its instances over there, so every
+    /// test that reads one drives a fake instead of a server.
+    fn app_state_with(
+        hosts: Vec<crate::config::Host>,
+        homes: Vec<crate::config::DshHome>,
+        instances: Vec<crate::config::DshInstance>,
+        transport: Arc<dyn crate::ssh::HostTransport>,
+    ) -> AppState {
         AppState {
             config_path: std::path::PathBuf::new(),
             data_dir: std::path::PathBuf::new(),
@@ -1102,13 +1297,11 @@ mod tests {
                 versions: Vec::new(),
                 instances,
                 settings: Default::default(),
-                hosts: vec![crate::config::Host::local()],
+                hosts,
             }),
             running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            // Plugin management talks to a *running instance* over HTTP; the
-            // remote transport plays no part in these tests.
-            host_transport: crate::remote::testing::idle(),
+            host_transport: transport,
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
             forwards: Default::default(),
@@ -1634,5 +1827,535 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("接管"), "err: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Remote hosts: the same page, over the launcher's own port forward
+    // -----------------------------------------------------------------------
+
+    use crate::native::testing::{
+        ok_response, FakeTransport as PluginServer, COOKIE, INSTANCE_URL,
+    };
+    use crate::remote::testing::{FakeAnswer as HostAnswer, FakeCall, FakeTransport as HostServer};
+
+    const TARGET: &str = "zjq_aliyun";
+    const TOKEN: &str = "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
+    /// Where that machine keeps its launcher data, and the DSH_HOME under it.
+    const REMOTE_DATA: &str = "/home/zhou/.local/share/dsh-launcher";
+    const REMOTE_HOME: &str = "/home/zhou/.local/share/dsh-launcher/homes/1.2.3";
+
+    /// A machine that is not this Mac: an ssh target, and a data directory of
+    /// its own over there.
+    fn remote_host() -> crate::config::Host {
+        crate::config::Host {
+            id: "host-lab".to_string(),
+            display_name: "服务器".to_string(),
+            ssh_target: TARGET.to_string(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: Some(std::path::PathBuf::from(REMOTE_DATA)),
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        }
+    }
+
+    fn remote_home() -> crate::config::DshHome {
+        crate::config::DshHome {
+            id: "h2".to_string(),
+            name: "h2".to_string(),
+            path: std::path::PathBuf::from(REMOTE_HOME),
+            host_id: "host-lab".to_string(),
+        }
+    }
+
+    fn remote_instance(id: &str) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: id.to_string(),
+            name: id.to_string(),
+            version_id: "v1".to_string(),
+            home_id: "h2".to_string(),
+            host_id: "host-lab".to_string(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        }
+    }
+
+    /// One running entry, as the running table holds it. `remote` is what makes
+    /// it a remote instance: DSH printed an address on its own machine, and the
+    /// launcher's table remembers where this Mac reaches it (`url`).
+    fn running_entry(
+        profile: &str,
+        url: String,
+        adopted: bool,
+        remote: Option<crate::process::RemoteRun>,
+    ) -> crate::process::RunningInstance {
+        crate::process::RunningInstance {
+            kill: Arc::new(tokio::sync::Notify::new()),
+            profile: profile.to_string(),
+            url: Some(url),
+            adopted: adopted.then(|| crate::process::Adopted {
+                pid: 4242,
+                port: 3080,
+                host: "192.0.2.7".to_string(),
+            }),
+            remote,
+        }
+    }
+
+    /// The remote half of an entry: the machine, the address DSH printed there
+    /// (the forward's target), and the pid that would be stopped there.
+    fn remote_run(host: &crate::config::Host, remote_url: &str) -> crate::process::RemoteRun {
+        crate::process::RemoteRun {
+            host_id: host.id.clone(),
+            host: crate::ssh::RemoteHost::of(host, std::path::Path::new("/launcher")).unwrap(),
+            remote_url: Some(remote_url.to_string()),
+            pid: 4242,
+            started_at: Some(11),
+            data_dir: std::path::PathBuf::from(REMOTE_DATA),
+            log_path: format!("{REMOTE_DATA}/logs/i2.log"),
+        }
+    }
+
+    /// That machine's own address for the instance — deliberately not loopback,
+    /// so a request that went there instead of through the forward is visible.
+    fn remote_url() -> String {
+        format!("http://192.0.2.7:3080/?token={TOKEN}")
+    }
+
+    /// An address the entry may still be holding from a forward that has since
+    /// died: a loopback port nothing answers on.
+    fn stale_local_url() -> String {
+        format!("http://127.0.0.1:9999/?token={TOKEN}")
+    }
+
+    async fn put_running(state: &AppState, id: &str, entry: crate::process::RunningInstance) {
+        state.running.lock().await.insert(id.to_string(), entry);
+    }
+
+    /// The forwards the page asked that machine's transport for, in order.
+    fn forwarded(fake: &HostServer) -> Vec<crate::ssh::PortForward> {
+        fake.calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                FakeCall::OpenForward { forward, .. } => Some(forward),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A running remote instance is listed exactly as a local one is, over the
+    /// address **this Mac** reaches it at: the page goes through the launcher's
+    /// port forward (ADR-0008), so what the client talks to is loopback with the
+    /// launch token — never the address DSH printed on that machine, which on
+    /// this Mac is whoever happens to hold that port.
+    ///
+    /// The address is not taken from the entry as it stands either: a forward
+    /// dies with the ssh connection under it (this Mac sleeping is enough), so
+    /// the page re-confirms it and rebuilds it from that machine's own address.
+    /// What the entry still holds from the dead forward is not what is used.
+    #[tokio::test]
+    async fn a_remote_instance_lists_its_layers_over_the_forwarded_address() {
+        let host = remote_host();
+        let hosts = HostServer::new().answering(HostAnswer::Done);
+        let state = app_state_with(
+            vec![host.clone()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        put_running(
+            &state,
+            "i2",
+            running_entry("web", stale_local_url(), false, Some(remote_run(&host, &remote_url()))),
+        )
+        .await;
+
+        let server = PluginServer::new(
+            COOKIE,
+            vec![ok_response(serde_json::json!([
+                {
+                    "name": "@deepseek-ai/dsh-base",
+                    "enabled": true,
+                    "installed": true,
+                    "removable": false,
+                    "optional": false,
+                    "rows": [{ "entryId": "llm" }, { "moduleName": "x" }]
+                },
+                {
+                    "name": "ds-bot",
+                    "enabled": true,
+                    "installed": true,
+                    "removable": true,
+                    "optional": false,
+                    "rows": [{ "entryId": "bot" }]
+                }
+            ]))],
+        );
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Managed);
+        assert_eq!(view.instance_id.as_deref(), Some("i2"));
+        assert_eq!(
+            view.bundles
+                .iter()
+                .map(|b| (b.name.as_str(), b.row_count))
+                .collect::<Vec<_>>(),
+            [("@deepseek-ai/dsh-base", 2), ("ds-bot", 1)],
+            "每层带多少条目要如实报出来"
+        );
+
+        // One forward, aimed at the address that machine printed…
+        let forwards = forwarded(&hosts);
+        assert_eq!(forwards.len(), 1, "一条实例地址一条转发");
+        assert_eq!(forwards[0].remote_host, "192.0.2.7");
+        assert_eq!(forwards[0].remote_port, 3080);
+        assert_eq!(forwards[0].local_port, 3080, "本机端口与远端相同（没被占时）");
+
+        // …and the client talked to loopback on the port the forward gave it,
+        // with the launch token intact.
+        let minted = server.minted();
+        assert_eq!(minted, vec![format!("http://127.0.0.1:3080/?token={TOKEN}")]);
+        assert_eq!(
+            server.last_sent().url,
+            "http://127.0.0.1:3080/api/pluginManager/listBundles"
+        );
+        assert!(
+            !server.last_sent().url.contains("192.0.2.7"),
+            "请求不能打到那台机器自己的地址上：{}",
+            server.last_sent().url
+        );
+    }
+
+    /// A write goes exactly where the read goes. And adoption is not a refusal
+    /// (AGENTS.md): what decides is the token, so an adopted remote instance the
+    /// launcher holds a launch token for is written to over the forward and
+    /// reported truthfully.
+    #[tokio::test]
+    async fn a_write_to_an_adopted_remote_instance_reaches_the_forwarded_address() {
+        let host = remote_host();
+        let hosts = HostServer::new().answering(HostAnswer::Done);
+        let state = app_state_with(
+            vec![host.clone()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        put_running(
+            &state,
+            "i2",
+            running_entry("web", stale_local_url(), true, Some(remote_run(&host, &remote_url()))),
+        )
+        .await;
+
+        let server = PluginServer::new(
+            COOKIE,
+            vec![ok_response(serde_json::json!({
+                "changed": true,
+                "application": "restart-required",
+                "stage": "enable",
+                "target": "ds-bot",
+                "warnings": []
+            }))],
+        );
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let client = write_client_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .expect("有 token 的接管实例照样能写");
+        let outcome = client.set_bundle_enabled("ds-bot", true).await.unwrap();
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.application, "restart-required");
+        let forwards = forwarded(&hosts);
+        assert_eq!(forwards.len(), 1);
+        let sent = server.last_sent();
+        assert_eq!(
+            sent.url,
+            format!(
+                "http://127.0.0.1:{}/api/pluginManager/setBundleEnabled",
+                forwards[0].local_port
+            )
+        );
+        assert_eq!(
+            sent.envelope.payload.args,
+            serde_json::json!({ "name": "ds-bot", "enabled": true })
+        );
+    }
+
+    /// A local instance is unchanged by all of this: the page talks to its own
+    /// URL, straight from the running table, and asks no machine for a port
+    /// forward.
+    #[tokio::test]
+    async fn a_local_instance_is_still_listed_over_its_own_address() {
+        let home = scratch_home("local-managed");
+        let state = app_state(
+            vec![home_with_path("h1", &home)],
+            vec![instance_of("i1", "h1")],
+        );
+        put_running(
+            &state,
+            "i1",
+            running_entry("web", INSTANCE_URL.to_string(), false, None),
+        )
+        .await;
+        let hosts = HostServer::new();
+        let server = PluginServer::new(
+            COOKIE,
+            vec![ok_response(serde_json::json!([
+                {
+                    "name": "ds-bot",
+                    "enabled": true,
+                    "installed": true,
+                    "removable": true,
+                    "optional": false,
+                    "rows": [{ "entryId": "bot" }]
+                }
+            ]))],
+        );
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+        let state = AppState { host_transport: hosts.clone(), ..state };
+
+        let view = list_plugins_via(&state, transport, "h1", "web", Some("i1"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Managed);
+        assert_eq!(server.minted(), vec![INSTANCE_URL]);
+        assert_eq!(
+            server.last_sent().url,
+            "http://127.0.0.1:34567/api/pluginManager/listBundles"
+        );
+        assert!(hosts.calls().is_empty(), "本机实例不建转发");
+    }
+
+    /// With no instance running, the fallback is that **machine's** own profile
+    /// files — read in one call, because this projection is what the page shows
+    /// exactly when nothing is running — and it stays as thin as a file can be:
+    /// no row counts, no removal rule, no availability.
+    #[tokio::test]
+    async fn the_remote_projection_reads_that_machines_profile_in_one_call() {
+        let manifest = profile_json(
+            &["@deepseek-ai/dsh-base", "ds-bot"],
+            &["@deepseek-ai/dsh-base"],
+        );
+        let hosts = HostServer::new().answering(HostAnswer::stdout(
+            crate::remote::testing::profile_packages_stdout(
+                &manifest,
+                &[("@deepseek-ai/dsh-base", "0.2.1-alpha.2")],
+            ),
+        ));
+        let state = app_state_with(
+            vec![remote_host()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        let server = PluginServer::new(COOKIE, vec![]);
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", None)
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::NotRunning);
+        assert!(view.instance_id.is_none());
+        let reason = view.reason.clone().expect("read-only reason");
+        assert!(reason.contains("启动该实例"), "reason: {reason}");
+
+        let names: Vec<&str> = view.bundles.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["@deepseek-ai/dsh-base", "ds-bot"]);
+        let base = view.bundles.iter().find(|b| b.name == "@deepseek-ai/dsh-base").unwrap();
+        assert!(base.enabled && base.installed);
+        assert_eq!(base.version.as_deref(), Some("0.2.1-alpha.2"), "版本读自那台机器");
+        assert!(
+            view.bundles.iter().all(|b| b.row_count == 0
+                && !b.removable
+                && b.availability.is_none()
+                && b.error_code.is_none()),
+            "文件投影故意比在线列表薄"
+        );
+
+        // One call for the whole profile, aimed at that machine's own path.
+        assert_eq!(hosts.calls().len(), 1, "一次 ssh 读回整个 Profile");
+        assert!(
+            hosts.last_script().contains(&format!("{REMOTE_HOME}/profiles/web")),
+            "读的是那台机器上的路径：{}",
+            hosts.last_script()
+        );
+        assert!(server.minted().is_empty(), "没有实例可以问，就不该去连一个");
+    }
+
+    /// A machine the launcher cannot reach: the page says why, offers the one
+    /// action that can change the answer, and asks that machine nothing more —
+    /// a second ssh from a page load would only make the wait longer, and the
+    /// profile files it would read are over there anyway.
+    #[tokio::test]
+    async fn an_unreachable_host_gives_a_readable_reason_and_asks_nothing() {
+        let hosts = HostServer::new();
+        let state = app_state_with(
+            vec![remote_host()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        state.set_host_status(
+            "host-lab",
+            crate::config::HostStatus::unreachable(
+                "ssh: connect to host zjq_aliyun port 22: Connection refused",
+            ),
+        );
+        put_running(
+            &state,
+            "i2",
+            running_entry(
+                "web",
+                stale_local_url(),
+                false,
+                Some(remote_run(&remote_host(), &remote_url())),
+            ),
+        )
+        .await;
+        let server = PluginServer::new(COOKIE, vec![]);
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Unreachable);
+        let reason = view.reason.expect("read-only reason");
+        assert!(reason.contains("服务器"), "要说清是哪台机器：{reason}");
+        assert!(
+            reason.contains("Connection refused"),
+            "那台机器自己的话要带出来：{reason}"
+        );
+        assert!(reason.contains("重试"), "给出能离开这个状态的动作：{reason}");
+        assert!(view.bundles.is_empty(), "读不到就不假装读过");
+        assert!(hosts.calls().is_empty(), "已经知道连不上，不再问一遍");
+        assert!(server.minted().is_empty(), "也不去连实例");
+    }
+
+    /// The other unreachable case: the machine answers, and the **tunnel** does
+    /// not. That is a message about this Mac's connection to that machine — with
+    /// the address to try by hand — and it must not read like DSH refusing the
+    /// operation (ADR-0008).
+    #[tokio::test]
+    async fn a_tunnel_that_will_not_come_up_says_so_instead_of_failing_silently() {
+        let host = remote_host();
+        let hosts = HostServer::new().answering(HostAnswer::fail(
+            crate::ssh::HostErrorKind::Unreachable,
+            "ssh: connect to host zjq_aliyun port 22: Connection refused",
+        ));
+        let state = app_state_with(
+            vec![host.clone()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        put_running(
+            &state,
+            "i2",
+            running_entry("web", stale_local_url(), false, Some(remote_run(&host, &remote_url()))),
+        )
+        .await;
+        let server = PluginServer::new(COOKIE, vec![]);
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Unreachable);
+        let reason = view.reason.expect("read-only reason");
+        assert!(reason.contains("隧道"), "reason: {reason}");
+        assert!(reason.contains("192.0.2.7"), "远端原始地址要念出来：{reason}");
+        assert!(reason.contains(&format!("ssh {TARGET}")), "给出可执行的命令：{reason}");
+        assert!(
+            reason.contains("不是 DSH 拒绝"),
+            "与「DSH 拒绝了这次操作」读起来不一样：{reason}"
+        );
+    }
+
+    /// An instance whose URL carries no token is read-only, and its reason names
+    /// the adoption — while the file projection still comes from **that**
+    /// machine, in one call.
+    #[tokio::test]
+    async fn a_remote_instance_without_a_token_is_read_only_and_names_the_adoption() {
+        let manifest = profile_json(&["ds-bot"], &["ds-bot"]);
+        let hosts = HostServer::new().answering(HostAnswer::stdout(
+            crate::remote::testing::profile_packages_stdout(&manifest, &[("ds-bot", "0.9.4")]),
+        ));
+        let state = app_state_with(
+            vec![remote_host()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        // An adopted process with a bare address: it is running over there, and
+        // nothing here can authenticate to it.
+        put_running(
+            &state,
+            "i2",
+            running_entry(
+                "web",
+                "http://192.0.2.7:3080".to_string(),
+                true,
+                Some(remote_run(&remote_host(), "http://192.0.2.7:3080")),
+            ),
+        )
+        .await;
+        let server = PluginServer::new(COOKIE, vec![]);
+        let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
+
+        let view = list_plugins_via(&state, transport, "h2", "web", Some("i2"))
+            .await
+            .unwrap();
+
+        assert_eq!(view.mode, PluginViewMode::Adopted);
+        let reason = view.reason.expect("read-only reason");
+        assert!(reason.contains("接管"), "reason: {reason}");
+        assert_eq!(
+            view.bundles.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            ["ds-bot"]
+        );
+        assert_eq!(view.bundles[0].version.as_deref(), Some("0.9.4"));
+        assert_eq!(hosts.calls().len(), 1, "投影仍是那台机器上一次调用");
+        assert!(server.minted().is_empty(), "没有 token 就不该去连");
+    }
+
+    /// No token is a refusal; a machine that is not there is a refusal of its
+    /// own — and neither of them is "实例未在运行", which is what the page turns
+    /// into a 启动 button (ADR-0007 后果: starting a second DSH on a server that
+    /// was running one all along).
+    #[tokio::test]
+    async fn a_write_to_an_unreachable_host_says_the_machine_is_the_problem() {
+        let hosts = HostServer::new();
+        let state = app_state_with(
+            vec![remote_host()],
+            vec![remote_home()],
+            vec![remote_instance("i2")],
+            hosts.clone(),
+        );
+        state.set_host_status(
+            "host-lab",
+            crate::config::HostStatus::unreachable("ssh 在 30 秒内没有返回"),
+        );
+
+        let err = match write_client(&state, "h2", "web", Some("i2")).await {
+            Ok(_) => panic!("连不上的机器不能开始一次写入"),
+            Err(e) => e,
+        };
+
+        assert!(err.contains("服务器"), "err: {err}");
+        assert!(err.contains("重试"), "err: {err}");
+        assert!(!err.contains("未在运行"), "不可达不是已停止：{err}");
     }
 }

@@ -576,7 +576,10 @@ pub enum PluginViewMode {
     NotRunning,
     /// The instance was adopted from an external process (no token).
     Adopted,
-    /// An instance is running but refused the connection / cookie.
+    /// An instance is running, and the launcher could not reach it: the
+    /// connection failed, or — for a remote instance — the machine it runs on
+    /// did not answer, so nothing about it could be read at all. The reason
+    /// says which, and the page offers the retry that asks again.
     Unreachable,
 }
 
@@ -715,14 +718,43 @@ impl BundleItem {
     }
 }
 
+/// The fake instance the plugin client's tests drive, shared with the modules
+/// that talk to an instance through it (`plugins.rs`): the page's states are
+/// asserted on the request that *would* be sent, never on a live DSH.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    pub(crate) const INSTANCE_URL: &str =
+        "http://127.0.0.1:34567/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
+    pub(crate) const COOKIE: &str =
+        "dsh-auth-6x_m4cbVo7y_dJvM1GEEE82y47XOJvfDgntZoIfis6E=v1.payload.sig";
+
+    /// The one queued answer the service would give for a JSON payload.
+    pub(crate) fn ok_response(value: serde_json::Value) -> NativeResponse {
+        NativeResponse {
+            status: 200,
+            body: serde_json::json!({
+                "type": "server-response",
+                "rpcId": "x",
+                "result": { "ok": true, "value": value },
+            })
+            .to_string(),
+        }
+    }
+
+    pub(crate) fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
     /// A fake instance: records every request, replies from a queue.
-    struct FakeTransport {
+    pub(crate) struct FakeTransport {
         cookie: String,
         minted: Mutex<Vec<String>>,
         sent: Mutex<Vec<NativeRequest>>,
@@ -730,7 +762,7 @@ mod tests {
     }
 
     impl FakeTransport {
-        fn new(cookie: &str, responses: Vec<NativeResponse>) -> Arc<Self> {
+        pub(crate) fn new(cookie: &str, responses: Vec<NativeResponse>) -> Arc<Self> {
             Arc::new(Self {
                 cookie: cookie.to_string(),
                 minted: Mutex::new(Vec::new()),
@@ -739,7 +771,15 @@ mod tests {
             })
         }
 
-        fn last_sent(&self) -> NativeRequest {
+        /// Every URL the client minted a session against — the address it was
+        /// handed, which is what a remote instance's forwarded address has to
+        /// show up as.
+        pub(crate) fn minted(&self) -> Vec<String> {
+            self.minted.lock().unwrap().clone()
+        }
+
+        /// The last request the client sent.
+        pub(crate) fn last_sent(&self) -> NativeRequest {
             self.sent.lock().unwrap().last().cloned().unwrap()
         }
     }
@@ -758,41 +798,28 @@ mod tests {
         ) -> NativeFuture<'_, Result<NativeResponse, String>> {
             Box::pin(async move {
                 self.sent.lock().unwrap().push(req);
-                Ok(self.responses.lock().unwrap().pop_front().unwrap())
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| "测试没有给这次调用排好应答（FakeTransport）".to_string())
             })
         }
     }
 
-    const INSTANCE_URL: &str =
-        "http://127.0.0.1:34567/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
-    const COOKIE: &str = "dsh-auth-6x_m4cbVo7y_dJvM1GEEE82y47XOJvfDgntZoIfis6E=v1.payload.sig";
-
-    fn block_on<F: std::future::Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(f)
-    }
-
-    fn ok_response(value: serde_json::Value) -> NativeResponse {
-        NativeResponse {
-            status: 200,
-            body: serde_json::json!({
-                "type": "server-response",
-                "rpcId": "x",
-                "result": { "ok": true, "value": value },
-            })
-            .to_string(),
-        }
-    }
-
-    fn client_with(responses: Vec<NativeResponse>) -> (NativeClient, Arc<FakeTransport>) {
+    /// A connected client over the fake, and the fake itself.
+    pub(crate) fn client_with(responses: Vec<NativeResponse>) -> (NativeClient, Arc<FakeTransport>) {
         let fake = FakeTransport::new(COOKIE, responses);
         let transport: Arc<dyn NativeTransport> = fake.clone();
         let client = block_on(NativeClient::connect_with(transport, INSTANCE_URL)).unwrap();
         (client, fake)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{block_on, client_with, ok_response, FakeTransport, COOKIE, INSTANCE_URL};
+    use super::*;
 
     /// The one request the service strictly validates: envelope shape, the
     /// `pluginManager/` prefix, endpoint path, and the session cookie — with
@@ -828,7 +855,7 @@ mod tests {
     #[test]
     fn mint_uses_the_instance_url_and_binds_cookie_to_host_port() {
         let (_, fake) = client_with(vec![]);
-        assert_eq!(fake.minted.lock().unwrap().as_slice(), &[INSTANCE_URL]);
+        assert_eq!(fake.minted().as_slice(), &[INSTANCE_URL]);
         assert_eq!(
             cookie_name("127.0.0.1:34567"),
             "dsh-auth-6x_m4cbVo7y_dJvM1GEEE82y47XOJvfDgntZoIfis6E"
@@ -996,7 +1023,7 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("token"), "err: {err}");
-        assert!(fake.minted.lock().unwrap().is_empty());
+        assert!(fake.minted().is_empty());
     }
 
     /// No `Origin` (a wrong one is 403) and no manual `Host`; the cookie and
