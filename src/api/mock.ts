@@ -1228,6 +1228,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
       return LOCAL_DATA_DIR as T
     }
+    case 'instance_remote_location': {
+      const inst = db.instances.find((i) => i.id === String(args?.instanceId))
+      const home = db.homes.find((h) => h.id === inst?.home_id)
+      const host = hostOf(db, home?.host_id ?? LOCAL_HOST_ID)
+      if (host.builtin) fail('本机实例的目录就在这台 Mac 上，用「打开目录」')
+      const path = String(home?.path ?? '')
+      return {
+        host_id: host.id,
+        host_name: host.display_name,
+        ssh_target: host.ssh_target,
+        path,
+        command: `ssh ${host.ssh_target} '/bin/bash -ilc "ls -la ${path}"'`,
+      } as T
+    }
     case 'open_home_directory': {
       const home = db.homes.find((h) => h.id === String(args?.homeId))
       refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
