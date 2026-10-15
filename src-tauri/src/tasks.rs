@@ -188,7 +188,13 @@ async fn start_create_instance_task(
     // Validate early so a doomed task is never enqueued.
     {
         let cfg = state.config.lock().unwrap();
-        if cfg.instances.iter().any(|i| i.name == name) {
+        // Names are unique per host: two machines may each have an instance
+        // called 「web」, and this path is how a version's own instance is named.
+        if cfg
+            .instances
+            .iter()
+            .any(|i| i.name == name && i.host_id == host.id)
+        {
             return Err("同名实例已存在".to_string());
         }
         // For a non-dedicated task the chosen HOME must exist already.
@@ -217,7 +223,7 @@ async fn start_create_instance_task(
         let mut tasks = state.tasks.lock().await;
         for task in tasks.values() {
             if task.state == TaskState::Running {
-                if task.instance_name.as_deref() == Some(name.as_str()) {
+                if task.instance_name.as_deref() == Some(name.as_str()) && task.host_id == host.id {
                     return Err("同名实例的下载任务已在进行中".to_string());
                 }
                 if task.host_id != host.id {
@@ -533,7 +539,11 @@ async fn do_create_instance(
     // 3. Create the instance record.
     let inst = {
         let mut cfg = state.config.lock().unwrap();
-        if cfg.instances.iter().any(|i| i.name == name) {
+        if cfg
+            .instances
+            .iter()
+            .any(|i| i.name == name && i.host_id == host.id)
+        {
             return Err("同名实例已存在".to_string());
         }
         if !cfg.homes.iter().any(|h| h.id == resolved_home_id) {
@@ -981,7 +991,7 @@ async fn install_remote_from_npm(
         ensure_remote_build_scripts_allowed(state, target, &layout.dir).await?;
 
         let argv = remote_npm_install_argv(pnpm, layout, version);
-        let log_path = remote_log_path(&layout.data_dir, task_id, &format!("npm-{attempt}"));
+        let log_path = remote_step_log_path(&layout.data_dir, task_id, &format!("npm-{attempt}"));
 
         let outcome = match run_remote_streamed(
             app,
@@ -1108,7 +1118,7 @@ async fn install_remote_from_source(
             ),
             &layout.versions_dir.to_string_lossy(),
         );
-        let log_path = remote_log_path(&layout.data_dir, task_id, "clone");
+        let log_path = remote_step_log_path(&layout.data_dir, task_id, "clone");
         let outcome =
             run_remote_streamed(app, state, task_id, target, &log_path, argv, "git clone").await?;
         let logs = task_logs(state, task_id).await;
@@ -1136,7 +1146,7 @@ async fn install_remote_from_source(
     ));
     let argv =
         crate::remote::measured_argv(&remote_pnpm_argv(pnpm, layout, &deps), &layout.dir.to_string_lossy());
-    let log_path = remote_log_path(&layout.data_dir, task_id, "deps");
+    let log_path = remote_step_log_path(&layout.data_dir, task_id, "deps");
     let outcome =
         run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install（源码）")
             .await?;
@@ -1154,7 +1164,7 @@ async fn install_remote_from_source(
         &remote_pnpm_argv(pnpm, layout, &["run".to_string(), "build".to_string()]),
         &layout.dir.to_string_lossy(),
     );
-    let log_path = remote_log_path(&layout.data_dir, task_id, "build");
+    let log_path = remote_step_log_path(&layout.data_dir, task_id, "build");
     let outcome =
         run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build").await?;
     let logs = task_logs(state, task_id).await;
@@ -1215,7 +1225,7 @@ async fn ensure_remote_pending_builds(
         &remote_pnpm_argv(pnpm, layout, &["rebuild".to_string()]),
         &layout.dir.to_string_lossy(),
     );
-    let log_path = remote_log_path(&layout.data_dir, task_id, "rebuild");
+    let log_path = remote_step_log_path(&layout.data_dir, task_id, "rebuild");
     let outcome =
         run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm rebuild").await?;
     let logs = task_logs(state, task_id).await;
@@ -1248,24 +1258,38 @@ async fn remote_pending_builds(
     }
 }
 
-/// The argv for one pnpm command on a remote host: that host's own environment
-/// variables and the launcher's pnpm policy (store, log level, registry,
-/// network settings), the absolute binary path the machine's probe resolved, and
-/// the arguments. Built as argv words, never as a shell string.
-fn remote_pnpm_argv(pnpm: &Path, layout: &InstallLayout, args: &[String]) -> Vec<String> {
+/// A command the launcher runs **on another machine**, as argv words:
+/// `/usr/bin/env`, that host's own environment variables, the ones this command
+/// adds, then the program and its arguments. Never a shell string — argv words
+/// reach the machine exactly as they are, with no second layer to quote through.
+fn remote_argv(
+    layout: &InstallLayout,
+    env: &[(&str, &str)],
+    program: &str,
+    args: &[String],
+) -> Vec<String> {
     let mut argv = vec!["/usr/bin/env".to_string()];
     for (key, value) in &layout.extra_env {
         argv.push(format!("{key}={value}"));
     }
-    for (key, value) in crate::toolchain::pnpm_network_env() {
+    for (key, value) in env {
         argv.push(format!("{key}={value}"));
     }
-    // No TTY under the launcher: keep pnpm non-interactive so a modules purge
-    // (store relink) never aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
-    argv.push("CI=true".to_string());
-    argv.push(pnpm.to_string_lossy().to_string());
+    argv.push(program.to_string());
     argv.extend(args.iter().cloned());
     argv
+}
+
+/// The argv for one pnpm command on a remote host: that host's own environment
+/// variables and the launcher's pnpm policy (store, log level, registry,
+/// network settings), the absolute binary path the machine's probe resolved, and
+/// the arguments.
+fn remote_pnpm_argv(pnpm: &Path, layout: &InstallLayout, args: &[String]) -> Vec<String> {
+    let mut env = crate::toolchain::pnpm_network_env().to_vec();
+    // No TTY under the launcher: keep pnpm non-interactive so a modules purge
+    // (store relink) never aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
+    env.push(("CI", "true"));
+    remote_argv(layout, &env, &pnpm.to_string_lossy(), args)
 }
 
 /// The exact command one npm install attempt spawns on a remote host: that
@@ -1293,22 +1317,22 @@ fn remote_npm_install_argv(pnpm: &Path, layout: &InstallLayout, version: &str) -
 /// tools the launcher probes, so it resolves through that machine's own login
 /// shell `PATH` — the same one the user's terminal there has.
 fn remote_git_argv(layout: &InstallLayout, args: &[String]) -> Vec<String> {
-    let mut argv = vec!["/usr/bin/env".to_string()];
-    for (key, value) in &layout.extra_env {
-        argv.push(format!("{key}={value}"));
-    }
-    // Never prompt for credentials on a public repo.
-    argv.push("GIT_TERMINAL_PROMPT=0".to_string());
-    argv.push("CI=true".to_string());
-    argv.push("git".to_string());
-    argv.extend(args.iter().cloned());
-    argv
+    remote_argv(
+        layout,
+        &[
+            // Never prompt for credentials on a public repo.
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("CI", "true"),
+        ],
+        "git",
+        args,
+    )
 }
 
 /// The log one remote command of a task writes to: under that host's own data
-/// directory, one file per command so a retry does not re-read the attempt
-/// before it.
-fn remote_log_path(data_dir: &Path, task_id: &str, step: &str) -> String {
+/// directory, one file per step so a retry does not re-read the attempt before
+/// it. Not the instance's log, which `process::remote_instance_log_path` names.
+fn remote_step_log_path(data_dir: &Path, task_id: &str, step: &str) -> String {
     data_dir
         .join("logs")
         .join(format!("install-{task_id}-{step}.log"))
@@ -2611,7 +2635,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
 
         let fake = FakeTransport::new().answering(FakeAnswer::Pid(4242));
         let state = state_with(fake.clone());
-        let log = remote_log_path(&layout.data_dir, "t-1", "npm-1");
+        let log = remote_step_log_path(&layout.data_dir, "t-1", "npm-1");
 
         let run = spawn_remote_run(&state, &remote_target(), &argv, &log)
             .await

@@ -76,6 +76,8 @@ jobs:
         run: node --test ci/api-contract.test.mjs
       - name: Setup-page guidance tests
         run: node --test ci/setup-guidance.test.mjs
+      - name: Bulk-scope tests
+        run: node --test ci/instances-bulk.test.mjs
 
   prepare:
     needs: [quality, integration]

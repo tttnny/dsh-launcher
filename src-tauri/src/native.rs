@@ -574,7 +574,12 @@ pub enum PluginViewMode {
     Managed,
     /// No instance is running this profile.
     NotRunning,
-    /// The instance was adopted from an external process (no token).
+    /// An instance runs this profile, but the launcher has no launch token for
+    /// it, so there is nothing to authenticate with: the process was adopted
+    /// from one the launcher did not start and its URL was not remembered. What
+    /// decides is the **token** ([`crate::process::manageable_url`]), not how the
+    /// entry came to exist — an adopted instance whose token was remembered is
+    /// `Managed`, and this mode is not reachable for it.
     Adopted,
     /// An instance is running, and the launcher could not reach it: the
     /// connection failed, or — for a remote instance — the machine it runs on

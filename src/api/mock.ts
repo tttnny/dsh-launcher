@@ -496,10 +496,8 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
  * change the answer.
  */
 function hostUnreachableReason(host: Host): string {
-  const detail = mockHostStatuses[host.id]?.message
-  return detail
-    ? `主机「${host.display_name}」现在连不上：${detail}。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
-    : `主机「${host.display_name}」现在连不上。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
+  const detail = mockHostStatuses[host.id]?.message?.trim() || '那台机器没有回应'
+  return `主机「${host.display_name}」现在连不上（${detail}）。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
 }
 
 /** The home's own machine, when the preview currently cannot reach it. */
@@ -785,7 +783,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_home': {
       const id = String(args?.id)
+      const hostId = hostIdArg(args)
       if (db.instances.some((i) => i.home_id === id)) fail('该 DSH_HOME 仍被实例引用，无法删除')
+      // The record must belong to the host the caller names: the same path on
+      // another machine is a different HOME, and a deletion that did nothing
+      // must not be reported as one.
+      const home = db.homes.find((h) => h.id === id)
+      if (!home || (home.host_id ?? LOCAL_HOST_ID) !== hostId) fail('该主机下没有这个 DSH_HOME')
       db.homes = db.homes.filter((h) => h.id !== id)
       saveDb(db)
       return undefined as T
@@ -839,8 +843,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       refuseUnreachable(host)
       if (!name) fail('实例名称不能为空')
       if (!version) fail('版本号不能为空')
-      if (db.instances.some((i) => i.name === name)) fail('同名实例已存在')
-      if ([...mockTasks.values()].some((t) => t.state === 'running' && t.instance_name === name)) {
+      if (db.instances.some((i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === host.id)) {
+        fail('同名实例已存在')
+      }
+      if (
+        [...mockTasks.values()].some(
+          (t) => t.state === 'running' && t.instance_name === name && t.host_id === host.id,
+        )
+      ) {
         fail('同名实例的下载任务已在进行中')
       }
       // The same version on the same host is one install; two hosts are two
@@ -1034,7 +1044,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.homeId ?? '')
       const hostId = hostIdArg(args)
       if (!name) fail('实例名称不能为空')
-      if (db.instances.some((i) => i.name === name)) fail('同名实例已存在')
+      // Names are unique per host: two machines may each have an instance
+      // called 「web」, and the row, the tray and the plugin link tell them
+      // apart by host.
+      if (db.instances.some((i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === hostId)) {
+        fail('同名实例已存在')
+      }
       const version = db.versions.find((v) => v.id === versionId)
       if (!version) fail('DSH 版本不存在')
       if ((version.host_id ?? LOCAL_HOST_ID) !== hostId) fail('DSH 版本不属于该主机')
@@ -1071,7 +1086,16 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const hostId = hostIdArg(args)
       const existing = db.instances.find((i) => i.id === input.id)
       if (!existing || (existing.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
-      if (db.instances.some((i) => i.name === input.name && i.id !== input.id)) fail('同名实例已存在')
+      if (
+        db.instances.some(
+          (i) =>
+            i.name === input.name &&
+            i.id !== input.id &&
+            (i.host_id ?? LOCAL_HOST_ID) === (existing.host_id ?? LOCAL_HOST_ID),
+        )
+      ) {
+        fail('同名实例已存在')
+      }
       // The binding's host is the record's, not the form's.
       const updated = { ...input, host_id: existing.host_id }
       db.instances = db.instances.map((i) => (i.id === input.id ? updated : i))
@@ -1245,11 +1269,28 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return mockCall('start_instance', { id, profile: entry.profile })
     }
     case 'refresh_instance_status': {
-      // The page's retry. The browser preview has no machine to ask, so it
-      // mirrors what a reachable one answers: whatever the preview's own running
-      // table says, or 「已停止」 when it holds nothing — the 「主机不可达」 the row
-      // was showing comes off with it.
+      // The page's retry. A machine the preview marks 不可达 answers nothing,
+      // and 「已停止」 is the one answer it must not give there: that reading is
+      // what makes a user press 启动 and end up with a second DSH on a server
+      // (ADR-0007). `list_instance_status` already says 主机不可达 for this
+      // host; the retry has to come back with the same word. The preview has no
+      // machine to ask, so the mark stays until 「测试连接」 clears it.
       const id = String(args?.id)
+      const inst = db.instances.find((i) => i.id === id)
+      const host = hostOf(db, inst?.host_id ?? LOCAL_HOST_ID)
+      if ((mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable') {
+        emitStatus({
+          id,
+          state: 'unreachable',
+          url: null,
+          remote_url: null,
+          profile: inst?.last_profile ?? inst?.default_profile ?? null,
+          exit_code: null,
+        })
+        return undefined as T
+      }
+      // Otherwise the preview mirrors what a reachable machine answers: whatever
+      // its own running table says, or 「已停止」 when it holds nothing.
       const entry = db.running[id]
       if (entry) {
         emitStatus(entry)

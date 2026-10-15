@@ -238,21 +238,30 @@ pub(crate) async fn clear_instance_icon_for(
     };
     forget_icon(instance_id);
     if was_local {
-        let dest = local_icon_path(&home, instance_id);
-        if host.builtin {
-            let _ = std::fs::remove_file(&dest);
-        } else if let Ok(remote) = crate::ssh::RemoteHost::of(&host, &state.data_dir) {
-            // Best effort, exactly as on this Mac: the record is what the page
-            // reads, and a machine that is off must not block the clear.
-            let _ = crate::remote::remove_dir(
-                &*state.host_transport,
-                &remote,
-                &dest.to_string_lossy(),
-            )
-            .await;
-        }
+        remove_icon_file(state, &host, &home, instance_id).await;
     }
     Ok(())
+}
+
+/// Removes one instance's local icon file — from this Mac, or from the machine
+/// the instance runs on. The only place that rule lives: a path under a remote
+/// HOME is a path on that server, so this Mac's `fs` must not be pointed at it.
+///
+/// Best effort on both sides: the record is what the page reads, and a machine
+/// that is off must not block the removal.
+pub(crate) async fn remove_icon_file(
+    state: &AppState,
+    host: &Host,
+    home: &Path,
+    instance_id: &str,
+) {
+    let dest = local_icon_path(home, instance_id);
+    if host.builtin {
+        let _ = std::fs::remove_file(&dest);
+    } else if let Ok(remote) = crate::ssh::RemoteHost::of(host, &state.data_dir) {
+        let _ =
+            crate::remote::remove_dir(&*state.host_transport, &remote, &dest.to_string_lossy()).await;
+    }
 }
 
 /// Resolves an instance icon for display: remote URLs pass through, local

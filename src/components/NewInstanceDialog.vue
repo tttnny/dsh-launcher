@@ -43,6 +43,20 @@ const hostId = computed(() => props.preset?.hostId ?? store.currentHostId)
 const host = computed(() => store.hostById(hostId.value))
 const versions = computed(() => store.versionsByHost[hostId.value] ?? [])
 const homes = computed(() => store.homesByHost[hostId.value] ?? [])
+/**
+ * Why this machine's versions and DSH_HOMEs could not be read. The two selects
+ * list **one machine's** resources, so that machine has to answer for them: a
+ * failed read leaves the store with no list at all (`loadHostResources`), and
+ * this sheet says what went wrong instead of offering yesterday's list as
+ * today's — or, worse, 「还没有装任何版本」 about a machine that never answered.
+ */
+const hostError = computed(
+  () => store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
+)
+
+function retryHost() {
+  void store.loadHostResources(hostId.value)
+}
 
 /** `base`, then `base 2`, `base 3`… — instance names are unique. */
 function uniqueName(base: string): string {
@@ -120,9 +134,23 @@ function close() {
   >
     <template #title>{{ preset ? t('instances.duplicate') : t('instances.newInstance') }}</template>
 
+    <!-- The machine has to answer before the sheet can offer anything: a host
+         whose read failed gets the reason and a retry, never a stale list. -->
+    <div v-if="hostError" class="dl-surface dl-failure">
+      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-text">{{ hostError }}</p>
+      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+      <div class="sheet-footer" style="margin-top: 8px">
+        <button class="dl-btn" @click="close">{{ t('common.close') }}</button>
+        <button class="dl-btn dl-btn--primary" @click="retryHost">
+          {{ t('common.refresh') }}
+        </button>
+      </div>
+    </div>
+
     <!-- Nothing installed yet: the sheet cannot do its job, so it says which
          page can, instead of offering three empty selects. -->
-    <div v-if="noVersions" class="dl-empty">
+    <div v-else-if="noVersions" class="dl-empty">
       <p class="dl-empty-title">{{ t('instances.noVersionsTitle') }}</p>
       <p class="dl-empty-text">{{ t('instances.noVersionsDesc') }}</p>
       <button class="dl-btn dl-btn--primary" style="margin-top: 6px" @click="close">

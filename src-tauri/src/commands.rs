@@ -530,8 +530,15 @@ pub(crate) fn remove_home_record(
     if cfg.instances.iter().any(|i| i.home_id == id) {
         return Err("该 DSH_HOME 仍被实例引用，无法删除".to_string());
     }
+    let before = cfg.homes.len();
     cfg.homes
         .retain(|h| !(h.id == id && h.host_id == host.id));
+    if cfg.homes.len() == before {
+        // Nothing belonged to this host: the caller named the wrong machine, or
+        // the record is already gone. Either way 「删掉了」 would be a claim
+        // about a deletion that did not happen.
+        return Err("该主机下没有这个 DSH_HOME".to_string());
+    }
     save_state(state, &cfg)
 }
 
@@ -1002,7 +1009,14 @@ pub fn create_instance(
     }
     let mut cfg = state.config.lock().unwrap();
     let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
-    if cfg.instances.iter().any(|i| i.name == name) {
+    // Names are unique **per host**: two machines may each have an instance
+    // called 「web」, and the row, the tray and the plugin link all keep telling
+    // them apart by host. A name only has to be unambiguous where it is used.
+    if cfg
+        .instances
+        .iter()
+        .any(|i| i.name == name && i.host_id == host.id)
+    {
         return Err("同名实例已存在".to_string());
     }
     let Some(version) = cfg.versions.iter().find(|v| v.id == version_id) else {
@@ -1036,8 +1050,9 @@ pub fn create_instance(
 
 /// Deletes one instance record. The version, the DSH_HOME and every other
 /// instance are untouched — an instance is a binding, not a directory. Only the
-/// instance's own local icon file (which the launcher itself wrote into the
-/// HOME's `icons/` folder) is removed, and that removal is best-effort.
+/// instance's own icon file (which the launcher itself wrote into the HOME's
+/// `icons/` folder — on this Mac, or on the machine the instance runs on) is
+/// removed, and that removal is best-effort.
 #[tauri::command]
 pub async fn delete_instance(
     app: AppHandle,
@@ -1056,7 +1071,9 @@ pub async fn delete_instance(
             .map_err(|e| format!("实例没能停下来，记录没有删：{e}"))?;
     }
 
-    let icon_path = {
+    // Resolve where the icon file is — which machine, and which HOME — before
+    // saving: the record is the only thing that names the file.
+    let icon_scope = {
         let mut cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
         let Some(pos) = cfg
@@ -1070,21 +1087,19 @@ pub async fn delete_instance(
         if cfg.settings.last_instance_id.as_deref() == Some(id.as_str()) {
             cfg.settings.last_instance_id = None;
         }
-        // Resolve the local icon path before saving: the record is the only
-        // thing that names the file, so it must be read while it still exists.
-        let icon_path = if inst.icon.as_deref() == Some("local") {
+        let icon_scope = if inst.icon.as_deref() == Some("local") {
             cfg.homes
                 .iter()
                 .find(|h| h.id == inst.home_id)
-                .map(|h| crate::icons::local_icon_path(&h.path, &id))
+                .map(|h| (host, h.path.clone()))
         } else {
             None
         };
         save_state(&state, &cfg.clone())?;
-        icon_path
+        icon_scope
     };
-    if let Some(path) = icon_path {
-        let _ = std::fs::remove_file(path);
+    if let Some((host, home)) = icon_scope {
+        crate::icons::remove_icon_file(&state, &host, &home, &id).await;
     }
     Ok(())
 }
@@ -1104,7 +1119,7 @@ pub fn update_instance(
     if cfg
         .instances
         .iter()
-        .any(|i| i.name == name && i.id != input.id)
+        .any(|i| i.name == name && i.id != input.id && i.host_id == host.id)
     {
         return Err("同名实例已存在".to_string());
     }
@@ -1900,7 +1915,7 @@ pub async fn open_instance_terminal(
     );
     let exports = env_pairs
         .iter()
-        .map(|(k, v)| format!("export {}={}\n", k, shell_quote(v)))
+        .map(|(k, v)| format!("export {}={}\n", k, crate::remote::quote(v)))
         .collect::<Vec<_>>()
         .join("");
 
@@ -1917,7 +1932,7 @@ pub async fn open_instance_terminal(
         cd {}\n\
         clear\n\
         exec {} -l\n",
-        shell_quote(&home_str),
+        crate::remote::quote(&home_str),
         shell
     );
     if std::fs::write(&term_script, script_content).is_ok() {
@@ -1932,7 +1947,7 @@ pub async fn open_instance_terminal(
     open_terminal_with(
         &terminal,
         &label,
-        &format!("exec {}", shell_quote(&term_script.to_string_lossy())),
+        &format!("exec {}", crate::remote::quote(&term_script.to_string_lossy())),
     )
 }
 
@@ -2007,7 +2022,7 @@ fn open_terminal_with(terminal: &str, label: &str, line: &str) -> Result<String,
             .arg("Ghostty")
             .arg("--args")
             .arg(format!("--title={label}"))
-            .arg(format!("--command={}", shell_quote(line)))
+            .arg(format!("--command={}", crate::remote::quote(line)))
             .spawn()
             .and_then(|mut c| c.wait());
 
@@ -2064,14 +2079,6 @@ fn open_terminal_with(terminal: &str, label: &str, line: &str) -> Result<String,
 /// The login shell for spawned terminals: $SHELL or /bin/zsh.
 fn shell_program() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
-}
-
-/// Single-quote a value for sh -c / do-script embedding. The same rule
-/// [`crate::remote::quote`] applies on the way to another machine, and the one
-/// [`crate::remote::terminal_command`] applies a second time for the shell that
-/// parses the command line here.
-pub(crate) fn shell_quote(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "'\\''"))
 }
 
 /// Opens a folder in the system file manager. On macOS this reuses an
@@ -2275,7 +2282,7 @@ pub(crate) async fn instance_log_source(
         .map(|run| run.log_path.clone());
     Ok(InstanceLog::Remote {
         host: Box::new(host),
-        log_path: from_run.unwrap_or_else(|| crate::process::remote_log_path(&data_dir, instance_id)),
+        log_path: from_run.unwrap_or_else(|| crate::process::remote_instance_log_path(&data_dir, instance_id)),
     })
 }
 
@@ -3227,6 +3234,38 @@ mod tests {
             fake.calls().is_empty(),
             "删记录不该给那台机器发任何命令：{:?}",
             fake.calls()
+        );
+    }
+
+    /// The record has to belong to the machine the caller names. Silently
+    /// deleting nothing would let the page report 「已删除」 about a DSH_HOME that
+    /// is still there — and the same path on another machine is not this one's
+    /// HOME anyway (ADR-0006).
+    #[test]
+    fn removing_a_home_record_from_the_wrong_host_is_refused() {
+        let data = ScratchDir::new("remote-home-wrong-host");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            homes: vec![DshHome {
+                id: "h-lab".into(),
+                name: "实验环境".into(),
+                path: std::path::PathBuf::from("/opt/dsh/lab"),
+                host_id: "host-lab".into(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake);
+
+        let refused =
+            remove_home_record(&state, "h-lab", Some(crate::config::LOCAL_HOST_ID));
+
+        assert!(refused.is_err(), "张冠李戴的宿主 id 不能算删掉了：{refused:?}");
+        assert_eq!(
+            state.config.lock().unwrap().homes.len(),
+            1,
+            "记录要原样留下"
         );
     }
 

@@ -126,7 +126,8 @@
     "remoteAddNote": "This is a path on that machine: the launcher creates it there if it is missing and only records it once that machine says it is usable.",
     "copyPath": "Copy path",
     "pathCopied": "Path copied",
-    "confirmDeleteRemoteHome": "Remove DSH_HOME \"{name}\" from the launcher? Only the record goes: the directory on that machine is left exactly as it is."
+    "confirmDeleteRemoteHome": "Remove DSH_HOME \"{name}\" from the launcher? Only the record goes: the directory on that machine is left exactly as it is.",
+    "homesEmptyUnreachable": "This list is only what the launcher itself recorded: “{host}” cannot be reached right now, so the DSH_HOMEs already on that machine (say ~/.dsh) were not read."
   },
   "profiles": {
     "profilesTitle": "Profiles",
@@ -147,7 +148,8 @@
     "usedByInstances": "Default for",
     "managePlugins": "Plugins",
     "noHomeSelected": "No DSH_HOME yet — add one on the DSH_HOME tab",
-    "pluginsLiveOnInstances": "Patch layers belong to a running instance: expand its card on the board, or open its settings, and press Plugins."
+    "pluginsLiveOnInstances": "Patch layers belong to a running instance: expand its card on the board, or open its settings, and press Plugins.",
+    "profileAddRemoteNote": "A profile is created on “{host}”: copy the one you want to a new name under <DSH_HOME>/profiles there, then use “Reload profiles”."
   },
   "plugins": {
     "pageTitle": "Plugin management",
@@ -275,7 +277,7 @@
       "deleteWarning": "This deletes the launcher's record only: nothing on the server is touched, and the instances running there keep running.",
       "deleteRecords": "The versions, DSH_HOMEs and instance records filed under this host go with it, and its instances will no longer show up in the launcher.",
       "deleteLeft": "The remote data directory stays on that machine as it is (versions, dedicated DSH_HOMEs, logs, running record). To look at it yourself, run in a terminal:",
-      "deleteCommandCopied": "Cleanup command copied",
+      "deleteInspectCopied": "Inspect command copied",
       "deleteRunning": "“{names}” keep running on that machine and the launcher will no longer see them; stopping them has to happen there."
     },
     "language": "Language",
