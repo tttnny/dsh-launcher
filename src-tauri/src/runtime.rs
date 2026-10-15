@@ -359,11 +359,12 @@ struct SystemEnv {
     at: Instant,
 }
 
-/// The system environment **per host**, keyed by host id: this Mac's PATH comes
-/// from the user's own login shell, a remote host's from `ssh <host> bash -ilc`.
-/// One cache per host is what keeps two machines' conclusions from answering for
-/// each other — a single slot would report whichever host was probed last
-/// (ADR-0005 追加).
+/// The system environment (PATH) **per host**, keyed by host id: this Mac's comes
+/// from the user's own login shell, a remote host's from the probe it runs over
+/// ssh. One cache per host is what keeps two machines' conclusions from answering
+/// for each other — a single slot would report whichever host was asked last
+/// (ADR-0005 追加). Only 本机 has an entry here: a remote host's PATH comes back
+/// inside that host's probe answer and is cached with it.
 fn system_env_cache() -> &'static Mutex<HashMap<String, SystemEnv>> {
     static CACHE: OnceLock<Mutex<HashMap<String, SystemEnv>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -462,17 +463,14 @@ async fn system_env(force: bool) -> SystemEnv {
             }
         }
     };
-    remember_system_env(crate::config::LOCAL_HOST_ID, env.dirs.clone(), env.shell.clone());
+    remember_system_env(env.dirs.clone(), env.shell.clone());
     env
 }
 
-/// Records one host's system environment. The local host's entry comes from
-/// [`read_shell_path`]; a remote host's comes from the probe, which reads the
-/// same PATH inside the same interactive login shell — asking twice would only
-/// risk the two answers disagreeing.
-fn remember_system_env(key: &str, dirs: Vec<PathBuf>, shell: Option<String>) {
+/// Records the local host's system environment, as [`read_shell_path`] read it.
+fn remember_system_env(dirs: Vec<PathBuf>, shell: Option<String>) {
     system_env_cache().lock().unwrap().insert(
-        key.to_string(),
+        crate::config::LOCAL_HOST_ID.to_string(),
         SystemEnv {
             dirs,
             shell,
@@ -517,11 +515,6 @@ async fn remote_env(
     )
     .await
     .map_err(|e| e.message)?;
-    remember_system_env(
-        &host.id,
-        std::env::split_paths(&env.path).collect(),
-        Some(env.shell.clone()),
-    );
     remote_env_cache()
         .lock()
         .unwrap()

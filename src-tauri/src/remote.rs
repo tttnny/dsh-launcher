@@ -229,14 +229,17 @@ pub struct RemoteToolStatus {
     pub skipped: Vec<RemoteSkipped>,
 }
 
-/// What one remote probe learned about a host's environment: the `PATH` its own
-/// interactive login shell gives, the version managers that machine has, and
-/// both tools resolved in the launcher's fixed candidate order.
+/// What one remote probe learned about a host's environment: the shell it was
+/// read from, the version managers that machine has, and both tools resolved in
+/// the launcher's fixed candidate order.
+///
+/// The machine's `PATH` is not carried back: the walk inside the probe uses it,
+/// and everything the launcher does afterwards on that machine uses the absolute
+/// paths the walk resolved (ADR-0005 追加 1).
 #[derive(Clone, Debug, Deserialize)]
 pub struct RemoteEnvironment {
-    /// The shell the `PATH` was read from — that machine's bash.
+    /// The shell the answer came from — that machine's bash.
     pub shell: String,
-    pub path: String,
     #[serde(default)]
     pub managers: Vec<String>,
     pub node: RemoteToolStatus,
@@ -567,9 +570,8 @@ if [ -d "${HOME:-}/.nvm" ]; then dsh_managers="$dsh_managers$dsh_msep\"nvm\""; d
 if [ -d "${HOME:-}/.fnm" ] || [ -d "${HOME:-}/.local/share/fnm" ]; then dsh_managers="$dsh_managers$dsh_msep\"fnm\""; dsh_msep=,; fi
 if [ -x /home/linuxbrew/.linuxbrew/bin/brew ] || [ -x /usr/local/bin/brew ]; then dsh_managers="$dsh_managers$dsh_msep\"brew\""; dsh_msep=,; fi
 
-dsh_json=$(printf '{"shell":"%s","path":"%s","managers":[%s],"node":%s,"pnpm":%s}' \
+dsh_json=$(printf '{"shell":"%s","managers":[%s],"node":%s,"pnpm":%s}' \
   "$(dsh_esc "${BASH:-/bin/bash}")" \
-  "$(dsh_esc "$PATH")" \
   "$dsh_managers" \
   "$(dsh_pick node "$dsh_node_min" "$dsh_manual_node" yes no)" \
   "$(dsh_pick pnpm "$dsh_pnpm_min" "$dsh_manual_pnpm" no yes)")
@@ -1016,7 +1018,6 @@ pub(crate) mod testing {
         marked(
             &serde_json::json!({
                 "shell": "/bin/bash",
-                "path": "/home/demo/.nvm/versions/node/v22.14.0/bin:/usr/local/bin:/usr/bin",
                 "managers": managers,
                 "node": node,
                 "pnpm": pnpm,
@@ -1718,10 +1719,10 @@ mod tests {
         assert_eq!(env.node.skipped[0].reason, "unusable");
     }
 
-    /// The shell, the `PATH` and the managers are that machine's, read in the one
-    /// shell the answer comes from.
+    /// The shell and the managers are that machine's, read in the one shell the
+    /// answer comes from.
     #[test]
-    fn the_probe_reports_the_shell_path_and_managers_of_that_machine() {
+    fn the_probe_reports_the_shell_and_managers_of_that_machine() {
         let home = probe_home("probe-facts");
         std::fs::create_dir_all(home.join(".nvm")).unwrap();
         let path = fixture_tools(&home).to_string_lossy().into_owned();
@@ -1729,7 +1730,6 @@ mod tests {
         let env = run_probe(&home, &path, None, &[]);
 
         assert_eq!(env.shell, "/bin/bash");
-        assert!(!env.path.is_empty(), "PATH 要如实带回");
         assert!(
             env.managers.iter().any(|m| m == "nvm"),
             "装了 nvm 就要报出来，安装引导才能顺着它给命令：{:?}",

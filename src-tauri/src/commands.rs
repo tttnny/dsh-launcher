@@ -1931,6 +1931,48 @@ mod tests {
         assert_eq!(updated.display_name, "这台 Mac");
     }
 
+    /// A settings save must not wipe what the environment page owns: the probe
+    /// cache and the user's hand-picked executables are not part of the host
+    /// form, exactly as an instance's icon and port are not part of its form.
+    #[test]
+    fn editing_a_host_keeps_its_toolchain_and_its_picks() {
+        let data = ScratchDir::new("host-edit-toolchain");
+        let mut lab = remote_host("host-lab", "lab");
+        lab.toolchain = crate::config::ToolchainBinding {
+            node: Some(crate::config::BoundTool {
+                path: std::path::PathBuf::from("/opt/node/bin/node"),
+                version: "v22.14.0".into(),
+            }),
+            pnpm: None,
+        };
+        lab.toolchain_overrides = crate::config::ToolchainOverrides {
+            node: Some(std::path::PathBuf::from("/opt/pick/node")),
+            pnpm: None,
+        };
+        let state = host_state(
+            &data,
+            crate::config::Config {
+                hosts: vec![Host::local(), lab],
+                ..Default::default()
+            },
+            crate::remote::testing::idle(),
+        );
+
+        let updated = update_host_record(&state, "host-lab", host_input("实验室", "lab")).unwrap();
+
+        assert_eq!(updated.display_name, "实验室");
+        assert_eq!(
+            updated.toolchain.node.as_ref().map(|bound| bound.path.clone()),
+            Some(std::path::PathBuf::from("/opt/node/bin/node")),
+            "探测结论不该被表单抹掉"
+        );
+        assert_eq!(
+            updated.toolchain_overrides.node,
+            Some(std::path::PathBuf::from("/opt/pick/node")),
+            "用户指定的路径不该被表单抹掉"
+        );
+    }
+
     /// Deleting a host removes the launcher's records and nothing else: the
     /// other host's records stay, and 本机 cannot be deleted (ADR-0006 §5).
     #[test]
