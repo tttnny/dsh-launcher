@@ -205,10 +205,11 @@ function handleDeepLink(raw: string) {
  * The instance a deep link names.
  *
  * This launcher only **reads** `dsh-launcher://launch` links — nothing in this
- * tree writes one, and the only shape the scheme is known to carry is an
- * `instance` parameter holding either an id or a name (a link that arrives from
- * outside is hand-written). An id names one instance on one machine, so it
- * resolves anywhere. A **name** only has to be unique on its own host
+ * tree writes one, and the parameters the scheme is known to carry are
+ * `instance`, holding either an id or a name (a link that arrives from outside
+ * is hand-written), and `profile`, the profile to start it with when it is not
+ * already running. An id names one instance on one machine, so it resolves
+ * anywhere. A **name** only has to be unique on its own host
  * (两台机器可以各有一个 `web`, ADR-0006 §1), and the link carries no host of its
  * own — so a name is read as 「当前主机上叫这个名字的那一个」, and a link whose
  * name is not there says so rather than starting whatever instance happens to
