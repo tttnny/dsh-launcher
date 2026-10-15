@@ -470,7 +470,12 @@ async function removeBundle(b: BundleItem) {
           </template>
         </div>
 
-        <p class="bundle-hint">{{ t('plugins.offlineNote') }}</p>
+        <!-- The projection's own note belongs on a page that read the profile's
+             files. In the unreachable case nothing may have been read at all,
+             and the instance is not 「没在跑」 — so the note's 「启动实例后」 is the
+             one action this state must not offer. The banner above says what
+             happened and how to leave it. -->
+        <p v-if="!unreadable" class="bundle-hint">{{ t('plugins.offlineNote') }}</p>
       </section>
     </template>
   </div>
