@@ -21,6 +21,7 @@ import { useAction } from '@/composables/useAction'
 import { useCopy } from '@/composables/useCopy'
 import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
+import { directoryCommand } from '@/remoteCommand'
 import { SHORTCUT_DOCS } from '@/shortcuts'
 import DlIcon from '@/components/DlIcon.vue'
 
@@ -354,20 +355,14 @@ const hostRunNames = computed(() =>
 /** What the user can run on the server to look at what the launcher left
  *  behind. Read-only on purpose: nothing here removes anything there.
  *
- *  The shape is the backend's `remote::ssh_command`, in one line: the whole
- *  remote command is one single-quoted word, and the path inside it is quoted
- *  again for the shell that parses it there. Two shells read this line — the one
- *  here, and the login shell at the other end — so a path with a space or a
- *  quote in it survives both. */
+ *  The shape is the backend's `remote::ssh_command` + `directory_recipe`, put
+ *  together in `directoryCommand` so the two agree — a host whose data directory
+ *  has not been read yet falls back to the default spelling `~/.local/share/…`,
+ *  and that tilde has to keep expanding on the far side. */
 function inspectCommand(host: HostWithStatus | null): string {
   if (!host) return ''
   const dir = host.data_dir || '~/.local/share/dsh-launcher'
-  return `ssh ${host.ssh_target} ${remoteWord(`bash -ilc "ls -la ${remoteWord(dir)}"`)}`
-}
-
-/** POSIX single-quoting — the backend's `remote::quote`. */
-function remoteWord(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`
+  return directoryCommand(host.ssh_target, dir)
 }
 
 /**

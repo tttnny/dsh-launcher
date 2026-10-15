@@ -29,6 +29,7 @@ import type {
   ToolStatus,
 } from './types'
 import { LOCAL_HOST_ID } from './types'
+import { directoryCommand } from '../remoteCommand'
 
 export type Listener<T> = (payload: T) => void
 
@@ -1335,7 +1336,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         host_name: host.display_name,
         ssh_target: host.ssh_target,
         path,
-        command: `ssh ${host.ssh_target} '/bin/bash -ilc "ls -la ${path}"'`,
+        command: directoryCommand(host.ssh_target, path),
       } as T
     }
     case 'open_home_directory': {

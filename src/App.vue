@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
-import type { ThemeMode } from '@/api/types'
+import type { DshInstance, ThemeMode } from '@/api/types'
 import { api } from '@/api'
 import {
   MENU_NAVIGATE_EVENTS,
@@ -201,10 +201,29 @@ function handleDeepLink(raw: string) {
   }
 }
 
+/**
+ * The instance a deep link names — which is why a link prefers the id.
+ *
+ * An id names one instance on one machine, so it resolves anywhere. A **name**
+ * only has to be unique on its own host (两台机器可以各有一个 `web`, ADR-0006 §1),
+ * and the link carries no host of its own — so a name is read as 「当前主机上叫
+ * 这个名字的那一个」, and a link whose name is not there says so rather than
+ * starting whatever instance happens to share the name on another machine.
+ *
+ * The launcher writes ids into links (`dsh-launcher://launch` is the only scheme
+ * there is); a name can only arrive in a hand-written URL, which is exactly when
+ * picking one of two machines at random would be worst.
+ */
+function launchTarget(ref: string): DshInstance | undefined {
+  const byId = store.instanceById(ref)
+  if (byId) return byId
+  return store.instancesOfHost(store.currentHostId).find((i) => i.name === ref)
+}
+
 async function launchFromDeepLink(u: URL) {
   const ref = u.searchParams.get('instance')
   if (!ref) return
-  const inst = store.instances.find((i) => i.id === ref || i.name === ref)
+  const inst = launchTarget(ref)
   if (!inst) {
     Message.error(String(ref))
     return
