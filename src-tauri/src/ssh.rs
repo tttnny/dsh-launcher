@@ -68,7 +68,9 @@ pub type HostFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostErrorKind {
-    /// ssh never reached the machine: refused, unresolvable, no route.
+    /// ssh never reached the machine: refused, unresolvable, no route. It is
+    /// also where a failure ssh did not explain lands — 255 with an empty
+    /// stderr, which carries no evidence about the machine at all.
     Unreachable,
     /// The machine answered but would not let us in — no key and no agent to
     /// offer one, or a host key `known_hosts` does not know yet.
@@ -677,6 +679,10 @@ const MAX_SOCKET_PATH: usize = 86;
 /// Classifies one failed ssh call. ssh reports its own failures on stderr and
 /// exits 255; there is no structured code to read, so the four classes come
 /// from what it said.
+///
+/// A failure ssh did **not** explain (255, nothing on stderr) is not evidence
+/// about the machine, and the message for it says so rather than asserting a
+/// cause — see the 「连不上」 arm.
 pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
     // The one failure that is not about the machine: ssh's own control socket
     // path. It has two spellings (ssh's pre-flight check and the bind that
@@ -687,9 +693,12 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
         return HostError::unreachable(message);
     }
     let kind = ssh_failure_kind(stderr);
-    let said = match stderr_tail(stderr) {
-        tail if tail.is_empty() => "ssh 没有说明原因".to_string(),
-        tail => tail,
+    let tail = stderr_tail(stderr);
+    let silent = tail.is_empty();
+    let said = if silent {
+        "ssh 没有说明原因".to_string()
+    } else {
+        tail
     };
     let message = match kind {
         // The first connection to a machine whose key is not in `known_hosts`
@@ -703,7 +712,24 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
             "{said}。连接 {target} 超过 {CONNECT_TIMEOUT_SECS} 秒没有回应：确认网络能到这台机器"
         ),
         HostErrorKind::Unreachable => {
-            format!("{said}。确认 ssh {target} 这台机器开着、地址没写错")
+            if silent {
+                // ssh exits 255 without a word when the connection it was
+                // riding is cut out from under it, and the launcher's own exit
+                // path does exactly that to a remote call still in flight (a
+                // log follower inside `remote::tail`). A machine that is off is
+                // not the only way this failure happens — and ssh, given a
+                // machine that really is off, says why (refused, no route,
+                // timeout, unresolvable name) — so this one states the two
+                // possibilities instead of sending the user to check a machine
+                // that may be up.
+                format!(
+                    "ssh 什么都没说就退出了：这既可能是连不上 {target}，\
+                     也可能是启动器自己那条连接刚被断开（撤销转发、退出启动器时会这样）。\
+                     先在终端里跑一次 ssh {target} 确认能登录，再重试一次"
+                )
+            } else {
+                format!("{said}。确认 ssh {target} 这台机器开着、地址没写错")
+            }
         }
         HostErrorKind::RemoteCommand => said,
     };
@@ -1315,6 +1341,43 @@ mod tests {
         assert_eq!(
             format!("{failed}"),
             "远端命令失败：远端命令失败（退出码 1）：npm ERR! missing pnpm"
+        );
+    }
+
+    /// ssh exits 255 with an empty stderr when the connection it was riding is
+    /// cut out from under it — which is what the launcher's own exit path does
+    /// to a log follower still waiting inside a remote call. Such a failure may
+    /// not be told to the user as 「确认那台机器开着」: the launcher does not know
+    /// that, and a machine that is up is then the thing the user is sent to
+    /// debug. A failure ssh *did* explain keeps its own, more useful reason.
+    #[test]
+    fn a_silent_ssh_failure_names_both_possibilities_instead_of_the_machine_being_off() {
+        let silent = ssh_failure("lab", "");
+        assert_eq!(silent.kind, HostErrorKind::Unreachable);
+        assert!(
+            !silent.message.contains("这台机器开着"),
+            "启动器不知道那台机器是关着的，别让它这么说：{}",
+            silent.message
+        );
+        assert!(
+            silent.message.contains("启动器自己那条连接"),
+            "要说出启动器自己切断连接这个可能：{}",
+            silent.message
+        );
+        assert!(
+            silent.message.contains("重试"),
+            "要给一个能离开这句话的动作：{}",
+            silent.message
+        );
+        assert!(silent.message.contains("ssh lab"), "{}", silent.message);
+
+        // ssh's own words still carry the reason whenever it said anything:
+        // 「连不上」 for these is not a guess.
+        let refused = ssh_failure("lab", "ssh: connect to host lab port 22: Connection refused\n");
+        assert!(
+            refused.message.contains("确认 ssh lab") && refused.message.contains("机器开着"),
+            "{}",
+            refused.message
         );
     }
 
