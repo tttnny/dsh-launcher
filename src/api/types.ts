@@ -259,6 +259,12 @@ export interface TaskInfo {
   kind: string
   label: string
   version: string
+  /**
+   * The machine this task works on. Two hosts can install the same version at
+   * the same time, so the Versions page keys an install's row by host +
+   * version — this is the host half of that.
+   */
+  host_id: string
   state: TaskState
   percent: number
   created_at: number

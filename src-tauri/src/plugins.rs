@@ -631,7 +631,24 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     } else {
         String::new()
     };
+    let manifest = build_scripts_manifest(&raw);
+    if let Some(manifest) = manifest {
+        std::fs::write(&ws_manifest, manifest)
+            .map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))?;
+    }
+    Ok(())
+}
 
+/// The document [`ensure_build_scripts_allowed`] writes, from the one that is
+/// already there — the whole decision, without touching a filesystem. `None`
+/// when the file already says what it should, so a caller only writes when
+/// there is something to write.
+///
+/// Split out because the same document has to be produced for a version
+/// directory on another machine, where the launcher reads and writes over the
+/// transport instead of `std::fs`; one function, so the two cannot disagree
+/// about what an allowed build script looks like.
+pub(crate) fn build_scripts_manifest(raw: &str) -> Option<String> {
     // Base document: `packages` is required for pnpm to treat the dir as a
     // workspace (needed for allowBuilds to be read from this file).
     let mut lines: Vec<String> = if raw.trim().is_empty() {
@@ -671,15 +688,13 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
         changed = true;
     }
 
-    if changed {
-        let out = lines.join("\n");
-        if !out.ends_with('\n') {
-            lines.push(String::new());
-        }
-        std::fs::write(&ws_manifest, lines.join("\n"))
-            .map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))?;
+    if !changed {
+        return None;
     }
-    Ok(())
+    if !lines.join("\n").ends_with('\n') {
+        lines.push(String::new());
+    }
+    Some(lines.join("\n"))
 }
 
 /// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a

@@ -112,7 +112,7 @@ impl ToolchainRequirements {
     /// runs **on this Mac** to install the tool on `host`. One command each,
     /// prefixed with `ssh <host>`, in the shape that installs into the same
     /// directories the probe searches (ADR-0005 追加 4).
-    fn for_remote(host: &crate::ssh::RemoteHost, managers: &[String]) -> Self {
+    pub(crate) fn for_remote(host: &crate::ssh::RemoteHost, managers: &[String]) -> Self {
         Self {
             min_pnpm_major: crate::toolchain::MIN_PNPM_MAJOR,
             recommended_node_major: RECOMMENDED_NODE_MAJOR,
@@ -707,6 +707,66 @@ fn binding_of_remote(env: &crate::remote::RemoteEnvironment) -> crate::config::T
     }
 }
 
+/// One remote host's toolchain as a task should drive it: the machine, that
+/// machine's probe answer, and the tools the launcher resolved there.
+///
+/// A task resolves through the same walk the environment page shows, so the
+/// binary it runs is the one the page reported (ADR-0005 追加 1).
+pub(crate) struct HostTools {
+    pub target: crate::ssh::RemoteHost,
+    pub env: crate::remote::RemoteEnvironment,
+    pub pnpm: Option<crate::config::BoundTool>,
+}
+
+/// Resolves one **remote** host's tools on that machine.
+pub(crate) async fn remote_host_tools(
+    state: &AppState,
+    host: &crate::config::Host,
+) -> Result<HostTools, String> {
+    let target = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+    let env = remote_probe(state, host, &target, false).await?;
+    let binding = binding_of_remote(&env);
+    Ok(HostTools {
+        target,
+        env,
+        pnpm: binding.pnpm,
+    })
+}
+
+/// Why a version cannot be installed on one remote host: that machine has no
+/// pnpm the launcher can drive. The fix is a command the user runs **here** to
+/// install it **there** — the recipe the environment page shows for that host,
+/// composed in one place so the two can never tell the user different things.
+pub(crate) fn remote_pnpm_missing_error(
+    host: &crate::config::Host,
+    target: &crate::ssh::RemoteHost,
+    managers: &[String],
+) -> String {
+    format!(
+        "「{}」上没有可用的 pnpm（需要 {} 或更高版本），所以装不了版本。\n\
+         在那台机器上装好之后，回到「设置 → 环境」选中该主机点「重新检测」即可继续：\n\n  {}",
+        host.display_name,
+        crate::toolchain::MIN_PNPM_MAJOR,
+        ToolchainRequirements::for_remote(target, managers).pnpm_install_command
+    )
+}
+
+/// One candidate a remote probe passed over, as a line of the task log. The page
+/// renders the reason codes in the user's language; a log line has no such
+/// machinery, so the codes become words here.
+pub(crate) fn skipped_candidate_note(tool: &str, skipped: &crate::remote::RemoteSkipped) -> String {
+    let why = match skipped.reason.as_str() {
+        "below-minimum" => match skipped.major {
+            Some(major) => format!("版本过低（{}，主版本 {major}）", skipped.version),
+            None => format!("版本过低（{}）", skipped.version),
+        },
+        "unparsable" => format!("版本号读不出来（{}）", skipped.version),
+        "unusable" => "不是能执行的文件".to_string(),
+        other => other.to_string(),
+    };
+    format!("那台机器上的 {tool} 候选 {} 被跳过：{why}", skipped.path)
+}
+
 /// Records one host's probe conclusion. The binding is the launcher's
 /// resolution, not a preference: it is rewritten whenever it changed, and always
 /// into the host it is about — never into a slot two machines would share.
@@ -724,8 +784,7 @@ fn write_host_binding(state: &AppState, host_id: &str, binding: &crate::config::
     }
 }
 
-fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {
-    match (status.path, status.version) {
+fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {    match (status.path, status.version) {
         (Some(path), Some(version)) => Some(crate::config::BoundTool {
             path: PathBuf::from(path),
             version,

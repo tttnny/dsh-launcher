@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
-import { useLauncherStore } from '@/stores/launcher'
+import { installKey, useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
 import type { RemoteVersion, TaskInfo } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
@@ -12,7 +12,8 @@ import DlRefreshButton from '@/components/DlRefreshButton.vue'
 
 // Installing a version is the app's only long task, and its outcome is a
 // version directory plus a 1:1 instance — so the progress lives on the version
-// it installs, and there is no task page to visit.
+// it installs, on the machine it installs onto, and there is no task page to
+// visit.
 
 const { t } = useI18n()
 const store = useLauncherStore()
@@ -33,13 +34,11 @@ const installedVersions = computed(() =>
   [...store.versions].sort((a, b) => collator.compare(b.version, a.version)),
 )
 
-/**
- * Installing a version names the machine it goes on, and an install only runs
- * where the launcher can drive npm and write the version directory — this Mac.
- * A remote host's tab still shows what that host could install; the button says
- * why it is not the one that does it.
- */
-const canInstallHere = computed(() => store.currentHost?.builtin === true)
+/** The machine an install goes onto: the Library's current host. */
+const hostLabel = computed(() => {
+  const host = store.currentHost
+  return host?.builtin ? t('versions.hostLocal') : (host?.display_name ?? store.currentHostId)
+})
 
 // Remote versions split into what can be installed and what already is.
 const installable = computed(() => sortedDesc.value.filter((v) => !installedSet.value.has(v.version)))
@@ -82,14 +81,32 @@ function formatDate(iso: string | null): string {
 
 const installAction = useAction(
   async (version: string) => {
-    const taskId = await api.startInstallVersionTask(version)
-    return { taskId, version }
+    // The install runs on the machine the Library is showing, and the row it
+    // shows its progress on is keyed by exactly that host.
+    const hostId = store.currentHostId
+    const taskId = await api.startInstallVersionTask(version, hostId)
+    return { taskId, hostId, version }
   },
-  { key: (version) => version, success: ({ version }) => t('versions.installTaskStarted', { version }) },
+  {
+    key: (version) => version,
+    success: ({ version }) => t('versions.installTaskStarted', { version, host: hostLabel.value }),
+  },
 )
 
+/** The install in flight (or the last outcome) of one version **on the host
+ *  this page is showing**. Two machines can install the same version at once:
+ *  each of them has its own row here. */
 function installOf(version: string): TaskInfo | null {
-  return store.installingVersions[version] ?? null
+  return store.installingVersions[installKey(store.currentHostId, version)] ?? null
+}
+
+const isInstalling = (version: string) => installOf(version)?.state === 'running'
+
+/** The tail of an install's log: the progress bar says how far along it is,
+ *  these lines say what it is doing. */
+const LOG_TAIL = 8
+function recentLogs(task: TaskInfo): string[] {
+  return task.logs.slice(-LOG_TAIL)
 }
 
 function onInstall(row: RemoteVersion) {
@@ -99,17 +116,17 @@ function onInstall(row: RemoteVersion) {
   }
   const isSourceBuild = row.source === 'github'
   Modal.confirm({
-    title: t('versions.confirmInstallTitle'),
+    title: t('versions.confirmInstallTitle', { host: hostLabel.value }),
     content: isSourceBuild
-      ? t('versions.confirmInstallSourceContent', { version: row.version })
-      : t('versions.confirmInstallContent', { version: row.version }),
+      ? t('versions.confirmInstallSourceContent', { version: row.version, host: hostLabel.value })
+      : t('versions.confirmInstallContent', { version: row.version, host: hostLabel.value }),
     okText: t('versions.installNow'),
     cancelText: t('common.cancel'),
     modalClass: 'dl-sheet',
     onOk: async () => {
       const started = await installAction.run(row.version)
       if (started === undefined) return
-      await store.watchInstallTask(started.taskId, row.version)
+      await store.watchInstallTask(started.taskId, started.hostId, row.version)
     },
   })
 }
@@ -242,12 +259,8 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         }}
       </div>
 
-      <!-- The list is that host's, but the install button is this Mac's: say so
-           once, instead of leaving a row of greyed-out buttons unexplained. -->
-      <div v-if="!canInstallHere && visibleInstallable.length > 0" class="dl-row-none">
-        {{ t('versions.installLocalOnly') }}
-      </div>
-
+      <!-- The list is that host's, and an install runs **there**: the button
+           installs onto the machine this page is showing. -->
       <div v-for="v in visibleInstallable" :key="v.version" class="ver-row">
         <span class="ver-mark is-idle"><DlIcon name="download" :size="14" /></span>
         <div class="ver-main">
@@ -264,30 +277,49 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
             {{ t('versions.releasedAt', { date: formatDate(v.released_at) }) }}
           </span>
 
-          <div v-if="installOf(v.version)" class="ver-progress">
-            <a-progress
-              :percent="(installOf(v.version)?.percent ?? 0) / 100"
-              size="small"
-              :show-text="true"
-            />
-            <button
-              class="dl-btn dl-btn--quiet"
-              :disabled="!!cancelAction.busy[installOf(v.version)?.id ?? '']"
-              @click="onCancelInstall(installOf(v.version)!.id)"
-            >
-              {{ t('versions.cancelInstall') }}
-            </button>
+          <!-- An install in flight: its progress, what it is doing, and a way
+               out. A failure or a cancellation keeps the row — the reason the
+               machine gave is the only place the user can read it, and the
+               install button beside it is how they try again. -->
+          <div v-if="installOf(v.version)" class="ver-install-state">
+            <div v-if="isInstalling(v.version)" class="ver-progress">
+              <a-progress
+                :percent="(installOf(v.version)?.percent ?? 0) / 100"
+                size="small"
+                :show-text="true"
+              />
+              <button
+                class="dl-btn dl-btn--quiet"
+                :disabled="!!cancelAction.busy[installOf(v.version)?.id ?? '']"
+                @click="onCancelInstall(installOf(v.version)!.id)"
+              >
+                {{ t('versions.cancelInstall') }}
+              </button>
+            </div>
+            <p v-else-if="installOf(v.version)?.state === 'error'" class="ver-failed">
+              {{ installOf(v.version)?.message }}
+            </p>
+            <p v-else-if="installOf(v.version)?.state === 'cancelled'" class="ver-cancelled">
+              {{ t('versions.installCancelled') }}
+            </p>
+            <div v-if="installOf(v.version)?.logs.length" class="ver-log">
+              <span
+                v-for="(line, index) in recentLogs(installOf(v.version)!)"
+                :key="index"
+                class="ver-log-line dl-mono"
+                >{{ line }}</span
+              >
+            </div>
           </div>
         </div>
 
         <button
-          v-if="!installOf(v.version)"
+          v-if="!isInstalling(v.version)"
           class="dl-btn dl-btn--quiet ver-install"
-          :disabled="!!installAction.busy[v.version] || !canInstallHere"
-          :title="canInstallHere ? undefined : t('versions.installLocalOnly')"
+          :disabled="!!installAction.busy[v.version]"
           @click="onInstall(v)"
         >
-          {{ t('versions.installNow') }}
+          {{ t(installOf(v.version)?.state === 'error' ? 'versions.retryInstall' : 'versions.installNow') }}
         </button>
         <span v-else class="dl-tag dl-tag--signal ver-installing">
           {{ t('versions.installing') }}
@@ -424,4 +456,45 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
   }
 }
 
+.ver-install-state {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  max-width: 560px;
+}
+
+.ver-failed {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-danger);
+}
+
+.ver-cancelled {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+}
+
+/* The install's own output. It is a console, so it stays a console: its tail,
+   monospaced and quiet, scrolled rather than truncated — the failure reason
+   above it is written from these same lines. */
+.ver-log {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 132px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-3);
+}
+
+.ver-log-line {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 </style>

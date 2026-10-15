@@ -31,6 +31,12 @@ use std::time::Duration;
 pub const MARK: &str = "<<<DSH-JSON>>>";
 pub const END: &str = "<<<DSH-END>>>";
 
+/// Marks the line a [`measured_argv`] wrapper appends to its command's log: the
+/// exit status. A detached process is nobody's child, so nothing can `wait` for
+/// it — this line written next to its own output is the only place its outcome
+/// exists (see [`measured_argv`]).
+pub const EXIT_MARK: &str = "<<<DSH-EXIT>>>";
+
 /// POSIX single-quoting: the one escaping rule every remote script uses, and
 /// the reason a path with a space or a quote in it survives.
 ///
@@ -249,6 +255,116 @@ pub async fn available_versions(
         NPM_VIEW_TIMEOUT,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Following one detached command
+// ---------------------------------------------------------------------------
+
+/// What one read of a remote log left behind: the text appended since the
+/// previous offset, and whether the process tree is still there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailChunk {
+    pub text: String,
+    /// Where to read from next. Always the log's current size, so the next call
+    /// asks only for what was written after this one.
+    pub offset: u64,
+    pub alive: bool,
+}
+
+/// Reads a remote log from `offset`, waiting **on that machine** for output, for
+/// the process to go, or for the budget, whichever comes first.
+pub async fn tail(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    log_path: &str,
+    offset: u64,
+    pid: i32,
+    wait_secs: u64,
+) -> Result<TailChunk, HostError> {
+    #[derive(Deserialize)]
+    struct Chunk {
+        offset: u64,
+        data: String,
+        alive: bool,
+    }
+    let script = tail_script(log_path, offset, pid, wait_secs);
+    let out = transport.run(host, RemoteCall::within(script, DEFAULT_TIMEOUT)).await?;
+    let chunk: Chunk = parse_marked(&out)?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(chunk.data.as_bytes())
+        .map_err(|e| HostError::remote_command(format!("远端日志无法解码：{e}")))?;
+    Ok(TailChunk {
+        text: String::from_utf8_lossy(&bytes).to_string(),
+        offset: chunk.offset,
+        alive: chunk.alive,
+    })
+}
+
+/// Whether the process tree one detached spawn started is still there.
+pub async fn alive(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    pid: i32,
+) -> Result<bool, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        alive: bool,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(alive_script(pid)))
+        .await?;
+    Ok(parse_marked::<Answer>(&out)?.alive)
+}
+
+/// Makes one remote directory, parents included.
+pub async fn ensure_dir(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<(), HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(ensure_dir_script(path)))
+        .await?;
+    decode_ack(&out)
+}
+
+/// Removes one remote directory tree. Not being there is already the state the
+/// caller asked for. The callers only ever aim this at a path they computed
+/// from that host's own data directory.
+pub async fn remove_dir(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<(), HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(remove_dir_script(path)))
+        .await?;
+    decode_ack(&out)
+}
+
+/// Whether that machine's npm knows one version of the launcher's package —
+/// which decides between installing it from npm there and building it from
+/// source there. `registry` empty means "use that machine's own npm
+/// configuration".
+pub async fn npm_has_version(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    package: &str,
+    registry: Option<&str>,
+) -> Result<bool, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        exists: bool,
+    }
+    let out = transport
+        .run(
+            host,
+            RemoteCall::new(npm_has_version_script(package, registry)),
+        )
+        .await?;
+    Ok(parse_marked::<Answer>(&out)?.exists)
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +940,119 @@ kill -TERM %%PID%% 2>/dev/null || { printf '不能给进程 %s 发信号\n' %%PI
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
+/// Stops a whole process tree: the process group one detached spawn leads
+/// (its [`SPAWN`] ran under `setsid`, so its pid is the group's id), falling
+/// back to the process itself when it leads no group.
+///
+/// Killing only the leader is not enough for the case this exists for: a
+/// cancelled `pnpm install` leaves its helpers behind, and a helper holding the
+/// store's lock makes every later install on that machine wait.
+///
+/// Already gone counts as stopped — a second cancel, or an install that exited
+/// between the click and this call, is not a failure.
+const STOP_GROUP: &str = r#"set -u
+dsh_pid=%%PID%%
+if kill -TERM -- "-$dsh_pid" 2>/dev/null || kill -TERM "$dsh_pid" 2>/dev/null; then
+  printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+elif kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null; then
+  printf '进程 %s 还在，但发不了终止信号（权限不足？）\n' "$dsh_pid" >&2
+  exit 3
+else
+  printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+fi
+"#;
+
+/// Whether the process tree one detached spawn started is still there. The same
+/// predicate [`STOP_GROUP`] signals with, so 「停了」 and 「真的没了」 cannot
+/// disagree.
+const ALIVE: &str = r#"set -u
+dsh_pid=%%PID%%
+if kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null; then
+  printf '<<<DSH-JSON>>>{"alive":true}<<<DSH-END>>>'
+else
+  printf '<<<DSH-JSON>>>{"alive":false}<<<DSH-END>>>'
+fi
+"#;
+
+/// The tail of one remote log from a byte offset, waiting on that machine until
+/// there is something to report.
+///
+/// A remote install has no pipe to read: it runs detached so it outlives the
+/// ssh session, and its only output is a log file. Reading that file once per
+/// poll would open an ssh per second for the ten minutes an install takes, so
+/// the wait happens **there** — this script returns as soon as the log has grown
+/// past the offset, the process is gone, or the budget runs out. Live output
+/// therefore arrives about a second after it is written, and a quiet install
+/// costs one call per `%%WAIT%%` seconds.
+///
+/// The bytes travel base64-encoded: the channel is text, and pnpm's output
+/// carries whatever its own terminals printed.
+const TAIL: &str = r#"set -u
+dsh_log=%%LOG%%
+dsh_offset=%%OFFSET%%
+dsh_pid=%%PID%%
+dsh_wait=%%WAIT%%
+
+dsh_alive() {
+  if [ "$dsh_pid" -le 0 ]; then return 0; fi
+  kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null
+}
+
+dsh_size() {
+  dsh_bytes=$(wc -c < "$dsh_log" 2>/dev/null | tr -d ' ')
+  if [ -z "$dsh_bytes" ]; then dsh_bytes=0; fi
+  printf '%s' "$dsh_bytes"
+}
+
+dsh_now=$(dsh_size)
+dsh_i=0
+while [ "$dsh_i" -lt "$dsh_wait" ] && [ "$dsh_now" -le "$dsh_offset" ] && dsh_alive; do
+  sleep 1
+  dsh_i=$((dsh_i + 1))
+  dsh_now=$(dsh_size)
+done
+
+dsh_data=$(tail -c "+$((dsh_offset + 1))" "$dsh_log" 2>/dev/null | base64 | tr -d '\n')
+if dsh_alive; then dsh_living=true; else dsh_living=false; fi
+printf '<<<DSH-JSON>>>{"offset":%s,"data":"%s","alive":%s}<<<DSH-END>>>' "$dsh_now" "$dsh_data" "$dsh_living"
+"#;
+
+/// Creates one directory, parents included. The launcher makes the directories
+/// it is about to write into *there*, because that filesystem is the only place
+/// they exist.
+const ENSURE_DIR: &str = r#"set -u
+dsh_path=%%PATH%%
+mkdir -p -- "$dsh_path" || { printf '建不了远端目录 %s\n' "$dsh_path" >&2; exit 2; }
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Removes one directory tree. A path that is not there is already what the
+/// caller wanted. The caller only ever aims this inside the host's own data
+/// directory (ADR-0006).
+const REMOVE_DIR: &str = r#"set -u
+dsh_path=%%PATH%%
+rm -rf -- "$dsh_path" || { printf '删不掉远端目录 %s\n' "$dsh_path" >&2; exit 2; }
+printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+"#;
+
+/// Whether that machine's npm knows one version of the launcher's package.
+///
+/// A version published only as a GitHub `dsh-v*` tag is not on npm anywhere, and
+/// the local installer forks to a source build for exactly that case. The
+/// answer has to come from the machine that will do the installing, because its
+/// registry is the one its install will read.
+const NPM_HAS_VERSION: &str = r#"set -u
+dsh_npm=$(command -v npm 2>/dev/null || true)
+if [ -z "$dsh_npm" ]; then
+  printf '这台机器上没有 npm\n' >&2
+  exit 2
+fi
+dsh_said=$("$dsh_npm" view %%PACKAGE%% version %%REGISTRY%% 2>/dev/null | head -n 1 || true)
+dsh_has=false
+if [ -n "$dsh_said" ]; then dsh_has=true; fi
+printf '<<<DSH-JSON>>>{"exists":%s}<<<DSH-END>>>' "$dsh_has"
+"#;
+
 /// Starts a process that outlives the ssh session (ADR-0007): its own session
 /// (`setsid`), stdin from `/dev/null`, output appended to the remote log file,
 /// and the pid printed for the remote running record.
@@ -876,6 +1105,52 @@ pub fn stop_pid_script(pid: i32) -> String {
     fill(STOP_PID, &[("%%PID%%", pid.to_string())])
 }
 
+pub fn stop_group_script(pid: i32) -> String {
+    fill(STOP_GROUP, &[("%%PID%%", pid.to_string())])
+}
+
+pub fn alive_script(pid: i32) -> String {
+    fill(ALIVE, &[("%%PID%%", pid.to_string())])
+}
+
+pub fn ensure_dir_script(path: &str) -> String {
+    fill(ENSURE_DIR, &[("%%PATH%%", quote(path))])
+}
+
+pub fn remove_dir_script(path: &str) -> String {
+    fill(REMOVE_DIR, &[("%%PATH%%", quote(path))])
+}
+
+/// The script that asks whether that machine's npm knows one version. An empty
+/// `registry` means "let that machine's own npm configuration decide".
+pub fn npm_has_version_script(package: &str, registry: Option<&str>) -> String {
+    let registry_arg = match registry.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(registry) => format!("--registry {}", quote(registry)),
+        None => String::new(),
+    };
+    fill(
+        NPM_HAS_VERSION,
+        &[
+            ("%%PACKAGE%%", quote(package)),
+            ("%%REGISTRY%%", registry_arg),
+        ],
+    )
+}
+
+/// The tail read for one remote log. The values are numbers and a quoted path,
+/// so nothing here can be read as shell syntax.
+pub fn tail_script(log_path: &str, offset: u64, pid: i32, wait_secs: u64) -> String {
+    fill(
+        TAIL,
+        &[
+            ("%%LOG%%", quote(log_path)),
+            ("%%OFFSET%%", offset.to_string()),
+            ("%%PID%%", pid.to_string()),
+            ("%%WAIT%%", wait_secs.to_string()),
+        ],
+    )
+}
+
 /// The script for one detached process: `argv` is the command line (already the
 /// argv the launcher would run locally, never a shell string), `log_path` the
 /// remote file its output is appended to.
@@ -892,6 +1167,44 @@ pub fn spawn_script(argv: &[String], log_path: &str) -> String {
             ("%%ARGV%%", command),
         ],
     )
+}
+
+/// The argv for a detached command whose **outcome** the launcher needs, run in
+/// `cwd` (which is created if it is not there).
+///
+/// [`spawn_script`] detaches the process with `setsid` so it outlives the ssh
+/// session — which also means it is not the launcher's child and nobody can
+/// `wait` for it. So the command runs under a small `sh -c` wrapper that appends
+/// its exit status to the same log the launcher is already reading
+/// ([`EXIT_MARK`], read back by [`exit_status_of`]). A missing status line is
+/// then meaningful in itself: the wrapper never got to write one, so the command
+/// was killed rather than having exited.
+///
+/// `cwd` is where pnpm and git want to run: both read the tree they are working
+/// on from the working directory, and `pnpm install --prefix` is not a
+/// substitute for being in the directory for everything else pnpm resolves.
+pub fn measured_argv(argv: &[String], cwd: &str) -> Vec<String> {
+    let command = argv
+        .iter()
+        .map(|word| quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "mkdir -p {dir} && cd {dir} && {command}; printf '\\n{EXIT_MARK}%s{END}\\n' \"$?\"",
+            dir = quote(cwd)
+        ),
+    ]
+}
+
+/// The exit status on one line of a log a [`measured_argv`] wrapper wrote, if
+/// that line is the status line. `None` for every other line, and for text that
+/// has no status line at all.
+pub fn exit_status_of(line: &str) -> Option<i32> {
+    let rest = line.trim().strip_prefix(EXIT_MARK)?;
+    rest.strip_suffix(END)?.trim().parse().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +1290,7 @@ pub(crate) mod testing {
         Run(String),
         Spawn(String),
         StopPid(i32),
+        StopGroup(i32),
         ReadFile(String),
         WriteFile(String, Vec<u8>),
         ListDir(String),
@@ -1223,6 +1537,20 @@ pub(crate) mod testing {
             })
         }
 
+        fn stop_group<'a>(
+            &'a self,
+            _host: &'a RemoteHost,
+            pid: i32,
+        ) -> HostFuture<'a, Result<(), HostError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(FakeCall::StopGroup(pid));
+                match self.answer()? {
+                    FakeAnswer::Done => Ok(()),
+                    other => Err(wrong_shape(&other)),
+                }
+            })
+        }
+
         fn read_file<'a>(
             &'a self,
             _host: &'a RemoteHost,
@@ -1319,6 +1647,7 @@ mod tests {
     };
     use super::*;
     use crate::ssh::{HostTransport, SshTransport};
+    use base64::Engine as _;
     use std::path::{Path, PathBuf};
 
     const TARGET: &str = "zjq_aliyun";
@@ -2144,5 +2473,283 @@ mod tests {
         ] {
             assert!(!recipe.contains('"'), "配方里不能有双引号：{recipe}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Following and stopping a detached command
+    // -----------------------------------------------------------------------
+
+    /// Reads the `alive` answer one real shell produced.
+    fn shell_alive(pid: i32) -> bool {
+        let out = local_shell(&alive_script(pid));
+        parse_marked::<serde_json::Value>(&out).unwrap()["alive"]
+            .as_bool()
+            .unwrap()
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Whether one pid still exists, asked of a real shell.
+    fn pid_exists(pid: i32) -> bool {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "if kill -0 {pid} 2>/dev/null; then echo yes; else echo no; fi"
+            ))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains("yes")
+    }
+
+    /// Waits up to a couple of seconds for a pid to be gone. A process that has
+    /// been signalled may take a moment to go away.
+    fn wait_gone(pid: i32) -> bool {
+        for _ in 0..20 {
+            if !pid_exists(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// The rule the whole cancellation story rests on: a detached spawn leads
+    /// its own process group, so stopping it means signalling the **group** —
+    /// the leader alone leaves the children pnpm started behind, holding the
+    /// store's lock. A real group with real children is stopped here, the way
+    /// `setsid` gives the launcher's detached spawn one.
+    #[test]
+    fn stopping_a_detached_command_reaches_the_children_it_started() {
+        use std::os::unix::process::CommandExt;
+
+        let dir = scratch("dsh-group");
+        let recorded = dir.join("children");
+        let fixture = format!(
+            "sleep 30 & echo $! >> {file}; sleep 30 & echo $! >> {file}; wait",
+            file = recorded.display()
+        );
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", &fixture]);
+        // Its own process group: pgid == pid, which is what `setsid` gives the
+        // launcher's detached spawn and what makes a negative pid the whole tree.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().expect("要能起一个自己的进程组的进程");
+        let pid = child.id() as i32;
+        assert!(shell_alive(pid), "起好的进程组要在");
+
+        let children = || -> Vec<i32> {
+            std::fs::read_to_string(&recorded)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.trim().parse().ok())
+                .collect()
+        };
+        for _ in 0..50 {
+            if children().len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let in_group = children();
+        assert_eq!(in_group.len(), 2, "夹具要记下组里两个子进程的 pid");
+        assert!(in_group.iter().all(|p| pid_exists(*p)));
+
+        let out = local_shell(&stop_group_script(pid));
+        decode_ack(&out).expect("停止要成功");
+
+        // The leader is reaped here so the group can be judged; the children
+        // are the ones that would have held the store's lock.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = child.wait();
+        for child_pid in in_group {
+            assert!(
+                wait_gone(child_pid),
+                "子进程 {child_pid} 没被停掉：那就是会占着 store 锁的孤儿"
+            );
+        }
+        assert!(wait_gone(pid), "组长也要没了");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Stopping something that is already gone is not a failure: the second
+    /// cancel click, and an install that exited between the click and the call,
+    /// both land here.
+    #[test]
+    fn stopping_something_already_gone_is_not_an_error() {
+        let out = local_shell(&stop_group_script(999_999));
+        decode_ack(&out).expect("本来就不在了也算停好了");
+    }
+
+    /// The plain pid stop is unchanged: it signals the process it was given and
+    /// nothing else, which is what an adopted process needs (ADR-0007).
+    #[test]
+    fn the_single_pid_stop_still_signals_only_that_pid() {
+        let script = stop_pid_script(4242);
+        assert!(script.contains("kill -TERM 4242"), "{script}");
+        assert!(
+            !script.contains("-4242"),
+            "不该用进程组的形式（那会连带停掉别人的孩子）：{script}"
+        );
+    }
+
+    /// A detached command carries its own outcome: the wrapper appends its exit
+    /// status to the log the launcher is already reading, because nothing can
+    /// `wait` for a process that is not our child.
+    #[test]
+    fn a_detached_command_writes_its_exit_status_into_its_own_log() {
+        let dir = scratch("dsh-measured");
+        let target = dir.join("tree");
+
+        let argv = measured_argv(
+            &["/usr/bin/env".to_string(), "CI=true".to_string(), "/bin/sh".to_string(), "-c".to_string(), "echo out; echo err >&2; exit 3".to_string()],
+            &target.to_string_lossy(),
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&argv[2])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let logged = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert!(target.is_dir(), "工作目录要在那里被建出来：{}", target.display());
+        assert!(logged.contains("out") && logged.contains("err"), "{logged}");
+        let code = logged
+            .lines()
+            .find_map(exit_status_of)
+            .expect("日志里要有退出码那一行");
+        assert_eq!(code, 3, "{logged}");
+        assert!(
+            exit_status_of("added 213 packages").is_none(),
+            "其它行不是状态行：{logged}"
+        );
+        assert!(exit_status_of("").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One read of a remote log asks only for what was written since the last
+    /// one, and it waits **there** until there is something to report: a quiet
+    /// install costs one call per wait budget instead of one per second.
+    #[test]
+    fn a_tail_read_returns_only_what_was_appended_since_the_last_one() {
+        let dir = scratch("dsh-tail");
+        let log = dir.join("install.log");
+        std::fs::write(&log, "line one\n").unwrap();
+        let path = log.to_string_lossy().to_string();
+
+        // Caught up and with nothing to watch: it waits the budget out on that
+        // side rather than answering at once.
+        let started = std::time::Instant::now();
+        let out = local_shell(&tail_script(&path, 9, 0, 2));
+        let parsed: serde_json::Value = parse_marked(&out).unwrap();
+        assert_eq!(parsed["offset"], 9);
+        assert_eq!(parsed["data"], "");
+        assert!(parsed["alive"].as_bool().unwrap());
+        assert!(
+            started.elapsed().as_secs() >= 1,
+            "等待发生在远端，不是立刻返回后由启动器一遍遍来问"
+        );
+
+        // Everything from an offset on, decided there.
+        let whole = local_shell(&tail_script(&path, 0, 0, 0));
+        let parsed: serde_json::Value = parse_marked(&whole).unwrap();
+        assert_eq!(parsed["offset"], 9);
+        let first = base64::engine::general_purpose::STANDARD
+            .decode(parsed["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&first), "line one\n");
+
+        std::fs::write(&log, "line one\nline two\n").unwrap();
+        let rest = local_shell(&tail_script(&path, 9, 0, 0));
+        let parsed: serde_json::Value = parse_marked(&rest).unwrap();
+        assert_eq!(parsed["offset"], 18);
+        let second = base64::engine::general_purpose::STANDARD
+            .decode(parsed["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&second), "line two\n");
+
+        // A process that is gone ends the wait at once, however long the budget.
+        let quick = std::time::Instant::now();
+        let out = local_shell(&tail_script(&path, 18, 999_999, 30));
+        let parsed: serde_json::Value = parse_marked(&out).unwrap();
+        assert!(!parsed["alive"].as_bool().unwrap());
+        assert!(quick.elapsed().as_secs() < 5, "进程没了就不该再等");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Directories on that machine are made and removed there, by path — the
+    /// only way a cleanup can touch the remote data directory and nothing else.
+    #[test]
+    fn a_remote_cleanup_creates_and_removes_the_directory_it_is_given() {
+        let dir = scratch("dsh-dirs");
+        let nested = dir.join("homes").join("0.1.0-rc.6");
+
+        let created = local_shell(&ensure_dir_script(&nested.to_string_lossy()));
+        decode_ack(&created).expect("要能建出目录");
+        assert!(nested.is_dir(), "{}", nested.display());
+
+        std::fs::write(nested.join("cordis.patch.yml"), "- id: webserver\n").unwrap();
+        let sibling = dir.join("homes").join("0.1.0-rc.5");
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let removed = local_shell(&remove_dir_script(&nested.to_string_lossy()));
+        decode_ack(&removed).expect("要能删掉目录");
+        assert!(!nested.exists(), "目标目录要整棵删掉");
+        assert!(sibling.is_dir(), "旁边的目录不该被碰到");
+        assert!(dir.is_dir(), "父目录还在");
+
+        // Already gone is already what the caller wanted.
+        let again = local_shell(&remove_dir_script(&nested.to_string_lossy()));
+        decode_ack(&again).expect("本来就不在了也算删好了");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Which npm decides whether a version is installable *there* is that
+    /// machine's own, against the registry its record names.
+    #[test]
+    fn the_version_lookup_asks_that_machines_own_npm() {
+        let with_registry = npm_has_version_script("@deepseek-ai/dsh@1.2.3", Some("https://mirror.example/it's"));
+        assert!(with_registry.contains("command -v npm"), "{with_registry}");
+        assert!(with_registry.contains("'@deepseek-ai/dsh@1.2.3'"), "{with_registry}");
+        assert!(
+            with_registry.contains("--registry 'https://mirror.example/it'\\''s'"),
+            "主机自己的 registry 要带进去：{with_registry}"
+        );
+
+        let plain = npm_has_version_script("@deepseek-ai/dsh@1.2.3", None);
+        assert!(
+            !plain.contains("--registry"),
+            "主机没配 registry 时用那台机器自己的 npm 配置：{plain}"
+        );
+    }
+
+    /// The transport carries the new capability, and the fake records it as the
+    /// machine would see it.
+    #[test]
+    fn the_process_group_stop_reaches_the_machine_with_that_pid() {
+        let fake = FakeTransport::new().answering(FakeAnswer::Done);
+        let transport: &dyn HostTransport = &*fake;
+
+        block_on(transport.stop_group(&host(), 4242)).unwrap();
+
+        assert_eq!(fake.calls(), vec![FakeCall::StopGroup(4242)]);
+        assert!(stop_group_script(4242).contains("-$dsh_pid"));
     }
 }

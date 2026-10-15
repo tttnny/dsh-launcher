@@ -542,6 +542,15 @@ function hostDirOf(db: MockDb, hostId: string): string {
 }
 
 /**
+ * The separator the preview's sample paths use for one host: 本机's samples are
+ * Windows-style, the remote machine's are POSIX — joining a path has to follow
+ * whichever directory it starts from.
+ */
+function sepOf(dir: string): string {
+  return dir.includes('\\') ? '\\' : '/'
+}
+
+/**
  * A host the preview marks 不可达 answers nothing: the backend's per-host reads
  * fail there too, and a page that showed a list anyway would be showing the
  * launcher's memory instead of the machine's answer.
@@ -717,26 +726,50 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'start_install_version_task': {
       const version = String(args?.version ?? '').trim()
-      return mockCall('start_create_instance_task', { name: version, version, home_id: null, dedicated: true })
+      return mockCall('start_create_instance_task', {
+        name: version,
+        version,
+        home_id: null,
+        dedicated: true,
+        host_id: hostIdArg(args),
+      })
     }
     case 'start_create_instance_task': {
       const name = String(args?.name ?? '').trim()
       const version = String(args?.version ?? '').trim()
       const dedicated = Boolean(args?.dedicated)
       const homeIdArg = args?.home_id as string | null
+      const host = hostOf(db, hostIdArg(args))
+      refuseUnreachable(host)
       if (!name) fail('实例名称不能为空')
       if (!version) fail('版本号不能为空')
       if (db.instances.some((i) => i.name === name)) fail('同名实例已存在')
       if ([...mockTasks.values()].some((t) => t.state === 'running' && t.instance_name === name)) {
         fail('同名实例的下载任务已在进行中')
       }
+      // The same version on the same host is one install; two hosts are two
+      // directories and may install it side by side, exactly as the backend
+      // allows.
+      if (
+        [...mockTasks.values()].some(
+          (t) =>
+            t.state === 'running' &&
+            t.kind === 'install-version' &&
+            t.version === version &&
+            t.host_id === host.id,
+        )
+      ) {
+        fail(`版本 ${version} 的下载任务已在进行中`)
+      }
 
+      const hostDir = hostDirOf(db, host.id)
+      const sep = sepOf(hostDir)
       // Dedicated HOME is only materialized when the task finishes, mirroring
       // the real backend's placeholder semantics.
       let dedicatedPath: string | null = null
       if (dedicated) {
         const safe = name.replace(/[^\w一-龥.-]+/g, '_')
-        dedicatedPath = `${LOCAL_DATA_DIR}\\homes\\${safe}`
+        dedicatedPath = `${hostDir}${sep}homes${sep}${safe}`
       }
       if (!dedicated && (!homeIdArg || !db.homes.some((h) => h.id === homeIdArg))) {
         fail('请选择 DSH_HOME')
@@ -749,6 +782,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         kind: 'install-version',
         label: `下载 DSH ${version} 并创建实例「${name}」`,
         version,
+        host_id: host.id,
         state: 'running',
         percent: 0,
         created_at: Date.now(),
@@ -788,27 +822,29 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         // Resolve the HOME now (dedicated HOME is created at completion time).
         let resolvedHomeId = homeIdArg
         if (dedicated && dedicatedPath) {
-          const existing = cur.homes.find(
-            (h) => h.path.replace(/\\/g, '/').toLowerCase() === dedicatedPath!.replace(/\\/g, '/').toLowerCase(),
-          )
+          const same = (a: string, b: string) =>
+            host.id === LOCAL_HOST_ID
+              ? a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+              : a === b
+          const existing = cur.homes.find((h) => same(h.path, dedicatedPath!))
           if (existing) {
             resolvedHomeId = existing.id
           } else {
-            const home: DshHome = { id: mockNewId('h'), name, path: dedicatedPath!, host_id: LOCAL_HOST_ID }
+            const home: DshHome = { id: mockNewId('h'), name, path: dedicatedPath!, host_id: host.id }
             cur.homes.push(home)
             resolvedHomeId = home.id
           }
         }
-        // Install version record if missing.
-        let ver = cur.versions.find((v) => v.version === version)
+        // Install version record if missing — on that host.
+        let ver = cur.versions.find((v) => v.version === version && (v.host_id ?? LOCAL_HOST_ID) === host.id)
         if (!ver) {
           ver = {
             id: mockNewId('v'),
             version,
-            dir: `${LOCAL_DATA_DIR}\\versions\\${version}`,
-            dedicated_home: `${LOCAL_DATA_DIR}\\homes\\${version}`,
+            dir: `${hostDir}${sepOf(hostDir)}versions${sepOf(hostDir)}${version}`,
+            dedicated_home: dedicatedPath ?? `${hostDir}${sepOf(hostDir)}homes${sepOf(hostDir)}${version}`,
             bin_ready: true,
-            host_id: LOCAL_HOST_ID,
+            host_id: host.id,
           }
           cur.versions.push(ver)
         }
@@ -817,7 +853,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           name,
           version_id: ver.id,
           home_id: resolvedHomeId!,
-          host_id: LOCAL_HOST_ID,
+          host_id: host.id,
           env_overrides: {},
           default_profile: null,
           last_profile: null,
@@ -870,15 +906,22 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_version': {
       const id = String(args?.id)
-      refuseRemotePathTouches(hostOf(db, hostIdArg(args)), '版本目录')
+      const host = hostOf(db, hostIdArg(args))
+      refuseUnreachable(host)
       if (db.instances.some((i) => i.version_id === id)) fail('该版本仍被实例引用，无法删除')
-      const removed = db.versions.find((v) => v.id === id)
+      const removed = db.versions.find((v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id)
       db.versions = db.versions.filter((v) => v.id !== id)
       // The version's dedicated DSH_HOME record goes with it, by the same path
-      // rule the backend deletes the directory with.
+      // rule the backend deletes the directory with — and only that host's
+      // record: the same path on another machine is another HOME.
       if (removed) {
-        const dedicated = removed.dedicated_home.replace(/\\/g, '/').toLowerCase()
-        db.homes = db.homes.filter((h) => h.path.replace(/\\/g, '/').toLowerCase() !== dedicated)
+        const same = (a: string, b: string) =>
+          host.id === LOCAL_HOST_ID
+            ? a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+            : a === b
+        db.homes = db.homes.filter(
+          (h) => !((h.host_id ?? LOCAL_HOST_ID) === host.id && same(h.path, removed.dedicated_home)),
+        )
       }
       saveDb(db)
       return undefined as T

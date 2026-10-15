@@ -97,9 +97,12 @@ export const api = {
   fetchAvailableVersions: (hostId?: string) =>
     call<RemoteVersion[]>('fetch_available_versions', { hostId }),
   removeVersion: (id: string, hostId?: string) => call<void>('remove_version', { id, hostId }),
-  /** Downloads & installs a DSH version, auto-creates dedicated HOME, and registers the 1:1 instance. */
-  startInstallVersionTask: (version: string) =>
-    call<string>('start_install_version_task', { version }),
+  /**
+   * Downloads & installs a DSH version **on one host**, auto-creates dedicated
+   * HOME, and registers the 1:1 instance. `hostId` absent means 本机.
+   */
+  startInstallVersionTask: (version: string, hostId?: string) =>
+    call<string>('start_install_version_task', { version, hostId }),
 
   listTasks: () => call<TaskInfo[]>('list_tasks'),
   removeTask: (id: string) => call<void>('remove_task', { id }),

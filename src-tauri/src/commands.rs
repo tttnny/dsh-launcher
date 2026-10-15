@@ -748,12 +748,6 @@ pub async fn remove_version(
     let (version, instance_ids, host, data_dir) = {
         let cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
-        // Everything below this point deletes directories by path. A remote
-        // host's version directory is on that server, so a local
-        // `remove_dir_all` would delete whatever this Mac has at the same
-        // spelling — and the record would be gone, leaving nothing that names
-        // what was destroyed.
-        host.local_paths_only("版本目录")?;
         let data_dir = host.data_dir(&state.data_dir)?;
         let Some(version) = cfg
             .versions
@@ -792,6 +786,21 @@ pub async fn remove_version(
         save_state(&state, &cfg)?;
     }
 
+    // Everything below removes directories the *host* owns, so it is done on
+    // that host: this Mac's filesystem for 本机, and the transport for a remote
+    // one — a local `remove_dir_all` aimed at a remote path would delete
+    // whatever this Mac happens to have at the same spelling, and the record
+    // that named what it destroyed is already gone by now.
+    if !host.builtin {
+        match host.dedicated_home_path(&state.data_dir, &version.version) {
+            Ok(home) => {
+                remove_remote_version_dirs(&state, &host, &data_dir, &[&version.dir, &home]).await
+            }
+            Err(e) => crate::log_warn!("无法确定版本 {} 的专属 DSH_HOME：{e}", version.version),
+        }
+        return Ok(());
+    }
+
     // Best-effort removal of the install directory.
     let _ = std::fs::remove_dir_all(&version.dir);
 
@@ -807,6 +816,46 @@ pub async fn remove_version(
         crate::log_warn!("删除版本 {} 的专属 DSH_HOME 失败，忽略: {e}", version.version);
     }
     Ok(())
+}
+
+/// The same two removals on a remote host: `<该主机的数据目录>/versions/<版本名>`
+/// and `<该主机的数据目录>/homes/<版本名>`, each over the transport, and each
+/// refused unless it is inside that host's own data directory — the one boundary
+/// that keeps a remote delete from reaching anything else on that machine
+/// (ADR-0006). A directory that is not there is already what the caller wanted.
+///
+/// Best effort, like the local half: the records are gone by now, and a failure
+/// to free disk on the server is worth a log line, not a failed command that
+/// would suggest the version is still there.
+async fn remove_remote_version_dirs(
+    state: &AppState,
+    host: &Host,
+    data_dir: &std::path::Path,
+    paths: &[&std::path::Path],
+) {
+    let target = match crate::ssh::RemoteHost::of(host, &state.data_dir) {
+        Ok(target) => target,
+        Err(e) => {
+            crate::log_warn!("删除远端版本目录失败：{}", e.message);
+            return;
+        }
+    };
+    for path in paths {
+        if !crate::tasks::inside(data_dir, path) {
+            crate::log_warn!(
+                "拒绝删除远端数据目录之外的路径 {}（{}）",
+                path.display(),
+                data_dir.display()
+            );
+            continue;
+        }
+        if let Err(e) =
+            crate::remote::remove_dir(&*state.host_transport, &target, &path.to_string_lossy())
+                .await
+        {
+            crate::log_warn!("删除远端目录 {} 失败，忽略: {e}", path.display());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2755,6 +2804,132 @@ mod tests {
         );
         assert!(!dedicated.exists(), "专属 DSH_HOME 目录被删除");
         assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
+    }
+
+    /// Deleting a version **on a remote host** takes the same three things the
+    /// local delete takes — the version directory, the record, and the version's
+    /// dedicated DSH_HOME (its directory and its record) — with every removal
+    /// aimed at that server: a local `remove_dir_all` at a remote path would
+    /// delete whatever this Mac happens to have at the same spelling.
+    #[test]
+    fn deleting_a_remote_version_removes_its_directory_and_home_there() {
+        use crate::remote::testing::{marked, FakeAnswer, FakeCall, FakeTransport};
+
+        let data = ScratchDir::new("remote-remove-version");
+        let host = server_host("host-lab", None);
+        let version = "0.1.0-rc.6";
+        let remote_data = host.data_dir(data.path()).unwrap();
+        let version_dir = remote_data.join("versions").join(version);
+        let dedicated = host.dedicated_home_path(data.path(), version).unwrap();
+
+        let mut cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            versions: vec![crate::config::DshVersion {
+                id: "v-rc6".into(),
+                version: version.into(),
+                dir: version_dir.clone(),
+                host_id: "host-lab".into(),
+            }],
+            homes: vec![
+                // The dedicated HOME the delete must take with it...
+                crate::config::DshHome {
+                    id: "h-dedicated".into(),
+                    name: version.into(),
+                    path: dedicated.clone(),
+                    host_id: "host-lab".into(),
+                },
+                // ...and a HOME of 本机 at the same spelling, which is another
+                // machine's directory and stays.
+                crate::config::DshHome {
+                    id: "h-local-same-path".into(),
+                    name: version.into(),
+                    path: dedicated.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked("{\"ok\":true}")))
+            .answering(FakeAnswer::stdout(marked("{\"ok\":true}")));
+        let state = host_state(&data, cfg.clone(), fake.clone());
+        let data_dir = host.data_dir(&state.data_dir).unwrap();
+
+        // The body of `remove_version`, without the Tauri State/app plumbing:
+        // both removals go through the transport for a remote host.
+        cfg.versions.retain(|v| v.id != "v-rc6");
+        remove_dedicated_home_record(&mut cfg, &host, &data_dir, version);
+        block_on(remove_remote_version_dirs(
+            &state,
+            &host,
+            &data_dir,
+            &[&version_dir, &dedicated],
+        ));
+
+        assert!(
+            cfg.versions.is_empty(),
+            "版本记录随它一起走"
+        );
+        assert_eq!(
+            cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h-local-same-path"],
+            "只有那台主机上这个路径的记录被删；本机同名的路径是另一回事"
+        );
+
+        let removed: Vec<String> = fake
+            .calls()
+            .iter()
+            .filter_map(|call| match call {
+                FakeCall::Run(script) => Some(script.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed.len(), 2, "两个目录各删一次：{removed:?}");
+        assert!(
+            removed[0].contains(&format!("dsh_path='{}'", version_dir.display()))
+                && removed[0].contains("rm -rf -- \"$dsh_path\""),
+            "远端版本目录：{}",
+            removed[0]
+        );
+        assert!(
+            removed[1].contains(&dedicated.to_string_lossy().to_string()),
+            "远端专属 DSH_HOME 目录：{}",
+            removed[1]
+        );        assert!(
+            !data.path().join("versions").exists() && !data.path().join("homes").exists(),
+            "远端路径不在本机，本机不该被碰"
+        );
+    }
+
+    /// A cleanup that would reach outside the host's own data directory on that
+    /// machine is refused, whatever it is spelled like: the launcher only
+    /// removes what it can prove it created there (ADR-0006).
+    #[test]
+    fn a_remote_directory_delete_outside_the_data_directory_is_refused() {
+        use crate::remote::testing::{FakeAnswer, FakeTransport};
+
+        let data = ScratchDir::new("remote-remove-guard");
+        let host = server_host("host-lab", None);
+        let fake = FakeTransport::new().answering(FakeAnswer::Done);
+        let state = host_state(&data, crate::config::Config::default(), fake.clone());
+        let data_dir = host.data_dir(&state.data_dir).unwrap();
+
+        block_on(remove_remote_version_dirs(
+            &state,
+            &host,
+            &data_dir,
+            &[
+                std::path::Path::new("/home/demo/.dsh"),
+                &data_dir.join("../secrets"),
+            ],
+        ));
+
+        assert!(
+            fake.calls().is_empty(),
+            "数据目录之外的路径一次都不该删：{:?}",
+            fake.calls()
+        );
     }
 
     /// An instance is a binding, not a directory: deleting one must leave its
