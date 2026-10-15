@@ -127,15 +127,45 @@ pub(crate) fn apply_pnpm_network_env(cmd: &mut tokio::process::Command) {
 /// the command, not of this argument list. Download-capable callers pair this
 /// with [`apply_pnpm_network_env`].
 pub(crate) fn pnpm_store_flags(store_dir: &Path, loglevel: &str) -> Vec<String> {
+    pnpm_store_flags_with(store_dir, loglevel, registry_mirror().as_deref())
+}
+
+/// [`pnpm_store_flags`] for a caller that knows which registry answers: 本机
+/// uses the launcher's own mirror, a remote host the registry its record names.
+pub(crate) fn pnpm_store_flags_with(
+    store_dir: &Path,
+    loglevel: &str,
+    registry: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "--store-dir".to_string(),
         store_dir.to_string_lossy().to_string(),
         format!("--config.loglevel={loglevel}"),
     ];
-    if let Some(registry) = registry_mirror() {
+    if let Some(registry) = registry.map(str::trim).filter(|r| !r.is_empty()) {
         args.push("--registry".to_string());
-        args.push(registry);
+        args.push(registry.to_string());
     }
+    args
+}
+
+/// The whole argument set for installing one package from npm into `dir`: the
+/// target directory, the store flags, then the package. One place, because the
+/// local install and an install on a remote host have to make the same choices
+/// — a second copy is how the two drift apart.
+pub(crate) fn pnpm_install_args(
+    dir: &Path,
+    store_dir: &Path,
+    registry: Option<&str>,
+    package: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "install".to_string(),
+        "--prefix".to_string(),
+        dir.to_string_lossy().to_string(),
+    ];
+    args.extend(pnpm_store_flags_with(store_dir, "http", registry));
+    args.push(package.to_string());
     args
 }
 
@@ -269,6 +299,56 @@ pub(crate) async fn ensure_pnpm_for_task(
             }
             Err(pnpm_missing_error())
         }
+    }
+}
+
+/// [`ensure_pnpm_for_task`] for one host: 本机 resolves exactly as it always
+/// has, and a remote host through that machine's own probe, so the binary a
+/// task runs there is the one the environment page reported.
+///
+/// A machine without a pnpm the launcher can drive fails with the command that
+/// installs one **there** (reusing the page's own recipe), because the launcher
+/// never installs Node or pnpm on another computer by itself.
+pub(crate) async fn ensure_pnpm_for_task_on(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    task_id: &str,
+    host_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        crate::config::resolve_host(&cfg, host_id)?.clone()
+    };
+    if host.builtin {
+        return ensure_pnpm_for_task(app, state, task_id).await;
+    }
+
+    let tools = crate::runtime::remote_host_tools(state, &host).await?;
+    for skipped in &tools.env.pnpm.skipped {
+        crate::tasks::push_task_log(
+            app,
+            state,
+            task_id,
+            &crate::runtime::skipped_candidate_note("pnpm", skipped),
+        )
+        .await;
+    }
+    match tools.pnpm {
+        Some(bound) => {
+            crate::tasks::push_task_log(
+                app,
+                state,
+                task_id,
+                &format!("使用那台机器上的 pnpm {}（{}）", bound.version, bound.path.display()),
+            )
+            .await;
+            Ok(bound.path)
+        }
+        None => Err(crate::runtime::remote_pnpm_missing_error(
+            &host,
+            &tools.target,
+            &tools.env.managers,
+        )),
     }
 }
 
@@ -419,5 +499,58 @@ mod tests {
         let flags = pnpm_store_flags(Path::new("/s"), "warn");
         assert!(flags.iter().any(|a| a == "--config.loglevel=warn"));
         assert!(!flags.iter().any(|a| a.starts_with("--config.fetch-")));
+    }
+
+    /// One argument set for installing a package, built in one place: the local
+    /// install and an install on another machine have to make the same choices,
+    /// or the two drift apart and only one of them keeps working.
+    #[test]
+    fn the_install_arguments_are_the_same_whichever_machine_runs_them() {
+        let args = pnpm_install_args(
+            Path::new("/versions/1.2.3"),
+            Path::new("/store"),
+            Some("https://mirror.example/npm"),
+            "@deepseek-ai/dsh@1.2.3",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "install",
+                "--prefix",
+                "/versions/1.2.3",
+                "--store-dir",
+                "/store",
+                "--config.loglevel=http",
+                "--registry",
+                "https://mirror.example/npm",
+                "@deepseek-ai/dsh@1.2.3",
+            ]
+        );
+
+        // Without a registry the flags are exactly what they always were.
+        assert_eq!(
+            pnpm_install_args(
+                Path::new("/versions/1.2.3"),
+                Path::new("/store"),
+                None,
+                "@deepseek-ai/dsh@1.2.3"
+            ),
+            vec![
+                "install",
+                "--prefix",
+                "/versions/1.2.3",
+                "--store-dir",
+                "/store",
+                "--config.loglevel=http",
+                "@deepseek-ai/dsh@1.2.3",
+            ]
+        );
+
+        // The registry a caller names wins over the launcher's own mirror, and
+        // an empty one means "no --registry at all".
+        assert_eq!(
+            pnpm_store_flags_with(Path::new("/store"), "http", Some("  ")),
+            pnpm_store_flags_with(Path::new("/store"), "http", None)
+        );
     }
 }

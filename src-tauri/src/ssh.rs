@@ -1,8 +1,9 @@
 //! The one seam that knows ssh.
 //!
 //! Every remote action the launcher takes — running a script, starting a
-//! detached process, stopping it by pid, reading or writing a file, listing a
-//! directory, opening a port forward — goes through [`HostTransport`]. That
+//! detached process, stopping it by pid or as a whole process tree, reading or
+//! writing a file, listing a directory, opening a port forward — goes through
+//! [`HostTransport`]. That
 //! keeps "how we talk to the other machine" in one place (ADR-0006), and it is
 //! what lets a test drive the whole remote feature through an in-memory double
 //! instead of a live server. The shape is copied from `native::NativeTransport`,
@@ -250,6 +251,20 @@ pub trait HostTransport: Send + Sync {
         pid: i32,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
+    /// Stops the whole process tree one [`spawn_detached`](Self::spawn_detached)
+    /// started: the process group `pid` leads, falling back to `pid` itself when
+    /// it leads none. Already gone counts as stopped.
+    ///
+    /// A detached spawn runs under `setsid`, so its pid is also its process
+    /// group's id and a negative pid reaches every child it started. That is the
+    /// difference between cancelling an install and leaving a pnpm helper behind
+    /// holding the store's lock (issue #9 风险).
+    fn stop_group<'a>(
+        &'a self,
+        host: &'a RemoteHost,
+        pid: i32,
+    ) -> HostFuture<'a, Result<(), HostError>>;
+
     /// Reads one file's bytes.
     fn read_file<'a>(
         &'a self,
@@ -412,6 +427,18 @@ impl HostTransport for SshTransport {
     ) -> HostFuture<'a, Result<(), HostError>> {
         Box::pin(async move {
             let call = RemoteCall::new(crate::remote::stop_pid_script(pid));
+            let out = self.script(host, call).await?;
+            crate::remote::decode_ack(&out)
+        })
+    }
+
+    fn stop_group<'a>(
+        &'a self,
+        host: &'a RemoteHost,
+        pid: i32,
+    ) -> HostFuture<'a, Result<(), HostError>> {
+        Box::pin(async move {
+            let call = RemoteCall::new(crate::remote::stop_group_script(pid));
             let out = self.script(host, call).await?;
             crate::remote::decode_ack(&out)
         })

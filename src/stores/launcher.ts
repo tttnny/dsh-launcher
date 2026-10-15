@@ -26,13 +26,26 @@ export interface HealthLogItem {
 
 /**
  * The install ledger: versions an install task is currently fetching, keyed by
- * version (a version has at most one install running). Accepts the full task
- * list, so both the initial fetch and a re-read build it the same way.
+ * **host + version** — two machines can install the same version at the same
+ * time, and each of them shows its own progress on its own row. Accepts the
+ * full task list, so both the initial fetch and a re-read build it the same way.
  */
 function installLedger(tasks: TaskInfo[]): Record<string, TaskInfo> {
   return Object.fromEntries(
-    tasks.filter((t) => t.kind === 'install-version' && t.state === 'running').map((t) => [t.version, t]),
+    tasks
+      .filter((t) => t.kind === 'install-version' && t.state === 'running')
+      .map((t) => [installKey(t.host_id, t.version), t]),
   )
+}
+
+/**
+ * How one install is identified on the Versions page: the machine, then the
+ * version. Neither can contain `:` (a version is semver plus tag characters,
+ * a host id is a uuid or the local literal), so one string identifies one
+ * install.
+ */
+export function installKey(hostId: string | undefined, version: string): string {
+  return `${hostId ?? LOCAL_HOST_ID}:${version}`
 }
 
 interface LauncherState {
@@ -74,15 +87,18 @@ interface LauncherState {
   settings: LauncherSettings
   statusById: Record<string, InstanceStatus>
   /**
-   * Versions an install task is currently fetching, keyed by version, so the
-   * Versions page can show the progress where the version itself lives. The
-   * launcher installs nothing else, and `instance_id` is no longer read by any
-   * view: a finished install's outcome is the instance that appears in the list.
+   * Installs in flight, keyed by host + version (`installKey`), so the Versions
+   * page shows the progress where the version itself lives — on the machine it
+   * is being installed on. A failed install stays here with the reason the
+   * backend gave, until the ledger is re-read.
    */
   installingVersions: Record<string, TaskInfo>
-  /** Install calls whose task the backend has not listed yet, by task id. A
-   *  null version means the task was never claimed by this launcher. */
-  pendingInstallTasks: Record<string, string | null>
+  /**
+   * Installs this page started, by task id, until the backend lists the task:
+   * the claim says which host and version a progress event belongs to. `null`
+   * means a task that was never claimed here.
+   */
+  pendingInstallTasks: Record<string, { hostId: string; version: string } | null>
   /** The installable list per host, so switching back to a host does not ask
    *  again; the refresh button is what asks again. */
   remoteVersionsByHost: Record<string, RemoteVersion[]>
@@ -240,47 +256,77 @@ export const useLauncherStore = defineStore('launcher', {
         if (host.id !== this.currentHostId) void this.loadHostResources(host.id)
       }
 
-      // Only install progress is tracked, and only while it runs: an install
+      // Only install progress is tracked, and only until it ends: an install
       // whose event never arrived is recovered by `watchInstallTask` when the
       // Versions page starts one, and one that finished without an event is
-      // retired on the next refresh. A running task already in the ledger is
-      // overwritten with the event's fuller record.
+      // retired on the next refresh.
       await api.onTaskProgress((p) => {
-        if (p.state === 'running') {
-          // Keyed by version, so adoption needs the version the row is under:
-          // from the claim `watchInstallTask` left, or from the task the
-          // backend just listed.
-          const version = this.pendingInstallTasks[p.id] ?? this.installingVersions[p.id]?.version
-          delete this.pendingInstallTasks[p.id]
-          if (version == null) {
-            // Not ours to show, but the backend knows it by id: keep watching
-            // so it lands here if the row ever appears.
-            if (this.pendingInstallTasks[p.id] === undefined) this.pendingInstallTasks[p.id] = null
-            return
+        // The row this event belongs to: the install this page just started
+        // (the claim `watchInstallTask` left), or the task the backend listed
+        // under that id.
+        const claim = this.pendingInstallTasks[p.id]
+        if (claim !== undefined) delete this.pendingInstallTasks[p.id]
+        const known = Object.values(this.installingVersions).find((t) => t.id === p.id)
+        const hostId = known?.host_id ?? claim?.hostId
+        const version = known?.version ?? claim?.version
+        if (hostId == null || version == null) {
+          // Not ours to show, but the backend knows it by id: keep watching so
+          // it lands here if the row ever appears.
+          if (claim === undefined) this.pendingInstallTasks[p.id] = null
+          // An install this page never saw still creates an instance and a
+          // version directory somewhere: the lists have to catch up with it.
+          if (p.state !== 'running' && p.instance_id) {
+            void this.refreshInstances()
+            void this.loadHostResources(this.currentHostId)
           }
-          this.installingVersions[version] = {
+          return
+        }
+        const key = installKey(hostId, version)
+        const previous = this.installingVersions[key]
+        if (p.state === 'running') {
+          this.installingVersions[key] = {
             id: p.id,
             kind: 'install-version',
             label: version,
             version,
+            host_id: hostId,
             state: 'running',
             percent: p.percent,
-            created_at: Date.now(),
+            created_at: previous?.created_at ?? Date.now(),
             message: p.message,
-            instance_id: p.instance_id,
-            instance_name: null,
-            logs: [],
+            instance_id: p.instance_id ?? previous?.instance_id ?? null,
+            instance_name: previous?.instance_name ?? null,
+            logs: previous?.logs ?? [],
           }
           return
         }
-        // Terminal: it may have created an instance and a version directory.
-        // Re-read both, but only when the event names an instance — otherwise
-        // every install's progress tick would trigger three full re-reads.
-        if (p.instance_id) {
-          this.refreshInstances()
-          this.refreshVersions()
-          this.refreshHomes()
+        // Terminal. A finished install leaves the row (the version itself is
+        // now in the installed list); a failure or a cancellation stays there
+        // with the backend's reason, which is the only place the user reads it.
+        if (p.state === 'done') {
+          delete this.installingVersions[key]
+        } else {
+          this.installingVersions[key] = {
+            ...(previous ?? {
+              id: p.id,
+              kind: 'install-version',
+              label: version,
+              version,
+              host_id: hostId,
+              created_at: Date.now(),
+              instance_name: null,
+              logs: [],
+            }),
+            state: p.state,
+            percent: p.percent,
+            message: p.message,
+            instance_id: p.instance_id ?? previous?.instance_id ?? null,
+          }
         }
+        // It may have created an instance and a version directory — on the host
+        // it ran on, which is not necessarily the one on screen.
+        void this.loadHostResources(hostId)
+        if (p.instance_id) void this.refreshInstances()
       })
 
       await api.onTaskLog((l) => {
@@ -399,17 +445,18 @@ export const useLauncherStore = defineStore('launcher', {
 
     /**
      * Follows one install the user just started, so its progress appears on the
-     * Versions page before the first task event arrives. The task id is what
-     * the start call returned.
+     * Versions page before the first task event arrives. `hostId` and `version`
+     * are what the row it belongs to is keyed by; the task id is what the start
+     * call returned.
      */
-    async watchInstallTask(taskId: string, version: string) {
+    async watchInstallTask(taskId: string, hostId: string, version: string) {
       const tasks = await api.listTasks()
       const task = tasks.find((t) => t.id === taskId)
       if (task) {
-        this.installingVersions[version] = task
+        this.installingVersions[installKey(hostId, version)] = task
         return
       }
-      this.pendingInstallTasks[taskId] = version
+      this.pendingInstallTasks[taskId] = { hostId, version }
     },
 
     async checkRuntime(force = false) {

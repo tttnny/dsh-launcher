@@ -176,6 +176,8 @@
   "versions": {
     "installedTitle": "Installed",
     "installedTag": "Installed",
+    "binMissing": "Incomplete install",
+    "binMissingHint": "This version has no launcher file; it needs installing again.",
     "emptyInstalled": "No DSH version installed yet",
     "availableTitle": "Available",
     "channelAll": "All",
@@ -190,17 +192,17 @@
     "versionDeleted": "Version {version} deleted",
     "usedBy": "{count} instances",
     "sourceBuildTag": "Source build",
-    "confirmInstallTitle": "Install version and create instance",
-    "confirmInstallContent": "Download and install DSH {version}? An instance and its dedicated directory are created when it finishes.",
-    "confirmInstallSourceContent": "Install DSH {version}? It is published on GitHub only, so it is cloned and built from source (this can take a while). An instance and its dedicated directory are created when it finishes.",
+    "confirmInstallTitle": "Install version and create instance ({host})",
+    "confirmInstallContent": "Download and install DSH {version} on 「{host}」? An instance and its dedicated directory are created on that machine when it finishes.",
+    "confirmInstallSourceContent": "Install DSH {version} on 「{host}」? It is published on GitHub only, so it is cloned and built from source on that machine (this can take a while). An instance and its dedicated directory are created when it finishes.",
     "installNow": "Install",
-    "installTaskStarted": "Installing DSH {version}",
+    "installTaskStarted": "Installing DSH {version} on 「{host}」",
     "alreadyInstalled": "Version {version} is already installed",
     "cancelInstall": "Cancel",
     "installing": "Installing",
-    "binMissing": "Incomplete install",
-    "binMissingHint": "This version has no launcher file; it needs installing again.",
-    "installLocalOnly": "Installs currently run on this Mac only"
+    "retryInstall": "Retry",
+    "installCancelled": "Cancelled; the install process on that machine was stopped",
+    "hostLocal": "this Mac"
   },
   "settings": {
     "title": "Settings",
