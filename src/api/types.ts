@@ -1,9 +1,35 @@
 // Shared types mirrored from the Rust backend (src-tauri/src/config.rs).
 
+/** The built-in local host's id; the literal the backend migrates records to. */
+export const LOCAL_HOST_ID = 'host-local'
+
+/**
+ * One machine the launcher manages. 本机 is the built-in one (`builtin`);
+ * every other host is reached over ssh. A host owns its versions, DSH_HOMEs,
+ * profiles and instances (ADR-0006).
+ */
+export interface Host {
+  id: string
+  /** The name shown in the UI. The built-in host's is 本机. */
+  display_name: string
+  /** The ssh target handed to the system ssh verbatim; empty for 本机. */
+  ssh_target: string
+  /** The npm registry this host's versions are listed from, when it has one. */
+  registry?: string | null
+  /** Environment variables injected into everything the launcher runs there. */
+  extra_env?: Record<string, string>
+  /** The launcher's data directory on that host; null for 本机 (its own). */
+  data_dir?: string | null
+  /** Built-in hosts cannot be deleted: true for 本机 only. */
+  builtin: boolean
+}
+
 export interface DshHome {
   id: string
   name: string
   path: string
+  /** The host this DSH_HOME lives on. */
+  host_id?: string
 }
 
 export interface DshVersion {
@@ -16,6 +42,8 @@ export interface DshVersion {
    * will remove. Deleting a version removes this path — and only this one.
    */
   dedicated_home: string
+  /** The host this version is installed on. */
+  host_id?: string
 }
 
 export interface DshInstance {
@@ -23,6 +51,8 @@ export interface DshInstance {
   name: string
   version_id: string
   home_id: string
+  /** The host this instance runs on. */
+  host_id?: string
   env_overrides: Record<string, string>
   default_profile: string | null
   last_profile: string | null

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { LauncherUpdateInfo, LogLevel, ThemeMode } from '@/api/types'
+import type { Host, LauncherUpdateInfo, LogLevel, ThemeMode } from '@/api/types'
 import { useAction } from '@/composables/useAction'
 import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
@@ -61,6 +61,11 @@ async function patchSettings(patch: Parameters<typeof api.updateSettings>[0]) {
 
 const envOk = computed(() => !!store.runtime?.node?.installed && !!store.runtime?.pnpm?.installed)
 
+// --- Hosts ----------------------------------------------------------------------
+
+/** The machines the launcher manages; 本机 is the built-in one (ADR-0006). */
+const hosts = ref<Host[]>([])
+
 // --- Update -------------------------------------------------------------------
 
 const launcherVersion = ref('')
@@ -78,6 +83,11 @@ onMounted(async () => {
     dataDir.value = await api.getLauncherDirectory()
   } catch {
     dataDir.value = ''
+  }
+  try {
+    hosts.value = await api.listHosts()
+  } catch {
+    hosts.value = []
   }
 })
 
@@ -134,6 +144,7 @@ const openLogAction = useAction(() => api.openLauncherLog(), {
 
 const sections = computed(() => [
   { key: 'general', label: t('settings.general') },
+  { key: 'hosts', label: t('settings.hosts.title') },
   { key: 'environment', label: t('settings.environment.title') },
   { key: 'proxy', label: t('settings.proxy.title') },
   { key: 'update', label: t('settings.update.title') },
@@ -302,6 +313,25 @@ onUnmounted(() => {
               </a-select>
             </div>
           </div>
+        </section>
+
+        <!-- Hosts: the machines the launcher manages. 本机 is built in and has
+             no delete control — the record cannot be removed. -->
+        <section :ref="(el) => setSectionRef('hosts', el)" class="dl-section">
+          <div class="dl-section-label">
+            {{ t('settings.hosts.title') }}
+            <span class="dl-section-count">{{ hosts.length }}</span>
+          </div>
+          <div class="dl-surface">
+            <div v-for="h in hosts" :key="h.id" class="dl-row">
+              <span class="dl-row-label">
+                {{ h.display_name }}
+                <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{ t('settings.hosts.builtin') }}</span>
+              </span>
+              <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{ h.ssh_target }}</span>
+            </div>
+          </div>
+          <p class="section-note">{{ t('settings.hosts.note') }}</p>
         </section>
 
         <!-- Environment: a compact readout that links to the full check page. -->

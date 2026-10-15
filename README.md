@@ -104,7 +104,7 @@ pnpm dev            # 仅浏览器预览：localStorage mock，无 Rust 后端
 
 数据目录：`~/Library/Application Support/in.dsh-plug.dsh-launcher/`
 
-- `config.json`：DSH_HOME / 版本 / 实例 / 设置
+- `config.json`：主机 / DSH_HOME / 版本 / 实例 / 设置
 - `running.json`：实例就绪时打印的 URL（含启动 token），用于启动器重启后接管仍在运行的实例
 - `versions/<版本>/`：各版本隔离安装目录
 - `homes/<版本名>/`：版本专属 DSH_HOME（安装版本时创建；删除版本时按同一路径规则连目录

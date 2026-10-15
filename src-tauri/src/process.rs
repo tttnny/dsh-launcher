@@ -1049,6 +1049,7 @@ mod tests {
                 versions: Vec::new(),
                 instances,
                 settings: Default::default(),
+                hosts: vec![crate::config::Host::local()],
             }),
             running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1061,6 +1062,7 @@ mod tests {
             name: id.to_string(),
             version_id: "v1".to_string(),
             home_id: home_id.to_string(),
+            host_id: crate::config::LOCAL_HOST_ID.to_string(),
             env_overrides: Default::default(),
             default_profile: None,
             last_profile: None,
@@ -1074,6 +1076,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             path: std::path::PathBuf::from("/tmp/home"),
+            host_id: crate::config::LOCAL_HOST_ID.to_string(),
         }
     }
 
