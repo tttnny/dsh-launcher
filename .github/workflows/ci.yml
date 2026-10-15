@@ -78,6 +78,8 @@ jobs:
         run: node --test ci/setup-guidance.test.mjs
       - name: Bulk-scope tests
         run: node --test ci/instances-bulk.test.mjs
+      - name: Remote-command tests
+        run: node --test ci/remote-command.test.mjs
 
   prepare:
     needs: [quality, integration]
