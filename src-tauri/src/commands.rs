@@ -1556,11 +1556,35 @@ pub fn check_instance_health(
     profile: String,
 ) -> Result<crate::doctor::DoctorReport, String> {
     let (home_path, version_dir, version) = resolve_instance_paths(&state, &instance_id)?;
+    // The self-check reads package documents out of the version tree and the
+    // profile — both on the machine that owns the instance. Another machine's
+    // are not on this Mac, and a local read aimed at a remote path reports on
+    // whatever happens to share that spelling (ADR-0006), so a remote instance
+    // reports nothing instead of something wrong.
+    if !instance_is_local(&state, &instance_id)? {
+        return Ok(crate::doctor::DoctorReport {
+            instance_id,
+            profile,
+            findings: Vec::new(),
+        });
+    }
     let profile_dir = crate::profile::profile_dir(&home_path, &profile)?;
     let report =
         crate::doctor::inspect(&instance_id, &profile, &version_dir, &version, &profile_dir);
     crate::doctor::log_report(&report);
     Ok(report)
+}
+
+/// Whether the files an instance runs on — its version tree and its profiles —
+/// are on this Mac.
+fn instance_is_local(state: &State<'_, AppState>, instance_id: &str) -> Result<bool, String> {
+    let cfg = state.config.lock().unwrap();
+    let inst = cfg
+        .instances
+        .iter()
+        .find(|i| i.id == instance_id)
+        .ok_or_else(|| "实例不存在".to_string())?;
+    Ok(crate::config::resolve_host(&cfg, Some(&inst.host_id))?.builtin)
 }
 
 #[tauri::command]
@@ -1573,19 +1597,23 @@ pub async fn start_instance(
     // Preflight the dependency tree before spawning: a duplicated core copy
     // in the profile breaks every tool call at runtime with no load-time
     // error, so it is reported up front instead of being debugged later.
-    // Findings never block the launch.
-    if let Ok((home_path, version_dir, version)) = resolve_instance_paths(&state, &id) {
-        let report = crate::doctor::inspect(
-            &id,
-            &profile,
-            &version_dir,
-            &version,
-            &crate::profile::profile_dir(&home_path, &profile)?,
-        );
-        crate::doctor::log_report(&report);
-        if !report.findings.is_empty() {
-            use tauri::Emitter;
-            let _ = app.emit(crate::doctor::HEALTH_EVENT, &report);
+    // Findings never block the launch. The version tree and the profile are the
+    // instance's own machine's, so a remote instance is not checked from here
+    // (see [`check_instance_health`]).
+    if instance_is_local(&state, &id).unwrap_or(true) {
+        if let Ok((home_path, version_dir, version)) = resolve_instance_paths(&state, &id) {
+            let report = crate::doctor::inspect(
+                &id,
+                &profile,
+                &version_dir,
+                &version,
+                &crate::profile::profile_dir(&home_path, &profile)?,
+            );
+            crate::doctor::log_report(&report);
+            if !report.findings.is_empty() {
+                use tauri::Emitter;
+                let _ = app.emit(crate::doctor::HEALTH_EVENT, &report);
+            }
         }
     }
 
@@ -1632,10 +1660,28 @@ pub async fn open_instance_window(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    let entry = state.running.lock().await.get(&id).map(|r| r.url.clone());
-    let Some(url) = entry.flatten() else {
+    let entry = state
+        .running
+        .lock()
+        .await
+        .get(&id)
+        .map(|r| (r.url.clone(), r.remote.is_some()));
+    let Some((url, remote)) = entry else {
         return Err("实例未在运行或尚未就绪".to_string());
     };
+    let Some(url) = url else {
+        return Err("实例未在运行或尚未就绪".to_string());
+    };
+    if remote {
+        // DSH prints its own address from its own point of view (`127.0.0.1`
+        // on that machine), which on this Mac is a different service — and the
+        // token in the query string would be handed to whatever answers there.
+        // The address a browser here can reach comes from a port forward
+        // (ADR-0008), not from the instance's own URL.
+        return Err(
+            "这是远端实例：它的地址要经 ssh 转发才能在本机打开（ADR-0008），现在还不能打开".to_string(),
+        );
+    }
     // 实例页改由系统浏览器承载：复用 open_external 的 http(s) 校验与日志。
     open_external(url)
 }

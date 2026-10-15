@@ -422,6 +422,12 @@ pub(crate) async fn remove_bundle_for(
 fn linked_store_dir(profile_dir: &std::path::Path) -> Option<String> {
     let raw =
         std::fs::read_to_string(profile_dir.join("node_modules").join(".modules.yaml")).ok()?;
+    linked_store_document(&raw)
+}
+
+/// [`linked_store_dir`] over the document itself, for a caller that read it from
+/// the machine that owns the profile.
+pub(crate) fn linked_store_document(raw: &str) -> Option<String> {
     for line in raw.lines() {
         if let Some(v) = line.trim().strip_prefix("storeDir:") {
             let v = v.trim().trim_matches('"').trim_matches('\'');
@@ -430,7 +436,7 @@ fn linked_store_dir(profile_dir: &std::path::Path) -> Option<String> {
             }
         }
     }
-    if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) {
+    if let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(v) = doc.get("storeDir").and_then(|v| v.as_str()) {
             if !v.is_empty() {
                 return Some(v.to_string());
@@ -464,8 +470,18 @@ pub(crate) fn profile_store_target(
     profile_dir: &std::path::Path,
     launcher_store: &std::path::Path,
 ) -> std::path::PathBuf {
-    match linked_store_dir(profile_dir) {
-        Some(linked) if !store_paths_match(&linked, &launcher_store.to_string_lossy()) => {
+    store_target_from(linked_store_dir(profile_dir).as_deref(), launcher_store)
+}
+
+/// [`profile_store_target`] over the linked store the caller already has (read
+/// from the machine that owns the profile): the same decision, one step further
+/// from the file.
+pub(crate) fn store_target_from(
+    linked: Option<&str>,
+    launcher_store: &std::path::Path,
+) -> std::path::PathBuf {
+    match linked {
+        Some(linked) if !store_paths_match(linked, &launcher_store.to_string_lossy()) => {
             std::path::PathBuf::from(linked)
         }
         _ => launcher_store.to_path_buf(),
@@ -508,17 +524,32 @@ pub(crate) fn ensure_profile_store_pin(
 ) -> Result<(), String> {
     let path = dir.join("pnpm-workspace.yaml");
     let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // The same base document DSH's own `initProfile` writes, because
-            // that writer never touches an existing file: creating a thinner
-            // one here would permanently deny the profile its `nodeLinker:
-            // hoisted` (the setting out-of-tree plugins depend on).
-            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n".to_string()
-        }
+        Ok(raw) => Some(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("读取 pnpm-workspace.yaml 失败: {e}")),
     };
+    let Some(out) = store_pin_document(raw.as_deref(), store_dir) else {
+        return Ok(());
+    };
 
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
+    std::fs::write(&path, out).map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))
+}
+
+/// The document a profile's `pnpm-workspace.yaml` should hold so every pnpm
+/// running in it agrees on `store_dir`, or `None` when it already says that.
+///
+/// `raw` is the file's text as it is now; `None` means the file is not there,
+/// which gets the same base document DSH's own `initProfile` writes — that
+/// writer never touches an existing file, so a thinner one created here would
+/// permanently deny the profile its `nodeLinker: hoisted` (the setting
+/// out-of-tree plugins depend on).
+pub(crate) fn store_pin_document(
+    raw: Option<&str>,
+    store_dir: &std::path::Path,
+) -> Option<String> {
+    const FRESH: &str = "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n";
+    let raw = raw.unwrap_or(FRESH);
     let pinned = format!(
         "storeDir: {}",
         yaml_double_quoted(&store_dir.to_string_lossy())
@@ -550,13 +581,11 @@ pub(crate) fn ensure_profile_store_pin(
         changed = true;
     }
     if !changed {
-        return Ok(());
+        return None;
     }
-
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 profile 目录失败: {e}"))?;
     let mut out = lines.join("\n");
     out.push('\n');
-    std::fs::write(&path, out).map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))
+    Some(out)
 }
 
 /// Pins `auto-install-peers=false` in a profile's `.npmrc`.
@@ -569,14 +598,22 @@ pub(crate) fn ensure_profile_store_pin(
 /// the setting per profile makes the install independent of the user's global
 /// pnpm configuration.
 pub(crate) fn ensure_profile_npmrc(dir: &std::path::Path) -> Result<(), String> {
-    const KEY: &str = "auto-install-peers";
     let path = dir.join(".npmrc");
     let raw = if path.exists() {
         std::fs::read_to_string(&path).map_err(|e| format!("读取 .npmrc 失败: {e}"))?
     } else {
         String::new()
     };
+    let Some(out) = npmrc_document(&raw) else {
+        return Ok(());
+    };
+    std::fs::write(&path, out).map_err(|e| format!("写入 .npmrc 失败: {e}"))
+}
 
+/// The document a profile's `.npmrc` should hold, or `None` when it already
+/// says it.
+pub(crate) fn npmrc_document(raw: &str) -> Option<String> {
+    const KEY: &str = "auto-install-peers";
     let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
     let mut found = false;
     let mut changed = false;
@@ -607,12 +644,12 @@ pub(crate) fn ensure_profile_npmrc(dir: &std::path::Path) -> Result<(), String> 
         lines.push(format!("{KEY}=false"));
         changed = true;
     }
-    if changed {
-        let mut out = lines.join("\n");
-        out.push('\n');
-        std::fs::write(&path, out).map_err(|e| format!("写入 .npmrc 失败: {e}"))?;
+    if !changed {
+        return None;
     }
-    Ok(())
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Some(out)
 }
 
 /// Make sure a profile's pnpm-workspace.yaml opts into dependency build
@@ -1242,6 +1279,7 @@ mod tests {
                         port: 3089,
                         host: "127.0.0.1".to_string(),
                     }),
+                    remote: None,
                 },
             );
         }
@@ -1286,6 +1324,7 @@ mod tests {
                         port: 1,
                         host: "127.0.0.1".to_string(),
                     }),
+                    remote: None,
                 },
             );
         }
@@ -1367,6 +1406,7 @@ mod tests {
                         port: 3089,
                         host: "127.0.0.1".to_string(),
                     }),
+                    remote: None,
                 },
             );
         }
@@ -1584,6 +1624,7 @@ mod tests {
                         port: 3089,
                         host: "127.0.0.1".to_string(),
                     }),
+                    remote: None,
                 },
             );
         }

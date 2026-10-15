@@ -29,7 +29,9 @@ const query = ref('')
 const focusId = computed(() => (typeof route.query.focus === 'string' ? route.query.focus : ''))
 const newDialogVisible = ref(false)
 /** Set when the sheet is opened as "duplicate this instance". */
-const newPreset = ref<{ name: string; versionId: string; homeId: string } | null>(null)
+const newPreset = ref<{ name: string; versionId: string; homeId: string; hostId?: string } | null>(
+  null,
+)
 const healthVisible = ref(false)
 
 function openNewInstance() {
@@ -40,7 +42,14 @@ function openNewInstance() {
 function duplicateInstance(id: string) {
   const inst = store.instanceById(id)
   if (!inst) return
-  newPreset.value = { name: inst.name, versionId: inst.version_id, homeId: inst.home_id }
+  // The copy binds on the machine the original runs on, so the sheet lists that
+  // machine's versions and DSH_HOMEs (an instance never spans two hosts).
+  newPreset.value = {
+    name: inst.name,
+    versionId: inst.version_id,
+    homeId: inst.home_id,
+    hostId: inst.host_id,
+  }
   newDialogVisible.value = true
 }
 

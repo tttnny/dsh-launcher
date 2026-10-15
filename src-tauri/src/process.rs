@@ -1,8 +1,10 @@
-use crate::config::{InstanceState, InstanceStatus};
+use crate::config::{DshInstance, DshVersion, Host, InstanceState, InstanceStatus};
 use crate::AppState;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -22,6 +24,61 @@ pub struct RunningInstance {
     /// not spawn (e.g. DSH restarted itself): `kill` is unused and the watcher
     /// polls `pid` for liveness instead of reaping a child.
     pub adopted: Option<Adopted>,
+    /// Set when the process runs on another machine. Such an instance is
+    /// nobody's child here: it is stopped by pid **there**, and it is meant to
+    /// outlive this launcher (ADR-0007), which is what [`kill_all`] reads.
+    pub remote: Option<RemoteRun>,
+}
+
+/// A DSH process the launcher started **on another machine**.
+///
+/// It replaces the child handle a local instance has: that machine's shell
+/// started it in its own session (`setsid`), so nothing here can wait for it or
+/// signal it directly. What the launcher knows instead is where it runs and what
+/// it is allowed to say about it — the pid that leads its process group, the
+/// process start time that tells a reused pid from this one, and that machine's
+/// own data directory, log and running record.
+#[derive(Clone, Debug)]
+pub struct RemoteRun {
+    pub host_id: String,
+    /// The machine, as the transport dials it.
+    pub host: crate::ssh::RemoteHost,
+    /// The pid `setsid` started — also the id of the process group a stop
+    /// signals as a whole.
+    pub pid: i32,
+    /// When that pid started, as its own machine's `/proc/<pid>/stat` reports it.
+    /// `None` = the machine could not be asked, so a later stop cannot tell a
+    /// reused pid apart and has to say so rather than signal blindly.
+    pub started_at: Option<u64>,
+    /// That host's data directory **on that machine**.
+    pub data_dir: PathBuf,
+    pub log_path: String,
+}
+
+/// One instance's entry in a remote host's own running record
+/// (`<该主机的数据目录>/running.json`).
+///
+/// It is written **on that machine** because that is where the facts are: a
+/// later launcher session (or a stop) finds here what it did not witness — the
+/// URL with the launch token in it, the profile, and the pid together with its
+/// process start time (ADR-0007 §3). Without the URL a running instance is only
+/// half-known: the card can say 运行, but the plugins page has no token to talk
+/// to it with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteRunRecord {
+    /// The URL the instance printed when it became ready, token included.
+    /// `None` until it has printed one.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The `token=` value out of that URL, on its own so a reader does not have
+    /// to parse it back out.
+    #[serde(default)]
+    pub token: Option<String>,
+    pub profile: String,
+    pub pid: i32,
+    /// `/proc/<pid>/stat` field 22, in clock ticks since boot.
+    #[serde(default)]
+    pub started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +198,7 @@ async fn adopt_external_process(
                 profile: profile.to_string(),
                 url: Some(url.clone()),
                 adopted: Some(Adopted { pid, port, host: host.to_string() }),
+                remote: None,
             },
         );
     }
@@ -244,6 +302,11 @@ pub async fn adopt_surviving_instances(app: &AppHandle) {
         let cfg = state.config.lock().unwrap();
         cfg.instances
             .iter()
+            // 本机 only: another machine's port is on that machine, and the
+            // local probe below would be asking this Mac about it — a local
+            // process wearing the same port number would be adopted as a remote
+            // instance. Adopting there is that machine's own pass (ADR-0007).
+            .filter(|inst| inst.host_id.trim().is_empty() || inst.host_id == crate::config::LOCAL_HOST_ID)
             .filter_map(|inst| {
                 let remembered = recall_url(&data_dir, &inst.id);
                 let port = inst.port.or_else(|| remembered.as_deref().and_then(port_of_url))?;
@@ -369,6 +432,666 @@ pub(crate) fn manageable_url(entry: &RunningEntry) -> Option<&str> {
     entry.url.as_deref().filter(|u| u.contains("token="))
 }
 
+// ---------------------------------------------------------------------------
+// Running an instance on another machine
+//
+// A remote instance is not this launcher's child. That machine's own shell
+// starts it in its own session, with `/dev/null` for stdin and its output
+// appended to a log file there, so it is still running after the ssh connection
+// closes and after the launcher itself quits (ADR-0007). What the launcher keeps
+// in place of a child handle is [`RemoteRun`] — which machine, which pid — and
+// what keeps it manageable across launcher restarts is the URL, launch token
+// included, written into **that machine's** own running record the moment its
+// log prints it.
+//
+// Nothing here reads a profile, a version tree or a log from this Mac: those are
+// paths on the other machine, and a local `fs` call aimed at one of them would
+// answer about whatever this Mac happens to have at the same spelling (ADR-0006).
+// ---------------------------------------------------------------------------
+
+/// How long one read of a remote instance's log may wait **on that machine** for
+/// output, for the process to go, or for the budget. The usual case — nothing
+/// new is written for minutes — costs one call per window instead of one per
+/// second; output that appears is seen about a second later.
+const REMOTE_TAIL_WAIT_SECS: u64 = 10;
+
+/// How long to wait before reading a remote log again after the machine could
+/// not answer. A machine that went away comes back; the follower is what notices
+/// either way, so a failed read is not the end of the watch.
+const REMOTE_FOLLOW_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `<该主机的数据目录>/running.json` — the file the records above live in, as
+/// that machine spells the path.
+fn remote_record_path(data_dir: &Path) -> String {
+    data_dir.join("running.json").to_string_lossy().to_string()
+}
+
+/// Reading that file, changing one entry and writing it back is two round trips,
+/// so two instances starting at once could drop each other's entry. One lock for
+/// every host is enough: these writes are rare and tiny.
+static REMOTE_RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One host's running record as it is on that machine. A file that is not there
+/// yet is an empty record: the launcher is the one that creates it.
+async fn read_remote_records(
+    state: &AppState,
+    run: &RemoteRun,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let path = remote_record_path(&run.data_dir);
+    let bytes = crate::remote::read_file_optional(&*state.host_transport, &run.host, &path)
+        .await
+        .map_err(|e| format!("读取那台机器上的运行记录失败（{path}）：{e}"))?;
+    let Some(bytes) = bytes else {
+        return Ok(serde_json::Map::new());
+    };
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    if text.trim().is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .ok_or_else(|| format!("那台机器上的运行记录不是对象（{path}）"))
+}
+
+async fn write_remote_records(
+    state: &AppState,
+    run: &RemoteRun,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let path = remote_record_path(&run.data_dir);
+    let raw = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))
+        .map_err(|e| format!("序列化运行记录失败：{e}"))?;
+    state
+        .host_transport
+        .write_file(&run.host, &path, raw.into_bytes())
+        .await
+        .map_err(|e| format!("写入那台机器上的运行记录失败（{path}）：{e}"))
+}
+
+/// Records one instance in **that machine's** running record (ADR-0007 §3).
+pub(crate) async fn remember_remote_run(
+    state: &AppState,
+    instance_id: &str,
+    record: &RemoteRunRecord,
+    run: &RemoteRun,
+) -> Result<(), String> {
+    let _guard = REMOTE_RECORD_LOCK.lock().await;
+    let mut map = read_remote_records(state, run).await?;
+    let value = serde_json::to_value(record).map_err(|e| format!("序列化运行记录失败：{e}"))?;
+    map.insert(instance_id.to_string(), value);
+    write_remote_records(state, run, &map).await
+}
+
+/// Drops one instance from that machine's record: the process is gone, so the
+/// token it printed is worthless, and a stale URL would be handed to the next
+/// reader as if it were current (the same rule [`forget_url`] follows locally).
+///
+/// A record the launcher cannot read is left exactly as it is — rewriting it
+/// from an empty read would delete every other instance's entry.
+pub(crate) async fn forget_remote_run(
+    state: &AppState,
+    instance_id: &str,
+    run: &RemoteRun,
+) -> Result<(), String> {
+    let _guard = REMOTE_RECORD_LOCK.lock().await;
+    let mut map = read_remote_records(state, run).await?;
+    if map.remove(instance_id).is_none() {
+        return Ok(());
+    }
+    write_remote_records(state, run, &map).await
+}
+
+/// The token of an instance URL, if it carries one. DSH's launch token exists
+/// only inside that URL, which is why the record keeps a copy of it: an instance
+/// whose token was lost is running but unmanageable.
+fn token_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url.trim())
+        .ok()?
+        .query_pairs()
+        .find(|(k, _)| k == "token")
+        .map(|(_, value)| value.to_string())
+}
+
+/// The instance URL on one line of its output — the same line 本机 reads off the
+/// child's stdout, from the same regex.
+fn url_in(line: &str) -> Option<String> {
+    url_re().captures(line).map(|cap| cap[1].to_string())
+}
+
+/// One profile's `package.json`, the document that decides whether the profile
+/// is a DSH web application.
+fn profile_package_json(home_path: &Path, profile: &str) -> PathBuf {
+    crate::profile::profile_dir(home_path, profile)
+        .ok()
+        .map(|dir| dir.join("package.json"))
+        .unwrap_or_else(|| home_path.join("profiles").join(profile).join("package.json"))
+}
+
+/// Whether one profile document declares the DSH web application among its
+/// bundles. Such a profile understands the web flags and gets a port.
+fn web_profile_document(raw: &str) -> bool {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    doc.pointer("/dsh/profile/bundles")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .any(|b| b.as_str() == Some("@deepseek-ai/dsh-web-app"))
+        })
+        .unwrap_or(false)
+}
+
+/// The same question asked of the machine that owns the profile: the document
+/// travels, the rule does not.
+async fn is_web_profile_remote(
+    state: &AppState,
+    run_host: &crate::ssh::RemoteHost,
+    home_path: &Path,
+    profile: &str,
+) -> bool {
+    let pkg = profile_package_json(home_path, profile);
+    match state
+        .host_transport
+        .read_file(run_host, &pkg.to_string_lossy())
+        .await
+    {
+        Ok(bytes) => web_profile_document(&String::from_utf8_lossy(&bytes)),
+        Err(_) => false,
+    }
+}
+
+async fn supports_no_open_remote(
+    state: &AppState,
+    run_host: &crate::ssh::RemoteHost,
+    version_dir: &Path,
+) -> bool {
+    let startup = crate::launch::web_app_startup_script(version_dir);
+    match state
+        .host_transport
+        .read_file(run_host, &startup.to_string_lossy())
+        .await
+    {
+        Ok(bytes) => crate::launch::supports_no_open(&String::from_utf8_lossy(&bytes)),
+        Err(_) => false,
+    }
+}
+
+/// Re-asserts the launcher's per-instance port in the profile's managed lan-bind
+/// block, **on the machine that owns the profile**: that block outranks the CLI
+/// `--port` and the plugin only re-asserts it at boot, so without this nudge the
+/// first start after a port change comes up on the old port (see
+/// [`crate::profile::assert_profile_lan_bind_port`] for the local twin).
+///
+/// A failure only costs the next start's port, so it is logged rather than
+/// raised — the same weight the local one carries.
+async fn assert_remote_lan_bind_port(
+    state: &AppState,
+    run_host: &crate::ssh::RemoteHost,
+    home_path: &Path,
+    profile: &str,
+    port: u16,
+) {
+    let Some(patch) = crate::profile::lan_bind_patch_path(home_path, profile) else {
+        return;
+    };
+    let path = patch.to_string_lossy().to_string();
+    let raw = match crate::remote::read_file_optional(&*state.host_transport, run_host, &path).await
+    {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+        // Absent file or absent block: nothing to nudge.
+        Ok(None) | Err(_) => return,
+    };
+    let updated = crate::profile::set_lan_bind_port(&raw, port);
+    if updated == raw {
+        return;
+    }
+    if let Err(e) = state
+        .host_transport
+        .write_file(run_host, &path, updated.into_bytes())
+        .await
+    {
+        crate::log_warn!("固定那台机器上 profile 的端口失败（{path}）: {e}");
+    }
+}
+
+/// Pins the profile's own pnpm store and peer policy **on that machine**.
+///
+/// The DSH Web UI's plugin manager runs bare `pnpm` in the profile directory and
+/// never sees the launcher's `--store-dir`; the profile itself has to record the
+/// settings, or every add/remove there fails with ERR_PNPM_UNEXPECTED_STORE.
+/// See [`crate::plugins::ensure_profile_store_pin`] / `ensure_profile_npmrc` for
+/// the local twins and why each setting exists. Best effort, like theirs.
+async fn pin_remote_profile_store(
+    state: &AppState,
+    run_host: &crate::ssh::RemoteHost,
+    home_path: &Path,
+    profile: &str,
+    data_dir: &Path,
+) {
+    let Ok(dir) = crate::profile::profile_dir(home_path, profile) else {
+        return;
+    };
+    let read = |file: PathBuf| async move {
+        let path = file.to_string_lossy().to_string();
+        match crate::remote::read_file_optional(&*state.host_transport, run_host, &path).await {
+            Ok(Some(bytes)) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+
+    // The store the profile is already linked from, so a profile a user
+    // installed against their own store keeps working.
+    let modules = dir.join("node_modules").join(".modules.yaml");
+    let linked = match read(modules).await {
+        Ok(Some(raw)) => crate::plugins::linked_store_document(&raw),
+        _ => None,
+    };
+    let store = crate::plugins::store_target_from(linked.as_deref(), &crate::toolchain::store_dir(data_dir));
+
+    let workspace = dir.join("pnpm-workspace.yaml");
+    match read(workspace.clone()).await {
+        Ok(raw) => {
+            if let Some(out) = crate::plugins::store_pin_document(raw.as_deref(), &store) {
+                let path = workspace.to_string_lossy().to_string();
+                if let Err(e) = state
+                    .host_transport
+                    .write_file(run_host, &path, out.into_bytes())
+                    .await
+                {
+                    crate::log_warn!("固定那台机器上 profile 的 pnpm store 失败（{path}）: {e}");
+                }
+            }
+        }
+        Err(e) => crate::log_warn!(
+            "读取那台机器上的 pnpm-workspace.yaml 失败（{}）: {e}",
+            workspace.display()
+        ),
+    }
+
+    let npmrc = dir.join(".npmrc");
+    match read(npmrc.clone()).await {
+        Ok(raw) => {
+            let raw = raw.unwrap_or_default();
+            if let Some(out) = crate::plugins::npmrc_document(&raw) {
+                let path = npmrc.to_string_lossy().to_string();
+                if let Err(e) = state
+                    .host_transport
+                    .write_file(run_host, &path, out.into_bytes())
+                    .await
+                {
+                    crate::log_warn!("固定那台机器上 profile 的 peer 策略失败（{path}）: {e}");
+                }
+            }
+        }
+        Err(e) => crate::log_warn!(
+            "读取那台机器上的 .npmrc 失败（{}）: {e}",
+            npmrc.display()
+        ),
+    }
+}
+
+/// What one remote start leaves behind.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteStart {
+    pub run: RemoteRun,
+    /// Where **this run's** output begins in that machine's log.
+    pub offset: u64,
+}
+
+/// Starts one instance **on a remote host** and returns where it runs.
+///
+/// The command line and the environment are 本机's policy, taken from
+/// [`crate::launch`], with two differences: the answers that depend on the other
+/// machine's files (whether the profile is a web application, whether its bundle
+/// understands `--no-open`, whether the version's `bin.js` is there) are asked
+/// there, and the launcher's proxy settings never ride along — a remote host's
+/// network exit is its record's business (`launch::instance_env_for`).
+///
+/// Everything here is a fact about the other machine: nothing is emitted and
+/// nothing is registered, so the caller owns the projections.
+pub(crate) async fn spawn_remote_instance(
+    state: &AppState,
+    cfg: &crate::config::Config,
+    host: &Host,
+    inst: &DshInstance,
+    version: &DshVersion,
+    profile: &str,
+) -> Result<RemoteStart, String> {
+    let run_host = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+    let data_dir = host.data_dir(&state.data_dir)?;
+
+    // The version's own `bin.js`, asked of the machine that has the version
+    // directory: `version_bin_ready` is a local `exists()`, which at a remote
+    // path answers about this Mac.
+    let bin = crate::launch::version_bin(&version.dir);
+    let ready = crate::remote::file_ready(&*state.host_transport, &run_host, &bin.to_string_lossy())
+        .await
+        .map_err(|e| format!("无法确认那台机器上的 {}：{e}", bin.display()))?;
+    if !ready {
+        return Err(format!(
+            "版本 {} 安装不完整（缺少 {}），请重新安装",
+            version.version,
+            bin.display()
+        ));
+    }
+
+    // Web-app profiles (their bundle list includes @deepseek-ai/dsh-web-app) get
+    // a port; the answer comes from that machine's copy of the profile, so a
+    // profile whose name is not literally "web" is still recognized — and one
+    // that is, but is not a web app there, is not.
+    let home_path = cfg
+        .homes
+        .iter()
+        .find(|h| h.id == inst.home_id)
+        .map(|h| h.path.clone());
+    let is_web = match home_path.as_deref() {
+        Some(home) => is_web_profile_remote(state, &run_host, home, profile).await,
+        None => profile == "web",
+    };
+    let web_port = is_web.then(|| inst.port.unwrap_or(0));
+
+    if let (true, Some(home)) = (is_web, home_path.as_deref()) {
+        assert_remote_lan_bind_port(state, &run_host, home, profile, inst.port.unwrap_or(0)).await;
+    }
+    if let Some(home) = home_path.as_deref() {
+        pin_remote_profile_store(state, &run_host, home, profile, &data_dir).await;
+    }
+
+    // The interpreter is that machine's resolved binding (ADR-0005 追加), and
+    // the flags are the launcher's policy — `--host` deliberately never among
+    // them, `--no-open` only when that machine's bundle understands it.
+    let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
+    let no_open = web_port.is_some() && supports_no_open_remote(state, &run_host, &version.dir).await;
+    let instance_argv =
+        crate::launch::instance_argv(&node, &version.dir, profile, web_port, no_open);
+
+    // Environment variables travel as `env` arguments: the detached spawn's own
+    // shell gets the command line, and this is what hands the child its
+    // environment without a second shell layer to quote through.
+    let mut argv = vec!["/usr/bin/env".to_string()];
+    for (key, value) in crate::launch::instance_env_for(cfg, &inst.id, host)? {
+        argv.push(format!("{key}={value}"));
+    }
+    argv.extend(instance_argv);
+
+    let log_path = data_dir
+        .join("logs")
+        .join(format!("{}.log", inst.id))
+        .to_string_lossy()
+        .to_string();
+
+    // Read the log's size **before** the process exists: the file is appended to
+    // across runs, and the previous run's URL line would otherwise be read as
+    // this one's.
+    let offset = crate::remote::log_size(&*state.host_transport, &run_host, &log_path)
+        .await
+        .map_err(|e| format!("无法读取那台机器上的日志（{log_path}）：{e}"))?;
+
+    let pid = state
+        .host_transport
+        .spawn_detached(&run_host, &argv, &log_path)
+        .await
+        .map_err(|e| format!("在「{}」上启动失败：{e}", host.display_name))?;
+    let started_at = crate::remote::process_start_time(&*state.host_transport, &run_host, pid)
+        .await
+        .ok()
+        .flatten();
+
+    let run = RemoteRun {
+        host_id: host.id.clone(),
+        host: run_host,
+        pid,
+        started_at,
+        data_dir,
+        log_path,
+    };
+    // The record is written before the URL is known and completed when it
+    // appears, so a launcher that dies in between still knows which pid it left
+    // running where.
+    let record = RemoteRunRecord {
+        url: None,
+        token: None,
+        profile: profile.to_string(),
+        pid,
+        started_at,
+    };
+    if let Err(e) = remember_remote_run(state, &inst.id, &record, &run).await {
+        crate::log_warn!(
+            "实例 {} 的远端运行记录没写上（{e}）；进程已在 pid {pid} 上跑",
+            inst.id
+        );
+    }
+
+    Ok(RemoteStart { run, offset })
+}
+
+/// What one read of a remote instance's log says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteLogRead {
+    /// Where to read from next.
+    pub offset: u64,
+    /// The instance's URL, once its output has printed one.
+    pub url: Option<String>,
+    /// Whether the process is still there.
+    pub alive: bool,
+}
+
+/// Reads one remote instance's log and, on the way, the two things the launcher
+/// needs out of it: the URL it printed (taken down into that machine's running
+/// record, token and all) and whether the process is still there.
+///
+/// `pending` carries whatever the last read ended in the middle of: a chunk is a
+/// byte range, so a line — the URL line above all — can be split across two
+/// reads, and half a line is not something to act on.
+pub(crate) async fn read_remote_log(
+    state: &AppState,
+    instance_id: &str,
+    profile: &str,
+    run: &RemoteRun,
+    offset: u64,
+    pending: &mut String,
+) -> Result<RemoteLogRead, String> {
+    let chunk = crate::remote::tail(
+        &*state.host_transport,
+        &run.host,
+        &run.log_path,
+        offset,
+        run.pid,
+        REMOTE_TAIL_WAIT_SECS,
+    )
+    .await
+    .map_err(|e| format!("读取那台机器上的日志失败（{}）：{e}", run.log_path))?;
+
+    pending.push_str(&chunk.text);
+    let mut url = None;
+    while let Some(cut) = pending.find('\n') {
+        let line = pending[..cut].trim_end_matches('\r').to_string();
+        pending.drain(..=cut);
+        if url.is_none() {
+            url = url_in(&line);
+        }
+    }
+
+    if let Some(found) = url.as_deref() {
+        let record = RemoteRunRecord {
+            url: Some(found.to_string()),
+            token: token_of(found),
+            profile: profile.to_string(),
+            pid: run.pid,
+            started_at: run.started_at,
+        };
+        if let Err(e) = remember_remote_run(state, instance_id, &record, run).await {
+            // The instance is up either way; losing the record only costs the
+            // next session the token, so it is loud in the log, not fatal here.
+            crate::log_warn!("实例 {instance_id} 的远端运行记录没写上（{e}）");
+        }
+    }
+
+    Ok(RemoteLogRead {
+        offset: chunk.offset,
+        url,
+        alive: chunk.alive,
+    })
+}
+
+/// Starts the remote half of a start and hands the rest to the follower.
+async fn start_remote_instance(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    cfg: &crate::config::Config,
+    host: &Host,
+    inst: &DshInstance,
+    version: &DshVersion,
+    profile: &str,
+) -> Result<(), String> {
+    emit_status(
+        app,
+        &InstanceStatus {
+            id: inst.id.clone(),
+            state: InstanceState::Starting,
+            url: None,
+            profile: Some(profile.to_string()),
+            exit_code: None,
+        },
+    );
+
+    let start = match spawn_remote_instance(state, cfg, host, inst, version, profile).await {
+        Ok(start) => start,
+        Err(e) => {
+            // Nothing is running: say so instead of leaving the card on 启动中.
+            emit_status(
+                app,
+                &InstanceStatus {
+                    id: inst.id.clone(),
+                    state: InstanceState::Stopped,
+                    url: None,
+                    profile: Some(profile.to_string()),
+                    exit_code: None,
+                },
+            );
+            return Err(e);
+        }
+    };
+
+    crate::log_info!(
+        "实例 {} 已在「{}」上拉起（pid {}，profile: {profile}）",
+        inst.id,
+        host.display_name,
+        start.run.pid
+    );
+
+    register_running(
+        app,
+        state,
+        &inst.id,
+        RunningInstance {
+            kill: Arc::new(Notify::new()),
+            profile: profile.to_string(),
+            url: None,
+            adopted: None,
+            remote: Some(start.run.clone()),
+        },
+    )
+    .await;
+
+    follow_remote_instance(app, &inst.id, profile, start.run, start.offset);
+    Ok(())
+}
+
+/// Watches one remote instance's log until the process is gone: reports the URL
+/// it printed (which is what makes the card say 运行 and the plugins page able to
+/// authenticate) and cleans up when it exits.
+///
+/// The read waits on the far side, so this loop costs one ssh per quiet window
+/// rather than one per second — the same shape the install follower uses.
+fn follow_remote_instance(
+    app: &AppHandle,
+    instance_id: &str,
+    profile: &str,
+    run: RemoteRun,
+    offset: u64,
+) {
+    let app = app.clone();
+    let id = instance_id.to_string();
+    let profile = profile.to_string();
+    tauri::async_runtime::spawn(async move {
+        let mut offset = offset;
+        let mut pending = String::new();
+        let mut announced = false;
+        loop {
+            let state = app.state::<AppState>();
+            // Stop coordinating when the entry is gone or was replaced: the user
+            // stopped the instance, or a start raced this follower.
+            let still_ours = state
+                .running
+                .lock()
+                .await
+                .get(&id)
+                .and_then(|entry| entry.remote.as_ref())
+                .map(|entry| entry.pid == run.pid)
+                .unwrap_or(false);
+            if !still_ours {
+                return;
+            }
+
+            let read = read_remote_log(&state, &id, &profile, &run, offset, &mut pending).await;
+            let read = match read {
+                Ok(read) => read,
+                Err(e) => {
+                    // The machine could not answer — the process may still be
+                    // running there, so this is not an exit.
+                    crate::log_warn!("实例 {id} 的远端日志暂时读不到：{e}");
+                    tokio::time::sleep(REMOTE_FOLLOW_RETRY).await;
+                    continue;
+                }
+            };
+            offset = read.offset;
+
+            if let Some(url) = read.url.filter(|_| !announced) {
+                announced = true;
+                crate::log_info!("实例 {id} 已就绪：{url}");
+                {
+                    let mut running = state.running.lock().await;
+                    if let Some(entry) = running.get_mut(&id) {
+                        entry.url = Some(url.clone());
+                    }
+                }
+                emit_status(
+                    &app,
+                    &InstanceStatus {
+                        id: id.clone(),
+                        state: InstanceState::Running,
+                        url: Some(url),
+                        profile: Some(profile.clone()),
+                        exit_code: None,
+                    },
+                );
+            }
+
+            if !read.alive {
+                crate::log_info!("实例 {id} 在那台机器上已退出（pid {}）", run.pid);
+                unregister_running(
+                    &app,
+                    &state,
+                    &id,
+                    InstanceStatus {
+                        id: id.clone(),
+                        state: InstanceState::Exited,
+                        url: None,
+                        profile: Some(profile.clone()),
+                        exit_code: None,
+                    },
+                )
+                .await;
+                return;
+            }
+        }
+    });
+}
+
 pub fn npm() -> &'static str {
     "npm"
 }
@@ -430,6 +1153,21 @@ pub async fn start_instance_process(
         .iter()
         .find(|v| v.id == inst.version_id)
         .ok_or_else(|| "实例引用的 DSH 版本未安装".to_string())?;
+
+    // A remote instance is started **there** (ADR-0007): the version tree, the
+    // profile and the process all belong to that machine, so everything below —
+    // which reads this Mac's filesystem and spawns this Mac's child processes —
+    // is the wrong half of the world for it.
+    let host = crate::config::resolve_host(&cfg, Some(&inst.host_id))?.clone();
+    if !host.builtin {
+        {
+            let running = state.running.lock().await;
+            if running.contains_key(instance_id) {
+                return Err("实例已在运行".to_string());
+            }
+        }
+        return start_remote_instance(app, state, &cfg, &host, &inst, version, profile).await;
+    }
 
     let bin = version_bin(&version.dir);
     if !version_bin_ready(&version.dir) {
@@ -603,6 +1341,7 @@ pub async fn start_instance_process(
             profile: profile.to_string(),
             url: None,
             adopted: None,
+            remote: None,
         },
     )
     .await;
@@ -754,8 +1493,8 @@ pub async fn stop_instance_process(
         .lock()
         .await
         .get(instance_id)
-        .map(|r| (r.kill.clone(), r.adopted.clone()));
-    let Some((kill, adopted)) = entry else {
+        .map(|r| (r.kill.clone(), r.adopted.clone(), r.remote.clone()));
+    let Some((kill, adopted, remote)) = entry else {
         crate::log_debug!("停止实例 {instance_id}：注册表无记录，补发 stopped 状态");
         emit_status(
             app,
@@ -769,6 +1508,17 @@ pub async fn stop_instance_process(
         );
         return Ok(());
     };
+    if let Some(run) = remote {
+        // A remote instance is stopped on the machine that runs it, by pid, with
+        // the recorded process start time checked first (ADR-0007 §4) — that
+        // belongs to the stop/restart/adoption pass, and until it exists this
+        // refuses rather than falling into the poll below, which has no child to
+        // wait for and would end in a timeout the user cannot act on.
+        return Err(format!(
+            "远端实例的停止还没有实现：它跑在「{}」上（pid {}），现在只能在那台机器上停它",
+            run.host.target, run.pid
+        ));
+    }
     if let Some(a) = adopted {
         // Adopted external process: no child handle, terminate by pid. The
         // watcher notices the exit and emits the terminal status.
@@ -801,9 +1551,17 @@ pub async fn stop_instance_process(
 
 /// Kills every running instance (called on launcher exit). Best-effort: the
 /// waiter tasks reap the children asynchronously as the runtime shuts down.
+///
+/// **Remote instances are not signalled** (ADR-0007 §1-2): they run on someone
+/// else's machine in their own session, and outliving this launcher is the whole
+/// point of putting them there. ⌘Q leaves them alone; the next session adopts
+/// them.
 pub fn kill_all(state: &AppState) {
     let running = state.running.blocking_lock();
     for entry in running.values() {
+        if entry.remote.is_some() {
+            continue;
+        }
         if let Some(a) = &entry.adopted {
             // Best-effort SIGTERM; the external process outlives the
             // launcher's exit anyway (it was never our child).
@@ -966,10 +1724,17 @@ async fn unregister_running(
     id: &str,
     status: InstanceStatus,
 ) {
-    state.running.lock().await.remove(id);
+    let remote = state.running.lock().await.remove(id).and_then(|r| r.remote);
     // The process is gone, so the token it printed is worthless: drop the
     // reminder rather than handing a stale URL to the next adoption.
     forget_url(&state.data_dir, id);
+    // Same on the machine that ran it: its own record is where a later session
+    // would find the pid and the token, and neither outlives the process.
+    if let Some(run) = remote {
+        if let Err(e) = forget_remote_run(state, id, &run).await {
+            crate::log_warn!("实例 {id} 的远端运行记录没能清掉：{e}");
+        }
+    }
     emit_status(app, &status);
     crate::tray::rebuild_tray_menu(app).await;
 }
@@ -1060,6 +1825,457 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Remote instances
+    //
+    // These drive the remote half of a start through the transport double: what
+    // the launcher *asks that machine to do* (the detached spawn, the record it
+    // writes) and what it reads back out of that machine's log are the whole
+    // contract, so the tests assert on those and not on which of the launcher's
+    // own functions ran. The Tauri side of a start — the status event and the
+    // tray rebuild — has no double, and is not driven here.
+    // -----------------------------------------------------------------------
+
+    use crate::remote::testing::{marked, FakeAnswer, FakeCall, FakeTransport};
+
+    const REMOTE_DATA: &str = "/home/demo/.local/share/dsh-launcher";
+    const REMOTE_HOME: &str = "/home/demo/.dsh";
+
+    fn remote_host(id: &str) -> crate::config::Host {
+        crate::config::Host {
+            id: id.to_string(),
+            display_name: "阿里云服务器".into(),
+            ssh_target: "zjq_aliyun".into(),
+            registry: None,
+            extra_env: [("HTTPS_PROXY".to_string(), "http://10.0.0.9:3128".to_string())]
+                .into_iter()
+                .collect(),
+            data_dir: Some(PathBuf::from(REMOTE_DATA)),
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        }
+    }
+
+    fn remote_home(host_id: &str) -> crate::config::DshHome {
+        crate::config::DshHome {
+            id: "h-remote".into(),
+            name: "服务器默认".into(),
+            path: PathBuf::from(REMOTE_HOME),
+            host_id: host_id.to_string(),
+        }
+    }
+
+    fn remote_version(host_id: &str) -> crate::config::DshVersion {
+        crate::config::DshVersion {
+            id: "v-remote".into(),
+            version: "0.1.0-rc.6".into(),
+            dir: PathBuf::from(REMOTE_DATA).join("versions").join("0.1.0-rc.6"),
+            host_id: host_id.to_string(),
+        }
+    }
+
+    fn remote_instance(host_id: &str, port: Option<u16>) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: "i-remote".into(),
+            name: "服务器实例".into(),
+            version_id: "v-remote".into(),
+            home_id: "h-remote".into(),
+            host_id: host_id.to_string(),
+            env_overrides: [("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            default_profile: Some("web".into()),
+            last_profile: None,
+            icon: None,
+            port,
+        }
+    }
+
+    /// An `AppState` for one remote host, with the launcher's own proxy settings
+    /// switched on — they belong to this Mac and must not reach that machine.
+    fn remote_app_state(
+        fake: std::sync::Arc<FakeTransport>,
+        host: crate::config::Host,
+        instance: crate::config::DshInstance,
+    ) -> AppState {
+        AppState {
+            config_path: std::env::temp_dir()
+                .join(format!("dsh-proc-test-{}", uuid::Uuid::new_v4()))
+                .join("config.json"),
+            data_dir: PathBuf::from("/launcher"),
+            config: std::sync::Mutex::new(crate::config::Config {
+                homes: vec![remote_home(&host.id)],
+                versions: vec![remote_version(&host.id)],
+                instances: vec![instance],
+                settings: crate::config::LauncherSettings {
+                    proxy_enabled: true,
+                    proxy_apply_dsh: true,
+                    proxy_url: "http://127.0.0.1".into(),
+                    proxy_port: 7890,
+                    ..Default::default()
+                },
+                hosts: vec![crate::config::Host::local(), host],
+            }),
+            running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            host_transport: fake,
+            host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn web_profile_document_fixture() -> Vec<u8> {
+        br#"{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#.to_vec()
+    }
+
+    /// A start's answers, in the order the launcher asks them: the two profile
+    /// documents it reads from that machine, the port nudge (no patch document
+    /// yet), the profile's own store and peer pins, that machine's toolchain,
+    /// the `--no-open` feature check, the log size, the spawn, the pid's start
+    /// time, and the empty running record it completes.
+    fn remote_start_answers(node: &str) -> Vec<FakeAnswer> {
+        vec![
+            // 1. 版本目录里的 bin.js 在不在（那台机器自己回答）。
+            FakeAnswer::stdout(marked(r#"{"ready":true}"#)),
+            // 2. 那个 profile 的 package.json：是不是 web 应用。
+            FakeAnswer::Bytes(web_profile_document_fixture()),
+            // 3. profile 的 lan-bind 文档：还没有，没有要改的行。
+            FakeAnswer::failed(2, "远端没有这个文件：cordis.patch.yml"),
+            // 4.-6. profile 自己那份 pnpm store：先看它已链接到哪个 store，
+            //       再把 store 写进 pnpm-workspace.yaml。
+            FakeAnswer::failed(2, "远端没有这个文件：node_modules/.modules.yaml"),
+            FakeAnswer::failed(2, "远端没有这个文件：pnpm-workspace.yaml"),
+            FakeAnswer::Done,
+            // 7.-8. 同一份 profile 的 peer 策略。
+            FakeAnswer::failed(2, "远端没有这个文件：.npmrc"),
+            FakeAnswer::Done,
+            // 9. 那台机器自己的绝对 Node。
+            FakeAnswer::stdout(crate::remote::testing::environment_stdout(
+                crate::remote::testing::remote_tool(node, "v26.0.0", "system"),
+                crate::remote::testing::remote_tool_missing(vec![]),
+                &[],
+            )),
+            // 10. 那台机器的 bundle 认不认 --no-open。
+            FakeAnswer::Bytes(b"const p = new Command().option('--no-open', 'x')".to_vec()),
+            // 11. 日志现在有多少字节（起进程之前问的）。
+            FakeAnswer::stdout(marked(r#"{"offset":0}"#)),
+            // 12. 脱离会话地起进程。
+            FakeAnswer::Pid(4242),
+            // 13. 这个 pid 自己的启动时间。
+            FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
+            // 14.-15. 那台机器上的运行记录：还没有，写一条。
+            FakeAnswer::failed(2, "远端没有这个文件：running.json"),
+            FakeAnswer::Done,
+        ]
+    }
+
+    fn last_write_of(fake: &FakeTransport, path: &str) -> Vec<u8> {
+        fake.calls()
+            .into_iter()
+            .rev()
+            .find_map(|call| match call {
+                FakeCall::WriteFile(written, bytes) if written == path => Some(bytes),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("没有写下 {path}"))
+    }
+
+    /// The URL DSH prints on readiness, and the line it arrives on.
+    const READY_URL: &str = "http://127.0.0.1:3080/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
+    const READY_TOKEN: &str = "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
+
+    fn remote_run() -> RemoteRun {
+        RemoteRun {
+            host_id: "host-server".into(),
+            host: crate::ssh::RemoteHost {
+                id: "host-server".into(),
+                target: "zjq_aliyun".into(),
+                socket: PathBuf::from("/launcher/ssh/abc.sock"),
+            },
+            pid: 4242,
+            started_at: Some(117384720),
+            data_dir: PathBuf::from(REMOTE_DATA),
+            log_path: format!("{REMOTE_DATA}/logs/i-remote.log"),
+        }
+    }
+
+    /// The whole point of ADR-0007's detached spawn: the instance is started by
+    /// that machine's own shell in its own session — `setsid`, stdin from
+    /// `/dev/null`, output appended to that machine's log — with the absolute
+    /// Node its own probe resolved, the version's `bin.js`, and the environment
+    /// the launcher promised (DSH_HOME, the instance's name and own variables,
+    /// the host record's variables) and **not** this Mac's proxy settings.
+    #[tokio::test]
+    async fn a_remote_start_spawns_detached_with_that_hosts_toolchain_and_environment() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let node = "/home/linuxbrew/.linuxbrew/bin/node";
+        let fake = FakeTransport::new();
+        for answer in remote_start_answers(node) {
+            fake.answering(answer);
+        }
+        let state = remote_app_state(fake.clone(), remote_host(&host_id), remote_instance(&host_id, Some(3080)));
+        let cfg = state.config.lock().unwrap().clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        let inst = cfg.instances[0].clone();
+        let version = cfg.versions[0].clone();
+
+        let start = spawn_remote_instance(&state, &cfg, &host, &inst, &version, "web")
+            .await
+            .unwrap();
+
+        let script = fake
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                FakeCall::Spawn(script) => Some(script),
+                _ => None,
+            })
+            .expect("远端启动要起一个脱离会话的进程");
+        // Detached: its own session, no stdin, output appended to that machine's
+        // log — which is what lets it outlive the ssh connection and this app.
+        assert!(script.contains("nohup setsid"), "{script}");
+        assert!(script.contains("< /dev/null"), "{script}");
+        assert!(
+            script.contains(&format!("dsh_log='{REMOTE_DATA}/logs/i-remote.log'"))
+                && script.contains("2>&1 < /dev/null"),
+            "输出追加到那台机器上的日志：{script}"
+        );
+        // Absolute Node and bin.js from that machine's own version directory.
+        assert!(script.contains(&format!("'{node}'")), "{script}");
+        assert!(
+            script.contains(&format!(
+                "'{REMOTE_DATA}/versions/0.1.0-rc.6/node_modules/@deepseek-ai/dsh/lib/bin.js'"
+            )),
+            "{script}"
+        );
+        assert!(script.contains("'--profile' 'web'"), "{script}");
+        assert!(script.contains("'--port' '3080'"), "{script}");
+        assert!(script.contains("'--no-open'"), "那台机器的 bundle 认这个 flag：{script}");
+        assert!(!script.contains("--host"), "绑定地址归 profile 层：{script}");
+        // The environment: DSH_HOME, the instance's name, its own variables, and
+        // the host record's variables.
+        assert!(script.contains(&format!("'DSH_HOME={REMOTE_HOME}'")), "{script}");
+        assert!(script.contains("'DSH_LAUNCHER_INSTANCE=服务器实例'"), "{script}");
+        assert!(script.contains("'DSH_TELEMETRY_DISABLED=1'"), "{script}");
+        assert!(script.contains("'HTTPS_PROXY=http://10.0.0.9:3128'"), "远端的出口由主机记录决定：{script}");
+        assert!(
+            !script.contains("127.0.0.1:7890"),
+            "本机代理只作用于本机实例：{script}"
+        );
+
+        assert_eq!(start.run.pid, 4242);
+        assert_eq!(start.run.host_id, host_id);
+        assert_eq!(start.run.data_dir, PathBuf::from(REMOTE_DATA));
+        assert_eq!(start.run.started_at, Some(117384720));
+        assert_eq!(start.offset, 0, "这次运行的输出从启动那一刻的日志末尾开始");
+    }
+
+    /// ADR-0007 §3: the record that machine keeps names the pid **and** its
+    /// process start time — a pid number alone is reused by the kernel — with the
+    /// profile, and no URL until the instance prints one. It is written before
+    /// the URL appears so a launcher that dies in between still knows what it
+    /// started where.
+    #[tokio::test]
+    async fn the_remote_run_record_names_the_pid_its_start_time_and_the_profile() {
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let fake = FakeTransport::new();
+        for answer in remote_start_answers("/usr/bin/node") {
+            fake.answering(answer);
+        }
+        let state = remote_app_state(fake.clone(), remote_host(&host_id), remote_instance(&host_id, Some(3080)));
+        let cfg = state.config.lock().unwrap().clone();
+        let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
+        let inst = cfg.instances[0].clone();
+        let version = cfg.versions[0].clone();
+
+        spawn_remote_instance(&state, &cfg, &host, &inst, &version, "web")
+            .await
+            .unwrap();
+
+        let path = format!("{REMOTE_DATA}/running.json");
+        let written = last_write_of(&fake, &path);
+        let doc: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        let entry = &doc["i-remote"];
+        assert_eq!(entry["pid"], 4242, "{doc}");
+        assert_eq!(entry["started_at"], 117384720, "{doc}");
+        assert_eq!(entry["profile"], "web", "{doc}");
+        assert_eq!(entry["url"], serde_json::Value::Null, "{doc}");
+    }
+
+    /// The URL is where the launch token lives, so reading it out of that
+    /// machine's log and writing it — token and all — into that machine's record
+    /// is what keeps the instance manageable after a launcher restart.
+    #[tokio::test]
+    async fn the_url_and_token_come_out_of_that_machines_log_into_its_record() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(crate::remote::testing::tail_stdout(
+                &format!("dsh web: {READY_URL}\n"),
+                999,
+            )))
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let run = remote_run();
+        let mut pending = String::new();
+
+        let read = read_remote_log(&state, "i-remote", "web", &run, 0, &mut pending)
+            .await
+            .unwrap();
+
+        assert_eq!(read.url.as_deref(), Some(READY_URL));
+        assert_eq!(read.offset, 999);
+        assert!(read.alive);
+
+        let written = last_write_of(&fake, &format!("{REMOTE_DATA}/running.json"));
+        let entry = &serde_json::from_slice::<serde_json::Value>(&written).unwrap()["i-remote"];
+        assert_eq!(entry["url"], READY_URL, "{entry}");
+        assert_eq!(
+            entry["token"],
+            READY_TOKEN,
+            "token 必须落到记录里：{entry}"
+        );
+        assert_eq!(entry["pid"], 4242, "{entry}");
+        assert_eq!(entry["started_at"], 117384720, "{entry}");
+        assert_eq!(entry["profile"], "web", "{entry}");
+    }
+
+    /// One read is a byte range, so the URL line can arrive in two halves. Acting
+    /// on half a line is not an option, and neither is losing it: the URL is what
+    /// makes the instance manageable at all.
+    #[tokio::test]
+    async fn a_url_split_across_two_reads_is_read_once_the_line_is_complete() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(crate::remote::testing::tail_stdout(
+                "dsh web: http://127.0.0.1:30",
+                40,
+            )))
+            .answering(FakeAnswer::stdout(crate::remote::testing::tail_stdout(
+                "80/?token=abc123\n",
+                60,
+            )))
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let run = remote_run();
+        let mut pending = String::new();
+
+        let first = read_remote_log(&state, "i-remote", "web", &run, 0, &mut pending)
+            .await
+            .unwrap();
+        assert_eq!(first.url, None, "半行 URL 不算数");
+
+        let second = read_remote_log(&state, "i-remote", "web", &run, first.offset, &mut pending)
+            .await
+            .unwrap();
+        assert_eq!(second.url.as_deref(), Some("http://127.0.0.1:3080/?token=abc123"));
+    }
+
+    /// A DSH that exited on that machine (a crash, a bad profile) is not the same
+    /// as one the launcher cannot see: the read says which it is, and the
+    /// follower ends the watch on the former.
+    #[tokio::test]
+    async fn a_read_of_a_log_whose_process_is_gone_says_so() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(
+            crate::remote::testing::tail_stdout_after_exit("Cannot find module 'x'\n", 25),
+        ));
+        let state = AppState {
+            host_transport: fake,
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let run = remote_run();
+        let mut pending = String::new();
+
+        let read = read_remote_log(&state, "i-remote", "web", &run, 0, &mut pending)
+            .await
+            .unwrap();
+
+        assert!(!read.alive);
+        assert_eq!(read.url, None);
+    }
+
+    /// 本机's token reminder is dropped when the process is gone, so a stale URL
+    /// is never handed to the next adoption. A remote instance's record has to
+    /// lose its entry the same way — the token it holds points at a process that
+    /// no longer exists.
+    #[tokio::test]
+    async fn forgetting_a_remote_run_removes_only_that_entry() {
+        let existing = serde_json::json!({
+            "i-other": {"url": "http://127.0.0.1:1/?token=keep", "profile": "web", "pid": 7},
+            "i-remote": {"url": null, "profile": "web", "pid": 4242, "started_at": 1},
+        })
+        .to_string();
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(crate::remote::testing::file_stdout(
+                existing.as_bytes(),
+            )))
+            .answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+
+        forget_remote_run(&state, "i-remote", &remote_run()).await.unwrap();
+
+        let written = last_write_of(&fake, &format!("{REMOTE_DATA}/running.json"));
+        let doc: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        assert!(doc.get("i-remote").is_none(), "{doc}");
+        assert_eq!(doc["i-other"]["url"], "http://127.0.0.1:1/?token=keep", "{doc}");
+    }
+
+    /// ⌘Q stops this Mac's instances and nothing else (ADR-0007 §1-2): a remote
+    /// instance is meant to still be running on that machine the next time the
+    /// launcher starts.
+    #[test]
+    fn launcher_exit_does_not_signal_remote_instances() {
+        let state = app_state(Vec::new(), Vec::new());
+        let local_kill = Arc::new(Notify::new());
+        let remote_kill = Arc::new(Notify::new());
+        state.running.blocking_lock().insert(
+            "i-local".into(),
+            RunningInstance {
+                kill: local_kill.clone(),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: None,
+            },
+        );
+        state.running.blocking_lock().insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: remote_kill.clone(),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: Some(remote_run()),
+            },
+        );
+
+        kill_all(&state);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(300), local_kill.notified())
+                .await
+                .expect("本机的实例退出启动器时要停掉");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), remote_kill.notified())
+                    .await
+                    .is_err(),
+                "远端实例不该在退出启动器时收到信号"
+            );
+        });
+    }
+
     fn instance(id: &str, home_id: &str) -> crate::config::DshInstance {
         crate::config::DshInstance {
             id: id.to_string(),
@@ -1090,6 +2306,7 @@ mod tests {
             profile: profile.to_string(),
             url: url.map(str::to_string),
             adopted: None,
+            remote: None,
         }
     }
 

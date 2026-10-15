@@ -68,6 +68,7 @@
     "create": "创建",
     "created": "实例已创建",
     "homeHint": "同一版本可以绑定到不同的 DSH_HOME，或与其他实例共用一个。",
+    "hostScope": "这台机器的资源只属于它自己：下面只能选「{host}」上的 DSH 版本与 DSH_HOME。",
     "noVersionsTitle": "还没有安装任何 DSH 版本",
     "noVersionsDesc": "先在资源库里安装一个版本，再回来创建实例。",
     "emptyTitle": "还没有实例",

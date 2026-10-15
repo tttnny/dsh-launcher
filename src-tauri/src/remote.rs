@@ -318,6 +318,90 @@ pub async fn alive(
     Ok(parse_marked::<Answer>(&out)?.alive)
 }
 
+/// How many bytes one remote log already holds.
+///
+/// Read *before* a detached spawn: the log is appended to across runs (a stopped
+/// instance's log is not truncated), and the launcher has to follow this run's
+/// output only. Starting at zero would re-read the previous run's URL line and
+/// adopt a token that belongs to a process which is no longer there.
+pub async fn log_size(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    log_path: &str,
+) -> Result<u64, HostError> {
+    #[derive(Deserialize)]
+    struct Size {
+        offset: u64,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(log_size_script(log_path)))
+        .await?;
+    Ok(parse_marked::<Size>(&out)?.offset)
+}
+
+/// Whether one file is there and not empty — the local rule a version's `bin.js`
+/// is checked with (`-s`), asked of the machine that owns the file.
+pub async fn file_ready(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<bool, HostError> {
+    #[derive(Deserialize)]
+    struct Ready {
+        ready: bool,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(file_ready_script(path)))
+        .await?;
+    Ok(parse_marked::<Ready>(&out)?.ready)
+}
+
+/// When one pid started, as that machine's own `/proc/<pid>/stat` records it
+/// (field 22: clock ticks since boot). A pid number alone is not an identity —
+/// the kernel reuses it — so this is what tells the process the launcher started
+/// from a later one wearing the same number (ADR-0007 §3).
+///
+/// `None` means the pid is not there (or the file cannot be read): the caller
+/// decides whether that is "already gone" or "cannot check".
+pub async fn process_start_time(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    pid: i32,
+) -> Result<Option<u64>, HostError> {
+    #[derive(Deserialize)]
+    struct Started {
+        started_at: Option<u64>,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(start_time_script(pid)))
+        .await?;
+    Ok(parse_marked::<Started>(&out)?.started_at)
+}
+
+/// Reads one file, or answers `None` when that machine says the file is not
+/// there.
+///
+/// [`READ_FILE`] exits 2 for exactly that case, and it is a normal answer for
+/// the files the launcher reads before it has ever written them (a host's
+/// running record, a profile's patch document). Every other failure — an
+/// unreachable machine, unreadable bytes — is still an `Err`.
+pub async fn read_file_optional(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<Option<Vec<u8>>, HostError> {
+    let out = transport
+        .run(host, RemoteCall::new(read_file_script(path)))
+        .await?;
+    if out.status == READ_FILE_MISSING {
+        return Ok(None);
+    }
+    decode_blob(&out).map(Some)
+}
+
+/// The exit status [`READ_FILE`] uses for 「这台机器上没有这个文件」.
+const READ_FILE_MISSING: i32 = 2;
+
 /// Removes one remote directory tree. Not being there is already the state the
 /// caller asked for. The callers only ever aim this at a path they computed
 /// from that host's own data directory.
@@ -1233,6 +1317,40 @@ else
 fi
 "#;
 
+/// How many bytes a log already holds. A file that is not there yet is zero:
+/// every caller here reads the size of a log it is about to append to.
+const LOG_SIZE: &str = r#"set -u
+dsh_bytes=$(wc -c < %%LOG%% 2>/dev/null | tr -d ' ')
+if [ -z "$dsh_bytes" ]; then dsh_bytes=0; fi
+printf '<<<DSH-JSON>>>{"offset":%s}<<<DSH-END>>>' "$dsh_bytes"
+"#;
+
+/// Whether one file exists and is not empty (`-s`), the rule a version's
+/// `bin.js` is checked with on 本机.
+const FILE_READY: &str = r#"set -u
+if [ -s %%PATH%% ]; then dsh_ready=true; else dsh_ready=false; fi
+printf '<<<DSH-JSON>>>{"ready":%s}<<<DSH-END>>>' "$dsh_ready"
+"#;
+
+/// When one pid started, in clock ticks since boot: field 22 of
+/// `/proc/<pid>/stat`, which puts a pid number back together with the process it
+/// names.
+///
+/// The fields are counted from after the parenthesised command name: that name
+/// is free text and may contain spaces, so `$22` of the whole line would drift.
+/// Anything that is not a number (the process is gone, `/proc` is not mounted)
+/// reads as null — the caller's 「查不了」.
+const START_TIME: &str = r#"set -u
+dsh_pid=%%PID%%
+dsh_stat=$(cat "/proc/$dsh_pid/stat" 2>/dev/null || true)
+dsh_rest=${dsh_stat##*') '}
+dsh_started=$(printf '%s' "$dsh_rest" | awk '{print $20}' 2>/dev/null || true)
+case "$dsh_started" in
+  ''|*[!0-9]*) printf '<<<DSH-JSON>>>{"started_at":null}<<<DSH-END>>>' ;;
+  *) printf '<<<DSH-JSON>>>{"started_at":%s}<<<DSH-END>>>' "$dsh_started" ;;
+esac
+"#;
+
 /// The tail of one remote log from a byte offset, waiting on that machine until
 /// there is something to report.
 ///
@@ -1395,6 +1513,21 @@ pub fn tail_script(log_path: &str, offset: u64, pid: i32, wait_secs: u64) -> Str
             ("%%WAIT%%", wait_secs.to_string()),
         ],
     )
+}
+
+/// The size read for one remote log.
+pub fn log_size_script(log_path: &str) -> String {
+    fill(LOG_SIZE, &[("%%LOG%%", quote(log_path))])
+}
+
+/// The readiness read for one remote file.
+pub fn file_ready_script(path: &str) -> String {
+    fill(FILE_READY, &[("%%PATH%%", quote(path))])
+}
+
+/// The start-time read for one pid.
+pub fn start_time_script(pid: i32) -> String {
+    fill(START_TIME, &[("%%PID%%", pid.to_string())])
 }
 
 /// The script for one detached process: `argv` is the command line (already the
@@ -1693,7 +1826,37 @@ pub(crate) mod testing {
         ))
     }
 
-    /// One tool of an environment probe's answer, as the script shapes it.
+    /// The stdout one file read answers with: the file's bytes, base64-encoded
+    /// between the markers (the shape [`READ_FILE`] prints).
+    pub(crate) fn file_stdout(contents: &[u8]) -> String {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(contents);
+        marked(&format!("{{\"data\":\"{data}\"}}"))
+    }
+
+    /// The stdout one tail read answers with: the log's size now, the bytes that
+    /// appeared since the previous offset (base64), and whether the process tree
+    /// is still there.
+    pub(crate) fn tail_stdout(text: &str, offset: u64) -> String {
+        tail_stdout_with(text, offset, true)
+    }
+
+    /// The same read when the process is gone — the follower's signal that the
+    /// instance ended on that machine.
+    pub(crate) fn tail_stdout_after_exit(text: &str, offset: u64) -> String {
+        tail_stdout_with(text, offset, false)
+    }
+
+    fn tail_stdout_with(text: &str, offset: u64, alive: bool) -> String {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+        marked(&format!(
+            "{{\"offset\":{offset},\"data\":\"{data}\",\"alive\":{alive}}}"
+        ))
+    }
+
+    /// A tool as the environment probe reports it — one machine's answer for one
+    /// of the two tools the launcher drives.
     pub(crate) fn remote_tool(path: &str, version: &str, source: &str) -> serde_json::Value {
         serde_json::json!({
             "path": path,
@@ -3032,6 +3195,85 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The launcher follows **this run's** output only. A log that a previous run
+    /// wrote to is still there when the next one starts (nothing truncates it),
+    /// and its URL line carries a token that belongs to a process which is gone;
+    /// reading the size first is what keeps the follower from adopting it.
+    #[test]
+    fn the_log_size_script_counts_an_absent_file_as_zero_and_a_real_one_as_its_bytes() {
+        let dir = scratch("dsh-remote-log-size");
+        let log = dir.join("instance.log");
+        let path = log.to_string_lossy().to_string();
+
+        #[derive(serde::Deserialize)]
+        struct Size {
+            offset: u64,
+        }
+        let absent: Size = parse_marked(&local_shell(&log_size_script(&path))).unwrap();
+        assert_eq!(absent.offset, 0, "还没有这个日志：从头开始");
+
+        std::fs::write(&log, "first run\n").unwrap();
+        let written: Size = parse_marked(&local_shell(&log_size_script(&path))).unwrap();
+        assert_eq!(written.offset, "first run\n".len() as u64);
+
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"offset":12}"#)));
+        assert_eq!(block_on(log_size(&*fake, &host(), &path)).unwrap(), 12);
+        assert!(fake.last_script().contains(&path), "问的是那台机器上的这个日志");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The local rule for a version's `bin.js` is 「在，而且不是空文件」; a remote
+    /// version gets the same question asked of the machine that has the file.
+    #[test]
+    fn the_file_ready_script_asks_that_machines_shell_whether_the_file_is_there_and_not_empty() {
+        let dir = scratch("dsh-remote-file-ready");
+        let bin = dir.join("versions 0.1.0/bin.js");
+        let path = bin.to_string_lossy().to_string();
+
+        #[derive(serde::Deserialize)]
+        struct Ready {
+            ready: bool,
+        }
+        let missing: Ready = parse_marked(&local_shell(&file_ready_script(&path))).unwrap();
+        assert!(!missing.ready, "文件不在：没装好");
+
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "").unwrap();
+        let empty: Ready = parse_marked(&local_shell(&file_ready_script(&path))).unwrap();
+        assert!(!empty.ready, "空文件：装到一半");
+
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        let there: Ready = parse_marked(&local_shell(&file_ready_script(&path))).unwrap();
+        assert!(there.ready);
+
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"ready":true}"#)));
+        assert!(block_on(file_ready(&*fake, &host(), &path)).unwrap());
+        assert!(fake.last_script().contains(&path), "问的是那台机器上的这个文件");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A pid number alone is not an identity: the answer has to be the process's
+    /// own start time, and a pid nothing is using has to say so instead of
+    /// inventing one. (A running pid's start time is only readable where `/proc`
+    /// exists, which is the machine this is aimed at — not the Mac the suite runs
+    /// on.)
+    #[test]
+    fn the_start_time_script_separates_a_live_pid_from_one_nothing_owns() {
+        #[derive(serde::Deserialize)]
+        struct Started {
+            started_at: Option<u64>,
+        }
+        let gone: Started = parse_marked(&local_shell(&start_time_script(4_000_000))).unwrap();
+        assert_eq!(gone.started_at, None, "没人占用的 pid 没有启动时间");
+
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            r#"{"started_at":117384720}"#,
+        )));
+        let started = block_on(process_start_time(&*fake, &host(), 4242)).unwrap();
+        assert_eq!(started, Some(117384720));
+        assert!(fake.last_script().contains("dsh_pid=4242"), "读的是那个 pid 自己的记录");
     }
 
     /// `~` is expanded **by the machine that owns the home directory**, and the
