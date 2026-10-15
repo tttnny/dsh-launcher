@@ -65,6 +65,26 @@ impl AppState {
             .insert(host_id.to_string(), status);
     }
 
+    /// Why the launcher currently cannot say anything about one host's instances
+    /// — `None` when the last word was 「到得了」, or when there is no word at all.
+    ///
+    /// The one definition of 「主机不可达」, and the one predicate on it: the
+    /// instance list, the plugin page, the bulk buttons and the tray all ask
+    /// this question, and two answers would let two of them disagree about the
+    /// same machine. 本机 is never in this state — nothing ever sets one for it.
+    pub fn host_unreachable_reason(&self, host_id: &str) -> Option<String> {
+        match self.host_status(host_id) {
+            Some(status) if status.state == config::HostState::Unreachable => Some(
+                status
+                    .message
+                    .map(|message| message.trim().to_string())
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| "那台机器没有回应".to_string()),
+            ),
+            _ => None,
+        }
+    }
+
     /// A deleted host takes its status with it: statuses are keyed by host id,
     /// and a host added later is not the same machine.
     pub fn forget_host_status(&self, host_id: &str) {

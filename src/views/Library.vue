@@ -42,14 +42,14 @@ const hostId = computed({
         <p class="dl-head-sub">{{ t('library.pageDesc') }}</p>
       </div>
       <div class="dl-head-actions">
-        <label class="host-picker">
+        <div class="host-picker">
           <span class="host-picker-label">{{ t('library.currentHost') }}</span>
           <a-select v-model="hostId" size="small" class="host-picker-select">
             <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">
               {{ h.display_name }}
             </a-option>
           </a-select>
-        </label>
+        </div>
         <div class="dl-segmented">
           <button
             v-for="tab in tabs"

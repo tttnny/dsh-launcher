@@ -4,7 +4,7 @@
 // (build scripts, peer policy, pnpm store pin). The launcher never writes
 // plugin state — the running DSH owns it (ADR-0001).
 
-use crate::config::{DshHome, Host, HostStatus, HostState};
+use crate::config::{DshHome, Host};
 use crate::native::{
     BundleItem, NativeChangeResult, NativeClient, NativeTransport, PluginView, PluginViewMode,
     ReqwestTransport,
@@ -153,8 +153,7 @@ async fn list_plugins_via(
     // why this does not fall through to a file projection: those files are over
     // there, and a local `fs` call aimed at that path answers about this Mac
     // (ADR-0006).
-    if is_host_unreachable(state, &host) {
-        let reason = host_unreachable_reason(&host, &state.host_status(&host.id));
+    if let Some(reason) = host_unreachable_note(state, &host) {
         return Ok(PluginView::readonly(
             PluginViewMode::Unreachable,
             reason,
@@ -226,35 +225,18 @@ fn home_and_host(state: &AppState, home_id: &str) -> Result<(DshHome, Host), Str
     Ok((home, host))
 }
 
-/// Whether the launcher currently knows this host is not answering. 本机 is
-/// never in that state: the machine the launcher runs on is here.
-fn is_host_unreachable(state: &AppState, host: &Host) -> bool {
-    !host.builtin
-        && state
-            .host_status(&host.id)
-            .map(|status| status.state == HostState::Unreachable)
-            .unwrap_or(false)
-}
-
 /// What the page says when the machine that owns the DSH_HOME cannot be reached:
-/// the machine's own reason when there is one, and the action that can change
-/// the answer.
-fn host_unreachable_reason(host: &Host, status: &Option<HostStatus>) -> String {
-    let detail = status
-        .as_ref()
-        .and_then(|s| s.message.as_deref())
-        .map(str::trim)
-        .filter(|d| !d.is_empty());
-    match detail {
-        Some(detail) => format!(
-            "主机「{}」现在连不上：{detail}。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。",
-            host.display_name
-        ),
-        None => format!(
-            "主机「{}」现在连不上。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。",
-            host.display_name
-        ),
-    }
+/// the machine's own reason when it gave one, and the action that can change the
+/// answer. `None` when it has not been reported unreachable — the predicate and
+/// the reason are one question, asked in one place
+/// ([`AppState::host_unreachable_reason`]), so two callers cannot disagree
+/// about the same machine.
+fn host_unreachable_note(state: &AppState, host: &Host) -> Option<String> {
+    let reason = state.host_unreachable_reason(&host.id)?;
+    Some(format!(
+        "主机「{}」现在连不上（{reason}）。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。",
+        host.display_name
+    ))
 }
 
 /// The profile's own files as a layer list, read **where they live**: 本机's
@@ -915,8 +897,8 @@ pub(crate) async fn write_client_via(
     instance_id: Option<&str>,
 ) -> Result<crate::native::NativeClient, String> {
     let (_, host) = home_and_host(state, home_id)?;
-    if is_host_unreachable(state, &host) {
-        return Err(host_unreachable_reason(&host, &state.host_status(&host.id)));
+    if let Some(reason) = host_unreachable_note(state, &host) {
+        return Err(reason);
     }
     let Some(entry) =
         crate::process::running_for_profile(state, home_id, profile, instance_id).await?

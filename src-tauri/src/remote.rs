@@ -1435,7 +1435,7 @@ if [ ! -f "$dsh_path" ]; then
   printf '远端没有这个文件：%s\n' "$dsh_path" >&2
   exit 2
 fi
-dsh_data=$(base64 "$dsh_path" | tr -d '\n')
+dsh_data=$(base64 < "$dsh_path" | tr -d '\n')
 printf '<<<DSH-JSON>>>{"data":"%s"}<<<DSH-END>>>' "$dsh_data"
 "#;
 

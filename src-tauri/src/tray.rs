@@ -265,12 +265,55 @@ fn stop_all_failure_note(failures: &[(String, String)]) -> Option<String> {
         many => Some(format!(
             "有 {} 个实例没能停止：\n{}",
             many.len(),
-            many.iter()
-                .map(|(label, reason)| format!("· {label}：{reason}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            failure_lines(many)
         )),
     }
+}
+
+/// What a start-all says when it did not do everything it was asked to. Two
+/// things can hold an instance back and they are not the same news: a start that
+/// ran and failed, with the reason the backend gave, and an instance left alone
+/// because its machine could not be reached — never attempted, since nothing is
+/// known about what already runs there (ADR-0007). `None` when every instance it
+/// set out for did start.
+fn start_all_report(failures: &[(String, String)], skipped: &[String]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match failures {
+        [] => {}
+        [(label, reason)] => parts.push(format!("启动实例「{label}」失败：{reason}")),
+        many => parts.push(format!(
+            "有 {} 个实例没能启动：\n{}",
+            many.len(),
+            failure_lines(many)
+        )),
+    }
+    if !skipped.is_empty() {
+        parts.push(format!(
+            "跳过 {} 个实例：它们所在的机器现在连不上，启动器不知道那边是不是已经在跑，所以没有动它们。\n{}",
+            skipped.len(),
+            skipped
+                .iter()
+                .map(|label| format!("· {label}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+/// One line per instance that did not go through, naming it and repeating the
+/// reason it gave. Both bulk actions say their failures this way, so the two
+/// dialogs cannot end up listing them differently.
+fn failure_lines(failures: &[(String, String)]) -> String {
+    failures
+        .iter()
+        .map(|(label, reason)| format!("· {label}：{reason}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<tauri::Wry>> {
@@ -448,34 +491,54 @@ fn show_and_navigate(app: &AppHandle, route: &str) {
 /// Starts every configured but currently stopped instance with its
 /// last-used (falling back to default, then "web") profile.
 /// Reuses `process::start_instance_process`; never touches config files.
+///
+/// A machine the launcher cannot reach is **skipped, not attempted**: nothing is
+/// known about what already runs there, and the click that starts one anyway is
+/// how a second DSH lands on a server (ADR-0007). The tray has no page to say
+/// that on, so it says it in one dialog — the same rule the board's 全部启动
+/// follows (`instancesBulk.ts`), and the same reason that button reports skips.
 fn start_all_instances(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let pending: Vec<(String, String)> = {
+        let (pending, skipped): (Vec<(String, String, String)>, Vec<String>) = {
             let running = state.running.lock().await;
             let cfg = state.config.lock().unwrap();
-            cfg.instances
-                .iter()
-                .filter(|i| !running.contains_key(&i.id))
-                .map(|i| {
-                    let profile = i
-                        .last_profile
-                        .clone()
-                        .or_else(|| i.default_profile.clone())
-                        .unwrap_or_else(|| "web".to_string());
-                    (i.id.clone(), profile)
-                })
-                .collect()
+            let mut pending = Vec::new();
+            let mut skipped = Vec::new();
+            for inst in cfg.instances.iter().filter(|i| !running.contains_key(&i.id)) {
+                let host_id = if inst.host_id.trim().is_empty() {
+                    LOCAL_HOST_ID
+                } else {
+                    inst.host_id.trim()
+                };
+                let label = instance_label(&inst.name, &host_label(&cfg, host_id));
+                if state.host_unreachable_reason(host_id).is_some() {
+                    skipped.push(label);
+                    continue;
+                }
+                let profile = inst
+                    .last_profile
+                    .clone()
+                    .or_else(|| inst.default_profile.clone())
+                    .unwrap_or_else(|| "web".to_string());
+                pending.push((inst.id.clone(), profile, label));
+            }
+            (pending, skipped)
         };
-        if pending.is_empty() {
+        if pending.is_empty() && skipped.is_empty() {
             crate::log_info!("托盘：全部实例已在运行，无需启动");
             return;
         }
-        for (id, profile) in pending {
-            if let Err(e) = process::start_instance_process(&app, &state, &id, &profile).await {
-                crate::log_warn!("托盘启动全部：实例 {id} 启动失败: {e}");
+        let mut failures: Vec<(String, String)> = Vec::new();
+        for (id, profile, label) in pending {
+            if let Err(reason) = process::start_instance_process(&app, &state, &id, &profile).await {
+                crate::log_warn!("托盘启动全部：实例 {id} 启动失败: {reason}");
+                failures.push((label, reason));
             }
+        }
+        if let Some(note) = start_all_report(&failures, &skipped) {
+            report_to_user(&app, &note);
         }
     });
 }

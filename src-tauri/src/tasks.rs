@@ -188,7 +188,13 @@ async fn start_create_instance_task(
     // Validate early so a doomed task is never enqueued.
     {
         let cfg = state.config.lock().unwrap();
-        if cfg.instances.iter().any(|i| i.name == name) {
+        // Names are unique per host: two machines may each have an instance
+        // called 「web」, and this path is how a version's own instance is named.
+        if cfg
+            .instances
+            .iter()
+            .any(|i| i.name == name && i.host_id == host.id)
+        {
             return Err("同名实例已存在".to_string());
         }
         // For a non-dedicated task the chosen HOME must exist already.
@@ -217,7 +223,7 @@ async fn start_create_instance_task(
         let mut tasks = state.tasks.lock().await;
         for task in tasks.values() {
             if task.state == TaskState::Running {
-                if task.instance_name.as_deref() == Some(name.as_str()) {
+                if task.instance_name.as_deref() == Some(name.as_str()) && task.host_id == host.id {
                     return Err("同名实例的下载任务已在进行中".to_string());
                 }
                 if task.host_id != host.id {
@@ -533,7 +539,11 @@ async fn do_create_instance(
     // 3. Create the instance record.
     let inst = {
         let mut cfg = state.config.lock().unwrap();
-        if cfg.instances.iter().any(|i| i.name == name) {
+        if cfg
+            .instances
+            .iter()
+            .any(|i| i.name == name && i.host_id == host.id)
+        {
             return Err("同名实例已存在".to_string());
         }
         if !cfg.homes.iter().any(|h| h.id == resolved_home_id) {

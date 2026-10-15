@@ -1,5 +1,5 @@
 use crate::config::{
-    DshInstance, DshVersion, Host, HostState, HostStatus, InstanceState, InstanceStatus,
+    DshInstance, DshVersion, Host, HostStatus, InstanceState, InstanceStatus,
 };
 use crate::AppState;
 use regex::Regex;
@@ -1344,6 +1344,11 @@ pub(crate) enum RemoteStop {
     /// Nothing was signalled, and why: a pid that is not the process the
     /// launcher started, or a start time that cannot be checked at all.
     NotSignalled(String),
+    /// The pid now belongs to a **different** process — the kernel reused the
+    /// number, so the one the launcher started has exited. Nothing was
+    /// signalled, and nothing about this instance is left running: the caller
+    /// must forget the entry and report it exited.
+    Reused(String),
     /// The signal went and the process did not go.
     StillRunning(String),
     /// The machine did not answer.
@@ -1388,7 +1393,7 @@ pub(crate) async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Remote
         },
         (Some(now), Some(stored)) if now == stored => {}
         (Some(now), Some(stored)) => {
-            return RemoteStop::NotSignalled(format!(
+            return RemoteStop::Reused(format!(
                 "pid {} 在「{target}」上已被系统复用（现在的启动时间 {now}，启动时记下的是 {stored}）：没有发信号",
                 run.pid
             ))
@@ -1441,6 +1446,20 @@ async fn recall_remote_run(
         .and_then(|value| serde_json::from_value::<RemoteRunRecord>(value.clone()).ok()))
 }
 
+/// The two things every call to another machine needs — how to reach that
+/// machine, and where its data directory is — or the reason this Mac cannot
+/// work them out. Both are facts about the *host*, not about one instance, so
+/// both are reported the same way wherever they block a call: a host the
+/// launcher cannot place is a host it cannot ask.
+fn remote_parts(host: &Host, launcher_data_dir: &Path) -> Result<(crate::ssh::RemoteHost, PathBuf), String> {
+    let run_host = crate::ssh::RemoteHost::of(host, launcher_data_dir)
+        .map_err(|_| format!("「{}」是本机，它上面没有远端进程", host.display_name))?;
+    let data_dir = host
+        .data_dir(launcher_data_dir)
+        .map_err(|_| format!("无法确定「{}」的数据目录", host.display_name))?;
+    Ok((run_host, data_dir))
+}
+
 /// What state one remote instance is in right now, as the machine that runs it
 /// reports it.
 ///
@@ -1458,11 +1477,9 @@ pub(crate) async fn check_remote_instance(
     inst: &DshInstance,
     host: &Host,
 ) -> RemoteVerdict {
-    let Ok(run_host) = crate::ssh::RemoteHost::of(host, &state.data_dir) else {
-        return RemoteVerdict::Unreachable(format!("「{}」是本机，它上面没有远端进程", host.display_name));
-    };
-    let Ok(data_dir) = host.data_dir(&state.data_dir) else {
-        return RemoteVerdict::Unreachable(format!("无法确定「{}」的数据目录", host.display_name));
+    let (run_host, data_dir) = match remote_parts(host, &state.data_dir) {
+        Ok(parts) => parts,
+        Err(reason) => return RemoteVerdict::Unreachable(reason),
     };
     let transport = &*state.host_transport;
     let record = match recall_remote_run(state, &run_host, &data_dir, &inst.id).await {
@@ -1778,11 +1795,9 @@ pub(crate) async fn settle_remote_instance(
     // That machine was talked to, whatever the answer was: its instances are no
     // longer 「还没查」.
     finish_remote_scan(state, &host.id);
-    let Ok(run_host) = crate::ssh::RemoteHost::of(host, &state.data_dir) else {
-        return InstanceState::Unreachable;
-    };
-    let Ok(data_dir) = host.data_dir(&state.data_dir) else {
-        return InstanceState::Unreachable;
+    let (run_host, data_dir) = match remote_parts(host, &state.data_dir) {
+        Ok(parts) => parts,
+        Err(reason) => return report_unreachable(app, state, inst, host, reason),
     };
     match verdict {
         RemoteVerdict::Running {
@@ -1820,22 +1835,35 @@ pub(crate) async fn settle_remote_instance(
             );
             InstanceState::Stopped
         }
-        RemoteVerdict::Unreachable(reason) => {
-            state.set_host_status(&host.id, HostStatus::unreachable(reason));
-            emit_status(
-                app,
-                &InstanceStatus {
-                    id: inst.id.clone(),
-                    state: InstanceState::Unreachable,
-                    url: None,
-                    remote_url: None,
-                    profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
-                    exit_code: None,
-                },
-            );
-            InstanceState::Unreachable
-        }
+        RemoteVerdict::Unreachable(reason) => report_unreachable(app, state, inst, host, reason),
     }
+}
+
+/// States one host's failure on both channels the page reads: the per-host
+/// status `list_statuses` consults, and the per-instance event. Reporting only
+/// the returned state would leave `list_statuses` silent for that host, and a
+/// silent host is one the page's `statusOf` reads as 「已停止」 — the misreading
+/// ADR-0007 exists to prevent.
+fn report_unreachable(
+    app: &AppHandle,
+    state: &AppState,
+    inst: &DshInstance,
+    host: &Host,
+    reason: String,
+) -> InstanceState {
+    state.set_host_status(&host.id, HostStatus::unreachable(reason));
+    emit_status(
+        app,
+        &InstanceStatus {
+            id: inst.id.clone(),
+            state: InstanceState::Unreachable,
+            url: None,
+            remote_url: None,
+            profile: profile_hint(inst),
+            exit_code: None,
+        },
+    );
+    InstanceState::Unreachable
 }
 
 /// Marks every remote host's instances as 「还没查」 for the launch-time scan.
@@ -2412,6 +2440,28 @@ pub async fn stop_instance_process(
                 Err(reason)
             }
             RemoteStop::NotSignalled(reason) | RemoteStop::StillRunning(reason) => Err(reason),
+            // The pid was reused, so the process the launcher started is gone:
+            // an entry kept for it would claim 运行中 for something that proved
+            // itself ended, and nothing but a launcher restart would clear it.
+            // It exited, so the record is forgotten and the row says so.
+            RemoteStop::Reused(reason) => {
+                crate::log_warn!("实例 {instance_id} 的 pid 已被系统复用，按已退出处理：{reason}");
+                unregister_running(
+                    app,
+                    state,
+                    instance_id,
+                    InstanceStatus {
+                        id: instance_id.to_string(),
+                        state: InstanceState::Stopped,
+                        url: None,
+                        remote_url: None,
+                        profile: Some(profile),
+                        exit_code: None,
+                    },
+                )
+                .await;
+                Ok(())
+            }
         };
     }
     if let Some(a) = adopted {
@@ -2491,17 +2541,6 @@ pub async fn restart_instance_process(
     start_instance_process(app, state, instance_id, &profile).await
 }
 
-/// Why the launcher cannot currently say anything about the instances of a host
-/// — `None` when the last word was 「到得了」, or when there is no word at all.
-fn host_unreachable_reason(state: &AppState, host_id: &str) -> Option<String> {
-    match state.host_status(host_id) {
-        Some(status) if status.state == HostState::Unreachable => {
-            Some(status.message.unwrap_or_else(|| "主机不可达".to_string()))
-        }
-        _ => None,
-    }
-}
-
 /// The profile a status talks about when the process itself has nothing to say.
 fn profile_hint(inst: &DshInstance) -> Option<String> {
     inst.last_profile.clone().or_else(|| inst.default_profile.clone())
@@ -2536,7 +2575,7 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
             let lost = entry
                 .remote
                 .as_ref()
-                .and_then(|run| host_unreachable_reason(state, &run.host_id));
+                .and_then(|run| state.host_unreachable_reason(&run.host_id));
             InstanceStatus {
                 id: id.clone(),
                 state: if lost.is_some() {
@@ -2575,7 +2614,7 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
             });
             continue;
         }
-        if host_unreachable_reason(state, &inst.host_id).is_some() {
+        if state.host_unreachable_reason(&inst.host_id).is_some() {
             out.push(InstanceStatus {
                 id: inst.id.clone(),
                 state: InstanceState::Unreachable,
@@ -3514,7 +3553,7 @@ mod tests {
         let outcome = stop_remote_run(&state, &remote_run()).await;
 
         match outcome {
-            RemoteStop::NotSignalled(reason) => assert!(reason.contains("复用"), "{reason}"),
+            RemoteStop::Reused(reason) => assert!(reason.contains("复用"), "{reason}"),
             other => panic!("一个被复用的 pid 不能当成我们的进程：{other:?}"),
         }
         assert!(

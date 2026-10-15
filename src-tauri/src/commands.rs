@@ -1002,7 +1002,14 @@ pub fn create_instance(
     }
     let mut cfg = state.config.lock().unwrap();
     let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
-    if cfg.instances.iter().any(|i| i.name == name) {
+    // Names are unique **per host**: two machines may each have an instance
+    // called 「web」, and the row, the tray and the plugin link all keep telling
+    // them apart by host. A name only has to be unambiguous where it is used.
+    if cfg
+        .instances
+        .iter()
+        .any(|i| i.name == name && i.host_id == host.id)
+    {
         return Err("同名实例已存在".to_string());
     }
     let Some(version) = cfg.versions.iter().find(|v| v.id == version_id) else {
@@ -1036,8 +1043,9 @@ pub fn create_instance(
 
 /// Deletes one instance record. The version, the DSH_HOME and every other
 /// instance are untouched — an instance is a binding, not a directory. Only the
-/// instance's own local icon file (which the launcher itself wrote into the
-/// HOME's `icons/` folder) is removed, and that removal is best-effort.
+/// instance's own icon file (which the launcher itself wrote into the HOME's
+/// `icons/` folder — on this Mac, or on the machine the instance runs on) is
+/// removed, and that removal is best-effort.
 #[tauri::command]
 pub async fn delete_instance(
     app: AppHandle,
@@ -1056,7 +1064,9 @@ pub async fn delete_instance(
             .map_err(|e| format!("实例没能停下来，记录没有删：{e}"))?;
     }
 
-    let icon_path = {
+    // Resolve where the icon file is — which machine, and which HOME — before
+    // saving: the record is the only thing that names the file.
+    let icon_scope = {
         let mut cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
         let Some(pos) = cfg
@@ -1070,21 +1080,19 @@ pub async fn delete_instance(
         if cfg.settings.last_instance_id.as_deref() == Some(id.as_str()) {
             cfg.settings.last_instance_id = None;
         }
-        // Resolve the local icon path before saving: the record is the only
-        // thing that names the file, so it must be read while it still exists.
-        let icon_path = if inst.icon.as_deref() == Some("local") {
+        let icon_scope = if inst.icon.as_deref() == Some("local") {
             cfg.homes
                 .iter()
                 .find(|h| h.id == inst.home_id)
-                .map(|h| crate::icons::local_icon_path(&h.path, &id))
+                .map(|h| (host, h.path.clone()))
         } else {
             None
         };
         save_state(&state, &cfg.clone())?;
-        icon_path
+        icon_scope
     };
-    if let Some(path) = icon_path {
-        let _ = std::fs::remove_file(path);
+    if let Some((host, home)) = icon_scope {
+        crate::icons::remove_icon_file(&state, &host, &home, &id).await;
     }
     Ok(())
 }
@@ -1104,7 +1112,7 @@ pub fn update_instance(
     if cfg
         .instances
         .iter()
-        .any(|i| i.name == name && i.id != input.id)
+        .any(|i| i.name == name && i.id != input.id && i.host_id == host.id)
     {
         return Err("同名实例已存在".to_string());
     }
