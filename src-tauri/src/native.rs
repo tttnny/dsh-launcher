@@ -576,7 +576,10 @@ pub enum PluginViewMode {
     NotRunning,
     /// The instance was adopted from an external process (no token).
     Adopted,
-    /// An instance is running but refused the connection / cookie.
+    /// An instance is running, and the launcher could not reach it: the
+    /// connection failed, or — for a remote instance — the machine it runs on
+    /// did not answer, so nothing about it could be read at all. The reason
+    /// says which, and the page offers the retry that asks again.
     Unreachable,
 }
 

@@ -94,6 +94,12 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
 /// with no usable token and an unreachable one take the read-only path; their
 /// `reason` differs so the two are distinguishable, and so is "not running".
 ///
+/// A remote instance is asked at the address **this Mac** reaches it at: the
+/// launcher's own port forward, re-confirmed (and rebuilt, if it died) before
+/// every call ([`crate::process::reachable_url_for`], ADR-0008). The projection
+/// for the read-only path is read on the machine that owns the profile, and a
+/// machine the launcher cannot reach answers with its own reason instead.
+///
 /// The instance is resolved from the selectors: the same DSH_HOME, running the
 /// selected profile (see [`crate::process::running_for_profile`]). `instance_id`
 /// is the instance the page was opened from, and it wins when it is itself
