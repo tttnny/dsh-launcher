@@ -318,6 +318,99 @@ pub async fn alive(
     Ok(parse_marked::<Answer>(&out)?.alive)
 }
 
+/// One listener on a port **on that machine**: its pid when `ss` could name it,
+/// and the command `ps` reports. A listener belonging to another user comes
+/// back without a pid and with an empty command — 「被占着，但说不出是谁」.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemotePortOwner {
+    pub pid: Option<i32>,
+    pub command: String,
+}
+
+/// Who holds `port` on that machine. `None` = nothing is listening there.
+///
+/// The probe runs **there**; a local `lsof` would answer about this Mac's
+/// listeners (`crate::process::probe_port_owner` is that half).
+pub async fn port_owner(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    port: u16,
+) -> Result<Option<RemotePortOwner>, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        occupied: bool,
+        pid: Option<i32>,
+        command: String,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(port_owner_script(port)))
+        .await?;
+    let answer: Answer = parse_marked(&out)?;
+    Ok(answer.occupied.then_some(RemotePortOwner {
+        pid: answer.pid,
+        command: answer.command,
+    }))
+}
+
+/// Whether the process tree one detached spawn started is gone, waiting up to
+/// `wait_secs` **on that machine** for it to go.
+pub async fn wait_gone(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    pid: i32,
+    wait_secs: u64,
+) -> Result<bool, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        gone: bool,
+    }
+    let out = transport
+        .run(
+            host,
+            RemoteCall::within(wait_gone_script(pid, wait_secs), DEFAULT_TIMEOUT),
+        )
+        .await?;
+    Ok(parse_marked::<Answer>(&out)?.gone)
+}
+
+/// What one attempt to spend an instance URL's launch token left behind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteMint {
+    /// The HTTP status, 0 when that machine has no `curl` (or the request never
+    /// got an answer).
+    pub status: u16,
+    /// The `Set-Cookie` pair, when the instance sent one.
+    pub cookie: Option<String>,
+}
+
+/// Asks **that machine** to spend one instance URL's launch token, and reports
+/// what its instance answered.
+///
+/// The token belongs to an instance listening on that machine's loopback, so
+/// only a request made there can say whether it is still accepted (ADR-0006:
+/// the same URL read from here would reach a different service). Whether the
+/// answer counts as 「认证成功」 is [`crate::native`]'s business — the cookie name
+/// is bound to the authority — and that decision stays in one place.
+pub async fn mint_headers(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    url: &str,
+) -> Result<RemoteMint, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        status: u16,
+        cookie: Option<String>,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(mint_script(url)))
+        .await?;
+    let answer: Answer = parse_marked(&out)?;
+    Ok(RemoteMint {
+        status: answer.status,
+        cookie: answer.cookie,
+    })
+}
+
 /// How many bytes one remote log already holds.
 ///
 /// Read *before* a detached spawn: the log is appended to across runs (a stopped
@@ -1317,6 +1410,87 @@ else
 fi
 "#;
 
+/// Who holds one TCP port on that machine, as `ss` names it: the pid of the
+/// listening process, and the short command name `ps` reports for that pid.
+///
+/// `ss` is where a port's occupant is visible — and unlike a probe done from
+/// here, it answers about **that** machine's listeners (ADR-0006). The number
+/// alone is not enough to move the occupant out of the way, so the name is read
+/// too; a listener this user does not own comes back without a pid, which is
+/// still the answer "occupied, by somebody else".
+const PORT_OWNER: &str = r#"set -u
+dsh_port=%%PORT%%
+dsh_row=$(ss -ltnp 2>/dev/null | grep -E ":${dsh_port}[[:space:]]" | head -n 1)
+if [ -z "$dsh_row" ]; then
+  printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":""}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_pid=$(printf '%s' "$dsh_row" | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2)
+if [ -z "$dsh_pid" ]; then
+  printf '<<<DSH-JSON>>>{"occupied":true,"pid":null,"command":""}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_name=$(ps -p "$dsh_pid" -o comm= 2>/dev/null | head -n 1 | tr -d '\r\n"\\')
+printf '<<<DSH-JSON>>>{"occupied":true,"pid":%s,"command":"%s"}<<<DSH-END>>>' "$dsh_pid" "$dsh_name"
+"#;
+
+/// Waits **on that machine** until one process tree is gone, or the budget runs
+/// out. The same predicate [`ALIVE`] reports with, so 「信号发出去了」 and 「真的
+/// 没了」 cannot disagree.
+///
+/// The wait belongs over there for the same reason [`TAIL`]'s does: confirming a
+/// stop by polling from here would open one ssh per second, when the only fact
+/// needed is when that machine stops seeing the process.
+const WAIT_GONE: &str = r#"set -u
+dsh_pid=%%PID%%
+dsh_wait=%%WAIT%%
+
+dsh_alive() {
+  kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null
+}
+
+dsh_i=0
+while [ "$dsh_i" -lt "$dsh_wait" ] && dsh_alive; do
+  sleep 1
+  dsh_i=$((dsh_i + 1))
+done
+if dsh_alive; then
+  printf '<<<DSH-JSON>>>{"gone":false}<<<DSH-END>>>'
+else
+  printf '<<<DSH-JSON>>>{"gone":true}<<<DSH-END>>>'
+fi
+"#;
+
+/// Exchanges one instance URL's launch token for its session cookie **on that
+/// machine**, and reports what came back: the HTTP status and the raw
+/// `Set-Cookie` pair.
+///
+/// The request has to be made there. A remote instance binds that machine's own
+/// `127.0.0.1`, so asking the same URL from 本机 would be asking this Mac about a
+/// different service — the confusion ADR-0006 exists to prevent, and the reason
+/// the token cannot be trusted by trying it from here. Deciding whether the
+/// answer means 「认证成功」 is [`crate::native`]'s rule (the cookie name is bound
+/// to the authority); this script only carries the response.
+///
+/// No `curl` on that machine reads as status 0 with no cookie: 「问不出来」, which
+/// the caller treats as 「没有认证成功」 — never as success.
+const MINT_REMOTE: &str = r#"set -u
+dsh_url=%%URL%%
+dsh_curl=$(command -v curl 2>/dev/null || true)
+if [ -z "$dsh_curl" ]; then
+  printf '<<<DSH-JSON>>>{"status":0,"cookie":null}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_head=$("$dsh_curl" -s -S -o /dev/null -D - --max-time 10 "$dsh_url" 2>/dev/null || true)
+dsh_status=$(printf '%s\n' "$dsh_head" | awk 'toupper($1) ~ /^HTTP\// {code=$2} END {print code+0}')
+dsh_cookie=$(printf '%s\n' "$dsh_head" | awk 'tolower($1) == "set-cookie:" {print $2; exit}' | tr -d '\r')
+if [ -z "$dsh_cookie" ]; then
+  printf '<<<DSH-JSON>>>{"status":%s,"cookie":null}<<<DSH-END>>>' "$dsh_status"
+else
+  printf '<<<DSH-JSON>>>{"status":%s,"cookie":"%s"}<<<DSH-END>>>' "$dsh_status" "$dsh_cookie"
+fi
+"#;
+
 /// How many bytes a log already holds. A file that is not there yet is zero:
 /// every caller here reads the size of a log it is about to append to.
 const LOG_SIZE: &str = r#"set -u
@@ -1528,6 +1702,27 @@ pub fn file_ready_script(path: &str) -> String {
 /// The start-time read for one pid.
 pub fn start_time_script(pid: i32) -> String {
     fill(START_TIME, &[("%%PID%%", pid.to_string())])
+}
+
+/// The occupancy probe for one port on that machine.
+pub fn port_owner_script(port: u16) -> String {
+    fill(PORT_OWNER, &[("%%PORT%%", port.to_string())])
+}
+
+/// The remote-side wait for one process tree to go.
+pub fn wait_gone_script(pid: i32, wait_secs: u64) -> String {
+    fill(
+        WAIT_GONE,
+        &[
+            ("%%PID%%", pid.to_string()),
+            ("%%WAIT%%", wait_secs.to_string()),
+        ],
+    )
+}
+
+/// The token exchange for one instance URL, made on that machine.
+pub fn mint_script(url: &str) -> String {
+    fill(MINT_REMOTE, &[("%%URL%%", quote(url))])
 }
 
 /// The script for one detached process: `argv` is the command line (already the

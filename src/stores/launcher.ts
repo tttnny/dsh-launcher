@@ -192,6 +192,17 @@ export const useLauncherStore = defineStore('launcher', {
     isHomeShared: (s) => (homeId: string) =>
       s.instances.some((i) => i.home_id === homeId) &&
       s.instances.filter((i) => i.home_id === homeId).length > 1,
+    /**
+     * The state of one instance. Absence from `statusById` means 「已停止」.
+     *
+     * That reading is only safe because the backend never leaves a remote
+     * instance undecided: its launch-time scan pushes 「启动中」 for every remote
+     * instance it has not asked about yet, and 「主机不可达」 for one whose machine
+     * did not answer (`process::list_statuses`). Neither of those ever reaches
+     * here as an absent record, which is what keeps 「已停止」 from being guessed
+     * at — the one word that leads a user to start a second DSH on a server
+     * (ADR-0007 后果).
+     */
     statusOf: (s) => (id: string): InstanceStatus =>
       s.statusById[id] ?? { id, state: 'stopped', url: null, profile: null, exit_code: null },
     healthErrorCount: (s) => s.healthLogs.filter((l) => l.level === 'error').length,

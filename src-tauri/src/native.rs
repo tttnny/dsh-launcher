@@ -531,6 +531,29 @@ fn token_of(url: &str) -> Result<String, String> {
         .ok_or_else(|| "实例 URL 缺少启动 token".to_string())
 }
 
+/// Whether one `Set-Cookie` pair is this URL's own session cookie — i.e. the
+/// instance accepted the URL's launch token (and, for a remote instance, that
+/// the exchange happened on the machine the URL belongs to).
+///
+/// The cookie name is derived from the authority, so the same rule decides a
+/// cookie read back from a request made on that machine
+/// ([`crate::remote::mint_headers`]) and one [`ReqwestTransport::mint`] read
+/// here: a token that was not accepted mints no cookie at all, and a cookie
+/// minted for another authority is not this instance's.
+pub(crate) fn cookie_pair_matches(url: &str, pair: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+        return false;
+    };
+    let Ok(authority) = authority_of(&parsed) else {
+        return false;
+    };
+    pair.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .starts_with(&format!("{}=", cookie_name(&authority)))
+}
+
 /// The auth cookie name the instance mints:
 /// `dsh-auth-<base64url(sha256("<host>:<port>"))>` with no padding.
 fn cookie_name(authority: &str) -> String {

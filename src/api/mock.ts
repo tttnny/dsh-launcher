@@ -1203,6 +1203,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       emitStatus(stopped)
       return mockCall('start_instance', { id, profile: entry.profile })
     }
+    case 'refresh_instance_status': {
+      // The page's retry. The browser preview has no machine to ask, so it
+      // mirrors what a reachable one answers: whatever the preview's own running
+      // table says, or 「已停止」 when it holds nothing — the 「主机不可达」 the row
+      // was showing comes off with it.
+      const id = String(args?.id)
+      const entry = db.running[id]
+      if (entry) {
+        emitStatus(entry)
+      } else {
+        emitStatus({ id, state: 'stopped', url: null, profile: null, exit_code: null })
+      }
+      return undefined as T
+    }
     case 'open_instance_window': {
       // Browser preview mirrors the desktop behavior (system browser):
       // open the running instance URL in a new tab.

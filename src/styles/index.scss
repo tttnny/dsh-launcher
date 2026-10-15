@@ -497,6 +497,17 @@ body {
   &.is-stopped {
     color: var(--dl-ink-3);
   }
+
+  // 「主机不可达」 is not 「已停止」: the instance may well be running on a machine
+  // the launcher cannot reach right now, so this carries the attention colour
+  // (and no pulse — nothing is happening here, which is the point).
+  &.is-unreachable {
+    color: var(--dl-warn);
+
+    &::before {
+      background: var(--dl-warn);
+    }
+  }
 }
 
 @keyframes dl-pulse {

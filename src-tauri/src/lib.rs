@@ -38,6 +38,11 @@ pub struct AppState {
     /// host record — a machine that is switched off is still a machine the user
     /// saved (ADR-0006).
     pub host_statuses: StdMutex<HashMap<String, config::HostStatus>>,
+    /// Remote hosts whose instances this session has not checked yet. Until a
+    /// host leaves this set, nothing is known about its instances, and the page
+    /// reads that as 「启动中」 — never as 「已停止」, which is the state that makes
+    /// a user start a second DSH on the server (ADR-0007 后果).
+    pub remote_scan: StdMutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
@@ -162,6 +167,7 @@ pub fn run() {
                 tasks: tokio::sync::Mutex::new(HashMap::new()),
                 host_transport: Arc::new(ssh::SshTransport::new()),
                 host_statuses: StdMutex::new(HashMap::new()),
+                remote_scan: StdMutex::new(std::collections::HashSet::new()),
             });
 
             // Resolve the toolchain once at startup and persist it, so the
@@ -194,11 +200,23 @@ pub fn run() {
 
             // Instances that outlived the last launcher session (an update, a
             // force quit) are adopted in the background, so the board, the tray
-            // and the plugins page all agree they are running.
+            // and the plugins page all agree they are running. 本机's instances
+            // are found by probing this Mac's ports; every remote host's by
+            // asking that machine (ADR-0007 §2) — which is also why the remote
+            // hosts are marked 「还没查」 first: until a machine has answered,
+            // its instances are unknown, not stopped.
+            {
+                let handle = app.handle().clone();
+                let state = handle.state::<AppState>();
+                crate::process::begin_remote_scan(&state);
+                tauri::async_runtime::spawn(async move {
+                    crate::process::adopt_surviving_instances(&handle).await;
+                });
+            }
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::process::adopt_surviving_instances(&handle).await;
+                    crate::process::adopt_surviving_remote_instances(&handle).await;
                 });
             }
 
@@ -245,6 +263,7 @@ pub fn run() {
             commands::restart_instance,
             commands::check_instance_health,
             commands::list_instance_status,
+            commands::refresh_instance_status,
             commands::open_instance_window,
             commands::open_external,
             commands::open_launcher_directory,
