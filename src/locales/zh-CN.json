@@ -15,7 +15,10 @@
     "pageDesc": "实例由三样东西组成：一份 DSH 版本、一个 DSH_HOME、一个 Profile。这里准备它们。",
     "tabVersions": "DSH 版本",
     "tabHomes": "DSH_HOME",
-    "tabProfiles": "Profile"
+    "tabProfiles": "Profile",
+    "currentHost": "当前主机",
+    "hostErrorTitle": "读不到这台主机的资源",
+    "hostErrorHint": "上面是那台机器回的话。修好之后再试一次。"
   },
   "home": {
     "selectProfile": "选择 Profile",
@@ -56,6 +59,9 @@
     "pageDesc": "每个实例绑定一份 DSH 版本、一个 DSH_HOME 和一个 Profile。启动后，DSH 的 Web 界面会在系统浏览器里打开。",
     "namePrefix": "实例 ",
     "summary": "共 {total} 个 · 运行中 {running}",
+    "hostFilter": "主机",
+    "hostAll": "全部",
+    "localTag": "本机",
     "newInstance": "新建实例",
     "startAll": "全部启动",
     "stopAll": "全部停止",
@@ -165,6 +171,8 @@
   "versions": {
     "installedTitle": "已安装",
     "installedTag": "已安装",
+    "binMissing": "安装不完整",
+    "binMissingHint": "这个版本的启动文件不在，装一次才算装好。",
     "emptyInstalled": "还没有安装任何 DSH 版本",
     "availableTitle": "可安装",
     "channelAll": "全部",
@@ -186,7 +194,8 @@
     "installTaskStarted": "已开始安装 DSH {version}",
     "alreadyInstalled": "版本 {version} 已经安装",
     "cancelInstall": "取消安装",
-    "installing": "安装中"
+    "installing": "安装中",
+    "installLocalOnly": "装版本目前只在本机进行"
   },
   "settings": {
     "title": "设置",

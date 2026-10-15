@@ -15,7 +15,10 @@
     "pageDesc": "An instance is three things: a DSH version, a DSH_HOME and a profile. Prepare them here.",
     "tabVersions": "DSH versions",
     "tabHomes": "DSH_HOME",
-    "tabProfiles": "Profiles"
+    "tabProfiles": "Profiles",
+    "currentHost": "Current host",
+    "hostErrorTitle": "This host's resources are out of reach",
+    "hostErrorHint": "That is what the machine said. Try again once it is reachable."
   },
   "home": {
     "selectProfile": "Select profile",
@@ -81,7 +84,10 @@
     "envNone": "None",
     "healthOk": "No issues",
     "healthErrors": "{count} errors",
-    "healthWarns": "{count} warnings"
+    "healthWarns": "{count} warnings",
+    "hostFilter": "Host",
+    "hostAll": "All",
+    "localTag": "This Mac"
   },
   "homes": {
     "homesTitle": "DSH_HOME directories",
@@ -186,7 +192,10 @@
     "installTaskStarted": "Installing DSH {version}",
     "alreadyInstalled": "Version {version} is already installed",
     "cancelInstall": "Cancel",
-    "installing": "Installing"
+    "installing": "Installing",
+    "binMissing": "Incomplete install",
+    "binMissingHint": "This version has no launcher file; it needs installing again.",
+    "installLocalOnly": "Installs currently run on this Mac only"
   },
   "settings": {
     "title": "Settings",

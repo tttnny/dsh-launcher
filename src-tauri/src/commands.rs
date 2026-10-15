@@ -1797,11 +1797,16 @@ pub fn open_instance_directory(
             .iter()
             .find(|i| i.id == instance_id)
             .ok_or_else(|| "实例不存在".to_string())?;
-        cfg.homes
+        let home = cfg
+            .homes
             .iter()
             .find(|h| h.id == inst.home_id)
-            .map(|h| h.path.clone())
-            .ok_or_else(|| "DSH_HOME 不存在".to_string())?
+            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
+        // A remote instance's HOME is a directory on that server: creating it
+        // here would leave a stray directory on this Mac at the same spelling,
+        // and opening it in the file manager would show the wrong machine.
+        crate::config::resolve_host(&cfg, Some(&home.host_id))?.local_paths_only("DSH_HOME 目录")?;
+        home.path.clone()
     };
     if !home.is_dir() {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建目录失败: {e}"))?;
@@ -1823,11 +1828,15 @@ pub fn open_home_directory(
 ) -> Result<String, String> {
     let home = {
         let cfg = state.config.lock().unwrap();
-        cfg.homes
+        let home = cfg
+            .homes
             .iter()
             .find(|h| h.id == home_id)
-            .map(|h| h.path.clone())
-            .ok_or_else(|| "DSH_HOME 不存在".to_string())?
+            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
+        // Same rule as the instance one: a remote HOME is that machine's
+        // directory, and this Mac must not be made to have a copy of its path.
+        crate::config::resolve_host(&cfg, Some(&home.host_id))?.local_paths_only("DSH_HOME 目录")?;
+        home.path.clone()
     };
     if !home.is_dir() {
         std::fs::create_dir_all(&home).map_err(|e| format!("创建目录失败: {e}"))?;

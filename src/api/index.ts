@@ -78,14 +78,22 @@ export const api = {
   /** The aliases in the user's own `~/.ssh/config`, for the add-host picker. */
   listSshAliases: () => call<SshAlias[]>('list_ssh_aliases'),
 
-  listHomes: () => call<DshHome[]>('list_homes'),
-  createHome: (name: string, path: string) => call<DshHome>('create_home', { name, path }),
-  removeHome: (id: string) => call<void>('remove_home', { id }),
-  defaultDedicatedHomePath: (name: string) => call<string>('default_dedicated_home_path', { name }),
+  listHomes: (hostId?: string) => call<DshHome[]>('list_homes', { hostId }),
+  createHome: (name: string, path: string, hostId?: string) =>
+    call<DshHome>('create_home', { name, path, hostId }),
+  removeHome: (id: string, hostId?: string) => call<void>('remove_home', { id, hostId }),
+  defaultDedicatedHomePath: (name: string, hostId?: string) =>
+    call<string>('default_dedicated_home_path', { name, hostId }),
 
-  listVersions: () => call<DshVersion[]>('list_versions'),
-  fetchAvailableVersions: () => call<RemoteVersion[]>('fetch_available_versions'),
-  removeVersion: (id: string) => call<void>('remove_version', { id }),
+  /** One host's installed versions, with each version's path and bin readiness. */
+  listVersions: (hostId?: string) => call<DshVersion[]>('list_versions', { hostId }),
+  /**
+   * The versions installable on one host: asked of that host's own npm when it
+   * names a registry, and of this Mac's when it does not (ADR-0006 故事 13).
+   */
+  fetchAvailableVersions: (hostId?: string) =>
+    call<RemoteVersion[]>('fetch_available_versions', { hostId }),
+  removeVersion: (id: string, hostId?: string) => call<void>('remove_version', { id, hostId }),
   /** Downloads & installs a DSH version, auto-creates dedicated HOME, and registers the 1:1 instance. */
   startInstallVersionTask: (version: string) =>
     call<string>('start_install_version_task', { version }),
@@ -94,13 +102,21 @@ export const api = {
   removeTask: (id: string) => call<void>('remove_task', { id }),
   cancelTask: (id: string) => call<void>('cancel_task', { id }),
 
-  listInstances: () => call<DshInstance[]>('list_instances'),
+  /**
+   * Instances of one host, or of **every** host when the caller says so
+   * (`allHosts`, the board's 全部 view). `hostId` absent and `allHosts` false
+   * means 本机.
+   */
+  listInstances: (hostId?: string | null, allHosts = false) =>
+    call<DshInstance[]>('list_instances', { hostId: hostId ?? null, allHosts }),
   /** Binds an already-installed version to a DSH_HOME as a new instance. */
-  createInstance: (name: string, versionId: string, homeId: string) =>
-    call<DshInstance>('create_instance', { name, versionId, homeId }),
+  createInstance: (name: string, versionId: string, homeId: string, hostId?: string) =>
+    call<DshInstance>('create_instance', { name, versionId, homeId, hostId }),
   /** Removes one instance record (stops it first); version and HOME stay. */
-  deleteInstance: (id: string) => call<void>('delete_instance', { id }),
-  updateInstance: (input: DshInstance) => call<DshInstance>('update_instance', { input }),
+  deleteInstance: (id: string, hostId?: string | null) =>
+    call<void>('delete_instance', { id, hostId: hostId ?? null }),
+  updateInstance: (input: DshInstance, hostId?: string | null) =>
+    call<DshInstance>('update_instance', { input, hostId: hostId ?? null }),
   /** Sets the instance's web port; null or out-of-range = random port. */
   setInstancePort: (instanceId: string, port: number | null) =>
     call<DshInstance>('set_instance_port', { instance_id: instanceId, port }),

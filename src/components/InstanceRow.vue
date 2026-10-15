@@ -108,6 +108,14 @@ const homeName = computed(() => store.homeById(props.inst.home_id)?.name ?? prop
 const sharedHome = computed(() => store.isHomeShared(props.inst.home_id))
 const version = computed(() => store.versionById(props.inst.version_id))
 const home = computed(() => store.homeById(props.inst.home_id))
+const host = computed(() => store.hostById(props.inst.host_id))
+/**
+ * Two instances called 「web」 on two machines must not read alike, so a row that
+ * belongs to another machine says which one — but only where more than one
+ * machine is on screen (the board's 全部 view). Under a single-host filter every
+ * row would otherwise repeat the same name the filter already states.
+ */
+const showHost = computed(() => store.allHosts && !!host.value && !host.value.builtin)
 const envEntries = computed(() => Object.entries(props.inst.env_overrides ?? {}))
 const portLabel = computed(() =>
   props.inst.port ? String(props.inst.port) : t('instances.portRandom'),
@@ -283,6 +291,12 @@ onMounted(() => {
         <span v-if="sharedHome" class="dl-tag dl-tag--warn">{{ t('home.sharedHome') }}</span>
       </div>
       <div class="inst-meta">
+        <template v-if="showHost">
+          <span class="dl-chip" :title="host?.ssh_target || host?.display_name">
+            {{ host?.display_name }}
+          </span>
+          <span class="inst-meta-sep">·</span>
+        </template>
         <template v-if="showVersionChip">
           <span class="dl-chip" :title="versionName">{{ versionName }}</span>
           <span class="inst-meta-sep">·</span>

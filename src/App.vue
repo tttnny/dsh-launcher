@@ -107,7 +107,16 @@ function goShortcut(name: ShortcutRoute) {
 }
 
 async function refreshAll() {
-  await Promise.allSettled([store.refreshInstances(), store.refreshVersions(), store.checkRuntime()])
+  // ⌘R re-reads what the pages show: the board, the current host's versions and
+  // DSH_HOMEs (whether or not it answered last time), and what that host's
+  // registry offers *now* — the installable list is cached per host, so it takes
+  // the forced read.
+  await Promise.allSettled([
+    store.refreshInstances(),
+    store.loadHostResources(store.currentHostId),
+    store.refreshRemoteVersions(true),
+    store.checkRuntime(),
+  ])
 }
 
 function onAppKeydown(e: KeyboardEvent) {

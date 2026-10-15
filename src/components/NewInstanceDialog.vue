@@ -71,7 +71,10 @@ const noVersions = computed(() => store.versions.length === 0)
 const noHomes = computed(() => store.homes.length === 0)
 
 const createAction = useAction(
-  () => api.createInstance(name.value.trim(), versionId.value!, homeId.value!),
+  // The instance is bound on the machine whose versions and DSH_HOMEs the two
+  // selects are listing — the current host (ADR-0006 §3: a binding never spans
+  // two machines).
+  () => api.createInstance(name.value.trim(), versionId.value!, homeId.value!, store.currentHostId),
   { success: () => t('instances.created') },
 )
 const saving = computed(() => createAction.busy['*'])
