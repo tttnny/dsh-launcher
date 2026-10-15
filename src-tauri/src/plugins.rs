@@ -791,15 +791,23 @@ pub(crate) fn npmrc_document(raw: &str) -> Option<String> {
     Some(out)
 }
 
-/// Make sure a profile's pnpm-workspace.yaml opts into dependency build
-/// scripts on both pnpm 10 (onlyBuiltDependencies) and pnpm 11 (allowBuilds).
+/// Make sure a directory's pnpm-workspace.yaml opts into dependency build
+/// scripts on every pnpm the launcher accepts: `onlyBuiltDependencies` for
+/// pnpm 10, `allowBuilds` for 11 and 12.
 ///
-/// pnpm 11 writes `allowBuilds: <name>: set this to true or false` for every
-/// dependency whose build script it ignored, then fails the install with
-/// ERR_PNPM_IGNORED_BUILDS. This converts those placeholders to `true` and
-/// keeps the old field around for pnpm ≤10, so a subsequent install actually
-/// runs the native build scripts (node-pty, koffi, esbuild, sharp, …).
-pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), String> {
+/// The two newer majors differ in how an approval is spelled. pnpm 11 writes
+/// `allowBuilds: <name>: set this to true or false` for every dependency whose
+/// build script it ignored and then fails with ERR_PNPM_IGNORED_BUILDS; a
+/// rewrite of that file turns the placeholders into `true`. pnpm 12 writes
+/// nothing at all — it only reports the names — and takes no wildcard, so the
+/// names `approve` carries, read off its own report, are the only approval it
+/// accepts (issue #14 验收). Both spells are the same document, so a subsequent
+/// install runs the native build scripts (node-pty, koffi, esbuild, sharp, …)
+/// whichever major runs it.
+pub(crate) fn ensure_build_scripts_allowed(
+    dir: &std::path::Path,
+    approve: &[String],
+) -> Result<(), String> {
     let ws_manifest = dir.join("pnpm-workspace.yaml");
     let raw = if ws_manifest.exists() {
         std::fs::read_to_string(&ws_manifest)
@@ -807,7 +815,7 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
     } else {
         String::new()
     };
-    let manifest = build_scripts_manifest(&raw);
+    let manifest = build_scripts_manifest(&raw, approve);
     if let Some(manifest) = manifest {
         std::fs::write(&ws_manifest, manifest)
             .map_err(|e| format!("写入 pnpm-workspace.yaml 失败: {e}"))?;
@@ -824,7 +832,7 @@ pub(crate) fn ensure_build_scripts_allowed(dir: &std::path::Path) -> Result<(), 
 /// directory on another machine, where the launcher reads and writes over the
 /// transport instead of `std::fs`; one function, so the two cannot disagree
 /// about what an allowed build script looks like.
-pub(crate) fn build_scripts_manifest(raw: &str) -> Option<String> {
+pub(crate) fn build_scripts_manifest(raw: &str, approve: &[String]) -> Option<String> {
     // Base document: `packages` is required for pnpm to treat the dir as a
     // workspace (needed for allowBuilds to be read from this file).
     let mut lines: Vec<String> = if raw.trim().is_empty() {
@@ -864,6 +872,23 @@ pub(crate) fn build_scripts_manifest(raw: &str) -> Option<String> {
         changed = true;
     }
 
+    // 4. Name the packages pnpm reported and refused. This is the whole of the
+    //    approval on pnpm 12 — it has no wildcard, so a name pnpm did not print
+    //    is a name the launcher cannot guess — and it is harmless on pnpm 11,
+    //    where the same section already carries pnpm's own placeholders.
+    let named = allow_builds_names(&lines);
+    let missing: Vec<&String> = approve
+        .iter()
+        .filter(|name| !named.contains(&name.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        let at = allow_builds_insert_at(&lines);
+        for (offset, name) in missing.iter().enumerate() {
+            lines.insert(at + offset, format!("  {}: true", allow_builds_key(name)));
+        }
+        changed = true;
+    }
+
     if !changed {
         return None;
     }
@@ -871,6 +896,57 @@ pub(crate) fn build_scripts_manifest(raw: &str) -> Option<String> {
         lines.push(String::new());
     }
     Some(lines.join("\n"))
+}
+
+/// The lines [`build_scripts_manifest`] may write approved package names into:
+/// inside the `allowBuilds:` block, before the next top-level key (or the blank
+/// line it keeps at the end of the document, which belongs with the newline).
+fn allow_builds_insert_at(lines: &[String]) -> usize {
+    let header = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("allowBuilds:"))
+        .unwrap_or(lines.len());
+    let mut at = lines
+        .iter()
+        .skip(header + 1)
+        .position(|line| !line.trim().is_empty() && !line.starts_with([' ', '\t']))
+        .map(|offset| header + 1 + offset)
+        .unwrap_or(lines.len());
+    while at > header + 1 && lines[at - 1].trim().is_empty() {
+        at -= 1;
+    }
+    at
+}
+
+/// The package names the `allowBuilds:` block already carries — pnpm 11's own
+/// placeholders included, which step 1 of [`build_scripts_manifest`] has
+/// already turned into an approval by the time this is asked.
+fn allow_builds_names(lines: &[String]) -> Vec<&str> {
+    let header = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("allowBuilds:"));
+    let Some(header) = header else {
+        return Vec::new();
+    };
+    lines[header + 1..]
+        .iter()
+        .take_while(|line| line.trim().is_empty() || line.starts_with([' ', '\t']))
+        .filter_map(|line| line.split_once(':'))
+        .map(|(key, _)| key.trim().trim_matches(['\'', '"']))
+        .collect()
+}
+
+/// One package name as a YAML mapping key. A scoped name has to be quoted: `@`
+/// may not begin a plain scalar.
+fn allow_builds_key(name: &str) -> String {
+    let plain = name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/'));
+    if plain {
+        return name.to_string();
+    }
+    yaml_double_quoted(name)
 }
 
 /// Resolves the instance that can manage `(home_id, profile)`'s plugins, as a
@@ -1176,7 +1252,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // Fresh profile: no workspace file yet -> packages + both sections.
-        ensure_build_scripts_allowed(&dir).unwrap();
+        ensure_build_scripts_allowed(&dir, &[]).unwrap();
         let fresh = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
         assert!(fresh.contains("packages:"), "fresh: {fresh}");
         assert!(fresh.contains("onlyBuiltDependencies"), "fresh: {fresh}");
@@ -1188,7 +1264,7 @@ mod tests {
             "packages:\n  - .\nallowBuilds:\n  node-pty: set this to true or false\n",
         )
         .unwrap();
-        ensure_build_scripts_allowed(&dir).unwrap();
+        ensure_build_scripts_allowed(&dir, &[]).unwrap();
         let fixed = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
         assert!(fixed.contains("node-pty: true"), "fixed: {fixed}");
         assert!(
@@ -1200,11 +1276,57 @@ mod tests {
 
         // Idempotent: second run leaves the file unchanged.
         let before = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
-        ensure_build_scripts_allowed(&dir).unwrap();
+        ensure_build_scripts_allowed(&dir, &[]).unwrap();
         let after = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
         assert_eq!(before, after, "must be idempotent");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// pnpm 12 has no wildcard to approve with: `allowBuilds: {'*': true}` and
+    /// `onlyBuiltDependencies: ['*']` both leave every build script refused, and
+    /// what pnpm prints in `Ignored build scripts: …` is the only list of names
+    /// there is. Those names, written here, are what an install on pnpm 12
+    /// needs (issue #14 验收).
+    #[test]
+    fn build_scripts_manifest_names_the_packages_pnpm_refused() {
+        let approve = [
+            "koffi".to_string(),
+            "@deepseek-ai/dsh-subprocess-local".to_string(),
+        ];
+        let document = build_scripts_manifest("", &approve).expect("空文件要写出清单");
+
+        assert!(document.contains("allowBuilds:"), "{document}");
+        assert!(
+            document.contains("  koffi: true"),
+            "普通包名照原样写：{document}"
+        );
+        assert!(
+            document.contains("  \"@deepseek-ai/dsh-subprocess-local\": true"),
+            "@ 开头的名字在 YAML 里要加引号：{document}"
+        );
+        assert!(
+            document.contains("onlyBuiltDependencies:\n  - '*'"),
+            "pnpm 10 只认这一段，它要继续留着：{document}"
+        );
+
+        // Handing the same names again is not a change: the caller only writes
+        // when there is something to write.
+        assert!(
+            build_scripts_manifest(&document, &approve).is_none(),
+            "已批准过的名字不该再写一遍"
+        );
+
+        // A second round names a package the first one did not, and it joins the
+        // same block — the file pnpm has to read stays one document.
+        let more = ["koffi".to_string(), "protobufjs".to_string()];
+        let second = build_scripts_manifest(&document, &more).expect("新名字要写进去");
+        assert!(second.contains("  protobufjs: true"), "{second}");
+        assert_eq!(second.matches("koffi: true").count(), 1, "{second}");
+        assert!(
+            second.contains("allowBuilds:\n  koffi: true"),
+            "批准项要落在 allowBuilds 段里：{second}"
+        );
     }
 
     #[test]
