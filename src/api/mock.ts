@@ -1313,8 +1313,28 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return null as T
     case 'open_instance_terminal':
       return `DSH ${String(args?.instanceId ?? args?.instance_id ?? '')}` as T
-    case 'list_instance_status':
-      return Object.values(db.running) as T
+    case 'list_instance_status': {
+      // Mirrors `process::list_statuses`: the machine that runs an instance
+      // decides what may be said about it. A record with no process says
+      // 「已停止」 — unless its machine is one the launcher cannot reach, which
+      // is 「主机不可达」 and deliberately not a relabelling of 已停止: that
+      // reading is what makes a user start a second DSH on a server (ADR-0007).
+      const rows: InstanceStatus[] = Object.values(db.running)
+      for (const inst of db.instances) {
+        if (rows.some((r) => r.id === inst.id)) continue
+        const host = hostOf(db, inst.host_id ?? LOCAL_HOST_ID)
+        if ((mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable') continue
+        rows.push({
+          id: inst.id,
+          state: 'unreachable',
+          url: null,
+          remote_url: null,
+          profile: inst.last_profile ?? inst.default_profile ?? null,
+          exit_code: null,
+        })
+      }
+      return rows as T
+    }
     case 'check_instance_health':
       // Browser preview has no real dependency tree: report healthy.
       return {
