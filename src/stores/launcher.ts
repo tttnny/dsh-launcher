@@ -273,6 +273,12 @@ export const useLauncherStore = defineStore('launcher', {
           // Not ours to show, but the backend knows it by id: keep watching so
           // it lands here if the row ever appears.
           if (claim === undefined) this.pendingInstallTasks[p.id] = null
+          // An install this page never saw still creates an instance and a
+          // version directory somewhere: the lists have to catch up with it.
+          if (p.state !== 'running' && p.instance_id) {
+            void this.refreshInstances()
+            void this.loadHostResources(this.currentHostId)
+          }
           return
         }
         const key = installKey(hostId, version)

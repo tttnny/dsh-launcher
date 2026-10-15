@@ -983,7 +983,7 @@ async fn install_remote_from_npm(
         let argv = remote_npm_install_argv(pnpm, layout, version);
         let log_path = remote_log_path(&layout.data_dir, task_id, &format!("npm-{attempt}"));
 
-        let code = match run_remote_streamed(
+        let outcome = match run_remote_streamed(
             app,
             state,
             task_id,
@@ -994,16 +994,21 @@ async fn install_remote_from_npm(
         )
         .await
         {
-            Ok(code) => code,
+            Ok(outcome) => outcome,
             // A transport failure is not the install's own failure: retrying a
             // machine the launcher cannot reach would only repeat it.
             Err(e) => return Err(e),
         };
-        if code == 0 {
-            break;
-        }
-
         let logs = task_logs(state, task_id).await;
+        // `None` is a command that was killed before it could record how it
+        // exited: the log then carries the only evidence there is.
+        let failed_code = match outcome {
+            RemoteCommandOutcome::Cancelled => return Err("任务已取消".to_string()),
+            RemoteCommandOutcome::Exited(0) => break,
+            RemoteCommandOutcome::Exited(code) => Some(code),
+            RemoteCommandOutcome::Killed => None,
+        };
+
         // pnpm 11 blocks dependency build scripts unless every package with an
         // install script is listed under `allowBuilds`. On the first attempt it
         // writes a `set this to true or false` placeholder into
@@ -1021,7 +1026,7 @@ async fn install_remote_from_npm(
             continue;
         }
         if attempt >= MAX_ATTEMPTS {
-            return Err(remote_install_failure(&logs, Some(code), &log_path));
+            return Err(remote_install_failure(&logs, failed_code, &log_path));
         }
         if !task_is_running(state, task_id).await {
             return Err("任务已取消".to_string());
@@ -1104,10 +1109,11 @@ async fn install_remote_from_source(
             &layout.versions_dir.to_string_lossy(),
         );
         let log_path = remote_log_path(&layout.data_dir, task_id, "clone");
-        let code =
+        let outcome =
             run_remote_streamed(app, state, task_id, target, &log_path, argv, "git clone").await?;
+        let logs = task_logs(state, task_id).await;
+        let code = outcome.status(&logs, &log_path)?;
         if code != 0 {
-            let logs = task_logs(state, task_id).await;
             return Err(remote_install_failure(&logs, Some(code), &log_path));
         }
     }
@@ -1131,9 +1137,12 @@ async fn install_remote_from_source(
     let argv =
         crate::remote::measured_argv(&remote_pnpm_argv(pnpm, layout, &deps), &layout.dir.to_string_lossy());
     let log_path = remote_log_path(&layout.data_dir, task_id, "deps");
-    let code = run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install（源码）").await?;
+    let outcome =
+        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install（源码）")
+            .await?;
+    let logs = task_logs(state, task_id).await;
+    let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
-        let logs = task_logs(state, task_id).await;
         return Err(remote_install_failure(&logs, Some(code), &log_path));
     }
     ensure_remote_pending_builds(app, state, task_id, target, layout, pnpm).await?;
@@ -1146,9 +1155,11 @@ async fn install_remote_from_source(
         &layout.dir.to_string_lossy(),
     );
     let log_path = remote_log_path(&layout.data_dir, task_id, "build");
-    let code = run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build").await?;
+    let outcome =
+        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build").await?;
+    let logs = task_logs(state, task_id).await;
+    let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
-        let logs = task_logs(state, task_id).await;
         return Err(remote_install_failure(&logs, Some(code), &log_path));
     }
 
@@ -1205,9 +1216,11 @@ async fn ensure_remote_pending_builds(
         &layout.dir.to_string_lossy(),
     );
     let log_path = remote_log_path(&layout.data_dir, task_id, "rebuild");
-    let code = run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm rebuild").await?;
+    let outcome =
+        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm rebuild").await?;
+    let logs = task_logs(state, task_id).await;
+    let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
-        let logs = task_logs(state, task_id).await;
         return Err(remote_install_failure(&logs, Some(code), &log_path));
     }
     pending = remote_pending_builds(state, target, &path).await;
@@ -1303,13 +1316,41 @@ fn remote_log_path(data_dir: &Path, task_id: &str, step: &str) -> String {
         .to_string()
 }
 
+/// What became of one remote command the launcher started.
+///
+/// There are three endings, not two: a command that finished (and recorded how),
+/// one that was killed before it could (on a small server usually the
+/// out-of-memory killer — the log is then the only evidence), and one the user
+/// cancelled. Only the first has an exit status at all.
+enum RemoteCommandOutcome {
+    Exited(i32),
+    Killed,
+    Cancelled,
+}
+
+impl RemoteCommandOutcome {
+    /// The command's exit status, or the reason there is none: a cancellation
+    /// (which the worker reports as such) or the classified failure for a
+    /// command that was killed without saying anything.
+    fn status(self, logs: &[String], log_path: &str) -> Result<i32, String> {
+        match self {
+            Self::Exited(code) => Ok(code),
+            Self::Killed => Err(remote_install_failure(logs, None, log_path)),
+            Self::Cancelled => Err("任务已取消".to_string()),
+        }
+    }
+}
+
 /// Runs one command on a remote host, detached, following everything it writes
-/// into the task log until it is gone, and returns its exit status.
+/// into the task log until it is gone.
 ///
 /// Detached because the install has to outlive the ssh session that started it
 /// (ADR-0007), which is also why its output is a log file the launcher reads
 /// rather than a pipe: [`crate::remote::tail`] waits *there* for output, so a
 /// long quiet install is not one connection per second.
+///
+/// `Err` is the transport's failure — the launcher could not start the command
+/// or could not read its log. How the command itself ended is the `Ok` value.
 async fn run_remote_streamed(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -1318,7 +1359,7 @@ async fn run_remote_streamed(
     log_path: &str,
     argv: Vec<String>,
     what: &str,
-) -> Result<i32, String> {
+) -> Result<RemoteCommandOutcome, String> {
     // Echo the exact command line, as the local streamed runner does: when a
     // child fails silently, the invocation itself is the only clue.
     push_task_log(app, state, task_id, &format!("$ {}", argv.join(" "))).await;
@@ -1337,13 +1378,11 @@ async fn run_remote_streamed(
     let outcome =
         follow_remote_log(app, state, task_id, &transport, &run, log_path, what).await;
     clear_remote_run(state, task_id).await;
-    outcome?.ok_or_else(|| format!("{what} 被强制终止，没有留下退出码"))
+    outcome
 }
 
 /// Reads a remote command's log until it says how it ended: the wrapper's exit
-/// status line, or the process being gone without one. `Ok(None)` means it ended
-/// without saying (the tree was killed, which on a small server is usually the
-/// out-of-memory killer).
+/// status line, or the process being gone without one.
 async fn follow_remote_log(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -1352,7 +1391,7 @@ async fn follow_remote_log(
     run: &RemoteRun,
     log_path: &str,
     what: &str,
-) -> Result<Option<i32>, String> {
+) -> Result<RemoteCommandOutcome, String> {
     let mut offset = 0u64;
     let mut pending = String::new();
     let mut status = None;
@@ -1371,8 +1410,8 @@ async fn follow_remote_log(
         pending.push_str(&chunk.text);
         status = status.or(drain_log_lines(app, state, task_id, &mut pending).await);
 
-        if status.is_some() {
-            return Ok(status);
+        if let Some(code) = status {
+            return Ok(RemoteCommandOutcome::Exited(code));
         }
         if !chunk.alive {
             // The wrapper's status line is written by the shell that just
@@ -1383,12 +1422,15 @@ async fn follow_remote_log(
                 .map_err(|e| format!("{what} 读取远端日志失败：{e}"))?;
             pending.push_str(&last.text);
             let status = status.or(drain_log_lines(app, state, task_id, &mut pending).await);
-            return Ok(status);
+            return Ok(match status {
+                Some(code) => RemoteCommandOutcome::Exited(code),
+                None => RemoteCommandOutcome::Killed,
+            });
         }
         if !task_is_running(state, task_id).await {
             // Cancelled: the click already stopped the tree on that machine,
             // and this is the worker noticing. Not a failure to report.
-            return Err("任务已取消".to_string());
+            return Ok(RemoteCommandOutcome::Cancelled);
         }
     }
 }
@@ -2660,6 +2702,18 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
             classify_remote_install_failure("", Some(137)),
             RemoteInstallFailure::OutOfMemory
         );
+        // The tree was killed before it could record anything at all — which is
+        // what happens when the out-of-memory killer takes the whole group. The
+        // log is then the only evidence, and it is enough.
+        let killed = remote_install_failure(
+            &[
+                "Progress: resolved 213".to_string(),
+                "Killed".to_string(),
+            ],
+            None,
+            &format!("{REMOTE_DATA_DIR}/logs/install-t-1-npm-2.log"),
+        );
+        assert!(killed.contains("内存不够"), "{killed}");
         assert_eq!(
             classify_remote_install_failure("pnpm: unknown option", Some(1)),
             RemoteInstallFailure::Other
