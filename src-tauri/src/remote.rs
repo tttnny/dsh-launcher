@@ -193,6 +193,183 @@ pub async fn connection_test(
 }
 
 // ---------------------------------------------------------------------------
+// The environment probe
+// ---------------------------------------------------------------------------
+
+/// One candidate the probe passed over, and why. A remote host passes over a
+/// Node below the recommended major and says so instead of using it silently
+/// (ADR-0005 追加 2); the local host only warns about one and keeps it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RemoteSkipped {
+    pub path: String,
+    #[serde(default)]
+    pub version: String,
+    /// `below-minimum` (its major is under the floor the launcher drives),
+    /// `unparsable` (a version the launcher cannot read) or `unusable` (a
+    /// hand-typed path that is not there or would not run). Codes, not
+    /// sentences: the page renders them in the user's language.
+    pub reason: String,
+    /// The major the candidate reported, when the reason is about a version.
+    #[serde(default)]
+    pub major: Option<u64>,
+}
+
+/// One tool as a remote probe resolved it: where it is, what it says, which of
+/// the three sources it came from, and everything passed over on the way.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RemoteToolStatus {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// `manual` | `system` | `fallback`; absent when nothing was found.
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub skipped: Vec<RemoteSkipped>,
+}
+
+/// What one remote probe learned about a host's environment: the `PATH` its own
+/// interactive login shell gives, the version managers that machine has, and
+/// both tools resolved in the launcher's fixed candidate order.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RemoteEnvironment {
+    /// The shell the `PATH` was read from — that machine's bash.
+    pub shell: String,
+    pub path: String,
+    #[serde(default)]
+    pub managers: Vec<String>,
+    pub node: RemoteToolStatus,
+    pub pnpm: RemoteToolStatus,
+}
+
+/// Runs the environment probe on one host: a single interactive login shell that
+/// reads `PATH`, walks the launcher's candidates in order and reports what each
+/// one turned out to be.
+///
+/// The budget is larger than one command's: that shell starts an interactive
+/// login shell (rc files included) and then runs `--version` for every candidate
+/// it walks.
+pub async fn environment(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    manual_node: Option<&str>,
+    manual_pnpm: Option<&str>,
+) -> Result<RemoteEnvironment, HostError> {
+    let script = environment_script(manual_node, manual_pnpm);
+    json::<RemoteEnvironment>(transport, host, script, ENVIRONMENT_TIMEOUT).await
+}
+
+/// How long the environment probe may take. Longer than one command's budget:
+/// that shell starts an interactive login shell (rc files and all) and then runs
+/// `--version` for every candidate it walks.
+const ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What one hand-typed path turned out to be on that machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManualProbe {
+    /// The file is there and answered `--version` with this.
+    Version(String),
+    /// There is no such file there.
+    Missing,
+    /// The file is there but would not run.
+    Unusable,
+}
+
+/// Runs one hand-typed path's `--version` **on that machine**: the launcher
+/// cannot execute a file on another computer, so this is the only way to accept
+/// a path there at all (ADR-0005 追加 3).
+pub async fn probe_manual_tool(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    path: &str,
+) -> Result<ManualProbe, HostError> {
+    let facts: ManualFacts =
+        json(transport, host, manual_tool_script(path), DEFAULT_TIMEOUT).await?;
+    Ok(match (facts.exists, facts.version) {
+        (_, Some(version)) => ManualProbe::Version(version),
+        (true, None) => ManualProbe::Unusable,
+        (false, None) => ManualProbe::Missing,
+    })
+}
+
+#[derive(Deserialize)]
+struct ManualFacts {
+    exists: bool,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// The Linux install directories a remote probe searches after the machine's own
+/// `PATH` (ADR-0005 追加 4): Linuxbrew, the nvm / fnm version directories, the
+/// pnpm official script's directory, and the two user / system bin directories.
+///
+/// The probe walks exactly this list, so what the page reports is what any later
+/// work on that machine will find; the wildcard entries are expanded there.
+///
+/// `$HOME` and the wildcards stay as written — only that machine's shell can
+/// expand either, and expanding them here would read *this* machine's home.
+pub fn fallback_bins() -> Vec<&'static str> {
+    vec![
+        "/home/linuxbrew/.linuxbrew/bin",
+        "$HOME/.linuxbrew/bin",
+        "$HOME/.nvm/versions/node/*/bin",
+        "$HOME/.fnm/aliases/default/bin",
+        "$HOME/.fnm/current/bin",
+        "$HOME/.fnm/node-versions/*/installation/bin",
+        "$HOME/.local/share/fnm/aliases/default/bin",
+        "$HOME/.local/share/fnm/current/bin",
+        "$HOME/.local/share/fnm/node-versions/*/installation/bin",
+        "$HOME/.local/share/pnpm",
+        "$HOME/.local/share/pnpm/bin",
+        "$HOME/.local/bin",
+        "/usr/local/bin",
+    ]
+}
+
+/// One command the user runs **on this Mac** to install a tool on a remote host.
+///
+/// Quoted for two shells because it goes through two: the user's own shell has
+/// to hand ssh a single argument, and ssh joins its arguments with spaces and
+/// lets the remote shell split them again. The inner quotes are what make the
+/// recipe reach `bash -ilc` as one word — the same shape
+/// [`script_command`] uses, so the install runs in the shell the probe read.
+///
+/// A recipe therefore must not contain a double quote; the ones below are
+/// written without one.
+pub fn ssh_command(target: &str, recipe: &str) -> String {
+    let shell = crate::ssh::REMOTE_SHELL;
+    format!("ssh {target} '{shell} -ilc \"{recipe}\"'")
+}
+
+/// The Node install recipe for the machine the probe found these managers on:
+/// extend the one the user already uses, so they end up with one Node in the
+/// place they expect. With no manager at all it installs nvm and then loads it
+/// into the same shell — a freshly installed `~/.bashrc` only takes effect in
+/// the *next* shell, so the recipe has to source it itself.
+pub fn node_install_recipe(managers: &[String]) -> &'static str {
+    let has = |m: &str| managers.iter().any(|x| x == m);
+    if has("nvm") {
+        "nvm install --lts"
+    } else if has("fnm") {
+        "fnm install --lts"
+    } else if has("brew") {
+        "brew install node"
+    } else {
+        "curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash \
+         && export NVM_DIR=$HOME/.nvm && . $NVM_DIR/nvm.sh && nvm install --lts"
+    }
+}
+
+/// The pnpm install recipe for a Linux machine: the official script rather than
+/// `npm install -g pnpm`, because it needs no Node to run and it writes to
+/// `~/.local/share/pnpm` — a directory the probe already searches, so a machine
+/// that follows this instruction is found again without further setup.
+pub fn pnpm_install_recipe() -> &'static str {
+    "curl -fsSL https://get.pnpm.io/install.sh | sh -"
+}
+
+// ---------------------------------------------------------------------------
 // Scripts
 // ---------------------------------------------------------------------------
 
@@ -256,6 +433,210 @@ pub fn connection_test_script(data_dir: Option<&str>) -> String {
             ("%%ESCAPER%%", ESCAPER.to_string()),
             ("%%DATA_DIR%%", data_dir.map(quote).unwrap_or_default()),
         ],
+    )
+}
+
+/// The environment probe: what this machine's **interactive login shell** gives,
+/// and what the launcher's candidates resolve to when walked in order.
+///
+/// Interactive *and* login, not just login: on Linux `~/.bashrc` is where
+/// brew, nvm, fnm and miniconda put themselves on `PATH`, and only an
+/// interactive shell reads it — a `bash -lc` would miss the very Node the user's
+/// terminal runs (ADR-0005 追加 1). Execution later uses the same shell shape,
+/// so what the page reports and what runs are the same thing.
+///
+/// A Node below `%%NODE_MIN%%` is passed over and the walk continues; only when
+/// nothing qualifies is the newest one below the floor used, and it stays
+/// reported as passed over (ADR-0005 追加 2). pnpm below its floor drives no
+/// install, so there the walk simply finds nothing — the same call the local
+/// resolver makes.
+const ENVIRONMENT: &str = r#"set -u
+%%ESCAPER%%
+
+dsh_node_min=%%NODE_MIN%%
+dsh_pnpm_min=%%PNPM_MIN%%
+dsh_manual_node=%%MANUAL_NODE%%
+dsh_manual_pnpm=%%MANUAL_PNPM%%
+dsh_fallback=%%FALLBACK%%
+
+# One candidate's version, or nothing when it is missing or will not run.
+dsh_version_of() {
+  [ -f "$1" ] || return 1
+  dsh_said=$("$1" --version 2>/dev/null | head -n 1)
+  [ -n "$dsh_said" ] || return 1
+  printf '%s' "$dsh_said"
+}
+
+# Every candidate, one per line, each preceded by the source it came from: what
+# the user picked, then the directories this interactive login shell has on
+# PATH, then the Linux install directories. A wildcard entry (an nvm or fnm
+# version directory) is expanded here and sorted newest first, which is the
+# order the local scan prefers too.
+dsh_candidates() {
+  dsh_prog=$1
+  dsh_manual=$2
+  if [ -n "$dsh_manual" ]; then printf 'manual\t%s\n' "$dsh_manual"; fi
+  dsh_ifs=$IFS
+  IFS=:
+  for dsh_dir in $PATH; do
+    [ -n "$dsh_dir" ] || continue
+    printf 'system\t%s\n' "$dsh_dir/$dsh_prog"
+  done
+  for dsh_dir in $dsh_fallback; do
+    IFS=$dsh_ifs
+    [ -n "$dsh_dir" ] || continue
+    case "$dsh_dir" in
+      *\**)
+        for dsh_hit in $(ls -d "$dsh_dir" 2>/dev/null | sort -Vr); do
+          printf 'fallback\t%s\n' "$dsh_hit/$dsh_prog"
+        done
+        ;;
+      *) printf 'fallback\t%s\n' "$dsh_dir/$dsh_prog" ;;
+    esac
+    IFS=:
+  done
+  IFS=$dsh_ifs
+}
+
+# One tool's answer: the candidate that was taken, and everything passed over.
+# `dsh_last_resort` says whether an older candidate beats having none at all
+# (Node is needed to boot DSH; pnpm below its floor drives nothing), and
+# `dsh_need_major` says whether a version the launcher cannot read disqualifies
+# a candidate (pnpm, which is driven with flags pinned to a major).
+dsh_pick() {
+  dsh_prog=$1
+  dsh_min=$2
+  dsh_manual=$3
+  dsh_last_resort=$4
+  dsh_need_major=$5
+  dsh_taken_source=
+  dsh_taken_path=
+  dsh_taken_version=
+  dsh_below_source=
+  dsh_below_path=
+  dsh_below_version=
+  dsh_skipped=
+  dsh_sep=
+
+  while read -r dsh_source dsh_path; do
+    dsh_version=$(dsh_version_of "$dsh_path") || {
+      if [ "$dsh_source" = manual ]; then
+        dsh_skipped="$dsh_skipped$dsh_sep{\"path\":\"$(dsh_esc "$dsh_path")\",\"version\":\"\",\"reason\":\"unusable\"}"
+        dsh_sep=,
+      fi
+      continue
+    }
+    dsh_major=$(printf '%s' "$dsh_version" | sed -e 's/^v//' | cut -d. -f1 | tr -cd '0-9')
+    if [ -z "$dsh_major" ]; then
+      if [ "$dsh_need_major" = yes ]; then
+        dsh_skipped="$dsh_skipped$dsh_sep{\"path\":\"$(dsh_esc "$dsh_path")\",\"version\":\"$(dsh_esc "$dsh_version")\",\"reason\":\"unparsable\"}"
+        dsh_sep=,
+        continue
+      fi
+    elif [ "$dsh_major" -lt "$dsh_min" ]; then
+      dsh_skipped="$dsh_skipped$dsh_sep{\"path\":\"$(dsh_esc "$dsh_path")\",\"version\":\"$(dsh_esc "$dsh_version")\",\"reason\":\"below-minimum\",\"major\":$dsh_major}"
+      dsh_sep=,
+      dsh_below_source=$dsh_source
+      dsh_below_path=$dsh_path
+      dsh_below_version=$dsh_version
+      continue
+    fi
+    dsh_taken_source=$dsh_source
+    dsh_taken_path=$dsh_path
+    dsh_taken_version=$dsh_version
+    break
+  done < <(dsh_candidates "$dsh_prog" "$dsh_manual")
+
+  if [ -z "$dsh_taken_path" ] && [ "$dsh_last_resort" = yes ] && [ -n "$dsh_below_path" ]; then
+    dsh_taken_source=$dsh_below_source
+    dsh_taken_path=$dsh_below_path
+    dsh_taken_version=$dsh_below_version
+  fi
+
+  if [ -z "$dsh_taken_path" ]; then
+    printf '{"path":null,"version":null,"source":null,"skipped":[%s]}' "$dsh_skipped"
+  else
+    printf '{"path":"%s","version":"%s","source":"%s","skipped":[%s]}' \
+      "$(dsh_esc "$dsh_taken_path")" "$(dsh_esc "$dsh_taken_version")" "$dsh_taken_source" "$dsh_skipped"
+  fi
+}
+
+dsh_managers=
+dsh_msep=
+if [ -d "${HOME:-}/.nvm" ]; then dsh_managers="$dsh_managers$dsh_msep\"nvm\""; dsh_msep=,; fi
+if [ -d "${HOME:-}/.fnm" ] || [ -d "${HOME:-}/.local/share/fnm" ]; then dsh_managers="$dsh_managers$dsh_msep\"fnm\""; dsh_msep=,; fi
+if [ -x /home/linuxbrew/.linuxbrew/bin/brew ] || [ -x /usr/local/bin/brew ]; then dsh_managers="$dsh_managers$dsh_msep\"brew\""; dsh_msep=,; fi
+
+dsh_json=$(printf '{"shell":"%s","path":"%s","managers":[%s],"node":%s,"pnpm":%s}' \
+  "$(dsh_esc "${BASH:-/bin/bash}")" \
+  "$(dsh_esc "$PATH")" \
+  "$dsh_managers" \
+  "$(dsh_pick node "$dsh_node_min" "$dsh_manual_node" yes no)" \
+  "$(dsh_pick pnpm "$dsh_pnpm_min" "$dsh_manual_pnpm" no yes)")
+printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
+"#;
+
+/// The environment probe's script. `manual_node` / `manual_pnpm` are the user's
+/// hand-typed paths on that machine, or `None`.
+pub fn environment_script(manual_node: Option<&str>, manual_pnpm: Option<&str>) -> String {
+    environment_script_with(manual_node, manual_pnpm, &fallback_bins())
+}
+
+/// [`environment_script`] with the install-directory list injected, the way
+/// `runtime::candidates_with` injects the local one: the walk over that list is
+/// what has to be driven against a fixture, because the test machine's own home
+/// directory is not the remote machine's.
+pub(crate) fn environment_script_with(
+    manual_node: Option<&str>,
+    manual_pnpm: Option<&str>,
+    fallback: &[&str],
+) -> String {
+    fill(
+        ENVIRONMENT,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            (
+                "%%NODE_MIN%%",
+                crate::runtime::RECOMMENDED_NODE_MAJOR.to_string(),
+            ),
+            (
+                "%%PNPM_MIN%%",
+                crate::toolchain::MIN_PNPM_MAJOR.to_string(),
+            ),
+            (
+                "%%MANUAL_NODE%%",
+                manual_node.map(quote).unwrap_or_default(),
+            ),
+            (
+                "%%MANUAL_PNPM%%",
+                manual_pnpm.map(quote).unwrap_or_default(),
+            ),
+            ("%%FALLBACK%%", fallback.join(":")),
+        ],
+    )
+}
+
+/// The probe of one hand-typed path: is it there, and does it answer
+/// `--version`. The order is the answer — the file has to exist before the
+/// launcher judges whether it runs.
+const MANUAL_TOOL: &str = r#"set -u
+%%ESCAPER%%
+dsh_path=%%PATH%%
+dsh_exists=false
+dsh_version=
+if [ -f "$dsh_path" ]; then
+  dsh_exists=true
+  dsh_version=$("$dsh_path" --version 2>/dev/null | head -n 1)
+fi
+dsh_said=null
+if [ -n "$dsh_version" ]; then dsh_said="\"$(dsh_esc "$dsh_version")\""; fi
+printf '<<<DSH-JSON>>>{"exists":%s,"version":%s}<<<DSH-END>>>' "$dsh_exists" "$dsh_said"
+"#;
+
+pub fn manual_tool_script(path: &str) -> String {
+    fill(
+        MANUAL_TOOL,
+        &[("%%ESCAPER%%", ESCAPER.to_string()), ("%%PATH%%", quote(path))],
     )
 }
 
@@ -588,6 +969,62 @@ pub(crate) mod testing {
         ))
     }
 
+    /// One tool of an environment probe's answer, as the script shapes it.
+    pub(crate) fn remote_tool(path: &str, version: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": path,
+            "version": version,
+            "source": source,
+            "skipped": [],
+        })
+    }
+
+    /// A tool the probe did not find, with what it passed over on the way.
+    pub(crate) fn remote_tool_missing(
+        skipped: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "path": null,
+            "version": null,
+            "source": null,
+            "skipped": skipped,
+        })
+    }
+
+    /// One candidate the probe passed over.
+    pub(crate) fn skipped(
+        path: &str,
+        version: &str,
+        reason: &str,
+        major: Option<u64>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "path": path,
+            "version": version,
+            "reason": reason,
+            "major": major,
+        })
+    }
+
+    /// The stdout a **successful** environment probe prints — what the fake
+    /// answers the launcher with instead of a real machine's `bash -ilc`.
+    pub(crate) fn environment_stdout(
+        node: serde_json::Value,
+        pnpm: serde_json::Value,
+        managers: &[&str],
+    ) -> String {
+        marked(
+            &serde_json::json!({
+                "shell": "/bin/bash",
+                "path": "/home/demo/.nvm/versions/node/v22.14.0/bin:/usr/local/bin:/usr/bin",
+                "managers": managers,
+                "node": node,
+                "pnpm": pnpm,
+            })
+            .to_string(),
+        )
+    }
+
     impl HostTransport for FakeTransport {
         fn run<'a>(
             &'a self,
@@ -731,10 +1168,13 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{connection_stdout, FakeAnswer, FakeCall, FakeTransport};
+    use super::testing::{
+        connection_stdout, environment_stdout, marked, remote_tool, remote_tool_missing, skipped,
+        FakeAnswer, FakeCall, FakeTransport,
+    };
     use super::*;
     use crate::ssh::{HostTransport, SshTransport};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     const TARGET: &str = "zjq_aliyun";
 
@@ -1028,5 +1468,405 @@ mod tests {
         assert_eq!(argv[argv.len() - 3], crate::ssh::REMOTE_SHELL);
         assert_eq!(argv[argv.len() - 2], "-ilc");
         let _ = SshTransport::new();
+    }
+
+    // -----------------------------------------------------------------------
+    // The environment probe
+    // -----------------------------------------------------------------------
+
+    /// A fixture tool: a script that prints the version it was made with, so the
+    /// candidate walk can be driven against a controlled filesystem.
+    fn fake_tool(home: &Path, rel: &str, version: &str) -> PathBuf {
+        let exe = home.join(rel);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        exe
+    }
+
+    /// A `PATH` a fixture can own: the tools the probe itself uses (`sed`, `tr`,
+    /// `head`, `cut`, `sort`, `ls`), so a fixture machine can be described
+    /// without also describing this Mac's PATH — and without a real `node`
+    /// sneaking into the answer.
+    fn fixture_tools(home: &Path) -> PathBuf {
+        let dir = home.join("tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        for tool in ["sed", "tr", "head", "cut", "sort", "ls"] {
+            let source = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|prefix| Path::new(prefix).join(tool))
+                .find(|candidate| candidate.is_file());
+            if let Some(source) = source {
+                let link = dir.join(tool);
+                if !link.exists() {
+                    std::os::unix::fs::symlink(source, link).unwrap();
+                }
+            }
+        }
+        dir
+    }
+
+    fn probe_home(tag: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    /// Runs the probe script in a real shell and parses its answer.
+    ///
+    /// `-c` rather than the `-ilc` the launcher dials with: what is under test is
+    /// the walk over the candidate list, and the fixtures have to own `PATH` and
+    /// `HOME` for the answer to be about them instead of about this Mac. The
+    /// interactive login shape is pinned by `script_command` and by the
+    /// connection test.
+    fn run_probe(
+        home: &Path,
+        path: &str,
+        manual_node: Option<&str>,
+        fallback: &[String],
+    ) -> RemoteEnvironment {
+        let dirs: Vec<&str> = fallback.iter().map(|dir| dir.as_str()).collect();
+        let script = environment_script_with(manual_node, None, &dirs);
+        let out = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(&script)
+            // Cleared, so the probe answers for the fixture machine and nothing
+            // else: an inherited `BASH_ENV` or locale could rewrite PATH from
+            // under the fixture.
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let output = RemoteOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        };
+        parse_marked(&output).unwrap_or_else(|e| panic!("探测脚本的答案要能解析：{e}\n{output:?}"))
+    }
+
+    fn dirs_of(home: &Path, rels: &[&str]) -> Vec<String> {
+        rels.iter()
+            .map(|rel| home.join(rel).to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The install directories are the Linux set, in the order they are tried,
+    /// and the probe walks exactly that list (ADR-0005 追加 4).
+    #[test]
+    fn the_remote_install_directories_are_the_linux_set_in_order() {
+        let dirs = fallback_bins();
+        assert_eq!(dirs[0], "/home/linuxbrew/.linuxbrew/bin");
+        assert!(dirs.contains(&"$HOME/.linuxbrew/bin"));
+        assert!(dirs.contains(&"$HOME/.nvm/versions/node/*/bin"));
+        assert!(dirs.contains(&"$HOME/.local/share/fnm/node-versions/*/installation/bin"));
+        assert!(dirs.contains(&"$HOME/.local/share/pnpm"));
+        assert!(dirs.contains(&"$HOME/.local/bin"));
+        assert_eq!(dirs.last().unwrap(), &"/usr/local/bin");
+        assert!(
+            !dirs
+                .iter()
+                .any(|dir| dir.contains("Library/pnpm") || dir.contains("/opt/homebrew")),
+            "本机的目录不该出现在远程候选里：{dirs:?}"
+        );
+
+        // The list is what the script walks, in that order: every entry has to
+        // appear after the one before it.
+        let script = environment_script(None, None);
+        let mut cursor = 0;
+        for dir in &dirs {
+            let at = script[cursor..]
+                .find(dir)
+                .map(|i| i + cursor)
+                .unwrap_or_else(|| panic!("脚本里没有 {dir}，或者它排在前一个候选之前"));
+            cursor = at + dir.len();
+        }
+    }
+
+    /// The three sources in their fixed order: what the user picked, then the
+    /// directories this interactive login shell has on PATH, then the install
+    /// directories.
+    #[test]
+    fn the_probe_takes_the_pick_then_the_path_then_the_install_directories() {
+        let home = probe_home("probe-order");
+        let from_path = fake_tool(&home, "path/bin/node", "v22.1.0");
+        fake_tool(&home, "fallback/bin/node", "v24.0.0");
+        let picked = fake_tool(&home, "picked/node", "v20.0.0");
+        let path = format!(
+            "{}:{}",
+            fixture_tools(&home).display(),
+            home.join("path/bin").display()
+        );
+        let fallback = dirs_of(&home, &["fallback/bin"]);
+
+        let env = run_probe(&home, &path, None, &fallback);
+        assert_eq!(env.node.path.as_deref(), Some(from_path.to_str().unwrap()));
+        assert_eq!(env.node.source.as_deref(), Some("system"));
+        assert!(env.node.skipped.is_empty(), "没有低于门槛的候选就不该报跳过");
+
+        let env = run_probe(&home, &path, Some(picked.to_str().unwrap()), &fallback);
+        assert_eq!(
+            env.node.path.as_deref(),
+            Some(picked.to_str().unwrap()),
+            "用户指定的排在系统环境变量前面"
+        );
+        assert_eq!(env.node.source.as_deref(), Some("manual"));
+    }
+
+    /// The remote-only rule: a Node below the recommended major is passed over,
+    /// the walk continues, and the page is told which one it was and why. Only
+    /// when nothing qualifies is an older one used (ADR-0005 追加 2).
+    #[test]
+    fn the_probe_passes_over_an_old_node_and_names_it() {
+        let home = probe_home("probe-skip");
+        let old = fake_tool(&home, "apt/bin/node", "v18.19.1");
+        let good = fake_tool(&home, "modern/bin/node", "v22.14.0");
+        let path = format!(
+            "{}:{}:{}",
+            fixture_tools(&home).display(),
+            home.join("apt/bin").display(),
+            home.join("modern/bin").display()
+        );
+        let fallback = dirs_of(&home, &["none/bin"]);
+
+        let env = run_probe(&home, &path, None, &fallback);
+        assert_eq!(env.node.path.as_deref(), Some(good.to_str().unwrap()));
+        assert_eq!(env.node.source.as_deref(), Some("system"));
+        assert_eq!(env.node.skipped.len(), 1);
+        assert_eq!(env.node.skipped[0].path, old.to_string_lossy());
+        assert_eq!(env.node.skipped[0].version, "v18.19.1");
+        assert_eq!(env.node.skipped[0].reason, "below-minimum");
+        assert_eq!(env.node.skipped[0].major, Some(18));
+
+        // Nothing qualifies: the last candidate below the floor is still used —
+        // a machine with only an old Node can still be looked at — and both are
+        // reported as passed over.
+        let older = fake_tool(&home, "older/bin/node", "v16.20.2");
+        let path = format!(
+            "{}:{}:{}",
+            fixture_tools(&home).display(),
+            home.join("apt/bin").display(),
+            home.join("older/bin").display()
+        );
+        let env = run_probe(&home, &path, None, &[]);
+        assert_eq!(
+            env.node.path.as_deref(),
+            Some(older.to_str().unwrap()),
+            "没有合格候选时用最后那个不合格的，而不是最早那个"
+        );
+        assert_eq!(env.node.skipped.len(), 2, "两个低于门槛的候选都要报出来");
+    }
+
+    /// pnpm is not driven below its floor or with a version nobody can read, and
+    /// it has no last resort: a pnpm the launcher cannot reason about drives
+    /// nothing, so it is reported and then simply not found.
+    #[test]
+    fn the_probe_passes_over_a_pnpm_it_cannot_drive() {
+        let home = probe_home("probe-pnpm");
+        let old = fake_tool(&home, "bin/pnpm", "9.15.0");
+        let path = format!(
+            "{}:{}",
+            fixture_tools(&home).display(),
+            home.join("bin").display()
+        );
+
+        let env = run_probe(&home, &path, None, &[]);
+        assert!(env.pnpm.path.is_none(), "低版本的 pnpm 不能被选中");
+        assert_eq!(env.pnpm.skipped.len(), 1);
+        assert_eq!(env.pnpm.skipped[0].path, old.to_string_lossy());
+        assert_eq!(env.pnpm.skipped[0].reason, "below-minimum");
+        assert_eq!(env.pnpm.skipped[0].major, Some(9));
+
+        let home = probe_home("probe-pnpm-odd");
+        fake_tool(&home, "bin/pnpm", "not-a-version");
+        let path = format!(
+            "{}:{}",
+            fixture_tools(&home).display(),
+            home.join("bin").display()
+        );
+        let env = run_probe(&home, &path, None, &[]);
+        assert!(env.pnpm.path.is_none());
+        assert_eq!(env.pnpm.skipped[0].reason, "unparsable");
+    }
+
+    /// A hand-typed path that is not there is reported as passed over, and the
+    /// walk carries on: the user's path is not a reason to leave a machine that
+    /// has a working tool with none.
+    #[test]
+    fn an_unusable_pick_is_reported_and_the_walk_goes_on() {
+        let home = probe_home("probe-unusable");
+        let good = fake_tool(&home, "bin/node", "v22.1.0");
+        let missing = home.join("gone/node");
+        let path = format!(
+            "{}:{}",
+            fixture_tools(&home).display(),
+            home.join("bin").display()
+        );
+
+        let env = run_probe(&home, &path, Some(missing.to_str().unwrap()), &[]);
+
+        assert_eq!(env.node.path.as_deref(), Some(good.to_str().unwrap()));
+        assert_eq!(env.node.source.as_deref(), Some("system"));
+        assert_eq!(env.node.skipped.len(), 1);
+        assert_eq!(env.node.skipped[0].path, missing.to_string_lossy());
+        assert_eq!(env.node.skipped[0].reason, "unusable");
+    }
+
+    /// The shell, the `PATH` and the managers are that machine's, read in the one
+    /// shell the answer comes from.
+    #[test]
+    fn the_probe_reports_the_shell_path_and_managers_of_that_machine() {
+        let home = probe_home("probe-facts");
+        std::fs::create_dir_all(home.join(".nvm")).unwrap();
+        let path = fixture_tools(&home).to_string_lossy().into_owned();
+
+        let env = run_probe(&home, &path, None, &[]);
+
+        assert_eq!(env.shell, "/bin/bash");
+        assert!(!env.path.is_empty(), "PATH 要如实带回");
+        assert!(
+            env.managers.iter().any(|m| m == "nvm"),
+            "装了 nvm 就要报出来，安装引导才能顺着它给命令：{:?}",
+            env.managers
+        );
+    }
+
+    /// The whole probe is one call, and the launcher reads its answer: the
+    /// sources, the managers and what was passed over all travel in it.
+    #[test]
+    fn the_probe_is_one_interactive_login_shell_and_its_answer_is_read() {
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(environment_stdout(
+            remote_tool("/usr/local/bin/node", "v22.14.0", "system"),
+            remote_tool_missing(vec![skipped(
+                "/usr/bin/pnpm",
+                "9.15.0",
+                "below-minimum",
+                Some(9),
+            )]),
+            &["nvm"],
+        )));
+        let transport: &dyn HostTransport = &*fake;
+
+        let env = block_on(environment(transport, &host(), Some("/opt/pick/node"), None)).unwrap();
+
+        assert_eq!(env.shell, "/bin/bash");
+        assert_eq!(env.node.source.as_deref(), Some("system"));
+        assert_eq!(env.pnpm.path, None);
+        assert_eq!(env.pnpm.skipped[0].reason, "below-minimum");
+        assert_eq!(env.managers, vec!["nvm".to_string()]);
+
+        // The pick and the candidate list travel in the script, so the machine
+        // that answered is the machine that was asked — and it was asked to walk
+        // the Linux install directories, not this Mac's.
+        let script = fake.last_script();
+        assert!(script.contains("'/opt/pick/node'"), "{script}");
+        assert!(script.contains("$HOME/.nvm/versions/node/*/bin"), "{script}");
+        assert!(script.contains("$HOME/.local/share/pnpm"), "{script}");
+    }
+
+    /// A remote pick is validated by running `--version` **there**: the launcher
+    /// cannot execute a file on another computer, so the script carries the path
+    /// the user typed and the answer says whether it is there and what it said.
+    #[test]
+    fn a_remote_pick_is_validated_by_running_it_on_that_machine() {
+        let cases = [
+            (
+                r#"{"exists":true,"version":"v22.14.0"}"#,
+                ManualProbe::Version("v22.14.0".to_string()),
+            ),
+            (r#"{"exists":true,"version":null}"#, ManualProbe::Unusable),
+            (r#"{"exists":false,"version":null}"#, ManualProbe::Missing),
+        ];
+        for (answer, expected) in cases {
+            let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(answer)));
+            let transport: &dyn HostTransport = &*fake;
+
+            let probed =
+                block_on(probe_manual_tool(transport, &host(), "/opt/node/bin/node")).unwrap();
+
+            assert_eq!(probed, expected, "答案：{answer}");
+            let script = fake.last_script();
+            assert!(
+                script.contains("'/opt/node/bin/node'"),
+                "要真的在那台机器上跑这个路径：{script}"
+            );
+            assert!(script.contains("--version"), "校验方式就是跑一次 --version：{script}");
+        }
+    }
+
+    /// The install guidance is one command the user runs on **this** Mac, and it
+    /// has to survive both shells on the way to the machine: the user's shell
+    /// hands ssh its arguments, ssh joins them, and the remote shell splits them
+    /// again. Both shells are real here, and the recipe is chosen so the result
+    /// is visible — a broken quoting shows up as the wrong output.
+    #[test]
+    fn an_install_command_survives_both_shells_on_the_way_to_the_machine() {
+        let command = ssh_command("lab", "echo one two | tr a-z A-Z");
+        assert!(command.starts_with("ssh lab "), "{command}");
+        assert!(
+            ssh_command("user@example.com -p 2222", "echo hi")
+                .starts_with("ssh user@example.com -p 2222 "),
+            "自由目标（带自己的参数）也要能用"
+        );
+
+        // What the user's shell hands ssh.
+        let handed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\n' {command}"))
+            .output()
+            .unwrap();
+        let words: Vec<String> = String::from_utf8_lossy(&handed.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(words[0], "ssh");
+        assert_eq!(words[1], "lab");
+        assert_eq!(words.len(), 3, "ssh 只该拿到一个参数：{words:?}");
+
+        // What ssh hands the remote shell: its arguments joined with spaces.
+        // Running that in a real shell is what the machine does with it.
+        let remote = words[2..].join(" ");
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&remote)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ONE TWO",
+            "远端 shell 解析出来的命令是：{remote}"
+        );
+    }
+
+    /// The recipes extend the manager the machine already has, and the one for a
+    /// machine with none leaves it with both nvm and a Node.
+    #[test]
+    fn the_install_recipes_extend_what_the_machine_already_has() {
+        assert_eq!(node_install_recipe(&["nvm".to_string()]), "nvm install --lts");
+        assert_eq!(node_install_recipe(&["fnm".to_string()]), "fnm install --lts");
+        assert_eq!(node_install_recipe(&["brew".to_string()]), "brew install node");
+        let bare = node_install_recipe(&[]);
+        assert!(
+            bare.contains("install.sh") && bare.contains("nvm.sh") && bare.contains("nvm install --lts"),
+            "没有管理器时要先装 nvm 再在同一个 shell 里加载它（新的 ~/.bashrc 只在下一次生效）：{bare}"
+        );
+        assert!(pnpm_install_recipe().contains("get.pnpm.io"));
+
+        // The recipes travel inside double quotes, so a double quote in one would
+        // end the command early.
+        for recipe in [
+            node_install_recipe(&[]),
+            node_install_recipe(&["nvm".to_string()]),
+            node_install_recipe(&["brew".to_string()]),
+            pnpm_install_recipe(),
+        ] {
+            assert!(!recipe.contains('"'), "配方里不能有双引号：{recipe}");
+        }
     }
 }

@@ -205,7 +205,21 @@ export interface ToolStatus {
   manual_path: string | null
 }
 
+/** 探测路上被跳过的候选（远程主机才报）：低于门槛的 Node / pnpm、读不出版本号的、
+ *  以及失效的手动指定。`reason` 是代码不是句子，页面按语言渲染。 */
+export interface SkippedCandidate {
+  tool: 'node' | 'pnpm'
+  path: string
+  version?: string
+  /** 'below-minimum' | 'unparsable' | 'unusable' */
+  reason: string
+  /** 候选报出来的大版本号（低于门槛时才有）。 */
+  major?: number
+}
+
 export interface RuntimeStatus {
+  /** 这份结论是哪台主机的（本机是 LOCAL_HOST_ID）。页面切换主机后据此丢弃迟到的答案。 */
+  host_id: string
   node: ToolStatus
   pnpm: ToolStatus
   /** Detected Node version managers ('nvm' | 'fnm' | 'brew'), most preferred
@@ -216,8 +230,11 @@ export interface RuntimeStatus {
   /** The version floors the backend enforces, so UI copy states the same
    *  numbers the resolver checks rather than repeating them as literals. */
   requirements: ToolchainRequirements
-  /** 系统环境变量是从哪个 shell 读来的（如 '/bin/zsh'）；null = 读 shell 失败，退回应用继承的 PATH。 */
+  /** 系统环境变量是从哪个 shell 读来的（如 '/bin/zsh'，远程是那台机器的 bash）；
+   *  null = 读 shell 失败，退回应用继承的 PATH。 */
   system_env_shell: string | null
+  /** 被跳过的候选，附原因。本机不跳过任何候选（老 Node 只告警），所以这里是空的。 */
+  skipped_candidates: SkippedCandidate[]
 }
 
 export interface ToolchainRequirements {

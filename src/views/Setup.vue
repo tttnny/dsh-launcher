@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { ToolSource } from '@/api/types'
+import { LOCAL_HOST_ID } from '@/api/types'
+import type { HostWithStatus, RuntimeStatus, SkippedCandidate, ToolSource } from '@/api/types'
 import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
@@ -31,8 +32,22 @@ const store = useLauncherStore()
 const checking = ref(false)
 const picking = ref<ToolId | null>(null)
 
+// The page answers for one host at a time. 本机 is the default, and it is the
+// only host whose answer the app itself needs — the redirect here at startup is
+// about the launcher's own toolchain (App.vue), so only that answer is mirrored
+// into the store.
+const hosts = ref<HostWithStatus[]>([])
+const hostId = ref(LOCAL_HOST_ID)
+const runtime = ref<RuntimeStatus | null>(null)
+const manualInput = ref<Record<ToolId, string>>({ node: '', pnpm: '' })
+/** Why this host has no conclusions at all (an unreachable machine, a bad target). */
+const loadError = ref('')
+
+const selectedHost = computed(() => hosts.value.find((h) => h.id === hostId.value) ?? null)
+const isRemote = computed(() => hostId.value !== LOCAL_HOST_ID)
+
 function statusOf(id: ToolId) {
-  return (id === 'node' ? store.runtime?.node : store.runtime?.pnpm) ?? null
+  return (id === 'node' ? runtime.value?.node : runtime.value?.pnpm) ?? null
 }
 
 interface ToolRow {
@@ -65,9 +80,39 @@ const pnpmOk = computed(() => statusOf('pnpm')?.installed ?? false)
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
 const belowRecommended = computed(() => store.runtime?.node_below_recommended ?? false)
 
-const requirements = computed(() => store.runtime?.requirements)
+const requirements = computed(() => runtime.value?.requirements)
 const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
 const pnpmCommand = computed(() => requirements.value?.pnpm_install_command ?? '')
+// The commands the backend hands out are already the ones for the selected
+// machine (on a remote host each is prefixed with `ssh <host>`), so the copy
+// only has to say where they are run.
+const nodeCommandDesc = computed(() =>
+  t(isRemote.value ? 'setup.remoteNodeCommandDesc' : 'setup.nodeCommandDesc'),
+)
+const pnpmCommandDesc = computed(() =>
+  t(isRemote.value ? 'setup.remotePnpmCommandDesc' : 'setup.pnpmCommandDesc', {
+    major: requirements.value?.min_pnpm_major,
+  }),
+)
+
+// The candidates the probe passed over on its way to a conclusion: on a remote
+// host an old Node is passed over rather than warned about, and the user is
+// owed the reason (ADR-0005 追加).
+const skipped = computed<SkippedCandidate[]>(() => runtime.value?.skipped_candidates ?? [])
+
+function skippedReason(candidate: SkippedCandidate): string {
+  if (candidate.reason === 'below-minimum') {
+    return t('setup.skippedBelowMinimum', {
+      path: candidate.path,
+      version: candidate.version ?? '',
+      major: candidate.major ?? '',
+    })
+  }
+  if (candidate.reason === 'unparsable') {
+    return t('setup.skippedUnparsable', { path: candidate.path, version: candidate.version ?? '' })
+  }
+  return t('setup.skippedUnusable', { path: candidate.path })
+}
 
 const overridePath = (id: ToolId) => statusOf(id)?.manual_path ?? null
 // A pick that no longer resolves: the backend falls back to its own detection
@@ -104,11 +149,34 @@ async function copyCommand(text: string, key: string) {
   }, 2000)
 }
 
-/** Re-reads the system environment variables: the user may have just fixed their PATH. */
+// One answer at a time: a load started before the user switched hosts must not
+// land on the page as if it were about the host now selected.
+let loadToken = 0
+
+async function load(force = false) {
+  const wanted = hostId.value
+  const token = ++loadToken
+  try {
+    const answer = await api.getRuntimeStatus(force, wanted)
+    if (token !== loadToken) return
+    loadError.value = ''
+    runtime.value = answer
+    if (answer.host_id === LOCAL_HOST_ID) store.runtime = answer
+  } catch (e) {
+    if (token !== loadToken) return
+    // A machine that cannot be reached has no conclusions to show. Reporting
+    // "Node 未安装" for it would send the user to install a toolchain on a
+    // machine that already has one.
+    loadError.value = String(e)
+    runtime.value = null
+  }
+}
+
+/** Re-reads the environment: the user may have just fixed their PATH. */
 async function recheck() {
   checking.value = true
   try {
-    await store.checkRuntime(true)
+    await load(true)
     if (nodeOk.value && pnpmOk.value) Message.success(t('setup.allReady'))
   } finally {
     checking.value = false
@@ -119,19 +187,38 @@ async function recheck() {
 // back to the window, so the page does not make them hunt for a button.
 async function onFocus() {
   if (checking.value) return
-  await store.checkRuntime()
+  await load()
+}
+
+async function selectHost(id: string) {
+  if (id === hostId.value) return
+  hostId.value = id
+  await load()
 }
 
 /** Points one tool at the file the user picked; `null` goes back to automatic detection. */
 async function applyOverride(id: ToolId, path: string | null) {
   try {
-    store.runtime = await api.setToolchainOverride(id, path)
+    const answer = await api.setToolchainOverride(id, path, hostId.value)
+    runtime.value = answer
+    if (answer.host_id === LOCAL_HOST_ID) store.runtime = answer
+    manualInput.value[id] = ''
     Message.success(
       t(path ? 'setup.overrideApplied' : 'setup.overrideCleared', { tool: TOOL_LABELS[id] }),
     )
   } catch (e) {
     Message.error(String(e))
   }
+}
+
+/**
+ * A remote host has no file picker on this machine, so the path is typed and the
+ * backend checks it by running `--version` over there.
+ */
+function submitManual(id: ToolId) {
+  const raw = manualInput.value[id].trim()
+  if (!raw) return
+  return applyOverride(id, raw)
 }
 
 async function pickFile(id: ToolId) {
@@ -156,7 +243,16 @@ function clearOverride(id: ToolId) {
   return applyOverride(id, null)
 }
 
-onMounted(() => window.addEventListener('focus', onFocus))
+onMounted(async () => {
+  window.addEventListener('focus', onFocus)
+  try {
+    hosts.value = await api.listHosts()
+  } catch {
+    // No host list is no reason to hide the page: 本机 is always there to report on.
+    hosts.value = []
+  }
+  await load()
+})
 onUnmounted(() => window.removeEventListener('focus', onFocus))
 </script>
 
@@ -168,6 +264,15 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
         <p class="dl-head-sub">{{ t('setup.desc') }}</p>
       </div>
       <div class="dl-head-actions">
+        <a-select
+          v-if="hosts.length > 1"
+          :model-value="hostId"
+          style="width: 190px"
+          size="small"
+          @change="(v) => selectHost(String(v))"
+        >
+          <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
+        </a-select>
         <button class="dl-btn dl-btn--quiet" :disabled="checking" @click="recheck">
           <DlIcon name="refresh" :size="13" />
           {{ t('setup.recheck') }}
@@ -191,7 +296,9 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
         </span>
       </div>
 
-      <div class="dl-surface">
+      <p v-if="loadError" class="setup-note setup-note--quiet">{{ loadError }}</p>
+
+      <div v-if="!loadError" class="dl-surface">
         <div v-for="tool in tools" :key="tool.name" class="dl-row">
           <span class="tool-mark" :class="tool.ok ? 'is-on' : 'is-off'">
             <DlIcon :name="tool.ok ? 'check' : 'alert'" :size="13" />
@@ -205,17 +312,31 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
         </div>
       </div>
 
+      <p v-if="isRemote" class="setup-note setup-note--quiet">
+        {{ t('setup.remoteNote', { host: selectedHost?.display_name ?? '' }) }}
+      </p>
+
       <p v-if="nodeOk && belowRecommended" class="setup-note">
         <DlIcon name="alert" :size="13" />
         {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
       </p>
+
+      <!-- On a remote host an old candidate is passed over instead of warned
+           about, so the page has to say which ones it walked past and why. -->
+      <div v-if="skipped.length" class="dl-surface skipped">
+        <div class="skipped-head">{{ t('setup.skippedTitle') }}</div>
+        <div v-for="candidate in skipped" :key="candidate.tool + candidate.path" class="skipped-row">
+          <span class="dl-chip">{{ candidate.tool }}</span>
+          <span class="skipped-why">{{ skippedReason(candidate) }}</span>
+        </div>
+      </div>
     </section>
 
     <!-- The two ways out of a missing or non-system toolchain: point the
          launcher at the file, or fix PATH in a terminal and re-check. Shown for
          every tool the terminal would not find, plus any tool the user already
          picked, so their choice stays visible and revisable. -->
-    <section v-if="manualTools.length" class="dl-section">
+    <section v-if="!loadError && manualTools.length" class="dl-section">
       <div class="dl-section-label">{{ t('setup.manualSection') }}</div>
 
       <div v-for="tool in manualTools" :key="tool.id" class="dl-surface pick">
@@ -231,7 +352,22 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
           </span>
         </div>
         <div class="pick-actions">
-          <button class="dl-btn dl-btn--quiet" :disabled="picking === tool.id" @click="pickFile(tool.id)">
+          <template v-if="isRemote">
+            <input
+              v-model="manualInput[tool.id]"
+              class="dl-input dl-mono"
+              :placeholder="t('setup.remoteManualPlaceholder')"
+              @keyup.enter="submitManual(tool.id)"
+            />
+            <button
+              class="dl-btn dl-btn--quiet"
+              :disabled="!manualInput[tool.id].trim()"
+              @click="submitManual(tool.id)"
+            >
+              {{ t('setup.remoteManualApply') }}
+            </button>
+          </template>
+          <button v-else class="dl-btn dl-btn--quiet" :disabled="picking === tool.id" @click="pickFile(tool.id)">
             <DlIcon name="folder" :size="13" />
             {{ t('setup.pickFile') }}
           </button>
@@ -247,13 +383,13 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       </div>
     </section>
 
-    <section v-if="!allOk" class="dl-section">
+    <section v-if="!loadError && !allOk" class="dl-section">
       <div class="dl-section-label">{{ t('setup.howTo') }}</div>
 
       <div v-if="!nodeOk" class="dl-surface guide">
         <div class="guide-head">
           <span class="guide-title">{{ t('setup.installNode') }}</span>
-          <span class="guide-desc">{{ t('setup.nodeCommandDesc') }}</span>
+          <span class="guide-desc">{{ nodeCommandDesc }}</span>
         </div>
         <div class="cmd-row">
           <code class="cmd-text">{{ nodeCommand }}</code>
@@ -267,9 +403,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       <div v-if="!pnpmOk" class="dl-surface guide">
         <div class="guide-head">
           <span class="guide-title">{{ t('setup.installPnpm') }}</span>
-          <span class="guide-desc">
-            {{ t('setup.pnpmCommandDesc', { major: requirements?.min_pnpm_major }) }}
-          </span>
+          <span class="guide-desc">{{ pnpmCommandDesc }}</span>
         </div>
         <div class="cmd-row">
           <code class="cmd-text">{{ pnpmCommand }}</code>
@@ -345,6 +479,39 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
   font-size: var(--dl-text-sm);
   line-height: 1.5;
   color: var(--dl-warn);
+
+  &--quiet {
+    color: var(--dl-ink-3);
+  }
+}
+
+.skipped {
+  margin-top: 12px;
+  padding: 14px 16px;
+}
+
+.skipped-head {
+  margin-bottom: 8px;
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.skipped-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  & + .skipped-row {
+    margin-top: 6px;
+  }
+}
+
+.skipped-why {
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+  word-break: break-all;
 }
 
 .guide {

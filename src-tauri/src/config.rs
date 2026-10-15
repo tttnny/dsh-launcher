@@ -94,6 +94,18 @@ pub struct Host {
     /// settings page reads to leave out the delete control.
     #[serde(default)]
     pub builtin: bool,
+    /// Where this host's toolchain resolution last landed: the absolute paths of
+    /// the `node` and `pnpm` the launcher will drive DSH with *there*. A probe
+    /// cache — rewritten by every probe, never a user preference — and one per
+    /// host, because a path is a fact about one machine's filesystem (ADR-0005
+    /// 追加).
+    #[serde(default)]
+    pub toolchain: ToolchainBinding,
+    /// Executables the user picked by hand for *this* host, on the environment
+    /// page. A chosen path wins over detection there, and only the override
+    /// command writes it.
+    #[serde(default)]
+    pub toolchain_overrides: ToolchainOverrides,
 }
 
 impl Host {
@@ -108,6 +120,8 @@ impl Host {
             extra_env: BTreeMap::new(),
             data_dir: None,
             builtin: true,
+            toolchain: ToolchainBinding::default(),
+            toolchain_overrides: ToolchainOverrides::default(),
         }
     }
 
@@ -233,21 +247,6 @@ pub struct LauncherSettings {
     /// terminal window with DSH_HOME set and cwd at the HOME directory.
     #[serde(default = "default_terminal")]
     pub terminal: String,
-    /// Where the launcher's own toolchain resolution last landed: the absolute
-    /// paths of the `node` and `pnpm` it will drive DSH with. This is a probe
-    /// *cache*, not a user preference — it is rewritten at startup and by the
-    /// setup page's re-check, and a stored path that no longer exists is
-    /// re-probed rather than reported as an error. Persisting it means a
-    /// spawned process no longer depends on the PATH the app happened to
-    /// inherit at launch.
-    #[serde(default)]
-    pub toolchain: ToolchainBinding,
-    /// Executables the user picked by hand on the setup page. `toolchain` above
-    /// records what the launcher detected; this records what the user chose.
-    /// A chosen path wins over detection, and detection only runs again as the
-    /// fallback when the choice stops working.
-    #[serde(default)]
-    pub toolchain_overrides: ToolchainOverrides,
 }
 
 /// The user's hand-picked `node` / `pnpm` executables. Each is `None` until the
@@ -351,8 +350,6 @@ impl Default for LauncherSettings {
             no_proxy: default_no_proxy(),
             proxy_apply_dsh: false,
             terminal: default_terminal(),
-            toolchain: ToolchainBinding::default(),
-            toolchain_overrides: ToolchainOverrides::default(),
         }
     }
 }
@@ -515,33 +512,76 @@ pub struct InstanceStatus {
 // ---------------------------------------------------------------------------
 
 pub fn load_config(path: &Path) -> Config {
-    match fs::read_to_string(path) {
-        Ok(raw) => match serde_json::from_str::<Config>(&raw) {
-            Ok(mut cfg) => {
-                let data_dir = path.parent().unwrap_or(Path::new("."));
-                // Ownership first: the sweeps below compare HOME paths, which
-                // only identify one record per host.
-                let hosts_changed = migrate_hosts(&mut cfg);
-                let local = cfg.local_host().cloned().unwrap_or_else(Host::local);
-                dedupe_homes(&local, &mut cfg);
-                cleanup_orphan_homes(&local, &mut cfg);
-                ensure_user_dsh_home(&local, &mut cfg);
-                let changed =
-                    hosts_changed || migrate_instances_to_dedicated_homes(&local, data_dir, &mut cfg);
-                if changed {
-                    let _ = save_config(path, &cfg);
-                }
-                cfg
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Config::default();
+    };
+    // The document is read as a value before it is read as a `Config`: a config
+    // written before each host kept its own toolchain still spells that pair
+    // under `settings`, and only the raw document can say what it was.
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return backup_and_reset(path, "配置不是合法的 JSON");
+    };
+    match serde_json::from_value::<Config>(document.clone()) {
+        Ok(mut cfg) => {
+            let data_dir = path.parent().unwrap_or(Path::new("."));
+            // Ownership first: the sweeps below compare HOME paths, which
+            // only identify one record per host.
+            let hosts_changed = migrate_hosts(&mut cfg);
+            let adopted = adopt_legacy_toolchain(&document, &mut cfg);
+            let local = cfg.local_host().cloned().unwrap_or_else(Host::local);
+            dedupe_homes(&local, &mut cfg);
+            cleanup_orphan_homes(&local, &mut cfg);
+            ensure_user_dsh_home(&local, &mut cfg);
+            let changed = hosts_changed
+                || adopted
+                || migrate_instances_to_dedicated_homes(&local, data_dir, &mut cfg);
+            if changed {
+                let _ = save_config(path, &cfg);
             }
-            Err(err) => {
-                // Back up the broken file and start fresh.
-                let _ = fs::copy(path, path.with_extension("json.bak"));
-                eprintln!("dsh-launcher: config corrupted, backed up: {err}");
-                Config::default()
-            }
-        },
-        Err(_) => Config::default(),
+            cfg
+        }
+        Err(err) => backup_and_reset(path, &err.to_string()),
     }
+}
+
+/// Keeps the broken file and starts fresh.
+fn backup_and_reset(path: &Path, reason: &str) -> Config {
+    let _ = fs::copy(path, path.with_extension("json.bak"));
+    eprintln!("dsh-launcher: config corrupted, backed up: {reason}");
+    Config::default()
+}
+
+/// Moves the toolchain pair a config written before hosts owned it kept under
+/// `settings` onto the local host, which is whose pair it was.
+///
+/// Without this the user's hand-picked executables would be dropped: the pair is
+/// per host now, and an unknown key in the document is simply not read.
+fn adopt_legacy_toolchain(document: &serde_json::Value, cfg: &mut Config) -> bool {
+    let settings = &document["settings"];
+    let binding: ToolchainBinding =
+        serde_json::from_value(settings["toolchain"].clone()).unwrap_or_default();
+    let overrides: ToolchainOverrides =
+        serde_json::from_value(settings["toolchain_overrides"].clone()).unwrap_or_default();
+    let legacy_is_empty = binding.node.is_none()
+        && binding.pnpm.is_none()
+        && overrides.node.is_none()
+        && overrides.pnpm.is_none();
+    if legacy_is_empty {
+        return false;
+    }
+    let Some(local) = cfg.hosts.iter_mut().find(|host| host.builtin) else {
+        return false;
+    };
+    let local_is_empty = local.toolchain.node.is_none()
+        && local.toolchain.pnpm.is_none()
+        && local.toolchain_overrides.node.is_none()
+        && local.toolchain_overrides.pnpm.is_none();
+    if !local_is_empty {
+        return false;
+    }
+    local.toolchain = binding;
+    local.toolchain_overrides = overrides;
+    true
 }
 
 /// Removes one host's HOME records whose directory no longer exists AND that
@@ -829,6 +869,8 @@ mod tests {
             extra_env: BTreeMap::new(),
             data_dir: data_dir.map(PathBuf::from),
             builtin: false,
+            toolchain: ToolchainBinding::default(),
+            toolchain_overrides: ToolchainOverrides::default(),
         }
     }
 
@@ -940,12 +982,16 @@ mod tests {
         assert!(!cfg.settings.minimize_to_tray);
         assert!(cfg.settings.autostart);
         assert_eq!(cfg.settings.terminal, "ghostty");
+
+        // The toolchain pair this config spells under `settings` belonged to the
+        // local host all along; it moves onto that host's record, so the user's
+        // hand-picked executables are not dropped by the move.
         assert_eq!(
-            cfg.settings.toolchain.node.as_ref().map(|b| b.path.clone()),
+            local.toolchain.node.as_ref().map(|b| b.path.clone()),
             Some(PathBuf::from("/opt/node/bin/node"))
         );
         assert_eq!(
-            cfg.settings.toolchain_overrides.pnpm,
+            local.toolchain_overrides.pnpm,
             Some(PathBuf::from("/opt/pnpm/bin/pnpm"))
         );
         assert_eq!(cfg.settings.last_instance_id.as_deref(), Some("i-web"));
@@ -956,6 +1002,10 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(written["hosts"][0]["id"], LOCAL_HOST_ID);
         assert_eq!(written["instances"][0]["host_id"], LOCAL_HOST_ID);
+        assert_eq!(
+            written["hosts"][0]["toolchain"]["node"]["path"],
+            "/opt/node/bin/node"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1288,30 +1338,43 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_toolchain_field_still_load() {
-        // Forward compatibility of the config file itself: `toolchain` is
-        // `#[serde(default)]`, so an old config.json keeps loading.
-        let raw = r#"{"locale":"zh-CN"}"#;
-        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
-        assert!(settings.toolchain.node.is_none());
+    fn a_host_record_without_toolchain_fields_still_loads() {
+        // Forward compatibility of the config file itself: both fields are
+        // `#[serde(default)]`, so a host record written before per-host
+        // toolchains existed loads with nothing probed and nothing chosen —
+        // rather than failing and taking the whole config with it.
+        let raw = r#"{"id":"host-lab","display_name":"服务器","ssh_target":"lab"}"#;
+        let host: Host = serde_json::from_str(raw).unwrap();
+        assert!(host.toolchain.node.is_none());
+        assert!(!host.toolchain.node_is_fresh(None));
+        assert!(host.toolchain_overrides.node.is_none());
+        assert!(host.toolchain_overrides.pnpm.is_none());
     }
 
     #[test]
-    fn settings_without_toolchain_overrides_still_load() {
-        // Same forward compatibility for the hand-picked executables: a config
-        // written before that field existed means "nothing picked by hand".
-        let raw = r#"{"locale":"zh-CN","toolchain":{"node":{"path":"/usr/bin/node","version":"v22.0.0"}}}"#;
-        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
-        assert!(settings.toolchain.node.is_some(), "the detection cache must survive");
-        assert!(settings.toolchain_overrides.node.is_none());
-        assert!(settings.toolchain_overrides.pnpm.is_none());
+    fn a_legacy_toolchain_pair_moves_onto_the_local_host() {
+        // The pair used to live under `settings`, and it was the local host's.
+        // Loading such a config has to keep it: a hand-picked executable is the
+        // user's choice, and nothing can re-derive it.
+        let mut cfg = Config::default();
+        migrate_hosts(&mut cfg);
+        let document: serde_json::Value = serde_json::from_str(
+            r#"{"settings":{
+                 "toolchain":{"node":{"path":"/usr/bin/node","version":"v22.0.0"}},
+                 "toolchain_overrides":{"pnpm":"/opt/pnpm/bin/pnpm"}}}"#,
+        )
+        .unwrap();
 
-        let raw = r#"{"toolchain_overrides":{"node":"/opt/node/bin/node"}}"#;
-        let settings: LauncherSettings = serde_json::from_str(raw).unwrap();
+        assert!(adopt_legacy_toolchain(&document, &mut cfg));
+        let local = cfg.local_host().unwrap();
+        assert_eq!(local.toolchain.node.as_ref().unwrap().version, "v22.0.0");
         assert_eq!(
-            settings.toolchain_overrides.node,
-            Some(PathBuf::from("/opt/node/bin/node"))
+            local.toolchain_overrides.pnpm,
+            Some(PathBuf::from("/opt/pnpm/bin/pnpm"))
         );
-        assert!(settings.toolchain_overrides.pnpm.is_none());
+
+        // A record that already carries its own pair is newer than the legacy
+        // one, and is left exactly as it is.
+        assert!(!adopt_legacy_toolchain(&document, &mut cfg));
     }
 }

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -34,6 +35,10 @@ pub struct ToolStatus {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeStatus {
+    /// Which host this answer is about — `host-local` for 本机. A page that
+    /// switched hosts can tell an answer that arrived late from the one it is
+    /// waiting for.
+    pub host_id: String,
     pub node: ToolStatus,
     pub pnpm: ToolStatus,
     /// Which Node version managers are present (`nvm`, `fnm`, `brew`), so the
@@ -49,10 +54,31 @@ pub struct RuntimeStatus {
     /// enforce them so the UI copy cannot drift out of sync with what the
     /// backend actually accepts.
     pub requirements: ToolchainRequirements,
-    /// The shell the system environment was read from (e.g. `/bin/zsh`), or
-    /// `None` when that read failed — in which case the system environment
-    /// falls back to the PATH the app itself inherited.
+    /// The shell the system environment was read from (e.g. `/bin/zsh`, or the
+    /// remote machine's `bash`), or `None` when that read failed — in which case
+    /// the system environment falls back to the PATH the app itself inherited.
     pub system_env_shell: Option<String>,
+    /// Candidates the probe passed over, with the reason. A remote host passes
+    /// over a Node below the recommended major (and any pnpm below its floor)
+    /// and reports it; the local host passes nothing over (ADR-0005 追加 2).
+    pub skipped_candidates: Vec<SkippedCandidate>,
+}
+
+/// One candidate the launcher's probe passed over on its way to a conclusion.
+#[derive(Clone, Debug, Serialize)]
+pub struct SkippedCandidate {
+    /// `node` | `pnpm`.
+    pub tool: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// A code, not a sentence: `below-minimum` (under the floor the launcher
+    /// drives), `unparsable` (a version it cannot read) or `unusable` (a path
+    /// the user typed that is not there or would not run). The page says it in
+    /// the reader's language.
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub major: Option<u64>,
 }
 
 /// What the launcher needs from the user's toolchain. Sent to the frontend so
@@ -79,6 +105,25 @@ impl ToolchainRequirements {
             recommended_node_major: RECOMMENDED_NODE_MAJOR,
             pnpm_install_command: crate::toolchain::PNPM_INSTALL_HINT.to_string(),
             node_install_command: node_install_command(managers),
+        }
+    }
+
+    /// The same numbers and the same manager preference, as commands the user
+    /// runs **on this Mac** to install the tool on `host`. One command each,
+    /// prefixed with `ssh <host>`, in the shape that installs into the same
+    /// directories the probe searches (ADR-0005 追加 4).
+    fn for_remote(host: &crate::ssh::RemoteHost, managers: &[String]) -> Self {
+        Self {
+            min_pnpm_major: crate::toolchain::MIN_PNPM_MAJOR,
+            recommended_node_major: RECOMMENDED_NODE_MAJOR,
+            pnpm_install_command: crate::remote::ssh_command(
+                &host.target,
+                crate::remote::pnpm_install_recipe(),
+            ),
+            node_install_command: crate::remote::ssh_command(
+                &host.target,
+                crate::remote::node_install_recipe(managers),
+            ),
         }
     }
 }
@@ -314,13 +359,59 @@ struct SystemEnv {
     at: Instant,
 }
 
-static SYSTEM_ENV: Mutex<Option<SystemEnv>> = Mutex::new(None);
+/// The system environment **per host**, keyed by host id: this Mac's PATH comes
+/// from the user's own login shell, a remote host's from `ssh <host> bash -ilc`.
+/// One cache per host is what keeps two machines' conclusions from answering for
+/// each other — a single slot would report whichever host was probed last
+/// (ADR-0005 追加).
+fn system_env_cache() -> &'static Mutex<HashMap<String, SystemEnv>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, SystemEnv>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The whole environment answer per remote host, keyed by
+/// [`crate::ssh::RemoteHost::id`]. The probe is one ssh call, but the shell on
+/// the other side starts an interactive login shell before it says anything, so
+/// the answer is reused for the same short window the local PATH read is.
+fn remote_env_cache() -> &'static Mutex<HashMap<String, (crate::remote::RemoteEnvironment, Instant)>>
+{
+    static CACHE: OnceLock<Mutex<HashMap<String, (crate::remote::RemoteEnvironment, Instant)>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// The PATH this process inherited at launch, captured before
 /// [`ensure_macos_paths`] appends the known tool directories to the process
 /// PATH. Afterwards `std::env::var("PATH")` is no longer the inherited value,
 /// so this is the only honest record of it.
 static INHERITED_PATH: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Which host an environment answer is about, and how to reach it. Everything
+/// that probes or resolves is stated per host, so no two machines can share a
+/// conclusion (ADR-0005 追加).
+pub(crate) enum EnvHost {
+    /// This Mac: read directly, dial nothing.
+    Local,
+    /// Another machine: everything goes through the transport.
+    Remote(crate::ssh::RemoteHost),
+}
+
+/// The host a runtime question is about — the one the caller named, or 本机 when
+/// it named none, which is what every caller written before hosts existed meant.
+pub(crate) fn env_host(
+    state: &AppState,
+    host_id: Option<&str>,
+) -> Result<(crate::config::Host, EnvHost), String> {
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        crate::config::resolve_host(&cfg, host_id)?.clone()
+    };
+    if host.builtin {
+        return Ok((host, EnvHost::Local));
+    }
+    let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+    Ok((host, EnvHost::Remote(target)))
+}
 
 /// Remembers the inherited PATH. Called before the process PATH is first
 /// mutated; a later caller gets whatever was stored then.
@@ -336,13 +427,15 @@ fn inherited_path_dirs() -> Vec<PathBuf> {
 }
 
 fn cached_system_env() -> Option<SystemEnv> {
-    match SYSTEM_ENV.lock().unwrap().as_ref() {
-        Some(cached) if cached.at.elapsed() < SYSTEM_ENV_TTL => Some(cached.clone()),
-        _ => None,
-    }
+    system_env_cache()
+        .lock()
+        .unwrap()
+        .get(crate::config::LOCAL_HOST_ID)
+        .filter(|cached| cached.at.elapsed() < SYSTEM_ENV_TTL)
+        .cloned()
 }
 
-/// The system environment, read from the user's login shell and cached for
+/// Reads `PATH` from the *local* machine's login shell, cached for
 /// [`SYSTEM_ENV_TTL`]. `force` skips the cache (the setup page's re-check: the
 /// user just edited their shell config and wants that honoured now).
 ///
@@ -369,8 +462,79 @@ async fn system_env(force: bool) -> SystemEnv {
             }
         }
     };
-    *SYSTEM_ENV.lock().unwrap() = Some(env.clone());
+    remember_system_env(crate::config::LOCAL_HOST_ID, env.dirs.clone(), env.shell.clone());
     env
+}
+
+/// Records one host's system environment. The local host's entry comes from
+/// [`read_shell_path`]; a remote host's comes from the probe, which reads the
+/// same PATH inside the same interactive login shell — asking twice would only
+/// risk the two answers disagreeing.
+fn remember_system_env(key: &str, dirs: Vec<PathBuf>, shell: Option<String>) {
+    system_env_cache().lock().unwrap().insert(
+        key.to_string(),
+        SystemEnv {
+            dirs,
+            shell,
+            at: Instant::now(),
+        },
+    );
+}
+
+/// The whole environment answer of one remote host, probed at most once per
+/// [`SYSTEM_ENV_TTL`]. `force` bypasses the cache — 「重新检测」 means the user
+/// changed something on that machine and wants that honoured now.
+async fn remote_env(
+    state: &AppState,
+    host: &crate::ssh::RemoteHost,
+    overrides: &crate::config::ToolchainOverrides,
+    force: bool,
+) -> Result<crate::remote::RemoteEnvironment, String> {
+    if !force {
+        let cached = remote_env_cache()
+            .lock()
+            .unwrap()
+            .get(&host.id)
+            .filter(|(_, at)| at.elapsed() < SYSTEM_ENV_TTL)
+            .map(|(env, _)| env.clone());
+        if let Some(env) = cached {
+            return Ok(env);
+        }
+    }
+    let env = crate::remote::environment(
+        &*state.host_transport,
+        host,
+        overrides
+            .node
+            .as_deref()
+            .map(|p| p.to_string_lossy())
+            .as_deref(),
+        overrides
+            .pnpm
+            .as_deref()
+            .map(|p| p.to_string_lossy())
+            .as_deref(),
+    )
+    .await
+    .map_err(|e| e.message)?;
+    remember_system_env(
+        &host.id,
+        std::env::split_paths(&env.path).collect(),
+        Some(env.shell.clone()),
+    );
+    remote_env_cache()
+        .lock()
+        .unwrap()
+        .insert(host.id.clone(), (env.clone(), Instant::now()));
+    Ok(env)
+}
+
+/// Drops one host's cached answers. Every write that changes what the probe
+/// would find — a new hand-picked path, a cleared one — has to drop them, or the
+/// page would keep showing the conclusion of the previous choice.
+pub(crate) fn forget_host_env(host_id: &str) {
+    system_env_cache().lock().unwrap().remove(host_id);
+    remote_env_cache().lock().unwrap().remove(host_id);
 }
 
 /// The shell whose environment counts as "the system's": the user's login shell
@@ -434,9 +598,10 @@ fn parse_shell_path(stdout: &str) -> Option<String> {
     Some(path.to_string())
 }
 
-/// Probes node and pnpm and records the result in the config, so every later
-/// spawn can use an absolute path instead of re-resolving a name against
-/// whatever PATH the app inherited. Returns the binding that was written.
+/// Probes node and pnpm and records the result in the **local host's** own
+/// binding, so every later spawn can use an absolute path instead of
+/// re-resolving a name against whatever PATH the app inherited. Returns the
+/// binding that was written.
 ///
 /// Freshness is checked per tool: a binding whose path still exists on disk is
 /// kept, so a startup probe does not re-run `--version` for a toolchain that
@@ -454,13 +619,16 @@ pub async fn refresh_toolchain_binding(
     state: &State<'_, AppState>,
     force: bool,
 ) -> crate::config::ToolchainBinding {
-    let (current, overrides) = {
-        let cfg = state.config.lock().unwrap();
-        (
-            cfg.settings.toolchain.clone(),
-            cfg.settings.toolchain_overrides.clone(),
-        )
-    };
+    refresh_local_binding(state, force).await
+}
+
+/// [`refresh_toolchain_binding`] for callers holding `&AppState`, which is every
+/// caller inside this module and every test.
+pub(crate) async fn refresh_local_binding(
+    state: &AppState,
+    force: bool,
+) -> crate::config::ToolchainBinding {
+    let (current, overrides) = local_toolchain(state);
     // Both freshness checks run before either field is moved out.
     let (node_fresh, pnpm_fresh) = (
         !force && current.node_is_fresh(overrides.node.as_deref()),
@@ -492,17 +660,75 @@ pub async fn refresh_toolchain_binding(
         }
     };
     let binding = crate::config::ToolchainBinding { node, pnpm };
-
-    {
-        let mut cfg = state.config.lock().unwrap();
-        if !binding_matches(&cfg.settings.toolchain, &binding) {
-            cfg.settings.toolchain = binding.clone();
-            if let Err(e) = crate::config::save_config(&state.config_path, &cfg) {
-                crate::log_warn!("保存工具链绑定失败: {e}");
-            }
-        }
-    }
+    write_host_binding(state, crate::config::LOCAL_HOST_ID, &binding);
     binding
+}
+
+/// The local host's recorded binding and the user's choices for it, so every
+/// caller reads the same pair.
+fn local_toolchain(
+    state: &AppState,
+) -> (
+    crate::config::ToolchainBinding,
+    crate::config::ToolchainOverrides,
+) {
+    let cfg = state.config.lock().unwrap();
+    match cfg.local_host() {
+        Some(host) => (host.toolchain.clone(), host.toolchain_overrides.clone()),
+        None => Default::default(),
+    }
+}
+
+/// Probes one remote host and records the conclusion in that host's own
+/// binding. The one place a remote conclusion is written, so the page and a
+/// spawn on that machine read the same resolution — and the same candidates
+/// were walked to get it.
+async fn remote_probe(
+    state: &AppState,
+    host: &crate::config::Host,
+    target: &crate::ssh::RemoteHost,
+    force: bool,
+) -> Result<crate::remote::RemoteEnvironment, String> {
+    let env = remote_env(state, target, &host.toolchain_overrides, force).await?;
+    write_host_binding(state, &host.id, &binding_of_remote(&env));
+    Ok(env)
+}
+
+/// What a remote probe's answer becomes for the launcher's own use: the path to
+/// execute and the version it reported, or `None` when that machine has no
+/// usable tool.
+fn binding_of_remote(env: &crate::remote::RemoteEnvironment) -> crate::config::ToolchainBinding {
+    let bound = |tool: &crate::remote::RemoteToolStatus| match (
+        tool.path.as_deref(),
+        tool.version.as_deref(),
+    ) {
+        (Some(path), Some(version)) => Some(crate::config::BoundTool {
+            path: PathBuf::from(path),
+            version: version.to_string(),
+        }),
+        _ => None,
+    };
+    crate::config::ToolchainBinding {
+        node: bound(&env.node),
+        pnpm: bound(&env.pnpm),
+    }
+}
+
+/// Records one host's probe conclusion. The binding is the launcher's
+/// resolution, not a preference: it is rewritten whenever it changed, and always
+/// into the host it is about — never into a slot two machines would share.
+fn write_host_binding(state: &AppState, host_id: &str, binding: &crate::config::ToolchainBinding) {
+    let mut cfg = state.config.lock().unwrap();
+    let Some(host) = cfg.hosts.iter_mut().find(|host| host.id == host_id) else {
+        return;
+    };
+    if binding_matches(&host.toolchain, binding) {
+        return;
+    }
+    host.toolchain = binding.clone();
+    if let Err(e) = crate::config::save_config(&state.config_path, &cfg) {
+        crate::log_warn!("保存工具链绑定失败: {e}");
+    }
 }
 
 fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {
@@ -539,8 +765,9 @@ fn binding_matches(
 /// (a config written before the binding existed), in which case PATH resolution
 /// is still better than refusing to launch.
 fn node_for_spawn(cfg: &crate::config::Config) -> PathBuf {
-    match &cfg.settings.toolchain.node {
-        Some(bound) if bound.path.is_file() => bound.path.clone(),
+    let bound = cfg.local_host().and_then(|host| host.toolchain.node.clone());
+    match bound {
+        Some(bound) if bound.path.is_file() => bound.path,
         _ => PathBuf::from(crate::process::node()),
     }
 }
@@ -560,123 +787,253 @@ pub fn node_missing_error() -> String {
 pub async fn node_for_spawn_checked(
     state: &State<'_, AppState>,
 ) -> Result<PathBuf, String> {
-    let fresh = {
-        let cfg = state.config.lock().unwrap();
-        cfg.settings
-            .toolchain
-            .node_is_fresh(cfg.settings.toolchain_overrides.node.as_deref())
-    };
-    if fresh {
-        let cfg = state.config.lock().unwrap();
-        return Ok(node_for_spawn(&cfg));
-    }
-    let binding = refresh_toolchain_binding(state, false).await;
-    match binding.node {
-        Some(bound) => Ok(bound.path),
-        None => Err(node_missing_error()),
+    node_for_spawn_checked_for(state, None).await
+}
+
+/// The node executable to spawn DSH with **on one host**, refreshing a stale
+/// binding first. 本机 keeps the shape it always had; a remote host resolves
+/// through that machine's own probe, so the path the page reports and the path a
+/// spawn there would run are the same file.
+pub(crate) async fn node_for_spawn_checked_for(
+    state: &AppState,
+    host_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let (host, target) = env_host(state, host_id)?;
+    match target {
+        EnvHost::Local => {
+            let fresh = {
+                let (binding, overrides) = local_toolchain(state);
+                binding.node_is_fresh(overrides.node.as_deref())
+            };
+            if fresh {
+                let cfg = state.config.lock().unwrap();
+                return Ok(node_for_spawn(&cfg));
+            }
+            match refresh_local_binding(state, false).await.node {
+                Some(bound) => Ok(bound.path),
+                None => Err(node_missing_error()),
+            }
+        }
+        EnvHost::Remote(remote) => {
+            let env = remote_probe(state, &host, &remote, false).await?;
+            match binding_of_remote(&env).node {
+                Some(bound) => Ok(bound.path),
+                None => Err(node_missing_error()),
+            }
+        }
     }
 }
 
-/// The status the setup page renders.
+/// The status the setup page renders for one host — 本机 when the caller names
+/// none, which is what every caller written before hosts existed meant.
 ///
 /// `force` re-reads the system environment and re-probes both tools: it is the
-/// page's re-check, and the user asking for one means their shell environment
-/// may have moved (a path they just exported, a tool they just installed).
+/// page's re-check, and the user asking for one means the environment may have
+/// moved (a path they just exported, a tool they just installed).
 #[tauri::command]
 pub async fn get_runtime_status(
     state: State<'_, AppState>,
     force: Option<bool>,
+    host_id: Option<String>,
 ) -> Result<RuntimeStatus, String> {
-    Ok(runtime_status(&state, force.unwrap_or(false)).await)
+    runtime_status_for(&state, host_id.as_deref(), force.unwrap_or(false)).await
 }
 
-/// Points the launcher at a `node` / `pnpm` the user picked by hand, or clears
-/// that choice when `path` is absent or empty. Answers with the status as it
-/// stands afterwards, so one call applies the change and refreshes the page.
+/// Points the launcher at a `node` / `pnpm` the user picked by hand **on one
+/// host**, or clears that choice when `path` is absent or empty. Answers with
+/// that host's status as it stands afterwards, so one call applies the change
+/// and refreshes the page.
 ///
-/// Nothing is written until the file has been run successfully: an override
-/// that cannot be executed would leave the launcher with a toolchain it cannot
-/// spawn, and the user with no obvious way back.
+/// Nothing is written until the file has been run successfully — locally by
+/// executing it, on a remote host by running `--version` there: an override that
+/// cannot be executed would leave the launcher with a toolchain it cannot spawn,
+/// and the user with no obvious way back.
 #[tauri::command]
 pub async fn set_toolchain_override(
     state: State<'_, AppState>,
     tool: String,
     path: Option<String>,
+    host_id: Option<String>,
 ) -> Result<RuntimeStatus, String> {
+    set_toolchain_override_for(&state, &tool, path.as_deref(), host_id.as_deref()).await
+}
+
+/// [`set_toolchain_override`] for callers holding `&AppState` — which is every
+/// test, since a Tauri `State` only exists inside a running app.
+pub(crate) async fn set_toolchain_override_for(
+    state: &AppState,
+    tool: &str,
+    path: Option<&str>,
+    host_id: Option<&str>,
+) -> Result<RuntimeStatus, String> {
+    let (host, target) = env_host(state, host_id)?;
     let program = match tool.trim() {
         "node" => "node",
         "pnpm" => "pnpm",
         other => return Err(format!("无法指定「{other}」：这里只能指定 node 或 pnpm。")),
     };
-    let manual = match path.map(|p| p.trim().to_string()) {
-        Some(raw) if !raw.is_empty() => Some(validate_manual_tool(program, &raw).await?),
-        _ => None,
+    let manual = match path.map(str::trim).filter(|raw| !raw.is_empty()) {
+        Some(raw) => Some(match &target {
+            EnvHost::Local => validate_manual_tool(program, raw).await?,
+            EnvHost::Remote(remote) => {
+                validate_remote_manual_tool(&*state.host_transport, remote, program, raw).await?
+            }
+        }),
+        None => None,
     };
 
     {
         let mut cfg = state.config.lock().unwrap();
+        let Some(record) = cfg.hosts.iter_mut().find(|record| record.id == host.id) else {
+            return Err(format!("主机不存在: {}", host.id));
+        };
         let is_node = program == "node";
-        let changed = {
-            let slot = if is_node {
-                &mut cfg.settings.toolchain_overrides.node
-            } else {
-                &mut cfg.settings.toolchain_overrides.pnpm
-            };
-            let changed = match (slot.as_deref(), manual.as_deref()) {
-                (Some(a), Some(b)) => !crate::config::paths_equal(a, b),
-                (None, None) => false,
-                _ => true,
-            };
-            if changed {
-                *slot = manual;
-            }
-            changed
+        let slot = if is_node {
+            &mut record.toolchain_overrides.node
+        } else {
+            &mut record.toolchain_overrides.pnpm
+        };
+        let changed = match (slot.as_deref(), manual.as_deref()) {
+            // Path equality follows the host's own filesystem: this Mac folds
+            // case, a Linux machine does not.
+            (Some(a), Some(b)) => !host.paths_equal(a, b),
+            (None, None) => false,
+            _ => true,
         };
         if changed {
+            *slot = manual;
             // The recorded binding is the answer to the previous choice; drop it
             // so the refresh below resolves again instead of reusing it.
-            let binding = &mut cfg.settings.toolchain;
             if is_node {
-                binding.node = None;
+                record.toolchain.node = None;
             } else {
-                binding.pnpm = None;
+                record.toolchain.pnpm = None;
             }
         }
         crate::config::save_config(&state.config_path, &cfg)
             .map_err(|e| format!("保存设置失败: {e}"))?;
     }
 
-    Ok(runtime_status(&state, false).await)
+    // The cached probe answer is the conclusion of the previous choice too.
+    forget_host_env(&host.id);
+    runtime_status_for(state, Some(&host.id), false).await
 }
 
-/// Probes both tools and reports where each one came from.
-async fn runtime_status(state: &State<'_, AppState>, force: bool) -> RuntimeStatus {
+/// Probes one host and reports where each tool came from. The one path both the
+/// page and the binding go through, so the numbers shown are the ones the
+/// launcher will actually spawn there.
+pub(crate) async fn runtime_status_for(
+    state: &AppState,
+    host_id: Option<&str>,
+    force: bool,
+) -> Result<RuntimeStatus, String> {
+    let (host, target) = env_host(state, host_id)?;
+    match target {
+        EnvHost::Local => Ok(local_runtime_status(state, force).await),
+        EnvHost::Remote(remote) => remote_runtime_status(state, &host, &remote, force).await,
+    }
+}
+
+async fn local_runtime_status(state: &AppState, force: bool) -> RuntimeStatus {
     if force {
         // Warm the cache first: every probe below reads it.
         system_env(true).await;
     }
     // One probe path for both the UI and the binding: the numbers the setup
     // page shows are the ones the launcher will actually spawn.
-    let binding = refresh_toolchain_binding(state, force).await;
-    let overrides = state
-        .config
-        .lock()
-        .unwrap()
-        .settings
-        .toolchain_overrides
-        .clone();
+    let binding = refresh_local_binding(state, force).await;
+    let overrides = local_toolchain(state).1;
     let env = system_env(false).await;
     let node = status_from("node", &binding.node, overrides.node.as_deref(), &env.dirs);
     let pnpm = status_from("pnpm", &binding.pnpm, overrides.pnpm.as_deref(), &env.dirs);
     let managers = detected_managers();
     RuntimeStatus {
+        host_id: crate::config::LOCAL_HOST_ID.to_string(),
         node_below_recommended: node_is_below_recommended(&node),
         node,
         pnpm,
         requirements: ToolchainRequirements::current(&managers),
         managers,
         system_env_shell: env.shell,
+        // The local host passes nothing over: an old Node is reported as a
+        // recommendation and still used (ADR-0005 追加 2).
+        skipped_candidates: Vec::new(),
     }
+}
+
+/// One remote host, as its own interactive login shell answered: the same three
+/// sources and the same candidate order as the local host, plus the remote-only
+/// rule that a Node below the recommended major is passed over.
+async fn remote_runtime_status(
+    state: &AppState,
+    host: &crate::config::Host,
+    target: &crate::ssh::RemoteHost,
+    force: bool,
+) -> Result<RuntimeStatus, String> {
+    // The probe's conclusion *is* the binding: what the page reports is what the
+    // launcher will execute there.
+    let env = remote_probe(state, host, target, force).await?;
+
+    let node = remote_status(&env.node, host.toolchain_overrides.node.as_deref());
+    let pnpm = remote_status(&env.pnpm, host.toolchain_overrides.pnpm.as_deref());
+    let mut passed_over = skipped_candidates("node", &env.node);
+    passed_over.extend(skipped_candidates("pnpm", &env.pnpm));
+    let managers = env.managers.clone();
+    Ok(RuntimeStatus {
+        host_id: host.id.clone(),
+        node_below_recommended: node_is_below_recommended(&node),
+        node,
+        pnpm,
+        requirements: ToolchainRequirements::for_remote(target, &managers),
+        managers,
+        system_env_shell: Some(env.shell.clone()),
+        skipped_candidates: passed_over,
+    })
+}
+
+/// One remote tool as the page reports it: where it is, what it says, and which
+/// source it came from. The user's own choice is carried back even when it was
+/// passed over, so the page can say the pick has stopped working.
+fn remote_status(
+    tool: &crate::remote::RemoteToolStatus,
+    manual: Option<&Path>,
+) -> ToolStatus {
+    let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
+    match (tool.path.as_deref(), tool.version.as_deref()) {
+        (Some(path), Some(version)) => ToolStatus {
+            installed: true,
+            version: Some(version.to_string()),
+            path: Some(path.to_string()),
+            source: Some(match tool.source.as_deref() {
+                Some("manual") => ToolSource::Manual,
+                Some("system") => ToolSource::System,
+                _ => ToolSource::Fallback,
+            }),
+            manual_path,
+        },
+        _ => ToolStatus {
+            installed: false,
+            version: None,
+            path: None,
+            source: None,
+            manual_path,
+        },
+    }
+}
+
+/// The candidates the remote probe passed over on its way to one tool.
+fn skipped_candidates(tool: &str, status: &crate::remote::RemoteToolStatus) -> Vec<SkippedCandidate> {
+    status
+        .skipped
+        .iter()
+        .map(|skipped| SkippedCandidate {
+            tool: tool.to_string(),
+            path: skipped.path.clone(),
+            version: skipped.version.clone(),
+            reason: skipped.reason.clone(),
+            major: skipped.major,
+        })
+        .collect()
 }
 
 /// Accepts a hand-typed executable path, or explains in the user's terms why it
@@ -720,6 +1077,62 @@ async fn validate_manual_tool(program: &str, raw: &str) -> Result<PathBuf, Strin
         }
     }
     Ok(path)
+}
+
+/// Accepts a hand-typed path **on a remote host**, or explains in the user's
+/// terms why it cannot be used.
+///
+/// The only honest validation is running `--version` on that machine: the
+/// launcher cannot execute a file on another computer, and a path that merely
+/// looks right here says nothing about there (ADR-0005 追加 3). The version
+/// floors are the same ones the local path enforces.
+async fn validate_remote_manual_tool(
+    transport: &dyn crate::ssh::HostTransport,
+    host: &crate::ssh::RemoteHost,
+    program: &str,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    let path = raw.trim();
+    if !path.starts_with('/') {
+        return Err(format!(
+            "远端路径要从 / 写起：{path}。远端没有本机文件选择器，请填那台机器上的绝对路径。"
+        ));
+    }
+    match crate::remote::probe_manual_tool(transport, host, path).await {
+        Err(err) => Err(err.message),
+        Ok(crate::remote::ManualProbe::Missing) => Err(format!(
+            "这个文件不是可用的 {program}：远端 {path} 不存在。请确认这是那台机器上的路径，\
+             并且指向 {program} 可执行文件本身。"
+        )),
+        Ok(crate::remote::ManualProbe::Unusable) => Err(format!(
+            "这个文件不是可用的 {program}：远端 {path} 无法运行（在那台机器上执行 --version 失败）。\
+             请确认它是那台机器上能执行的 {program}。"
+        )),
+        Ok(crate::remote::ManualProbe::Version(version)) => {
+            if program == "pnpm" {
+                match crate::toolchain::pnpm_major(&version) {
+                    Some(major) if crate::toolchain::accepts_pnpm_major(major) => {}
+                    Some(major) => {
+                        return Err(format!(
+                            "这个 pnpm 版本过低：远端 {path} 报告的是 pnpm {major}，需要 {} 或更高。\
+                             请在那台机器上升级（如 {}）后重新指定。",
+                            crate::toolchain::MIN_PNPM_MAJOR,
+                            crate::remote::ssh_command(
+                                &host.target,
+                                crate::remote::pnpm_install_recipe()
+                            )
+                        ))
+                    }
+                    None => {
+                        return Err(format!(
+                            "这个文件不是可用的 pnpm：远端 {path} 报告的版本号「{version}」无法识别。"
+                        ))
+                    }
+                }
+            }
+            Ok(PathBuf::from(path))
+        }
+    }
 }
 
 /// Whether the probed node reports a major older than
@@ -1366,5 +1779,474 @@ mod tests {
         assert!(bare.contains("nvm-sh/nvm"), "should install nvm first: {bare}");
         assert!(bare.contains("nvm install --lts"));
     }
-}
 
+    // -----------------------------------------------------------------------
+    // Per host
+    // -----------------------------------------------------------------------
+
+    /// A scratch directory that also holds the config, so a probe's conclusion
+    /// can be checked where it is persisted.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn app_state(
+        data: &Path,
+        hosts: Vec<crate::config::Host>,
+        transport: std::sync::Arc<dyn crate::ssh::HostTransport>,
+    ) -> AppState {
+        AppState {
+            config_path: data.join("config.json"),
+            data_dir: data.to_path_buf(),
+            config: std::sync::Mutex::new(crate::config::Config {
+                hosts,
+                ..Default::default()
+            }),
+            running: Default::default(),
+            tasks: Default::default(),
+            host_transport: transport,
+            host_statuses: Default::default(),
+        }
+    }
+
+    fn remote_host(id: &str) -> crate::config::Host {
+        crate::config::Host {
+            id: id.to_string(),
+            display_name: "服务器".into(),
+            ssh_target: "lab".into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: Some(PathBuf::from("/home/demo/.local/share/dsh-launcher")),
+            builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
+        }
+    }
+
+    /// One host's record as a restart would read it back from disk.
+    fn persisted(state: &AppState, id: &str) -> crate::config::Host {
+        let cfg = crate::config::load_config(&state.config_path);
+        cfg.hosts
+            .iter()
+            .find(|host| host.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("config.json 里没有 {id}"))
+    }
+
+    /// Whether a refused write left anything on disk: no config file at all, or
+    /// a record with neither tool picked by hand.
+    fn nothing_written(state: &AppState, id: &str) -> bool {
+        if !state.config_path.exists() {
+            return true;
+        }
+        crate::config::load_config(&state.config_path)
+            .hosts
+            .iter()
+            .find(|host| host.id == id)
+            .map(|host| {
+                host.toolchain_overrides.node.is_none() && host.toolchain_overrides.pnpm.is_none()
+            })
+            .unwrap_or(true)
+    }
+
+    /// A real executable the local probe can run, printing the version it was
+    /// made with.
+    fn fake_exe(dir: &Path, name: &str, version: &str) -> PathBuf {
+        let exe = dir.join(name);
+        std::fs::write(&exe, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        exe
+    }
+
+    /// The local host is the user's own desktop: it says an old Node is old and
+    /// keeps using it. The remote-only rule (pass it over) must not leak here.
+    #[tokio::test]
+    async fn the_local_host_warns_about_an_old_node_instead_of_skipping_it() {
+        let data = Scratch::new("runtime-local-old");
+        let old = fake_exe(data.path(), "node", "v18.19.1");
+        let pnpm = fake_exe(data.path(), "pnpm", "11.17.0");
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local()],
+            crate::remote::testing::idle(),
+        );
+        set_toolchain_override_for(&state, "node", Some(old.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        set_toolchain_override_for(&state, "pnpm", Some(pnpm.to_str().unwrap()), None)
+            .await
+            .unwrap();
+
+        let status = runtime_status_for(&state, None, false).await.unwrap();
+
+        assert_eq!(status.host_id, crate::config::LOCAL_HOST_ID);
+        assert!(status.node.installed, "老 Node 仍然可用，只是要提醒");
+        assert_eq!(status.node.path.as_deref(), Some(old.to_str().unwrap()));
+        assert_eq!(status.node.source, Some(ToolSource::Manual));
+        assert!(status.node_below_recommended, "低版本要如实提示");
+        assert!(
+            status.skipped_candidates.is_empty(),
+            "本机不跳过任何候选：{:?}",
+            status.skipped_candidates
+        );
+    }
+
+    /// The ticket's core promise: two machines, two conclusions, two picks. The
+    /// probe cache and the user's choice are keyed by host, and neither host's
+    /// answer can be written into the other's record.
+    #[tokio::test]
+    async fn each_host_keeps_its_own_conclusion_and_its_own_pick() {
+        let data = Scratch::new("runtime-per-host");
+        let remote_id = format!("host-lab-{}", uuid::Uuid::new_v4());
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"exists":true,"version":"v22.14.0"}"#),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::environment_stdout(
+                    crate::remote::testing::remote_tool("/opt/pick/node", "v22.14.0", "manual"),
+                    crate::remote::testing::remote_tool("/usr/local/bin/pnpm", "11.17.0", "system"),
+                    &[],
+                ),
+            ));
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local(), remote_host(&remote_id)],
+            fake,
+        );
+        let local_node = fake_exe(data.path(), "local-node", "v24.0.0");
+
+        let remote = set_toolchain_override_for(
+            &state,
+            "node",
+            Some("/opt/pick/node"),
+            Some(&remote_id),
+        )
+        .await
+        .unwrap();
+        let local = set_toolchain_override_for(&state, "node", Some(local_node.to_str().unwrap()), None)
+            .await
+            .unwrap();
+
+        assert_eq!(remote.node.path.as_deref(), Some("/opt/pick/node"));
+        assert_eq!(remote.node.source, Some(ToolSource::Manual));
+        assert_eq!(local.node.path.as_deref(), Some(local_node.to_str().unwrap()));
+        assert_eq!(local.node.source, Some(ToolSource::Manual));
+
+        // Each record keeps its own pair, on disk as well as in memory.
+        let local_record = persisted(&state, crate::config::LOCAL_HOST_ID);
+        let remote_record = persisted(&state, &remote_id);
+        assert_eq!(
+            local_record.toolchain_overrides.node.as_deref(),
+            Some(local_node.as_path())
+        );
+        assert_eq!(
+            remote_record.toolchain_overrides.node.as_deref(),
+            Some(Path::new("/opt/pick/node"))
+        );
+        assert!(
+            local_record.toolchain_overrides.pnpm.is_none() && remote_record.toolchain_overrides.pnpm.is_none(),
+            "指定 node 不该动 pnpm"
+        );
+    }
+
+    /// Two reachable machines are two answers. A single PATH cache would report
+    /// whichever host was probed last (ADR-0005 追加).
+    #[tokio::test]
+    async fn two_machines_do_not_share_one_probe_answer() {
+        let data = Scratch::new("runtime-two-machines");
+        let first_id = format!("host-a-{}", uuid::Uuid::new_v4());
+        let second_id = format!("host-b-{}", uuid::Uuid::new_v4());
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::environment_stdout(
+                    crate::remote::testing::remote_tool("/home/a/.nvm/bin/node", "v22.1.0", "system"),
+                    crate::remote::testing::remote_tool_missing(vec![]),
+                    &["nvm"],
+                ),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::environment_stdout(
+                    crate::remote::testing::remote_tool(
+                        "/home/linuxbrew/.linuxbrew/bin/node",
+                        "v26.0.0",
+                        "fallback",
+                    ),
+                    crate::remote::testing::remote_tool_missing(vec![]),
+                    &["brew"],
+                ),
+            ));
+        let state = app_state(
+            data.path(),
+            vec![
+                crate::config::Host::local(),
+                remote_host(&first_id),
+                remote_host(&second_id),
+            ],
+            fake,
+        );
+
+        let first = runtime_status_for(&state, Some(&first_id), false).await.unwrap();
+        let second = runtime_status_for(&state, Some(&second_id), false).await.unwrap();
+
+        assert_eq!(first.host_id, first_id);
+        assert_eq!(second.host_id, second_id);
+        assert_eq!(first.node.path.as_deref(), Some("/home/a/.nvm/bin/node"));
+        assert_eq!(first.node.source, Some(ToolSource::System));
+        assert_eq!(first.managers, vec!["nvm".to_string()]);
+        assert_eq!(
+            second.node.path.as_deref(),
+            Some("/home/linuxbrew/.linuxbrew/bin/node"),
+            "第二台机器的结论不能被第一台的缓存盖掉"
+        );
+        assert_eq!(second.node.source, Some(ToolSource::Fallback));
+        assert_eq!(second.managers, vec!["brew".to_string()]);
+    }
+
+    /// A remote conclusion travels with its source, with what was passed over,
+    /// and with commands the user can actually run from this Mac.
+    #[tokio::test]
+    async fn a_remote_probe_reports_its_source_and_what_it_passed_over() {
+        let data = Scratch::new("runtime-remote-source");
+        let remote_id = format!("host-src-{}", uuid::Uuid::new_v4());
+        let old = "/usr/bin/node";
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::environment_stdout(
+                {
+                    let mut tool = crate::remote::testing::remote_tool(
+                        "/home/demo/.nvm/versions/node/v22.14.0/bin/node",
+                        "v22.14.0",
+                        "system",
+                    );
+                    tool["skipped"] = serde_json::json!([crate::remote::testing::skipped(
+                        old,
+                        "v18.19.1",
+                        "below-minimum",
+                        Some(18)
+                    )]);
+                    tool
+                },
+                crate::remote::testing::remote_tool_missing(vec![crate::remote::testing::skipped(
+                    "/usr/bin/pnpm",
+                    "9.15.0",
+                    "below-minimum",
+                    Some(9),
+                )]),
+                &["nvm"],
+            )),
+        );
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local(), remote_host(&remote_id)],
+            fake,
+        );
+
+        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+
+        assert_eq!(status.node.source, Some(ToolSource::System));
+        assert_eq!(status.system_env_shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(status.managers, vec!["nvm".to_string()]);
+        assert!(!status.pnpm.installed);
+
+        let skipped: Vec<&SkippedCandidate> = status
+            .skipped_candidates
+            .iter()
+            .filter(|candidate| candidate.reason == "below-minimum")
+            .collect();
+        assert_eq!(skipped.len(), 2, "两个候选都要如实报出来：{:?}", status.skipped_candidates);
+        assert_eq!(skipped[0].tool, "node");
+        assert_eq!(skipped[0].path, old);
+        assert_eq!(skipped[0].major, Some(18));
+        assert_eq!(skipped[1].tool, "pnpm");
+        assert_eq!(skipped[1].major, Some(9));
+
+        // The install guidance is one command the user runs here, over ssh, in
+        // the same shell shape the probe used.
+        assert!(
+            status
+                .requirements
+                .pnpm_install_command
+                .starts_with("ssh lab "),
+            "{}",
+            status.requirements.pnpm_install_command
+        );
+        assert!(
+            status.requirements.pnpm_install_command.contains("get.pnpm.io"),
+            "{}",
+            status.requirements.pnpm_install_command
+        );
+        assert!(status.requirements.node_install_command.contains("nvm install --lts"));
+    }
+
+    /// Probing and execution are the same resolution on a remote host too: the
+    /// path a spawn would use is the path the page reported — and a second
+    /// question inside the cache window does not cost another ssh call.
+    #[tokio::test]
+    async fn a_remote_probe_and_a_remote_spawn_resolve_to_the_same_candidate() {
+        let data = Scratch::new("runtime-remote-agree");
+        let remote_id = format!("host-agree-{}", uuid::Uuid::new_v4());
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::environment_stdout(
+                crate::remote::testing::remote_tool(
+                    "/home/linuxbrew/.linuxbrew/bin/node",
+                    "v26.0.0",
+                    "fallback",
+                ),
+                crate::remote::testing::remote_tool("/usr/local/bin/pnpm", "11.17.0", "system"),
+                &["brew"],
+            )),
+        );
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local(), remote_host(&remote_id)],
+            fake.clone(),
+        );
+
+        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+        let to_spawn = node_for_spawn_checked_for(&state, Some(&remote_id))
+            .await
+            .unwrap();
+
+        assert_eq!(status.node.path.as_deref(), Some(to_spawn.to_str().unwrap()));
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "同一个窗口内第二次提问不该再起一次 shell：{:?}",
+            fake.calls()
+        );
+        // And the record a restart would read agrees too.
+        let record = persisted(&state, &remote_id);
+        assert_eq!(
+            record.toolchain.node.as_ref().map(|bound| bound.path.clone()),
+            Some(to_spawn)
+        );
+    }
+
+    /// A remote pick is validated by running it **there**. A path the launcher
+    /// could not run is refused and nothing is written — the same call the local
+    /// host makes, for the same reason.
+    #[tokio::test]
+    async fn a_remote_pick_is_refused_when_it_cannot_be_run_there() {
+        let data = Scratch::new("runtime-remote-pick");
+        let remote_id = format!("host-pick-{}", uuid::Uuid::new_v4());
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"exists":false,"version":null}"#),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"exists":true,"version":"9.15.0"}"#),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::marked(r#"{"exists":true,"version":"v22.14.0"}"#),
+            ))
+            .answering(crate::remote::testing::FakeAnswer::stdout(
+                crate::remote::testing::environment_stdout(
+                    crate::remote::testing::remote_tool("/opt/pick/node", "v22.14.0", "manual"),
+                    crate::remote::testing::remote_tool_missing(vec![]),
+                    &[],
+                ),
+            ));
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local(), remote_host(&remote_id)],
+            fake.clone(),
+        );
+
+        // Not there: the message names the path on *that* machine, and nothing
+        // is written.
+        let err = set_toolchain_override_for(&state, "node", Some("/gone/node"), Some(&remote_id))
+            .await
+            .unwrap_err();
+        assert!(err.contains("/gone/node") && err.contains("远端"), "{err}");
+        assert!(nothing_written(&state, &remote_id), "被拒绝的指定不能落库");
+
+        // There, but a pnpm the launcher will not drive: refused, with the
+        // command that fixes it on that machine.
+        let err = set_toolchain_override_for(&state, "pnpm", Some("/usr/bin/pnpm"), Some(&remote_id))
+            .await
+            .unwrap_err();
+        assert!(err.contains("pnpm 9") && err.contains("ssh lab "), "{err}");
+        assert!(nothing_written(&state, &remote_id), "被拒绝的指定不能落库");
+
+        // A path that runs: accepted, and reported back as the manual source.
+        let status =
+            set_toolchain_override_for(&state, "node", Some("/opt/pick/node"), Some(&remote_id))
+                .await
+                .unwrap();
+        assert_eq!(status.node.source, Some(ToolSource::Manual));
+        assert_eq!(
+            persisted(&state, &remote_id)
+                .toolchain_overrides
+                .node
+                .as_deref(),
+            Some(Path::new("/opt/pick/node"))
+        );
+    }
+
+    /// A pick that stopped working falls back to detection but is still reported,
+    /// so the page can say so and let the user replace or clear it (ADR-0005).
+    #[tokio::test]
+    async fn a_remote_pick_that_stopped_working_falls_back_and_is_still_reported() {
+        let data = Scratch::new("runtime-remote-stale");
+        let remote_id = format!("host-stale-{}", uuid::Uuid::new_v4());
+        let mut host = remote_host(&remote_id);
+        host.toolchain_overrides.node = Some(PathBuf::from("/gone/node"));
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::environment_stdout(
+                {
+                    let mut tool = crate::remote::testing::remote_tool(
+                        "/usr/local/bin/node",
+                        "v22.14.0",
+                        "system",
+                    );
+                    tool["skipped"] = serde_json::json!([crate::remote::testing::skipped(
+                        "/gone/node",
+                        "",
+                        "unusable",
+                        None
+                    )]);
+                    tool
+                },
+                crate::remote::testing::remote_tool_missing(vec![]),
+                &[],
+            )),
+        );
+        let state = app_state(
+            data.path(),
+            vec![crate::config::Host::local(), host],
+            fake,
+        );
+
+        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+
+        assert!(status.node.installed, "退回自动探测，工具本身还是可用的");
+        assert_eq!(status.node.path.as_deref(), Some("/usr/local/bin/node"));
+        assert_eq!(status.node.source, Some(ToolSource::System));
+        assert_eq!(
+            status.node.manual_path.as_deref(),
+            Some("/gone/node"),
+            "失效的指定要如实带回，页面才好说「你指定的路径用不了了」"
+        );
+        assert_eq!(status.skipped_candidates[0].reason, "unusable");
+    }
+}

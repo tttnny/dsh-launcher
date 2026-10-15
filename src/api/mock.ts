@@ -25,6 +25,7 @@ import type {
   TaskInfo,
   TaskProgress,
   TaskLog,
+  ToolSource,
   ToolStatus,
 } from './types'
 import { LOCAL_HOST_ID } from './types'
@@ -215,51 +216,104 @@ const mockProfiles: Record<string, string[]> = {}
 // instance answers to `/api/pluginManager/listBundles` (localized titles, an
 // installation-only layer, an unmounted layer, and one broken layer).
 const mockNativeStore: Record<string, PluginView> = {}
-// The hand-picked executables of the browser preview: there is no backend here,
-// so a path chosen on the setup page is only remembered in this module.
-const mockToolchainOverrides: Record<'node' | 'pnpm', string | null> = { node: null, pnpm: null }
+// The hand-picked executables of the browser preview, **per host** — as the
+// backend keys them. There is no backend here, so a path chosen on the setup
+// page is only remembered in this module.
+const mockToolchainOverrides: Record<string, Partial<Record<'node' | 'pnpm', string>>> = {}
 
-/**
- * The preview's runtime status: both tools are assumed to be in the system
- * environment variables, and a tool that was picked reports that path instead —
- * the same "the pick wins" rule the real backend applies.
- */
-function mockRuntimeStatus(): RuntimeStatus {
-  const base = {
+function mockOverridesOf(hostId: string): Partial<Record<'node' | 'pnpm', string>> {
+  if (!mockToolchainOverrides[hostId]) mockToolchainOverrides[hostId] = {}
+  return mockToolchainOverrides[hostId]
+}
+
+/** Where each preview machine's tools are, as its own probe would report them. */
+const MOCK_TOOLS: Record<string, { node: { version: string; path: string }; pnpm: { version: string; path: string }; managers: string[] }> = {
+  [LOCAL_HOST_ID]: {
     node: { version: 'v22.14.0', path: '/usr/local/bin/node' },
     pnpm: { version: '11.17.0', path: '/usr/local/bin/pnpm' },
-  }
-  const tool = (name: 'node' | 'pnpm'): ToolStatus => {
-    const manual = mockToolchainOverrides[name]
+    managers: ['brew'],
+  },
+  [REMOTE_HOST_ID]: {
+    node: { version: 'v22.14.0', path: '/home/demo/.nvm/versions/node/v22.14.0/bin/node' },
+    pnpm: { version: '11.17.0', path: '/home/demo/.local/share/pnpm/pnpm' },
+    managers: ['nvm'],
+  },
+}
+
+/**
+ * The preview's runtime status for one host: both tools are assumed to be
+ * present, a tool that was picked by hand reports that path instead (the same
+ * "the pick wins" rule the guard applies), and the remote sample also carries
+ * the candidates its probe passed over — the apt Node 18 and the pnpm 9 a real
+ * Linux machine very often has.
+ */
+function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
+  const tools = MOCK_TOOLS[hostId]
+  const overrides = mockOverridesOf(hostId)
+  const tool = (name: 'node' | 'pnpm', fallbackSource: ToolSource): ToolStatus => {
+    const base = tools?.[name]
+    const manual = overrides[name]
     if (manual) {
       return {
         installed: true,
-        version: base[name].version,
+        version: base?.version ?? null,
         path: manual,
         source: 'manual',
         manual_path: manual,
       }
     }
+    if (!base) {
+      // A host the preview has never probed: saying "not found" is the honest
+      // answer, and it is what a real fresh host reports.
+      return { installed: false, version: null, path: null, source: null, manual_path: null }
+    }
     return {
       installed: true,
-      version: base[name].version,
-      path: base[name].path,
-      source: 'system',
+      version: base.version,
+      path: base.path,
+      source: fallbackSource,
       manual_path: null,
     }
   }
+  const remote = hostId !== LOCAL_HOST_ID && !!tools
   return {
-    node: tool('node'),
-    pnpm: tool('pnpm'),
-    managers: ['brew'],
+    host_id: hostId,
+    node: tool('node', 'system'),
+    pnpm: tool('pnpm', remote ? 'fallback' : 'system'),
+    managers: tools?.managers ?? [],
     node_below_recommended: false,
-    requirements: {
-      min_pnpm_major: 11,
-      recommended_node_major: 20,
-      pnpm_install_command: 'npm install -g pnpm',
-      node_install_command: 'brew install node',
-    },
-    system_env_shell: '/bin/zsh',
+    requirements: remote
+      ? {
+          min_pnpm_major: 11,
+          recommended_node_major: 20,
+          pnpm_install_command: `ssh zjq_aliyun '/bin/bash -ilc "curl -fsSL https://get.pnpm.io/install.sh | sh -"'`,
+          node_install_command: `ssh zjq_aliyun '/bin/bash -ilc "nvm install --lts"'`,
+        }
+      : {
+          min_pnpm_major: 11,
+          recommended_node_major: 20,
+          pnpm_install_command: 'npm install -g pnpm',
+          node_install_command: 'brew install node',
+        },
+    system_env_shell: remote ? '/bin/bash' : '/bin/zsh',
+    skipped_candidates: remote
+      ? [
+          {
+            tool: 'node',
+            path: '/usr/bin/node',
+            version: 'v18.19.1',
+            reason: 'below-minimum',
+            major: 18,
+          },
+          {
+            tool: 'pnpm',
+            path: '/usr/bin/pnpm',
+            version: '9.15.0',
+            reason: 'below-minimum',
+            major: 9,
+          },
+        ]
+      : [],
   }
 }
 
@@ -714,15 +768,18 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
 
       return task.id as T
     }
-    case 'get_runtime_status':
-      // Browser preview: assume Node + pnpm are in the system PATH so the UI is usable.
-      return mockRuntimeStatus() as T
+    case 'get_runtime_status': {
+      // Browser preview: assume the tools are there so the UI is usable, per host.
+      const hostId = String(args?.hostId ?? LOCAL_HOST_ID)
+      return mockRuntimeStatus(hostId) as T
+    }
     case 'set_toolchain_override': {
       const tool = args?.tool
       if (tool !== 'node' && tool !== 'pnpm') fail('工具名必须是 node 或 pnpm')
       const path = typeof args?.path === 'string' ? args.path.trim() : ''
-      mockToolchainOverrides[tool] = path || null
-      return mockRuntimeStatus() as T
+      const hostId = String(args?.hostId ?? LOCAL_HOST_ID)
+      mockOverridesOf(hostId)[tool] = path || undefined
+      return mockRuntimeStatus(hostId) as T
     }
     case 'list_tasks': {
       return [...mockTasks.values()].sort((a, b) => b.created_at - a.created_at) as T

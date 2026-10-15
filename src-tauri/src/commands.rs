@@ -76,6 +76,10 @@ pub(crate) fn create_host_record(state: &AppState, input: HostInput) -> Result<H
         extra_env: input.extra_env,
         data_dir: cleaned_path(input.data_dir),
         builtin: false,
+        // A host starts with nothing probed and nothing chosen: the environment
+        // page is what fills both in.
+        toolchain: Default::default(),
+        toolchain_overrides: Default::default(),
     };
     let mut cfg = state.config.lock().unwrap();
     if let Some(existing) = cfg.hosts.iter().find(|h| h.ssh_target == host.ssh_target) {
@@ -114,6 +118,10 @@ pub(crate) fn update_host_record(
         .position(|h| h.id == id)
         .ok_or_else(|| format!("主机不存在: {id}"))?;
     let builtin = cfg.hosts[pos].builtin;
+    // The probe cache and the user's choices are not part of this form: the
+    // environment page owns them, and a settings save must not wipe them.
+    let toolchain = cfg.hosts[pos].toolchain.clone();
+    let toolchain_overrides = cfg.hosts[pos].toolchain_overrides.clone();
     let target = if builtin {
         // 本机 dials nothing; whatever a form sent for it is not a target.
         String::new()
@@ -128,6 +136,8 @@ pub(crate) fn update_host_record(
         extra_env: input.extra_env,
         data_dir: cleaned_path(input.data_dir),
         builtin,
+        toolchain,
+        toolchain_overrides,
     };
     let updated = cfg.hosts[pos].clone();
     crate::config::save_config(&state.config_path, &cfg)?;
@@ -1779,6 +1789,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: None,
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         }
     }
 
@@ -2106,6 +2118,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         };
         let mut cfg = crate::config::Config {
             hosts: vec![local.clone(), remote.clone()],
@@ -2161,6 +2175,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         };
         let version = "0.1.0-rc.6";
         let dedicated = dedicated_home_path(data.path(), version);
