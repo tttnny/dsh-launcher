@@ -1360,6 +1360,14 @@ async fn run_remote_streamed(
     argv: Vec<String>,
     what: &str,
 ) -> Result<RemoteCommandOutcome, String> {
+    // A cancelled task starts nothing. The click can land between two of this
+    // task's commands — during the pause before a retry, say — and a command
+    // started after it would be one nobody is waiting for, on a machine the user
+    // has already been told the install stopped on (issue #14 验收).
+    if !task_is_running(state, task_id).await {
+        return Ok(RemoteCommandOutcome::Cancelled);
+    }
+
     // Echo the exact command line, as the local streamed runner does: when a
     // child fails silently, the invocation itself is the only clue.
     push_task_log(app, state, task_id, &format!("$ {}", argv.join(" "))).await;
@@ -1428,8 +1436,12 @@ async fn follow_remote_log(
             });
         }
         if !task_is_running(state, task_id).await {
-            // Cancelled: the click already stopped the tree on that machine,
-            // and this is the worker noticing. Not a failure to report.
+            // Cancelled: the click stopped the tree on that machine if one was
+            // running when it landed, and this is the worker noticing. The two
+            // can miss each other — the click lands in a gap between this task's
+            // commands, and the command that starts afterwards is nobody's to
+            // stop — so the worker stops what it started here as well.
+            stop_run_on_cancel(state, task_id, run).await;
             return Ok(RemoteCommandOutcome::Cancelled);
         }
     }
@@ -1536,6 +1548,25 @@ async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Result<(), String
         tokio::time::sleep(REMOTE_STOP_TICK).await;
     }
     Ok(())
+}
+
+/// Stops one remote command because the task it belongs to was cancelled — the
+/// half of the cancellation contract the click cannot cover by itself.
+///
+/// The click stops whatever is running at the moment it lands. It can land when
+/// nothing is: between two of a task's commands, during the pause before a
+/// retry. The command that starts afterwards is the worker's to stop, or it
+/// outlives the task that started it and holds that machine's store.
+///
+/// A failure here goes to the app log rather than to the user: the click already
+/// answered 「已取消」, and a cancelled task records no further outcome.
+async fn stop_run_on_cancel(state: &AppState, task_id: &str, run: &RemoteRun) {
+    if let Err(e) = stop_remote_run(state, run).await {
+        crate::log_warn!(
+            "任务 {task_id} 取消后，那台机器上的安装进程（pid {}）没能确认停止：{e}",
+            run.pid
+        );
+    }
 }
 
 /// Removes one directory on a remote host, and refuses anything outside that
@@ -2665,6 +2696,31 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
         let err = stop_remote_run(&state, &run).await.unwrap_err();
         assert!(err.contains("没能停掉"), "{err}");
         assert!(err.contains("4242"), "要点出是哪个进程：{err}");
+    }
+
+    /// The click stops what is running when it lands. It can land when nothing
+    /// is — between two of a task's commands, during the pause before a retry —
+    /// and then the command that starts afterwards is the worker's to stop, or
+    /// the cancelled install leaves a pnpm on that machine holding the store's
+    /// lock (issue #14 验收).
+    #[tokio::test]
+    async fn a_cancel_the_click_missed_is_stopped_by_the_worker() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::stdout(marked("{\"alive\":false}")));
+        let state = state_with(fake.clone());
+        let run = RemoteRun {
+            host: remote_target(),
+            pid: 4242,
+        };
+
+        stop_run_on_cancel(&state, "t-1", &run).await;
+
+        assert_eq!(
+            fake.calls()[0],
+            FakeCall::StopGroup(4242),
+            "worker 自己也要停那棵树，而不是只把任务标成已取消"
+        );
     }
 
     /// A small server that ran out of memory and a machine that could not reach
