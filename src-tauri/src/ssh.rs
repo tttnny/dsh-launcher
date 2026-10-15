@@ -612,23 +612,80 @@ pub fn script_command(script: &str) -> Vec<String> {
     ]
 }
 
-/// Where the launcher keeps its own multiplexed connection for one target,
-/// under its data directory.
+/// Where the launcher keeps its own multiplexed connection for one target.
 ///
 /// The file name is a hash of the target rather than the target itself: a Unix
-/// socket path has a hard length limit (104 bytes on macOS) and a data
-/// directory under `/Users/<name>/Library/Application Support/…` already uses
-/// most of it.
+/// socket path is short, and the target is not (it may be a free string such as
+/// `user@host -p 2222`).
+///
+/// **Short enough or somewhere else.** A Unix socket address holds 104 bytes and
+/// ssh spends 17 of them before it even binds: it binds `<ControlPath>.<16
+/// random characters>` first and hard-links that into place (OpenSSH's
+/// `muxserver_listen`), so the launcher has **86** bytes to work with — and a
+/// stock macOS data directory already derives 89
+/// (`~/Library/Application Support/in.dsh-plug.dsh-launcher/ssh/<16 hex>.sock`),
+/// which ssh refuses outright ("too long for Unix domain socket"). So the
+/// launcher's own directory is used when the path fits there, and otherwise the
+/// socket moves to a short directory of the launcher's own under `$HOME`, its
+/// name derived from **both** the data directory and the target: the socket is
+/// one ssh master, and two data directories sharing one would put two
+/// configurations' commands on the same session.
 fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
     let digest = Sha256::digest(target.as_bytes());
     let short: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
-    launcher_data_dir.join("ssh").join(format!("{short}.sock"))
+
+    let own = launcher_data_dir.join("ssh").join(format!("{short}.sock"));
+    if own.as_os_str().len() <= MAX_SOCKET_PATH {
+        return own;
+    }
+
+    // `$HOME` and not the temporary directory: this Mac's `$TMPDIR` is a long
+    // `/var/folders/…` path that would overflow this budget just as the data
+    // directory did, and `/tmp` is shared with every other user on the machine —
+    // a control socket somebody else can create first is a connection somebody
+    // else can answer on.
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    if home.as_os_str().is_empty() {
+        // No home to move into: keep the launcher's own directory and let ssh say
+        // what is wrong with the path ([`socket_path_too_long`] turns that into a
+        // sentence a user can act on).
+        return own;
+    }
+    let scoped: String = Sha256::digest(launcher_data_dir.to_string_lossy().as_bytes())
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    home.join(SHORT_SOCKET_DIR)
+        .join(format!("{scoped}-{short}.sock"))
 }
+
+/// The directory the socket moves into when the launcher's data directory
+/// cannot hold one. Hidden, and the launcher's own: the user's `~/.ssh` is
+/// theirs and carries their own `ControlPath`.
+const SHORT_SOCKET_DIR: &str = ".dsh-launcher-ssh";
+
+/// How many bytes a path handed to ssh as `ControlPath` may use.
+///
+/// Measured against this Mac's OpenSSH: 86 passes, 87 fails with
+/// `unix_listener: path "…" too long for Unix domain socket`, because of the
+/// 17-byte temporary name ssh binds first. See [`ssh_failure`] for the other
+/// half of that rule — ssh also refuses anything of 104 bytes or more before it
+/// starts.
+const MAX_SOCKET_PATH: usize = 86;
 
 /// Classifies one failed ssh call. ssh reports its own failures on stderr and
 /// exits 255; there is no structured code to read, so the four classes come
 /// from what it said.
 pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
+    // The one failure that is not about the machine: ssh's own control socket
+    // path. It has two spellings (ssh's pre-flight check and the bind that
+    // follows), neither of which says anything a user can act on, and both of
+    // which would otherwise be filed under 「连不上」 with advice about the
+    // machine being off — which is exactly what it is not.
+    if let Some(message) = socket_path_too_long(stderr) {
+        return HostError::unreachable(message);
+    }
     let kind = ssh_failure_kind(stderr);
     let said = match stderr_tail(stderr) {
         tail if tail.is_empty() => "ssh 没有说明原因".to_string(),
@@ -651,6 +708,26 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
         HostErrorKind::RemoteCommand => said,
     };
     HostError::new(kind, message)
+}
+
+/// The readable reason for ssh saying the launcher's own socket path is too
+/// long, or `None` when that is not what it said.
+///
+/// Two texts, one cause: `ControlPath too long ('…' >= 104 bytes)` is ssh's
+/// check before it starts, and `unix_listener: path "…" too long for Unix
+/// domain socket` is the bind failing on the temporary name it adds. Only the
+/// first names a limit, and neither says the path belongs to the launcher.
+fn socket_path_too_long(stderr: &str) -> Option<String> {
+    let said = stderr.to_lowercase();
+    if !said.contains("controlpath too long") && !said.contains("too long for unix domain socket") {
+        return None;
+    }
+    Some(format!(
+        "启动器自己那条 ssh 连接的控制 socket 路径太长了：一台机器上的 Unix socket 地址最多 103 字节，\
+         ssh 还会先在它后面加 17 个字符再绑定，所以最多只能用 {MAX_SOCKET_PATH} 字节。\
+         把启动器的数据目录（设置里的「数据目录」）换到更短的路径下，或者把家目录放到更短的位置，就能连上——\
+         这与那台机器无关"
+    ))
 }
 
 fn ssh_failure_kind(stderr: &str) -> HostErrorKind {
@@ -853,7 +930,9 @@ mod tests {
     /// the page.
     #[test]
     fn ssh_argv_carries_batch_mode_and_the_launchers_own_socket() {
-        let dir = Path::new("/Users/me/Library/Application Support/in.dsh-plug.dsh-launcher");
+        // Short enough to sit inside the data directory, and with a space in it
+        // — the case the `-o` quoting exists for.
+        let dir = Path::new("/Users/me/Library/Application Support/dsh");
         let host = RemoteHost::of(&remote_host("zjq_aliyun"), dir).unwrap();
         let argv = ssh_argv(&host.target, &host.socket, &script_command("echo hi"));
 
@@ -878,10 +957,177 @@ mod tests {
             "要有连接超时：{argv:?}"
         );
         assert!(
-            host.socket.starts_with(dir.join("ssh")),
-            "socket 必须在启动器数据目录下，不能碰用户自己的：{}",
+            !host.socket.starts_with("/Users/me/.ssh"),
+            "socket 是启动器自己的，不能碰用户配置里的那个：{}",
             host.socket.display()
         );
+    }
+
+    /// A Unix socket path holds 104 bytes, and ssh does not bind the
+    /// `ControlPath` directly: it binds `<ControlPath>.<16 random characters>`
+    /// first and hard-links that into place, so 17 of the 103 usable bytes are
+    /// spoken for and the launcher has 86 to work with.
+    ///
+    /// A stock macOS data directory already spends 89 of them
+    /// (`~/Library/Application Support/in.dsh-plug.dsh-launcher/ssh/<16 hex>.sock`),
+    /// which ssh refuses — so a HOME that is merely longer than this one, let
+    /// alone a data directory the user pointed somewhere deep, must still get a
+    /// socket, or every remote action fails with ssh's own complaint.
+    const SOCKET_BUDGET: usize = 86;
+
+    fn socket_len(host: &RemoteHost) -> usize {
+        host.socket.as_os_str().len()
+    }
+
+    #[test]
+    fn a_long_data_directory_still_yields_a_socket_ssh_can_bind() {
+        let long = Path::new(
+            "/Users/averylongusername/Library/Application Support/in.dsh-plug.dsh-launcher",
+        );
+        let host = RemoteHost::of(&remote_host("zjq_aliyun"), long).unwrap();
+
+        assert!(
+            socket_len(&host) <= SOCKET_BUDGET,
+            "ssh 绑不了这么长的控制 socket（{} 字节）：{}",
+            socket_len(&host),
+            host.socket.display()
+        );
+        assert!(
+            !host.socket.starts_with("/Users/averylongusername/.ssh"),
+            "换位置也不能换到用户自己的 ssh 目录里：{}",
+            host.socket.display()
+        );
+    }
+
+    /// The stock macOS data directory is the case that matters most: this path
+    /// is what `app_data_dir()` produces on an ordinary account, and ssh refuses
+    /// the 89-byte socket it used to derive from it.
+    #[test]
+    fn the_stock_macos_data_directory_also_gets_a_bindable_socket() {
+        let stock = Path::new("/Users/me/Library/Application Support/in.dsh-plug.dsh-launcher");
+        let host = RemoteHost::of(&remote_host("zjq_aliyun"), stock).unwrap();
+
+        assert!(
+            socket_len(&host) <= SOCKET_BUDGET,
+            "{} 字节放不下 ssh 的控制 socket：{}",
+            socket_len(&host),
+            host.socket.display()
+        );
+    }
+
+    /// Moving the socket out must not merge two launcher data directories onto
+    /// one connection: the socket is the multiplexed ssh master, so sharing one
+    /// would put two configurations' commands on the same session. The name is
+    /// derived from the data directory as well as the target.
+    #[test]
+    fn two_data_directories_never_share_one_socket() {
+        let one = RemoteHost::of(
+            &remote_host("zjq_aliyun"),
+            Path::new("/Users/averylongusername/one/in.dsh-plug.dsh-launcher"),
+        )
+        .unwrap();
+        let two = RemoteHost::of(
+            &remote_host("zjq_aliyun"),
+            Path::new("/Users/averylongusername/two/in.dsh-plug.dsh-launcher"),
+        )
+        .unwrap();
+        let again = RemoteHost::of(
+            &remote_host("zjq_aliyun"),
+            Path::new("/Users/averylongusername/one/in.dsh-plug.dsh-launcher"),
+        )
+        .unwrap();
+
+        assert_ne!(one.socket, two.socket, "两个数据目录是两条连接");
+        assert_eq!(one.socket, again.socket, "同一份配置问两次是同一个答案");
+    }
+
+    /// A data directory short enough for the socket to live inside it keeps it
+    /// there: the launcher's own storage is where its own files belong, and the
+    /// short path is the common case.
+    #[test]
+    fn a_short_data_directory_keeps_the_socket_inside_it() {
+        let dir = Path::new("/Users/me/.dsh-launcher");
+        let host = RemoteHost::of(&remote_host("zjq_aliyun"), dir).unwrap();
+
+        assert!(
+            host.socket.starts_with(dir.join("ssh")),
+            "能放下就放在启动器数据目录下：{}",
+            host.socket.display()
+        );
+    }
+
+    /// Both of ssh's ways of saying "this path is too long" are about the
+    /// launcher's own socket, not about the machine — and one of them says
+    /// nothing at all about the limit. Neither may reach the user as raw ssh
+    /// output with 「确认那台机器开着」 attached to it.
+    #[test]
+    fn sshs_two_too_long_messages_become_one_readable_reason() {
+        let refused = ssh_failure(
+            "lab",
+            "ControlPath too long ('/Users/me/deep/dir/ssh/0123456789abcdef.sock' >= 104 bytes)\r\n",
+        );
+        let unbound = ssh_failure(
+            "lab",
+            "unix_listener: path \"/Users/me/deep/dir/ssh/0123456789abcdef.sock.kz3T78nCyigS9fZR\" too long for Unix domain socket\r\n",
+        );
+
+        for error in [&refused, &unbound] {
+            assert!(
+                error.message.contains("控制 socket"),
+                "要说是启动器自己的 socket 太长：{}",
+                error.message
+            );
+            assert!(
+                error.message.contains("86"),
+                "要把真正的上限说出来：{}",
+                error.message
+            );
+            assert!(
+                !error.message.contains("确认 ssh"),
+                "这不是机器的问题，别提机器：{}",
+                error.message
+            );
+        }
+    }
+
+    /// The real OpenSSH on the real path: it must be able to bind the socket the
+    /// launcher derives from a data directory as long as the stock one, which is
+    /// the case ssh refuses when the socket is kept inside it. It writes nothing
+    /// into that machine's tree — the check is that ssh gets a session at all —
+    /// and takes its socket away again afterwards.
+    ///
+    /// ```text
+    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
+    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_ssh_binds
+    /// ```
+    #[tokio::test]
+    #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
+    async fn a_real_ssh_binds_the_socket_the_launcher_derives() {
+        let Ok(target) = std::env::var("DSH_LAUNCHER_TEST_SSH_HOST") else {
+            eprintln!("跳过：没有设置 DSH_LAUNCHER_TEST_SSH_HOST");
+            return;
+        };
+        let home = std::env::var("HOME").expect("这台机器上要有 HOME");
+        let dir = PathBuf::from(home).join("Library/Application Support/in.dsh-plug.dsh-launcher");
+        let host = RemoteHost::of(&remote_host(&target), &dir).unwrap();
+        let transport = SshTransport::new();
+        let transport: &dyn HostTransport = &transport;
+
+        let out = transport
+            .run(&host, RemoteCall::new("echo bound"))
+            .await
+            .unwrap_or_else(|e| panic!("ssh 连不上（socket {}）：{e}", host.socket.display()));
+
+        assert!(out.stdout.contains("bound"), "{:?}", out.stdout);
+        assert!(socket_len(&host) <= SOCKET_BUDGET, "{}", host.socket.display());
+        // End the launcher's own connection first, the way the app's exit path
+        // does, and only then take the socket away: a master that is still alive
+        // owns it.
+        let _ = transport.close_connection(&host).await;
+        let _ = std::fs::remove_file(&host.socket);
+        if let Some(parent) = host.socket.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 
     /// The argv has to be more than the right words: ssh has to **accept** it.
