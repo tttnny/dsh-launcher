@@ -367,12 +367,17 @@ export const useLauncherStore = defineStore('launcher', {
         this.homesByHost[hostId] = homes.value
         delete this.homeErrors[hostId]
       } else {
+        // The failed list is dropped, not kept: a stale list would be the
+        // previous answer presented as today's — in the Library's own tabs and
+        // in the two sheets that fill their selects from this cache.
+        delete this.homesByHost[hostId]
         this.homeErrors[hostId] = String(homes.reason)
       }
       if (versions.status === 'fulfilled') {
         this.versionsByHost[hostId] = versions.value
         delete this.versionErrors[hostId]
       } else {
+        delete this.versionsByHost[hostId]
         this.versionErrors[hostId] = String(versions.reason)
       }
     },

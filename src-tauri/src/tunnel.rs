@@ -90,6 +90,17 @@ pub(crate) async fn reachable_url(
     let mut open = state.forwards.open.lock().await;
     if let Some(existing) = open.get(&key) {
         if port_answers(existing.forward.local_port) {
+            // An answered port is taken as the forward's own. What this cannot
+            // tell apart is the one case where it is not: the ssh master died
+            // (ControlPersist, a slept Mac) and an unrelated local process took
+            // that exact port meanwhile — the launcher would then hand
+            // `127.0.0.1:<port>/?token=…` to that process instead of to the
+            // instance. Proving the port is **ours** means asking the connection
+            // that opened it (`ssh -O check` on this host's control socket),
+            // which spawns a subprocess on a path every instance row, tray
+            // rebuild and plugins page walks. Deliberately not done: the
+            // exposure stays on this Mac and needs that coincidence, and the
+            // strong check can move here the day it happens for real.
             return local_url(remote_url, existing.forward.local_port);
         }
         // The connection is gone and took the forward with it: forget it and

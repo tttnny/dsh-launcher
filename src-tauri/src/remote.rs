@@ -689,7 +689,7 @@ pub fn ssh_command(target: &str, recipe: &str) -> String {
     let shell = crate::ssh::REMOTE_SHELL;
     format!(
         "ssh {target} {}",
-        crate::commands::shell_quote(&format!("{shell} -ilc \"{recipe}\""))
+        quote(&format!("{shell} -ilc \"{recipe}\""))
     )
 }
 
@@ -1932,13 +1932,13 @@ pub fn terminal_script(home: &str, env: &[(String, String)], path_dirs: &[String
 ///
 /// Two shells sit between the click and the session: the one inside the
 /// terminal parses this line, and the login shell at the other end parses what
-/// ssh hands it. The script is quoted for the first ([`crate::commands::shell_quote`]),
+/// ssh hands it. The script is quoted for the first ([`quote`]),
 /// so what ssh sends is the script's own text; the quoting *inside* the script —
 /// every path and every value in it goes through [`quote`] — is what carries it
 /// through the second. `-t` is what makes the far end a terminal session rather
 /// than a one-shot command.
 pub fn terminal_command(target: &str, script: &str) -> String {
-    format!("ssh -t {target} {}", crate::commands::shell_quote(script))
+    format!("ssh -t {target} {}", quote(script))
 }
 
 /// How much of a remote log the launcher copies home before opening it. A DSH
@@ -3719,8 +3719,10 @@ mod tests {
         );
     }
 
-    /// The transport carries the new capability, and the fake records it as the
-    /// machine would see it.
+    /// The transport carries the new capability, and it stops the **group**: the
+    /// pid a detached spawn leads, not that process alone. What may not happen
+    /// is a signal to the bare pid — that leaves whatever the instance started
+    /// running on that machine.
     #[test]
     fn the_process_group_stop_reaches_the_machine_with_that_pid() {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
@@ -3728,7 +3730,16 @@ mod tests {
 
         block_on(transport.stop_group(&host(), 4242)).unwrap();
 
-        assert_eq!(fake.calls(), vec![FakeCall::StopGroup(4242)]);
+        assert!(
+            fake.calls().contains(&FakeCall::StopGroup(4242)),
+            "要停的是那个进程组：{:?}",
+            fake.calls()
+        );
+        assert!(
+            !fake.calls().contains(&FakeCall::StopPid(4242)),
+            "只发组长就等于把那台机器上实例起的子进程留下了：{:?}",
+            fake.calls()
+        );
         assert!(stop_group_script(4242).contains("-$dsh_pid"));
     }
 

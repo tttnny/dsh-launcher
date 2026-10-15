@@ -126,7 +126,8 @@
     "remoteAddNote": "这是那台机器上的路径：启动器会在那边把它建出来（不存在的目录会新建），确认可用之后才记下这条记录。",
     "copyPath": "复制路径",
     "pathCopied": "已复制路径",
-    "confirmDeleteRemoteHome": "从启动器移除 DSH_HOME「{name}」？只删这条记录：那台机器上的目录一个字节都不动。"
+    "confirmDeleteRemoteHome": "从启动器移除 DSH_HOME「{name}」？只删这条记录：那台机器上的目录一个字节都不动。",
+    "homesEmptyUnreachable": "不过这只是启动器自己记下的记录：「{host}」现在问不到，那台机器上已有的 DSH_HOME（比如 ~/.dsh）没读到。"
   },
   "profiles": {
     "profilesTitle": "Profile",
@@ -147,7 +148,8 @@
     "usedByInstances": "默认用于",
     "managePlugins": "管理插件",
     "noHomeSelected": "还没有 DSH_HOME，先在 DSH_HOME 标签页里添加一个",
-    "pluginsLiveOnInstances": "补丁层属于运行中的实例：在实例页展开实例卡片，或进实例设置，点「管理插件」。"
+    "pluginsLiveOnInstances": "补丁层属于运行中的实例：在实例页展开实例卡片，或进实例设置，点「管理插件」。",
+    "profileAddRemoteNote": "Profile 是在「{host}」上建的：在那台机器的 <DSH_HOME>/profiles 里把要用的那一个复制成新名字，再点「重新读取 Profile」。"
   },
   "plugins": {
     "pageTitle": "插件管理",
@@ -275,7 +277,7 @@
       "deleteWarning": "只删启动器里的这条记录：服务器上什么都不动，在那台机器上跑着的实例会继续跑。",
       "deleteRecords": "启动器里归属这台主机的版本、DSH_HOME 与实例记录会一起消失，此后它上面的实例在启动器里看不到了。",
       "deleteLeft": "远端数据目录原样留在那台机器上（版本、专属 DSH_HOME、日志、运行记录）。想在服务器上自己看一眼，可以在终端里跑：",
-      "deleteCommandCopied": "清理命令已复制",
+      "deleteInspectCopied": "查看命令已复制",
       "deleteRunning": "「{names}」会继续在那台机器上跑，启动器里再也看不到它们——要停只能在服务器上停。"
     },
     "language": "界面语言",

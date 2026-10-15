@@ -833,8 +833,9 @@ async fn pin_remote_profile_store(
 /// That machine's log file for one instance:
 /// `<该主机的数据目录>/logs/<实例 id>.log` — where a remote spawn appends its
 /// output, and what 「日志」 copies the tail of. One derivation, so the file the
-/// launcher reads is the file the spawn wrote.
-pub(crate) fn remote_log_path(data_dir: &Path, instance_id: &str) -> String {
+/// launcher reads is the file the spawn wrote. Not an install step's log, which
+/// `tasks::remote_step_log_path` names.
+pub(crate) fn remote_instance_log_path(data_dir: &Path, instance_id: &str) -> String {
     data_dir
         .join("logs")
         .join(format!("{instance_id}.log"))
@@ -926,7 +927,7 @@ pub(crate) async fn spawn_remote_instance(
     }
     argv.extend(instance_argv);
 
-    let log_path = crate::process::remote_log_path(&data_dir, &inst.id);
+    let log_path = crate::process::remote_instance_log_path(&data_dir, &inst.id);
 
     // Read the log's size **before** the process exists: the file is appended to
     // across runs, and the previous run's URL line would otherwise be read as

@@ -783,7 +783,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_home': {
       const id = String(args?.id)
+      const hostId = hostIdArg(args)
       if (db.instances.some((i) => i.home_id === id)) fail('该 DSH_HOME 仍被实例引用，无法删除')
+      // The record must belong to the host the caller names: the same path on
+      // another machine is a different HOME, and a deletion that did nothing
+      // must not be reported as one.
+      const home = db.homes.find((h) => h.id === id)
+      if (!home || (home.host_id ?? LOCAL_HOST_ID) !== hostId) fail('该主机下没有这个 DSH_HOME')
       db.homes = db.homes.filter((h) => h.id !== id)
       saveDb(db)
       return undefined as T

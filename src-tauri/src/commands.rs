@@ -530,8 +530,15 @@ pub(crate) fn remove_home_record(
     if cfg.instances.iter().any(|i| i.home_id == id) {
         return Err("该 DSH_HOME 仍被实例引用，无法删除".to_string());
     }
+    let before = cfg.homes.len();
     cfg.homes
         .retain(|h| !(h.id == id && h.host_id == host.id));
+    if cfg.homes.len() == before {
+        // Nothing belonged to this host: the caller named the wrong machine, or
+        // the record is already gone. Either way 「删掉了」 would be a claim
+        // about a deletion that did not happen.
+        return Err("该主机下没有这个 DSH_HOME".to_string());
+    }
     save_state(state, &cfg)
 }
 
@@ -1908,7 +1915,7 @@ pub async fn open_instance_terminal(
     );
     let exports = env_pairs
         .iter()
-        .map(|(k, v)| format!("export {}={}\n", k, shell_quote(v)))
+        .map(|(k, v)| format!("export {}={}\n", k, crate::remote::quote(v)))
         .collect::<Vec<_>>()
         .join("");
 
@@ -1925,7 +1932,7 @@ pub async fn open_instance_terminal(
         cd {}\n\
         clear\n\
         exec {} -l\n",
-        shell_quote(&home_str),
+        crate::remote::quote(&home_str),
         shell
     );
     if std::fs::write(&term_script, script_content).is_ok() {
@@ -1940,7 +1947,7 @@ pub async fn open_instance_terminal(
     open_terminal_with(
         &terminal,
         &label,
-        &format!("exec {}", shell_quote(&term_script.to_string_lossy())),
+        &format!("exec {}", crate::remote::quote(&term_script.to_string_lossy())),
     )
 }
 
@@ -2015,7 +2022,7 @@ fn open_terminal_with(terminal: &str, label: &str, line: &str) -> Result<String,
             .arg("Ghostty")
             .arg("--args")
             .arg(format!("--title={label}"))
-            .arg(format!("--command={}", shell_quote(line)))
+            .arg(format!("--command={}", crate::remote::quote(line)))
             .spawn()
             .and_then(|mut c| c.wait());
 
@@ -2072,14 +2079,6 @@ fn open_terminal_with(terminal: &str, label: &str, line: &str) -> Result<String,
 /// The login shell for spawned terminals: $SHELL or /bin/zsh.
 fn shell_program() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
-}
-
-/// Single-quote a value for sh -c / do-script embedding. The same rule
-/// [`crate::remote::quote`] applies on the way to another machine, and the one
-/// [`crate::remote::terminal_command`] applies a second time for the shell that
-/// parses the command line here.
-pub(crate) fn shell_quote(v: &str) -> String {
-    format!("'{}'", v.replace('\'', "'\\''"))
 }
 
 /// Opens a folder in the system file manager. On macOS this reuses an
@@ -2283,7 +2282,7 @@ pub(crate) async fn instance_log_source(
         .map(|run| run.log_path.clone());
     Ok(InstanceLog::Remote {
         host: Box::new(host),
-        log_path: from_run.unwrap_or_else(|| crate::process::remote_log_path(&data_dir, instance_id)),
+        log_path: from_run.unwrap_or_else(|| crate::process::remote_instance_log_path(&data_dir, instance_id)),
     })
 }
 
@@ -3235,6 +3234,38 @@ mod tests {
             fake.calls().is_empty(),
             "删记录不该给那台机器发任何命令：{:?}",
             fake.calls()
+        );
+    }
+
+    /// The record has to belong to the machine the caller names. Silently
+    /// deleting nothing would let the page report 「已删除」 about a DSH_HOME that
+    /// is still there — and the same path on another machine is not this one's
+    /// HOME anyway (ADR-0006).
+    #[test]
+    fn removing_a_home_record_from_the_wrong_host_is_refused() {
+        let data = ScratchDir::new("remote-home-wrong-host");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            homes: vec![DshHome {
+                id: "h-lab".into(),
+                name: "实验环境".into(),
+                path: std::path::PathBuf::from("/opt/dsh/lab"),
+                host_id: "host-lab".into(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake);
+
+        let refused =
+            remove_home_record(&state, "h-lab", Some(crate::config::LOCAL_HOST_ID));
+
+        assert!(refused.is_err(), "张冠李戴的宿主 id 不能算删掉了：{refused:?}");
+        assert_eq!(
+            state.config.lock().unwrap().homes.len(),
+            1,
+            "记录要原样留下"
         );
     }
 

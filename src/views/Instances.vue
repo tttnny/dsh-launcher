@@ -92,7 +92,8 @@ const filtered = computed(() => {
 /**
  * The visible rows, split by what each button would do to them. The rule lives
  * in `src/instancesBulk.ts` so the board and the buttons read one definition of
- * 「the range I am looking at」 — and so it can be driven without a webview.
+ * 「the range I am looking at」 — and so it can be driven without a webview
+ * (`ci/instances-bulk.test.mjs`).
  */
 const bulk = computed(() => bulkScope(filtered.value, (id) => store.statusOf(id)))
 

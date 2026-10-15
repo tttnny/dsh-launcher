@@ -351,11 +351,23 @@ const hostRunNames = computed(() =>
   hostRunsOnDelete.value.join(locale.value === 'zh-CN' ? '、' : ', '),
 )
 
-/** What the user can run on the server to see what the launcher left behind. */
-function cleanupCommand(host: HostWithStatus | null): string {
+/** What the user can run on the server to look at what the launcher left
+ *  behind. Read-only on purpose: nothing here removes anything there.
+ *
+ *  The shape is the backend's `remote::ssh_command`, in one line: the whole
+ *  remote command is one single-quoted word, and the path inside it is quoted
+ *  again for the shell that parses it there. Two shells read this line — the one
+ *  here, and the login shell at the other end — so a path with a space or a
+ *  quote in it survives both. */
+function inspectCommand(host: HostWithStatus | null): string {
   if (!host) return ''
   const dir = host.data_dir || '~/.local/share/dsh-launcher'
-  return `ssh ${host.ssh_target} 'ls -la ${dir}'`
+  return `ssh ${host.ssh_target} ${remoteWord(`bash -ilc "ls -la ${remoteWord(dir)}"`)}`
+}
+
+/** POSIX single-quoting — the backend's `remote::quote`. */
+function remoteWord(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
 }
 
 /**
@@ -982,10 +994,10 @@ onUnmounted(() => {
       <p class="delete-warning">{{ t('settings.hosts.deleteRecords') }}</p>
       <p class="delete-warning">{{ t('settings.hosts.deleteLeft') }}</p>
       <div class="cleanup-command">
-        <code class="dl-mono">{{ cleanupCommand(hostPendingDelete) }}</code>
+        <code class="dl-mono">{{ inspectCommand(hostPendingDelete) }}</code>
         <button
           class="dl-btn dl-btn--quiet"
-          @click="copy(cleanupCommand(hostPendingDelete), 'settings.hosts.deleteCommandCopied')"
+          @click="copy(inspectCommand(hostPendingDelete), 'settings.hosts.deleteInspectCopied')"
         >
           {{ t('common.copy') }}
         </button>

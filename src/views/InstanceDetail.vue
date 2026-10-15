@@ -100,6 +100,19 @@ const host = computed(() => store.hostById(hostId.value))
 const remote = computed(() => !!host.value && !host.value.builtin)
 const hostVersions = computed(() => store.versionsByHost[hostId.value] ?? [])
 const hostHomes = computed(() => store.homesByHost[hostId.value] ?? [])
+/**
+ * Why that machine's versions and DSH_HOMEs could not be read. Both lists are
+ * its own answers, so a failed read leaves nothing to offer — and the last list
+ * it gave is not today's answer (`loadHostResources` drops it). The form says
+ * what happened instead of listing yesterday's versions.
+ */
+const hostError = computed(
+  () => store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
+)
+
+function retryHost() {
+  void store.loadHostResources(hostId.value)
+}
 
 /**
  * The form's identity, used to tell "nothing to save" from "the user changed
@@ -434,25 +447,36 @@ function removeEnvRow(idx: number) {
               />
             </div>
 
-            <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('instanceEdit.version') }}</span>
+            <div v-if="hostError" class="dl-surface dl-failure">
+              <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+              <p class="dl-failure-text">{{ hostError }}</p>
+              <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+              <div style="margin-top: 6px">
+                <button class="dl-btn" @click="retryHost">{{ t('common.refresh') }}</button>
               </div>
-              <a-select v-model="versionId" style="width: 230px">
-                <a-option v-for="v in hostVersions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
-              </a-select>
             </div>
 
-            <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('instanceEdit.home') }}</span>
+            <template v-else>
+              <div class="dl-row">
+                <div class="dl-row-info">
+                  <span class="dl-row-label">{{ t('instanceEdit.version') }}</span>
+                </div>
+                <a-select v-model="versionId" style="width: 230px">
+                  <a-option v-for="v in hostVersions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
+                </a-select>
               </div>
-              <a-select v-model="homeId" style="width: 230px" @change="onHomePicked">
-                <a-option v-for="h in hostHomes" :key="h.id" :value="h.id">
-                  {{ h.name }} — {{ h.path }}
-                </a-option>
-              </a-select>
-            </div>
+
+              <div class="dl-row">
+                <div class="dl-row-info">
+                  <span class="dl-row-label">{{ t('instanceEdit.home') }}</span>
+                </div>
+                <a-select v-model="homeId" style="width: 230px" @change="onHomePicked">
+                  <a-option v-for="h in hostHomes" :key="h.id" :value="h.id">
+                    {{ h.name }} — {{ h.path }}
+                  </a-option>
+                </a-select>
+              </div>
+            </template>
 
             <div class="dl-row">
               <div class="dl-row-info">

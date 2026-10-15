@@ -31,6 +31,15 @@ const newPath = ref('')
 /** Whether the pane is showing another machine's DSH_HOMEs. */
 const remote = computed(() => store.currentHost?.builtin === false)
 
+/**
+ * Whether that machine is one the launcher cannot currently reach. It matters
+ * for an *empty* list most of all: the records themselves come from the
+ * launcher's own file, so they survive (ADR-0006 §2), but `list_homes` also
+ * asks that machine for the `~/.dsh` it already has — and an unreachable machine
+ * answers nothing, so 「暂无 DSH_HOME」 would be half the story.
+ */
+const hostUnreachable = computed(() => store.currentHost?.status?.state === 'unreachable')
+
 const usedBy = computed(() => (id: string) => store.instancesOfHome(id).length)
 
 async function pickDir() {
@@ -127,6 +136,9 @@ function viewProfiles(homeId: string) {
 
     <div v-else class="dl-surface home-list">
       <DlEmpty v-if="store.homes.length === 0" icon="tray" :description="t('homes.homesEmpty')" />
+      <p v-if="store.homes.length === 0 && remote && hostUnreachable" class="dl-field-hint">
+        {{ t('homes.homesEmptyUnreachable', { host: store.currentHost?.display_name ?? '' }) }}
+      </p>
 
       <div v-for="h in store.homes" :key="h.id" class="home-row">
         <div class="home-main">
