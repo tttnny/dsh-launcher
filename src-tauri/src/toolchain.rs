@@ -238,14 +238,14 @@ pub(crate) async fn ensure_pnpm_for_task(
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
+    // Version installs are the local host's: a remote install is its own flow
+    // with its own resolution on that machine.
     let manual = state
         .config
         .lock()
         .unwrap()
-        .settings
-        .toolchain_overrides
-        .pnpm
-        .clone();
+        .local_host()
+        .and_then(|host| host.toolchain_overrides.pnpm.clone());
     let mut notes = Vec::new();
     match resolve_pnpm(manual.as_deref(), &mut |s| notes.push(s)).await {
         Some((path, version)) => {

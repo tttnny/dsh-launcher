@@ -90,9 +90,16 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 `manual`（用户选定）。「系统环境变量」= 用户登录 shell 的 `PATH`（另起一个登录 shell
 读它，带超时与短时缓存；「重新检测」传 `force` 绕过缓存，否则用户配好 `.zshrc` 也刷不
 出来）。候选顺序固定为「用户指定 → 系统环境变量 → 常见安装目录」，探测与执行共用这一份，
-别让页面报的与实际执行的不一致。`settings.toolchain` 永远是探测缓存；用户的选择记在
-`settings.toolchain_overrides`，只能由 `set_toolchain_override` 写入（`SettingsPatch`
-不给这条路），指定的文件失效时退回自动探测但如实把它带回去给页面提示。
+别让页面报的与实际执行的不一致。**结论与用户选择都是按主机分开的**：探测缓存与用户指定长在
+主机记录上（`Host.toolchain` / `Host.toolchain_overrides`），进程内的 PATH 缓存与远程探测
+缓存都按主机 id 分桶（不是单个槽，否则两台机器互相污染）；`set_toolchain_override` 是唯一的
+写入通道（`SettingsPatch` 不给这条路），指定的文件失效时退回自动探测但如实把它带回去给页面
+提示。远程那台一律经 `bash -ilc` 探测（与它在自己终端里命中的是同一个 shell），执行用绝对
+路径，候选表是 Linux 的那一套（Linuxbrew、nvm / fnm 版本目录、pnpm 官方脚本目录、
+`~/.local/bin`、`/usr/local/bin`）；低于 20 的 Node 候选**跳过并报出**（本机维持「只告警不
+阻止」），跳过了谁与原因由后端放进 `skipped_candidates` 交给页面。远程的「手动指定」只能填
+路径（远端没有本机文件选择器），由那台机器真跑一次 `--version` 才认；远程缺工具时给的是
+**一条**带 `ssh <主机>` 前缀、可直接在本机终端执行的命令。
 
 **DSH 的展示文案是「字符串或语言映射」（契约）**：`meta.title` / `meta.description`
 对官方插件是普通字符串，对本地化过的插件是 `{"en": …, "zh": …}`。凡是有可能拿到

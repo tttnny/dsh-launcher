@@ -123,9 +123,10 @@ _Avoid_: 健康检查、诊断
 
 **系统环境变量 (System environment)**：
 用户在终端里用的那一套环境变量，`PATH` 由登录 shell（`~/.zshrc` / `~/.zprofile`）决定。
-图形界面应用从 Finder 启动时继承不到它，所以环境检测另起一个登录 shell 去读，把它当作
-「这台机器上有没有 Node / pnpm」的基准（ADR-0005）。对远程主机，指的是那台主机上登录
-shell 的 `PATH`（另起一个 `bash -lc` 去读）。
+图形界面应用从 Finder 启动时继承不到它，所以环境检测另起一个**交互式**登录 shell 去读，把它当作
+「这台机器上有没有 Node / pnpm」的基准（ADR-0005）。对远程主机，指的是那台主机上交互式登录
+shell 的 `PATH`（另起一个 `bash -ilc` 去读：Linux 上把 brew、nvm、miniconda 加进 `PATH` 的是
+`~/.bashrc`，只有交互式 shell 会读它）。每台主机各读一次、各存一份结论。
 _Avoid_: 系统 PATH、全局环境
 
 **手动指定的可执行文件 (Manual toolchain path)**：

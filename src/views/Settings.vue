@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
+import { LOCAL_HOST_ID } from '@/api/types'
 import type {
   ConnectionTest,
   HostInput,
@@ -12,6 +13,7 @@ import type {
   LauncherUpdateInfo,
   LogLevel,
   RemoteTool,
+  RuntimeStatus,
   SshAlias,
   ThemeMode,
 } from '@/api/types'
@@ -70,7 +72,31 @@ async function patchSettings(patch: Parameters<typeof api.updateSettings>[0]) {
 
 // --- Environment --------------------------------------------------------------
 
-const envOk = computed(() => !!store.runtime?.node?.installed && !!store.runtime?.pnpm?.installed)
+// The readout answers for one host: the toolchain is per host, because a path is
+// a fact about one machine's filesystem (ADR-0005 追加). 本机 is the default, and
+// the store's copy of that answer is what the app itself checked at startup.
+const envHostId = ref(LOCAL_HOST_ID)
+const envRuntime = ref<RuntimeStatus | null>(store.runtime)
+
+const envOk = computed(
+  () => !!envRuntime.value?.node?.installed && !!envRuntime.value?.pnpm?.installed,
+)
+
+async function loadEnv() {
+  const wanted = envHostId.value
+  try {
+    const answer = await api.getRuntimeStatus(false, wanted)
+    if (wanted !== envHostId.value) return
+    envRuntime.value = answer
+  } catch (e) {
+    Message.error(String(e))
+  }
+}
+
+watch(envHostId, () => {
+  envRuntime.value = null
+  void loadEnv()
+})
 
 // --- Hosts ----------------------------------------------------------------------
 
@@ -319,6 +345,7 @@ onMounted(async () => {
     dataDir.value = ''
   }
   await loadHosts()
+  await loadEnv()
 })
 
 const checkUpdateAction = useAction(() => api.checkLauncherUpdate(updateChannel.value))
@@ -637,19 +664,30 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="dl-surface">
+            <div v-if="hosts.length > 1" class="dl-row">
+              <span class="dl-row-label">{{ t('settings.environment.host') }}</span>
+              <a-select
+                :model-value="envHostId"
+                style="width: 190px"
+                size="small"
+                @change="(v) => (envHostId = String(v))"
+              >
+                <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
+              </a-select>
+            </div>
             <div class="dl-row">
               <span class="dl-row-label">Node.js</span>
-              <span class="row-path dl-mono" :title="store.runtime?.node?.path ?? ''">
-                {{ store.runtime?.node?.path ?? t('settings.environment.notFound') }}
+              <span class="row-path dl-mono" :title="envRuntime?.node?.path ?? ''">
+                {{ envRuntime?.node?.path ?? t('settings.environment.notFound') }}
               </span>
-              <span class="dl-chip">{{ store.runtime?.node?.version ?? t('settings.environment.missing') }}</span>
+              <span class="dl-chip">{{ envRuntime?.node?.version ?? t('settings.environment.missing') }}</span>
             </div>
             <div class="dl-row">
               <span class="dl-row-label">pnpm</span>
-              <span class="row-path dl-mono" :title="store.runtime?.pnpm?.path ?? ''">
-                {{ store.runtime?.pnpm?.path ?? t('settings.environment.notFound') }}
+              <span class="row-path dl-mono" :title="envRuntime?.pnpm?.path ?? ''">
+                {{ envRuntime?.pnpm?.path ?? t('settings.environment.notFound') }}
               </span>
-              <span class="dl-chip">{{ store.runtime?.pnpm?.version ?? t('settings.environment.missing') }}</span>
+              <span class="dl-chip">{{ envRuntime?.pnpm?.version ?? t('settings.environment.missing') }}</span>
             </div>
             <div class="dl-row">
               <span class="dl-row-desc">{{ t('settings.environment.desc') }}</span>

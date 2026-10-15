@@ -760,6 +760,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: Some(PathBuf::from("/home/u/.local/share/dsh-launcher")),
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         }
     }
 

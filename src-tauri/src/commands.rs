@@ -76,6 +76,10 @@ pub(crate) fn create_host_record(state: &AppState, input: HostInput) -> Result<H
         extra_env: input.extra_env,
         data_dir: cleaned_path(input.data_dir),
         builtin: false,
+        // A host starts with nothing probed and nothing chosen: the environment
+        // page is what fills both in.
+        toolchain: Default::default(),
+        toolchain_overrides: Default::default(),
     };
     let mut cfg = state.config.lock().unwrap();
     if let Some(existing) = cfg.hosts.iter().find(|h| h.ssh_target == host.ssh_target) {
@@ -114,6 +118,10 @@ pub(crate) fn update_host_record(
         .position(|h| h.id == id)
         .ok_or_else(|| format!("主机不存在: {id}"))?;
     let builtin = cfg.hosts[pos].builtin;
+    // The probe cache and the user's choices are not part of this form: the
+    // environment page owns them, and a settings save must not wipe them.
+    let toolchain = cfg.hosts[pos].toolchain.clone();
+    let toolchain_overrides = cfg.hosts[pos].toolchain_overrides.clone();
     let target = if builtin {
         // 本机 dials nothing; whatever a form sent for it is not a target.
         String::new()
@@ -128,6 +136,8 @@ pub(crate) fn update_host_record(
         extra_env: input.extra_env,
         data_dir: cleaned_path(input.data_dir),
         builtin,
+        toolchain,
+        toolchain_overrides,
     };
     let updated = cfg.hosts[pos].clone();
     crate::config::save_config(&state.config_path, &cfg)?;
@@ -2264,6 +2274,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: None,
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         }
     }
 
@@ -2402,6 +2414,48 @@ mod tests {
         assert!(updated.builtin, "编辑不该丢掉内置标记");
         assert!(updated.ssh_target.is_empty(), "本机不经过 ssh");
         assert_eq!(updated.display_name, "这台 Mac");
+    }
+
+    /// A settings save must not wipe what the environment page owns: the probe
+    /// cache and the user's hand-picked executables are not part of the host
+    /// form, exactly as an instance's icon and port are not part of its form.
+    #[test]
+    fn editing_a_host_keeps_its_toolchain_and_its_picks() {
+        let data = ScratchDir::new("host-edit-toolchain");
+        let mut lab = remote_host("host-lab", "lab");
+        lab.toolchain = crate::config::ToolchainBinding {
+            node: Some(crate::config::BoundTool {
+                path: std::path::PathBuf::from("/opt/node/bin/node"),
+                version: "v22.14.0".into(),
+            }),
+            pnpm: None,
+        };
+        lab.toolchain_overrides = crate::config::ToolchainOverrides {
+            node: Some(std::path::PathBuf::from("/opt/pick/node")),
+            pnpm: None,
+        };
+        let state = host_state(
+            &data,
+            crate::config::Config {
+                hosts: vec![Host::local(), lab],
+                ..Default::default()
+            },
+            crate::remote::testing::idle(),
+        );
+
+        let updated = update_host_record(&state, "host-lab", host_input("实验室", "lab")).unwrap();
+
+        assert_eq!(updated.display_name, "实验室");
+        assert_eq!(
+            updated.toolchain.node.as_ref().map(|bound| bound.path.clone()),
+            Some(std::path::PathBuf::from("/opt/node/bin/node")),
+            "探测结论不该被表单抹掉"
+        );
+        assert_eq!(
+            updated.toolchain_overrides.node,
+            Some(std::path::PathBuf::from("/opt/pick/node")),
+            "用户指定的路径不该被表单抹掉"
+        );
     }
 
     /// Deleting a host removes the launcher's records and nothing else: the
@@ -2591,6 +2645,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         };
         let mut cfg = crate::config::Config {
             hosts: vec![local.clone(), remote.clone()],
@@ -2646,6 +2702,8 @@ mod tests {
             extra_env: Default::default(),
             data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
             builtin: false,
+            toolchain: Default::default(),
+            toolchain_overrides: Default::default(),
         };
         let version = "0.1.0-rc.6";
         let dedicated = dedicated_home_path(data.path(), version);

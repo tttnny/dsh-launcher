@@ -47,11 +47,14 @@ import {
 export const api = {
   isTauri,
 
-  /** `force` 为 true 时忽略缓存，重新读一次系统环境变量（供「重新检测」按钮使用）。 */
-  getRuntimeStatus: (force = false) => call<RuntimeStatus>('get_runtime_status', { force }),
-  /** 指定某个工具的可执行文件；path 为 null 表示取消指定，回到自动检测。返回刷新后的状态。 */
-  setToolchainOverride: (tool: 'node' | 'pnpm', path: string | null) =>
-    call<RuntimeStatus>('set_toolchain_override', { tool, path }),
+  /** `force` 为 true 时忽略缓存，重新探测一次（供「重新检测」按钮使用）。
+   *  `hostId` 缺省是本机；每台主机各有一份结论与一份用户指定。 */
+  getRuntimeStatus: (force = false, hostId?: string | null) =>
+    call<RuntimeStatus>('get_runtime_status', { force, hostId: hostId ?? null }),
+  /** 指定某台主机上某个工具的可执行文件；path 为 null 表示取消指定，回到自动检测。
+   *  返回那台主机刷新后的状态。 */
+  setToolchainOverride: (tool: 'node' | 'pnpm', path: string | null, hostId?: string | null) =>
+    call<RuntimeStatus>('set_toolchain_override', { tool, path, hostId: hostId ?? null }),
 
   /**
    * The machines the launcher manages, each with the status last observed for
