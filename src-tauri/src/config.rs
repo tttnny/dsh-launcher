@@ -151,6 +151,52 @@ impl Host {
     }
 }
 
+/// What the launcher last learned about reaching one host: 连接中 while a test
+/// is in flight, then 可达 or 不可达.
+///
+/// This is **runtime**, never a field of `config.json`: 「现在连不上」 is a fact
+/// about the network and the moment, not about the host record. A machine that
+/// is off is still a machine the user saved (ADR-0006).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostState {
+    Connecting,
+    Reachable,
+    Unreachable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostStatus {
+    pub state: HostState,
+    /// Why, when `Unreachable`: the readable sentence of one of the four
+    /// failure classes.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl HostStatus {
+    pub fn connecting() -> Self {
+        Self {
+            state: HostState::Connecting,
+            message: None,
+        }
+    }
+
+    pub fn reachable() -> Self {
+        Self {
+            state: HostState::Reachable,
+            message: None,
+        }
+    }
+
+    pub fn unreachable(message: impl Into<String>) -> Self {
+        Self {
+            state: HostState::Unreachable,
+            message: Some(message.into()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherSettings {
     #[serde(default = "default_locale")]

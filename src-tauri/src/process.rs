@@ -1053,6 +1053,10 @@ mod tests {
             }),
             running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            // The local lifecycle never talks to a remote host; an in-memory
+            // transport that answers nothing is the honest stand-in.
+            host_transport: crate::remote::testing::idle(),
+            host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::config::{
-    new_id, DshHome, DshInstance, Host, LauncherSettings, RemoteVersion, SettingsPatch,
+    new_id, DshHome, DshInstance, Host, HostStatus, LauncherSettings, RemoteVersion, SettingsPatch,
 };
 use crate::{process, AppState};
 use std::collections::BTreeMap;
@@ -12,11 +12,278 @@ pub(crate) use crate::config::dedicated_home_path;
 // Hosts
 // ---------------------------------------------------------------------------
 
-/// The machines the launcher manages. 本机 is always one of them, marked
-/// `builtin` so the page can leave out its delete control (ADR-0006).
+/// A host record plus the status last observed for it — one object per host, so
+/// the settings page can render a row straight from it. `status` is runtime
+/// (never in `config.json`), and `None` means 「还没测过」, which is not the same
+/// as 「不可达」.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct HostView {
+    #[serde(flatten)]
+    pub host: Host,
+    pub status: Option<HostStatus>,
+}
+
+/// The editable half of a host record: what the settings page's dialog holds.
+/// Its fields keep the record's own spelling, so the page can hand back the
+/// fields of the row it is editing.
+///
+/// `id` is deliberately absent — a host's id is the launcher's, and every record
+/// that belongs to that host is filed under it.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct HostInput {
+    pub display_name: String,
+    #[serde(default)]
+    pub ssh_target: String,
+    #[serde(default)]
+    pub registry: Option<String>,
+    #[serde(default)]
+    pub extra_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub data_dir: Option<String>,
+}
+
+/// The machines the launcher manages, each with the status last observed.
 #[tauri::command]
-pub fn list_hosts(state: State<'_, AppState>) -> Result<Vec<Host>, String> {
-    Ok(state.config.lock().unwrap().hosts.clone())
+pub fn list_hosts(state: State<'_, AppState>) -> Result<Vec<HostView>, String> {
+    list_hosts_with_status(&state)
+}
+
+pub(crate) fn list_hosts_with_status(state: &AppState) -> Result<Vec<HostView>, String> {
+    let hosts = state.config.lock().unwrap().hosts.clone();
+    Ok(hosts
+        .into_iter()
+        .map(|host| HostView {
+            status: state.host_status(&host.id),
+            host,
+        })
+        .collect())
+}
+
+/// Adds a remote host. Nothing is dialed here: a machine that is switched off
+/// right now can still be saved, and 「测试连接」 is what finds out whether it is
+/// there (ADR-0006).
+#[tauri::command]
+pub fn create_host(state: State<'_, AppState>, input: HostInput) -> Result<Host, String> {
+    create_host_record(&state, input)
+}
+
+pub(crate) fn create_host_record(state: &AppState, input: HostInput) -> Result<Host, String> {
+    let host = Host {
+        id: new_id("host"),
+        display_name: checked_name(&input.display_name)?,
+        ssh_target: checked_target(&input.ssh_target)?,
+        registry: cleaned(input.registry),
+        extra_env: input.extra_env,
+        data_dir: cleaned_path(input.data_dir),
+        builtin: false,
+    };
+    let mut cfg = state.config.lock().unwrap();
+    if let Some(existing) = cfg.hosts.iter().find(|h| h.ssh_target == host.ssh_target) {
+        return Err(format!(
+            "已经有一台主机用这个 ssh 目标：{}",
+            existing.display_name
+        ));
+    }
+    cfg.hosts.push(host.clone());
+    crate::config::save_config(&state.config_path, &cfg)?;
+    Ok(host)
+}
+
+/// Rewrites one host's editable fields. The record keeps its id and its
+/// `builtin` flag: the form must not be able to turn 本机 into a remote machine,
+/// or the other way round.
+#[tauri::command]
+pub fn update_host(
+    state: State<'_, AppState>,
+    id: String,
+    input: HostInput,
+) -> Result<Host, String> {
+    update_host_record(&state, &id, input)
+}
+
+pub(crate) fn update_host_record(
+    state: &AppState,
+    id: &str,
+    input: HostInput,
+) -> Result<Host, String> {
+    let name = checked_name(&input.display_name)?;
+    let mut cfg = state.config.lock().unwrap();
+    let pos = cfg
+        .hosts
+        .iter()
+        .position(|h| h.id == id)
+        .ok_or_else(|| format!("主机不存在: {id}"))?;
+    let builtin = cfg.hosts[pos].builtin;
+    let target = if builtin {
+        // 本机 dials nothing; whatever a form sent for it is not a target.
+        String::new()
+    } else {
+        checked_target(&input.ssh_target)?
+    };
+    cfg.hosts[pos] = Host {
+        id: id.to_string(),
+        display_name: name,
+        ssh_target: target,
+        registry: cleaned(input.registry),
+        extra_env: input.extra_env,
+        data_dir: cleaned_path(input.data_dir),
+        builtin,
+    };
+    let updated = cfg.hosts[pos].clone();
+    crate::config::save_config(&state.config_path, &cfg)?;
+    Ok(updated)
+}
+
+/// Removes a host and the records filed under it — **only** the launcher's own
+/// records. Nothing on that machine is touched, and the instances that were
+/// running there keep running (ADR-0006, ADR-0007). What stays behind on that
+/// machine — its data directory, versions, DSH_HOMEs and running record — is
+/// what the page's confirmation names, with a command to go and look.
+pub(crate) fn delete_host_record(state: &AppState, id: &str) -> Result<(), String> {
+    let mut cfg = state.config.lock().unwrap();
+    let pos = cfg
+        .hosts
+        .iter()
+        .position(|h| h.id == id)
+        .ok_or_else(|| format!("主机不存在: {id}"))?;
+    if cfg.hosts[pos].builtin {
+        return Err("本机是内置的，不能删除".to_string());
+    }
+    cfg.hosts.remove(pos);
+
+    let dropped: Vec<String> = cfg
+        .instances
+        .iter()
+        .filter(|i| i.host_id == id)
+        .map(|i| i.id.clone())
+        .collect();
+    cfg.instances.retain(|i| i.host_id != id);
+    cfg.homes.retain(|h| h.host_id != id);
+    cfg.versions.retain(|v| v.host_id != id);
+    if cfg
+        .settings
+        .last_instance_id
+        .as_ref()
+        .is_some_and(|last| dropped.contains(last))
+    {
+        cfg.settings.last_instance_id = None;
+    }
+    crate::config::save_config(&state.config_path, &cfg)?;
+    drop(cfg);
+    state.forget_host_status(id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_host(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    delete_host_record(&state, &id)
+}
+
+/// The connection test: what that machine is, where its home and the launcher's
+/// data directory are, and what Node and pnpm it resolves to.
+///
+/// A machine that cannot be reached comes back as an `Ok` result saying so (the
+/// record stays, and the page says 「不可达」); only a broken request — an unknown
+/// host id, the built-in host — is an error.
+#[tauri::command]
+pub async fn test_host_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<crate::remote::ConnectionTest, String> {
+    test_host_connection_for(&state, &id).await
+}
+
+pub(crate) async fn test_host_connection_for(
+    state: &AppState,
+    id: &str,
+) -> Result<crate::remote::ConnectionTest, String> {
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        cfg.hosts
+            .iter()
+            .find(|h| h.id == id)
+            .cloned()
+            .ok_or_else(|| format!("主机不存在: {id}"))?
+    };
+    if host.builtin {
+        return Err("本机就在这台 Mac 上，不需要测试连接".to_string());
+    }
+    state.set_host_status(id, HostStatus::connecting());
+
+    let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+    let configured = host
+        .data_dir
+        .as_ref()
+        .map(|dir| dir.to_string_lossy().to_string());
+    let test =
+        crate::remote::connection_test(&*state.host_transport, &target, configured.as_deref())
+            .await;
+
+    state.set_host_status(
+        id,
+        if test.ok {
+            HostStatus::reachable()
+        } else {
+            HostStatus::unreachable(test.message.clone().unwrap_or_default())
+        },
+    );
+    // A machine that answered also told us where its data directory is. Remember
+    // it, so later work on that host does not have to ask again; a value the user
+    // configured always wins.
+    if test.ok && host.data_dir.is_none() {
+        if let Some(dir) = test.data_dir.clone() {
+            remember_data_dir(state, id, &dir);
+        }
+    }
+    Ok(test)
+}
+
+fn remember_data_dir(state: &AppState, id: &str, dir: &str) {
+    let mut cfg = state.config.lock().unwrap();
+    let Some(host) = cfg.hosts.iter_mut().find(|h| h.id == id) else {
+        return;
+    };
+    if host.data_dir.is_some() {
+        return;
+    }
+    host.data_dir = Some(std::path::PathBuf::from(dir));
+    if let Err(e) = crate::config::save_config(&state.config_path, &cfg) {
+        crate::log_warn!("记住主机 {id} 的远端数据目录失败：{e}");
+    }
+}
+
+/// The aliases of the user's own `~/.ssh/config`, for the add/edit dialog's
+/// picker. A machine with no config simply has none.
+#[tauri::command]
+pub fn list_ssh_aliases() -> Result<Vec<crate::ssh::SshAlias>, String> {
+    Ok(crate::ssh::ssh_aliases())
+}
+
+fn checked_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("主机的显示名不能为空".to_string());
+    }
+    Ok(name.to_string())
+}
+
+fn checked_target(raw: &str) -> Result<String, String> {
+    let target = raw.trim();
+    if target.is_empty() {
+        return Err("请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串".to_string());
+    }
+    Ok(target.to_string())
+}
+
+/// An empty field in the dialog means 「没配」, not an empty string.
+fn cleaned(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn cleaned_path(value: Option<String>) -> Option<std::path::PathBuf> {
+    cleaned(value).map(std::path::PathBuf::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1461,6 +1728,320 @@ mod tests {
         assert!(hosts[0].builtin, "本机是内置的那一条");
         assert_eq!(hosts[0].display_name, "本机");
         assert!(hosts[0].ssh_target.is_empty(), "本机不经过 ssh");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hosts
+    // -----------------------------------------------------------------------
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    /// An `AppState` around one scratch config file, with the transport a test
+    /// chose. The local lifecycle modules build theirs the same way.
+    fn host_state(
+        data: &ScratchDir,
+        cfg: crate::config::Config,
+        transport: std::sync::Arc<dyn crate::ssh::HostTransport>,
+    ) -> AppState {
+        AppState {
+            config_path: data.path().join("config.json"),
+            data_dir: data.path().to_path_buf(),
+            config: std::sync::Mutex::new(cfg),
+            running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            host_transport: transport,
+            host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn host_input(name: &str, target: &str) -> HostInput {
+        HostInput {
+            display_name: name.into(),
+            ssh_target: target.into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: None,
+        }
+    }
+
+    fn remote_host(id: &str, target: &str) -> Host {
+        Host {
+            id: id.into(),
+            display_name: "服务器".into(),
+            ssh_target: target.into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: None,
+            builtin: false,
+        }
+    }
+
+    /// The point of the whole ticket: a machine that cannot be reached is still
+    /// a machine the user may keep. Saving it works, the page shows 「不可达」, and
+    /// the reason is one of the four classes.
+    #[test]
+    fn a_host_that_cannot_be_reached_is_still_saved_and_shows_as_unreachable() {
+        let data = ScratchDir::new("host-unreachable");
+        let transport = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::fail(
+                crate::ssh::HostErrorKind::Unreachable,
+                "ssh: connect to host lab port 22: Connection refused",
+            ),
+        );
+        let state = host_state(&data, crate::config::Config::default(), transport);
+
+        let host = create_host_record(&state, host_input("实验室", "lab")).unwrap();
+
+        let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
+        assert!(!test.ok);
+        assert_eq!(test.kind, Some(crate::ssh::HostErrorKind::Unreachable));
+        assert!(test.message.unwrap().contains("Connection refused"));
+
+        let views = list_hosts_with_status(&state).unwrap();
+        let saved = views.iter().find(|v| v.host.id == host.id).unwrap();
+        assert_eq!(saved.host.display_name, "实验室", "连不上的主机照样存下来");
+        let status = saved.status.as_ref().unwrap();
+        assert_eq!(status.state, crate::config::HostState::Unreachable);
+        assert!(status.message.as_ref().unwrap().contains("Connection refused"));
+        // 本机 never gets a status: it is not a machine to reach.
+        let local = views.iter().find(|v| v.host.builtin).unwrap();
+        assert!(local.status.is_none());
+    }
+
+    /// A machine that answered also says where its data directory is, and
+    /// whether it is there yet. The launcher remembers the path so the work that
+    /// follows does not have to ask again.
+    #[test]
+    fn a_reachable_host_remembers_where_its_data_directory_is() {
+        let data = ScratchDir::new("host-reachable");
+        let transport = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::connection_stdout(
+                Some(("/home/linuxbrew/.linuxbrew/bin/node", "v26.0.0")),
+                None,
+            )),
+        );
+        let state = host_state(&data, crate::config::Config::default(), transport);
+        let host = create_host_record(&state, host_input("实验室", "lab")).unwrap();
+
+        let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
+
+        assert!(test.ok);
+        assert_eq!(
+            test.node.as_ref().map(|t| t.version.as_str()),
+            Some("v26.0.0")
+        );
+        assert!(test.pnpm.is_none(), "那台机器没有 pnpm，如实说没有");
+        assert!(!test.data_dir_exists);
+
+        let saved = list_hosts_with_status(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.host.id == host.id)
+            .unwrap();
+        assert_eq!(
+            saved.host.data_dir.as_deref(),
+            Some(std::path::Path::new("/home/demo/.local/share/dsh-launcher")),
+            "远端报出来的数据目录要记下来"
+        );
+        assert_eq!(
+            saved.status.unwrap().state,
+            crate::config::HostState::Reachable
+        );
+    }
+
+    /// A data directory the user configured is the one the remote side is asked
+    /// about — the launcher does not quietly replace it with its own default.
+    #[test]
+    fn a_configured_data_directory_is_what_the_remote_is_asked_to_check() {
+        let data = ScratchDir::new("host-data-dir");
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::connection_stdout(
+                Some(("/usr/bin/node", "v22.11.0")),
+                Some(("/usr/bin/pnpm", "11.0.0")),
+            )),
+        );
+        let state = host_state(&data, crate::config::Config::default(), fake.clone());
+        let mut host = remote_host("host-lab", "lab");
+        host.data_dir = Some(std::path::PathBuf::from("/srv/dsh launcher"));
+        state.config.lock().unwrap().hosts.push(host.clone());
+
+        let test = block_on(test_host_connection_for(&state, &host.id)).unwrap();
+
+        assert!(test.ok);
+        let script = fake.last_script();
+        assert!(
+            script.contains("dsh_configured='/srv/dsh launcher'"),
+            "用户填的数据目录要原样问那台机器：{script}"
+        );
+        let saved = list_hosts_with_status(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.host.id == host.id)
+            .unwrap();
+        assert_eq!(
+            saved.host.data_dir,
+            Some(std::path::PathBuf::from("/srv/dsh launcher")),
+            "远端报的默认值不该覆盖用户填的"
+        );
+    }
+
+    /// The form must not be able to change what a host *is*: editing 本机 leaves
+    /// it 本机, with no ssh target.
+    #[test]
+    fn editing_a_host_keeps_its_id_and_its_builtin_flag() {
+        let data = ScratchDir::new("host-edit");
+        let state = host_state(
+            &data,
+            crate::config::Config::default(),
+            crate::remote::testing::idle(),
+        );
+
+        let updated = update_host_record(
+            &state,
+            crate::config::LOCAL_HOST_ID,
+            HostInput {
+                display_name: "这台 Mac".into(),
+                ssh_target: "someone@elsewhere".into(),
+                ..host_input("", "")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.id, crate::config::LOCAL_HOST_ID);
+        assert!(updated.builtin, "编辑不该丢掉内置标记");
+        assert!(updated.ssh_target.is_empty(), "本机不经过 ssh");
+        assert_eq!(updated.display_name, "这台 Mac");
+    }
+
+    /// Deleting a host removes the launcher's records and nothing else: the
+    /// other host's records stay, and 本机 cannot be deleted (ADR-0006 §5).
+    #[test]
+    fn deleting_a_host_drops_only_its_own_records() {
+        let data = ScratchDir::new("host-delete");
+        let local = Host::local();
+        let lab = remote_host("host-lab", "lab");
+        let mut cfg = crate::config::Config {
+            hosts: vec![local.clone(), lab.clone()],
+            homes: vec![
+                crate::config::DshHome {
+                    id: "h-local".into(),
+                    name: "本机 HOME".into(),
+                    path: data.path().join("local-home"),
+                    host_id: local.id.clone(),
+                },
+                crate::config::DshHome {
+                    id: "h-lab".into(),
+                    name: "服务器 HOME".into(),
+                    path: std::path::PathBuf::from("/home/u/.dsh"),
+                    host_id: lab.id.clone(),
+                },
+            ],
+            versions: vec![crate::config::DshVersion {
+                id: "v-lab".into(),
+                version: "0.1.0-rc.6".into(),
+                dir: std::path::PathBuf::from(
+                    "/home/u/.local/share/dsh-launcher/versions/0.1.0-rc.6",
+                ),
+                host_id: lab.id.clone(),
+            }],
+            instances: vec![
+                crate::config::DshInstance {
+                    id: "i-lab".into(),
+                    name: "服务器实例".into(),
+                    version_id: "v-lab".into(),
+                    home_id: "h-lab".into(),
+                    host_id: lab.id.clone(),
+                    env_overrides: Default::default(),
+                    default_profile: None,
+                    last_profile: None,
+                    icon: None,
+                    port: None,
+                },
+                crate::config::DshInstance {
+                    id: "i-local".into(),
+                    name: "本机实例".into(),
+                    version_id: "v-local".into(),
+                    home_id: "h-local".into(),
+                    host_id: local.id.clone(),
+                    env_overrides: Default::default(),
+                    default_profile: None,
+                    last_profile: None,
+                    icon: None,
+                    port: None,
+                },
+            ],
+            ..Default::default()
+        };
+        cfg.settings.last_instance_id = Some("i-lab".into());
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+
+        delete_host_record(&state, "host-lab").unwrap();
+
+        let cfg = state.config.lock().unwrap();
+        assert_eq!(cfg.hosts.len(), 1, "只剩本机");
+        assert!(cfg.hosts[0].builtin);
+        assert_eq!(
+            cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h-local"],
+            "另一台主机的 HOME 记录不该被带走"
+        );
+        assert!(cfg.versions.is_empty(), "那台主机的版本记录跟着主机走");
+        assert_eq!(
+            cfg.instances.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["i-local"]
+        );
+        assert_eq!(
+            cfg.settings.last_instance_id, None,
+            "被删掉的实例不该还被记成最近用的"
+        );
+        drop(cfg);
+
+        let err = delete_host_record(&state, crate::config::LOCAL_HOST_ID).unwrap_err();
+        assert!(err.contains("本机"), "{err}");
+    }
+
+    /// The three refusals that keep the records honest: no name, no target, and
+    /// no second host pointing at the same machine.
+    #[test]
+    fn a_host_needs_a_name_and_a_target_and_only_one_per_machine() {
+        let data = ScratchDir::new("host-validate");
+        let state = host_state(
+            &data,
+            crate::config::Config::default(),
+            crate::remote::testing::idle(),
+        );
+
+        assert!(create_host_record(&state, host_input("  ", "lab")).is_err());
+        assert!(create_host_record(&state, host_input("实验室", "  ")).is_err());
+
+        create_host_record(&state, host_input("实验室", "lab")).unwrap();
+        let again = create_host_record(&state, host_input("另一个名字", " lab ")).unwrap_err();
+        assert!(again.contains("实验室"), "重复的 ssh 目标要指名道姓：{again}");
+    }
+
+    /// The built-in host is this Mac: there is nothing to connect to, and saying
+    /// so is better than a dial that cannot work.
+    #[test]
+    fn the_local_host_has_no_connection_to_test() {
+        let data = ScratchDir::new("host-local-test");
+        let state = host_state(
+            &data,
+            crate::config::Config::default(),
+            crate::remote::testing::idle(),
+        );
+
+        let err =
+            block_on(test_host_connection_for(&state, crate::config::LOCAL_HOST_ID)).unwrap_err();
+        assert!(err.contains("本机"), "{err}");
+
+        let missing = block_on(test_host_connection_for(&state, "host-nope")).unwrap_err();
+        assert!(missing.contains("主机不存在"), "{missing}");
     }
 
     #[test]

@@ -10,7 +10,9 @@ mod plugins;
 mod process;
 mod profile;
 mod proxy;
+mod remote;
 mod runtime;
+mod ssh;
 mod tasks;
 mod toolchain;
 mod tray;
@@ -18,6 +20,7 @@ mod update;
 mod windows;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tauri::{Emitter, Manager};
 
@@ -27,6 +30,35 @@ pub struct AppState {
     pub config: StdMutex<config::Config>,
     pub running: tokio::sync::Mutex<HashMap<String, process::RunningInstance>>,
     pub tasks: tokio::sync::Mutex<HashMap<String, tasks::TaskInfo>>,
+    /// The one boundary every remote action crosses. A test substitutes an
+    /// in-memory double here instead of needing a real machine.
+    pub host_transport: Arc<dyn ssh::HostTransport>,
+    /// What the launcher last learned about reaching each host. Runtime only:
+    /// 「现在连不上」 is a fact about the network and the moment, not part of the
+    /// host record — a machine that is switched off is still a machine the user
+    /// saved (ADR-0006).
+    pub host_statuses: StdMutex<HashMap<String, config::HostStatus>>,
+}
+
+impl AppState {
+    /// The status last observed for one host. `None` before the first test: the
+    /// page then shows no badge at all rather than pretending 「不可达」.
+    pub fn host_status(&self, host_id: &str) -> Option<config::HostStatus> {
+        self.host_statuses.lock().unwrap().get(host_id).cloned()
+    }
+
+    pub fn set_host_status(&self, host_id: &str, status: config::HostStatus) {
+        self.host_statuses
+            .lock()
+            .unwrap()
+            .insert(host_id.to_string(), status);
+    }
+
+    /// A deleted host takes its status with it: statuses are keyed by host id,
+    /// and a host added later is not the same machine.
+    pub fn forget_host_status(&self, host_id: &str) {
+        self.host_statuses.lock().unwrap().remove(host_id);
+    }
 }
 
 /// Extracts a `dsh-launcher://…` deep link from process arguments.
@@ -128,6 +160,8 @@ pub fn run() {
                 config: StdMutex::new(cfg),
                 running: tokio::sync::Mutex::new(HashMap::new()),
                 tasks: tokio::sync::Mutex::new(HashMap::new()),
+                host_transport: Arc::new(ssh::SshTransport::new()),
+                host_statuses: StdMutex::new(HashMap::new()),
             });
 
             // Resolve the toolchain once at startup and persist it, so the
@@ -178,6 +212,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
+            commands::create_host,
+            commands::update_host,
+            commands::delete_host,
+            commands::test_host_connection,
+            commands::list_ssh_aliases,
             commands::list_homes,
             commands::create_home,
             commands::default_dedicated_home_path,

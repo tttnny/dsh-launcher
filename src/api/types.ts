@@ -24,6 +24,71 @@ export interface Host {
   builtin: boolean
 }
 
+/** 主机当前的状态：连接中 / 可达 / 不可达。 */
+export type HostState = 'connecting' | 'reachable' | 'unreachable'
+
+/**
+ * What the launcher last learned about reaching one host. Runtime only: it is
+ * never written to `config.json`, because 「现在连不上」 is a fact about the
+ * network and the moment, not part of the record (ADR-0006).
+ */
+export interface HostStatus {
+  state: HostState
+  /** The readable reason, when `unreachable` — one of the four classes. */
+  message?: string | null
+}
+
+/** A host record plus the status last observed for it (`list_hosts`). */
+export interface HostWithStatus extends Host {
+  /** `null` = 还没测过, which is not the same as 不可达. */
+  status: HostStatus | null
+}
+
+/** The editable half of a host record — what the add/edit sheet holds. */
+export interface HostInput {
+  display_name: string
+  ssh_target: string
+  registry?: string | null
+  extra_env?: Record<string, string>
+  data_dir?: string | null
+}
+
+/** The four ways a remote call fails, as the page tells them apart. */
+export type HostErrorKind = 'unreachable' | 'auth' | 'timeout' | 'remote_command'
+
+/** One probe of one tool on a remote machine: the path it resolves to, and its version. */
+export interface RemoteTool {
+  path: string
+  version: string
+}
+
+/**
+ * What 「测试连接」 found on a host. A failure is a **result**, not a thrown
+ * error: a machine that is switched off right now can still be saved, and the
+ * page says 「不可达」 (ADR-0006).
+ */
+export interface ConnectionTest {
+  ok: boolean
+  kind: HostErrorKind | null
+  message: string | null
+  system: { os: string; release: string; arch: string } | null
+  home: string | null
+  data_dir: string | null
+  /** A fresh host has no data directory yet; the launcher creates it on first write. */
+  data_dir_exists: boolean
+  /** `null` = 那台机器上没有这个命令。 */
+  node: RemoteTool | null
+  pnpm: RemoteTool | null
+}
+
+/** One alias from the user's own `~/.ssh/config`, for the add-host picker. */
+export interface SshAlias {
+  alias: string
+  host_name: string | null
+  user: string | null
+  port: number | null
+}
+
 export interface DshHome {
   id: string
   name: string

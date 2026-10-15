@@ -6,10 +6,14 @@
 import type {
   BundleItem,
   ChangeOutcome,
+  ConnectionTest,
   DshHome,
   DshInstance,
   DshVersion,
   Host,
+  HostInput,
+  HostStatus,
+  HostWithStatus,
   InstanceStatus,
   LauncherSettings,
   PluginView,
@@ -17,6 +21,7 @@ import type {
   RuntimeStatus,
   RemoveBundleInput,
   SetBundleEnabledInput,
+  SshAlias,
   TaskInfo,
   TaskProgress,
   TaskLog,
@@ -37,7 +42,7 @@ interface MockDb {
   running: Record<string, InstanceStatus>
 }
 
-/** The only host the browser preview has: the built-in local one. */
+/** The built-in host the browser preview always has. */
 function localHost(): Host {
   return {
     id: LOCAL_HOST_ID,
@@ -50,16 +55,46 @@ function localHost(): Host {
   }
 }
 
+/** The preview's remote machine, so host-aware pages have two of them to show. */
+const REMOTE_HOST_ID = 'host-aliyun'
+
+function remoteHost(): Host {
+  return {
+    id: REMOTE_HOST_ID,
+    display_name: '阿里云服务器',
+    ssh_target: 'zjq_aliyun',
+    registry: null,
+    extra_env: {},
+    data_dir: '/home/demo/.local/share/dsh-launcher',
+    builtin: false,
+  }
+}
+
+/**
+ * Host statuses, runtime only — the mock's stand-in for the backend's status
+ * map, which is not persisted either (a machine that is off is still saved).
+ * The remote sample starts out 不可达 so that state is visible in the preview;
+ * 「测试连接」 then turns it 可达.
+ */
+const mockHostStatuses: Record<string, HostStatus> = {
+  [REMOTE_HOST_ID]: {
+    state: 'unreachable',
+    message: 'ssh: connect to host zjq_aliyun port 22: Connection refused。确认 ssh zjq_aliyun 这台机器开着、地址没写错',
+  },
+}
+
 function seedDb(): MockDb {
   return {
-    hosts: [localHost()],
+    hosts: [localHost(), remoteHost()],
     homes: [
       { id: 'h-default', name: '默认 DSH_HOME', path: 'C:\\Users\\Administrator\\.dsh', host_id: LOCAL_HOST_ID },
       { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab', host_id: LOCAL_HOST_ID },
+      { id: 'h-remote', name: '服务器默认', path: '/home/demo/.dsh', host_id: REMOTE_HOST_ID },
     ],
     versions: [
       { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6', host_id: LOCAL_HOST_ID },
       { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5', host_id: LOCAL_HOST_ID },
+      { id: 'v-remote', version: '0.1.0-rc.6', dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6', dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6', host_id: REMOTE_HOST_ID },
     ],
     instances: [
       {
@@ -81,6 +116,16 @@ function seedDb(): MockDb {
         env_overrides: {},
         default_profile: null,
         last_profile: null,
+      },
+      {
+        id: 'i-remote',
+        name: '服务器实例',
+        version_id: 'v-remote',
+        home_id: 'h-remote',
+        host_id: REMOTE_HOST_ID,
+        env_overrides: {},
+        default_profile: 'web',
+        last_profile: 'web',
       },
     ],
     settings: {
@@ -126,6 +171,9 @@ function loadDb(): MockDb {
       for (const h of db.homes) h.host_id = h.host_id ?? LOCAL_HOST_ID
       for (const v of db.versions) v.host_id = v.host_id ?? LOCAL_HOST_ID
       for (const i of db.instances) i.host_id = i.host_id ?? LOCAL_HOST_ID
+      // A preview stored before remote hosts existed knows only 本机; it gains
+      // the sample remote machine once, so host-aware pages have two to show.
+      if (!db.hosts.some((h) => !h.builtin)) db.hosts.push(remoteHost())
       return db
     }
   } catch {
@@ -404,6 +452,22 @@ function mockNewId(prefix: string): string {
   return `${prefix}-${uuid()}`
 }
 
+/**
+ * The host a host-aware list belongs to. Absent means 本机 — the backend's own
+ * rule (`config::resolve_host`) — so a list that was not told which machine it
+ * is for never merges two of them.
+ */
+function hostIdArg(args?: Record<string, unknown>): string {
+  const raw = args?.hostId ?? args?.host_id
+  const id = raw === undefined || raw === null ? '' : String(raw).trim()
+  return id || LOCAL_HOST_ID
+}
+
+/** Every host with the status the preview holds for it. */
+function hostViews(db: MockDb): HostWithStatus[] {
+  return db.hosts.map((h) => ({ ...h, status: mockHostStatuses[h.id] ?? null }))
+}
+
 export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const db = loadDb()
   function fail(msg: string): never {
@@ -411,10 +475,93 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
   }
 
   switch (cmd) {
+    // --- Hosts ---------------------------------------------------------------
     case 'list_hosts':
-      return db.hosts as T
-    case 'list_homes':
-      return db.homes as T
+      return hostViews(db) as T
+    case 'create_host': {
+      const input = (args?.input ?? {}) as HostInput
+      const name = String(input.display_name ?? '').trim()
+      const target = String(input.ssh_target ?? '').trim()
+      if (!name) fail('主机的显示名不能为空')
+      if (!target) fail('请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串')
+      if (db.hosts.some((h) => h.ssh_target === target)) fail('已经有一台主机用这个 ssh 目标')
+      const host: Host = {
+        id: mockNewId('host'),
+        display_name: name,
+        ssh_target: target,
+        registry: input.registry ?? null,
+        extra_env: input.extra_env ?? {},
+        data_dir: input.data_dir ?? null,
+        builtin: false,
+      }
+      db.hosts.push(host)
+      saveDb(db)
+      return host as T
+    }
+    case 'update_host': {
+      const id = String(args?.id)
+      const input = (args?.input ?? {}) as HostInput
+      const host = db.hosts.find((h) => h.id === id)
+      if (!host) fail(`主机不存在: ${id}`)
+      host.display_name = String(input.display_name ?? '').trim() || host.display_name
+      // 本机 does not go over ssh; a form must not be able to make it one.
+      if (!host.builtin) host.ssh_target = String(input.ssh_target ?? '').trim()
+      host.registry = input.registry ?? null
+      host.extra_env = input.extra_env ?? {}
+      host.data_dir = input.data_dir ?? null
+      saveDb(db)
+      return host as T
+    }
+    case 'delete_host': {
+      const id = String(args?.id)
+      const host = db.hosts.find((h) => h.id === id)
+      if (!host) fail(`主机不存在: ${id}`)
+      if (host.builtin) fail('本机是内置的，不能删除')
+      // Only the launcher's records go: the machine keeps everything it has and
+      // the instances running there keep running (ADR-0006 §5).
+      db.hosts = db.hosts.filter((h) => h.id !== id)
+      db.homes = db.homes.filter((h) => h.host_id !== id)
+      db.versions = db.versions.filter((v) => v.host_id !== id)
+      db.instances = db.instances.filter((i) => i.host_id !== id)
+      delete mockHostStatuses[id]
+      saveDb(db)
+      return undefined as T
+    }
+    case 'test_host_connection': {
+      const id = String(args?.id)
+      const host = db.hosts.find((h) => h.id === id)
+      if (!host) fail(`主机不存在: ${id}`)
+      if (host.builtin) fail('本机就在这台 Mac 上，不需要测试连接')
+      // A machine that answers: the sample the real script's JSON mirrors.
+      const test: ConnectionTest = {
+        ok: true,
+        kind: null,
+        message: null,
+        system: { os: 'Linux', release: '6.8.0-45-generic', arch: 'x86_64' },
+        home: '/home/demo',
+        data_dir: host.data_dir ?? '/home/demo/.local/share/dsh-launcher',
+        data_dir_exists: true,
+        node: { path: '/home/linuxbrew/.linuxbrew/bin/node', version: 'v26.0.0' },
+        pnpm: { path: '/home/demo/.local/share/pnpm/pnpm', version: '11.1.2' },
+      }
+      mockHostStatuses[id] = { state: 'reachable', message: null }
+      if (!host.data_dir) {
+        host.data_dir = test.data_dir
+        saveDb(db)
+      }
+      return test as T
+    }
+    case 'list_ssh_aliases':
+      return [
+        { alias: 'zjq_aliyun', host_name: '47.98.1.2', user: 'root', port: 2222 },
+        { alias: 'lab-gpu', host_name: '10.0.0.7', user: 'deploy', port: null },
+      ] as T
+
+    // --- DSH_HOME ------------------------------------------------------------
+    case 'list_homes': {
+      const hostId = hostIdArg(args)
+      return db.homes.filter((h) => (h.host_id ?? LOCAL_HOST_ID) === hostId) as T
+    }
     case 'default_dedicated_home_path': {
       const name = String(args?.name ?? 'instance')
       const safe = name.replace(/[^\w一-龥.-]+/g, '_')
@@ -436,8 +583,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       saveDb(db)
       return undefined as T
     }
-    case 'list_versions':
-      return db.versions as T
+    case 'list_versions': {
+      const hostId = hostIdArg(args)
+      return db.versions.filter((v) => (v.host_id ?? LOCAL_HOST_ID) === hostId) as T
+    }
     case 'fetch_available_versions':
       return [
         { version: '0.1.2-alpha.1', released_at: '2026-10-01T08:00:00Z', source: 'github' },
@@ -609,8 +758,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       saveDb(db)
       return undefined as T
     }
-    case 'list_instances':
-      return db.instances as T
+    case 'list_instances': {
+      const hostId = hostIdArg(args)
+      return db.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId) as T
+    }
     case 'create_instance': {
       const name = String(args?.name ?? '').trim()
       const versionId = String(args?.versionId ?? '')
