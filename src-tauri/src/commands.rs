@@ -2395,6 +2395,9 @@ pub fn open_instance_directory(
 }
 
 /// Opens a DSH_HOME directory in the file manager.
+///
+/// Local-only for the same reason as the instance one above: a remote HOME lives
+/// on that server, and the DSH_HOME list offers 「复制路径」 for it instead.
 #[tauri::command]
 pub fn open_home_directory(
     state: State<'_, AppState>,
