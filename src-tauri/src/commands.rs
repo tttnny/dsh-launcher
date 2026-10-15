@@ -313,7 +313,7 @@ pub fn create_home(
     path: String,
     host_id: Option<String>,
 ) -> Result<DshHome, String> {
-    create_home_record(&state, &name, &path, host_id.as_deref())
+    create_home_record_in(&state, &name, &path, host_id.as_deref())
 }
 
 /// Shared helper: validates + creates a DSH_HOME record. The path is
@@ -325,8 +325,13 @@ pub fn create_home(
 /// same-name HOMEs when a dedicated HOME is requested repeatedly).
 ///
 /// `host_id` absent means 本机.
-pub(crate) fn create_home_record(
-    state: &State<'_, AppState>,
+///
+/// Only 本机's HOMEs are created here. A remote host's path is a path on that
+/// server: `create_dir_all` on this Mac would leave a stray directory behind
+/// (and `~` would expand to *this* machine's home), so a remote record is
+/// refused until the path is validated where it lives.
+pub(crate) fn create_home_record_in(
+    state: &AppState,
     name: &str,
     path: &str,
     host_id: Option<&str>,
@@ -335,18 +340,25 @@ pub(crate) fn create_home_record(
     if name.is_empty() {
         return Err("名称不能为空".to_string());
     }
+
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        crate::config::resolve_host(&cfg, host_id)?.clone()
+    };
+    // The path is a path *on that machine*: `create_dir_all` here would leave a
+    // stray directory on this Mac (and `~` would expand to this machine's home),
+    // so a remote record waits until the path can be validated where it lives.
+    host.local_paths_only("DSH_HOME 目录")?;
+
     let path_buf = crate::config::normalize_dir_path(path)?;
 
     // Reuse an existing HOME with the same path on the same host.
-    let (host, existing) = {
+    let existing = {
         let cfg = state.config.lock().unwrap();
-        let host = crate::config::resolve_host(&cfg, host_id)?.clone();
-        let existing = cfg
-            .homes
+        cfg.homes
             .iter()
             .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &path_buf))
-            .cloned();
-        (host, existing)
+            .cloned()
     };
     if let Some(existing) = existing {
         return Ok(existing);
@@ -361,7 +373,7 @@ pub(crate) fn create_home_record(
     };
     let mut cfg = state.config.lock().unwrap();
     cfg.homes.push(home.clone());
-    save_state(state, &cfg)?;
+    crate::config::save_config(&state.config_path, &cfg)?;
     Ok(home)
 }
 
@@ -441,27 +453,54 @@ pub fn remove_home(
 /// DSH_HOME, derived here (where the host's data directory is known) so the
 /// delete dialog can name the exact path it removes and no second
 /// implementation of the path rule exists on the JS side.
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct DshVersionView {
     pub id: String,
     pub version: String,
     pub dir: std::path::PathBuf,
     pub dedicated_home: String,
     pub host_id: String,
+    /// Whether the version's bin is there and not empty. A directory an install
+    /// left half-finished is a record the user can see and delete, but not a
+    /// version anyone can start — and only the machine that owns the directory
+    /// can say which it is ([`crate::launch::version_bin`] is the layout).
+    pub bin_ready: bool,
 }
 
 #[tauri::command]
-pub fn list_versions(
+pub async fn list_versions(
     state: State<'_, AppState>,
     host_id: Option<String>,
 ) -> Result<Vec<DshVersionView>, String> {
-    let cfg = state.config.lock().unwrap();
-    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
-    let data_dir = host.data_dir(&state.data_dir)?;
-    Ok(cfg
-        .versions
+    list_versions_for(&state, host_id.as_deref()).await
+}
+
+/// One host's installed versions.
+///
+/// The records are the launcher's: they say which versions were installed on
+/// that host. Everything the page shows beyond them is what only the machine
+/// knows, and one ssh answers for all of them at once — so a host that cannot
+/// be reached fails the whole call rather than answering from records alone
+/// (「装了哪些」 would then be a claim the launcher cannot back up).
+pub(crate) async fn list_versions_for(
+    state: &AppState,
+    host_id: Option<&str>,
+) -> Result<Vec<DshVersionView>, String> {
+    let (host, data_dir, records) = {
+        let cfg = state.config.lock().unwrap();
+        let host = crate::config::resolve_host(&cfg, host_id)?.clone();
+        let data_dir = host.data_dir(&state.data_dir)?;
+        let records: Vec<crate::config::DshVersion> = cfg
+            .versions
+            .iter()
+            .filter(|v| v.host_id == host.id)
+            .cloned()
+            .collect();
+        (host, data_dir, records)
+    };
+
+    let mut listed: Vec<DshVersionView> = records
         .iter()
-        .filter(|v| v.host_id == host.id)
         .map(|v| DshVersionView {
             id: v.id.clone(),
             version: v.version.clone(),
@@ -470,30 +509,85 @@ pub fn list_versions(
                 .to_string_lossy()
                 .to_string(),
             host_id: v.host_id.clone(),
+            bin_ready: false,
         })
-        .collect())
+        .collect();
+
+    if host.builtin {
+        for view in &mut listed {
+            view.bin_ready = crate::launch::version_bin_ready(&view.dir);
+        }
+        return Ok(listed);
+    }
+
+    // A remote host states its own data directory; without one there is no
+    // versions directory to ask about, and guessing is not an option.
+    let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+    let versions_dir = data_dir.join("versions");
+    let on_machine = crate::remote::installed_versions(
+        &*state.host_transport,
+        &target,
+        &versions_dir.to_string_lossy(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    for view in &mut listed {
+        if let Some(found) = on_machine.iter().find(|f| f.name == view.version) {
+            // The machine's own answer about where it is and whether it is
+            // usable wins over the record's copy of the path.
+            view.dir = std::path::PathBuf::from(&found.dir);
+            view.bin_ready = found.bin_ready;
+        }
+    }
+    Ok(listed)
 }
 
-/// Queries the npm registry for available @deepseek-ai/dsh versions with
-/// their publish dates, then merges in GitHub-only `dsh-v*` release tags
-/// (alpha builds are tagged on GitHub but not published to npm) marked with
-/// `source: "github"`.
-#[tauri::command]
-pub async fn fetch_available_versions() -> Result<Vec<RemoteVersion>, String> {
-    let versions_json = run_npm_view("@deepseek-ai/dsh", "versions").await?;
-    let versions: Vec<String> =
-        serde_json::from_str(&versions_json).map_err(|e| format!("解析版本列表失败: {e}"))?;
+/// Where one host's installable-version list is fetched.
+///
+/// 本机 asks its own npm. A remote host with a registry of its own asks **that**
+/// machine's npm: its registry may be a mirror only that machine can reach, and
+/// a list fetched here could offer versions that cannot be installed there. A
+/// remote host with no registry is listed from the very registry the launcher
+/// already queries, so it is fetched here — no ssh, and no second way to fail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionsSource {
+    Local { registry: Option<String> },
+    Remote { registry: String },
+}
 
-    let time_json = run_npm_view("@deepseek-ai/dsh", "time").await?;
-    // npm >= 9 returns `time` as `[{ "created": ..., "<version>": "<date>" }]`
-    // (array wrapping one object); older npm returned the object directly.
+/// Which npm answers for one host, and with which registry.
+pub fn versions_source(host: &Host) -> VersionsSource {
+    let registry = host
+        .registry
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string);
+    if host.builtin {
+        return VersionsSource::Local { registry };
+    }
+    match registry {
+        Some(registry) => VersionsSource::Remote { registry },
+        None => VersionsSource::Local { registry: None },
+    }
+}
+
+/// Turns npm's two `--json` answers into the list the page shows. npm >= 9
+/// returns `time` as `[{ ... }]` (an array wrapping one object); older npm
+/// returned the object directly.
+pub(crate) fn versions_from_npm(
+    versions_json: &str,
+    time_json: &str,
+) -> Result<Vec<RemoteVersion>, String> {
+    let versions: Vec<String> =
+        serde_json::from_str(versions_json).map_err(|e| format!("解析版本列表失败: {e}"))?;
     let time_map: BTreeMap<String, serde_json::Value> =
-        match serde_json::from_str::<BTreeMap<String, serde_json::Value>>(&time_json) {
+        match serde_json::from_str::<BTreeMap<String, serde_json::Value>>(time_json) {
             Ok(map) => map,
             Err(_) => {
                 let arr: Vec<BTreeMap<String, serde_json::Value>> =
-                    serde_json::from_str(&time_json)
-                        .map_err(|e| format!("解析发布时间失败: {e}"))?;
+                    serde_json::from_str(time_json).map_err(|e| format!("解析发布时间失败: {e}"))?;
                 arr.into_iter().next().unwrap_or_default()
             }
         };
@@ -510,6 +604,43 @@ pub async fn fetch_available_versions() -> Result<Vec<RemoteVersion>, String> {
             source: None,
         });
     }
+    Ok(out)
+}
+
+/// Queries the npm registry for available @deepseek-ai/dsh versions with
+/// their publish dates, then merges in GitHub-only `dsh-v*` release tags
+/// (alpha builds are tagged on GitHub but not published to npm) marked with
+/// `source: "github"`.
+///
+/// `host_id` absent means 本机. A remote host with a registry of its own is
+/// queried on that machine (see [`versions_source`]).
+#[tauri::command]
+pub async fn fetch_available_versions(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+) -> Result<Vec<RemoteVersion>, String> {
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        crate::config::resolve_host(&cfg, host_id.as_deref())?.clone()
+    };
+    let mut out = match versions_source(&host) {
+        VersionsSource::Local { registry } => {
+            let versions_json = run_npm_view("@deepseek-ai/dsh", "versions", registry.as_deref()).await?;
+            let time_json = run_npm_view("@deepseek-ai/dsh", "time", registry.as_deref()).await?;
+            versions_from_npm(&versions_json, &time_json)?
+        }
+        VersionsSource::Remote { registry } => {
+            let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+            let listings = crate::remote::available_versions(
+                &*state.host_transport,
+                &target,
+                &registry,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            versions_from_npm(&listings.versions, &listings.time)?
+        }
+    };
 
     // GitHub-only tags (e.g. dsh-v0.1.2-alpha.1). A release listing failure
     // never aborts the npm listing.
@@ -568,15 +699,20 @@ async fn fetch_github_tag_versions() -> Result<Vec<RemoteVersion>, String> {
     Ok(out)
 }
 
-async fn run_npm_view(pkg: &str, field: &str) -> Result<String, String> {
+async fn run_npm_view(
+    pkg: &str,
+    field: &str,
+    registry: Option<&str>,
+) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new(process::npm());
     // Keep the listing consistent with the installer's npm probe: both honor
     // the DSH_NPM_REGISTRY mirror, so a mirror user doesn't see official-
     // registry data in the list but mirror data at install time (or vice
-    // versa when the mirror lags).
+    // versa when the mirror lags). A registry named on the host record wins:
+    // that is the registry this machine's versions come from.
     crate::proxy::apply_to_command(&mut cmd);
     cmd.args(["view", pkg, field, "--json"]);
-    if let Some(registry) = crate::toolchain::registry_mirror() {
+    if let Some(registry) = registry.map(str::to_string).or_else(crate::toolchain::registry_mirror) {
         cmd.args(["--registry", &registry]);
     }
     let output = crate::process::hide_console(&mut cmd)
@@ -602,6 +738,12 @@ pub async fn remove_version(
     let (version, instance_ids, host, data_dir) = {
         let cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
+        // Everything below this point deletes directories by path. A remote
+        // host's version directory is on that server, so a local
+        // `remove_dir_all` would delete whatever this Mac has at the same
+        // spelling — and the record would be gone, leaving nothing that names
+        // what was destroyed.
+        host.local_paths_only("版本目录")?;
         let data_dir = host.data_dir(&state.data_dir)?;
         let Some(version) = cfg
             .versions
@@ -661,13 +803,30 @@ pub async fn remove_version(
 // Instances
 // ---------------------------------------------------------------------------
 
+/// Every instance of one host — or, when asked explicitly, of every host.
+///
+/// `all_hosts` is the board's 全部 view (ADR-0006 §3): the launcher has one
+/// current host, and 「所有机器上的实例都列出来」 is a request only the caller can
+/// make. Silence means 本机, exactly as it does everywhere else.
 #[tauri::command]
 pub fn list_instances(
     state: State<'_, AppState>,
     host_id: Option<String>,
+    all_hosts: Option<bool>,
+) -> Result<Vec<DshInstance>, String> {
+    list_instances_for(&state, host_id.as_deref(), all_hosts.unwrap_or(false))
+}
+
+pub(crate) fn list_instances_for(
+    state: &AppState,
+    host_id: Option<&str>,
+    all_hosts: bool,
 ) -> Result<Vec<DshInstance>, String> {
     let cfg = state.config.lock().unwrap();
-    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
+    if all_hosts {
+        return Ok(cfg.instances.clone());
+    }
+    let host = crate::config::resolve_host(&cfg, host_id)?;
     Ok(cfg
         .instances
         .iter()
@@ -1733,6 +1892,323 @@ mod tests {
     // -----------------------------------------------------------------------
     // Hosts
     // -----------------------------------------------------------------------
+
+    /// A remote host record with a data directory on that machine.
+    fn server_host(id: &str, registry: Option<&str>) -> Host {
+        let mut host = remote_host(id, "zjq_aliyun");
+        host.data_dir = Some(std::path::PathBuf::from(
+            "/home/demo/.local/share/dsh-launcher",
+        ));
+        host.registry = registry.map(str::to_string);
+        host
+    }
+
+    /// Which machine's npm answers the installable-version question, and with
+    /// which registry: 本机 with its own record's registry, a remote host with
+    /// its own registry asked **there** (a mirror that only that machine can
+    /// reach would otherwise offer a list it cannot install), and a remote host
+    /// without one asked here — the same registry, so no ssh and no second way
+    /// to fail.
+    #[test]
+    fn a_hosts_installable_list_is_queried_from_its_own_registry() {
+        assert_eq!(
+            versions_source(&Host::local()),
+            VersionsSource::Local { registry: None },
+            "本机用启动器自己这台机器的 npm"
+        );
+
+        let local_with_registry = Host {
+            registry: Some("https://npm.example.com/".into()),
+            ..Host::local()
+        };
+        assert_eq!(
+            versions_source(&local_with_registry),
+            VersionsSource::Local {
+                registry: Some("https://npm.example.com/".into())
+            },
+            "本机记录里写了 registry 就按它查"
+        );
+
+        assert_eq!(
+            versions_source(&server_host("host-lab", None)),
+            VersionsSource::Local { registry: None },
+            "远程主机没配 registry 时复用本机那份"
+        );
+        assert_eq!(
+            versions_source(&server_host("host-lab", Some("https://npm.example.com"))),
+            VersionsSource::Remote {
+                registry: "https://npm.example.com".into()
+            }
+        );
+        // A registry field holding only spaces is no registry at all.
+        assert_eq!(
+            versions_source(&server_host("host-lab", Some("   "))),
+            VersionsSource::Local { registry: None }
+        );
+    }
+
+    /// npm's two `--json` answers become the list the page shows: the version
+    /// list decides the entries, the timing map fills in the dates it knows.
+    /// npm >= 9 wraps `time` in a one-element array; older npm returned the
+    /// object directly — both shapes are read, because both are in the field.
+    #[test]
+    fn npm_listings_become_versions_with_their_dates() {
+        let flat = versions_from_npm(
+            "[\"0.1.0-rc.6\",\"0.1.0-rc.5\"]",
+            "{\"created\":\"2026-01-01T00:00:00Z\",\"0.1.0-rc.6\":\"2026-08-01T12:00:00Z\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            flat.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+            vec!["0.1.0-rc.6", "0.1.0-rc.5"]
+        );
+        assert_eq!(flat[0].released_at.as_deref(), Some("2026-08-01T12:00:00Z"));
+        assert_eq!(flat[1].released_at, None, "没有发布时间的版本也要列出来");
+
+        let wrapped = versions_from_npm(
+            "[\"0.1.0-rc.6\"]",
+            "[{\"0.1.0-rc.6\":\"2026-08-01T12:00:00Z\"}]",
+        )
+        .unwrap();
+        assert_eq!(wrapped[0].released_at.as_deref(), Some("2026-08-01T12:00:00Z"));
+
+        assert!(
+            versions_from_npm("not json", "{}").is_err(),
+            "读不懂的答案要报错，不能当成空列表"
+        );
+    }
+
+    /// What a remote host has installed comes back the way **that machine**
+    /// describes it: the records say which versions the user installed there,
+    /// and the machine says where each one really is and whether its bin is
+    /// ready. A version whose install stopped early is listed, marked as not
+    /// ready — it is a record the user has to be able to see and delete, not a
+    /// version anyone can start.
+    #[test]
+    fn a_remote_hosts_installed_versions_carry_their_path_and_bin_readiness() {
+        let data = ScratchDir::new("remote-versions");
+        let host = server_host("host-lab", None);
+        let remote_data = "/home/demo/.local/share/dsh-launcher";
+        let mut cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            versions: vec![
+                crate::config::DshVersion {
+                    id: "v-rc6".into(),
+                    version: "0.1.0-rc.6".into(),
+                    dir: format!("{remote_data}/versions/0.1.0-rc.6").into(),
+                    host_id: host.id.clone(),
+                },
+                crate::config::DshVersion {
+                    id: "v-rc5".into(),
+                    version: "0.1.0-rc.5".into(),
+                    dir: format!("{remote_data}/versions/0.1.0-rc.5").into(),
+                    host_id: host.id.clone(),
+                },
+            ],
+            ..Default::default()
+        };
+        // A local version, which the remote list must not pick up.
+        cfg.versions.push(crate::config::DshVersion {
+            id: "v-local".into(),
+            version: "0.1.0-rc.4".into(),
+            dir: data.path().join("versions/0.1.0-rc.4"),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
+        });
+
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
+                "{\"versions\":[\
+                 {\"name\":\"0.1.0-rc.6\",\"dir\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6\",\"bin_ready\":true},\
+                 {\"name\":\"0.1.0-rc.5\",\"dir\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.5\",\"bin_ready\":false}]}",
+            )),
+        );
+        let state = host_state(&data, cfg, fake.clone());
+
+        let listed = block_on(list_versions_for(&state, Some("host-lab"))).unwrap();
+
+        assert_eq!(
+            listed.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+            vec!["0.1.0-rc.6", "0.1.0-rc.5"],
+            "只列这台主机的记录"
+        );
+        assert!(listed[0].bin_ready, "机器说 rc.6 的 bin 就绪");
+        assert!(!listed[1].bin_ready, "安装没走完：如实报不就绪");
+        assert_eq!(listed[1].dir.to_string_lossy(), format!("{remote_data}/versions/0.1.0-rc.5"));
+        assert_eq!(
+            listed[0].dedicated_home,
+            format!("{remote_data}/homes/0.1.0-rc.6"),
+            "专属 DSH_HOME 按那台主机的数据目录算"
+        );
+        assert!(
+            fake.last_script().contains(&format!("'{remote_data}/versions'")),
+            "一次 ssh 问那台机器的 versions 目录：{}",
+            fake.last_script()
+        );
+    }
+
+    /// A machine the launcher cannot reach is an error, never an empty list:
+    /// 「这台机器上没有版本」 is a claim only the machine can make, and a page that
+    /// shows it after a failed call is telling the user something it does not
+    /// know.
+    #[test]
+    fn an_unreachable_hosts_version_list_is_an_error_not_an_empty_list() {
+        let data = ScratchDir::new("remote-versions-down");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            versions: vec![crate::config::DshVersion {
+                id: "v-rc6".into(),
+                version: "0.1.0-rc.6".into(),
+                dir: "/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6".into(),
+                host_id: host.id.clone(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::fail(
+                crate::ssh::HostErrorKind::Unreachable,
+                "ssh: connect to host zjq_aliyun port 22: Connection refused",
+            ),
+        );
+        let state = host_state(&data, cfg, fake);
+
+        let err = block_on(list_versions_for(&state, Some("host-lab"))).unwrap_err();
+
+        assert!(err.contains("连不上"), "{err}");
+        assert!(err.contains("Connection refused"), "{err}");
+    }
+
+    /// 本机's own list needs no ssh and answers bin-readiness from this
+    /// filesystem: a version directory that never got its bin is reported the
+    /// same way a remote one is.
+    #[test]
+    fn the_local_version_list_reports_bin_readiness_from_this_machine() {
+        let data = ScratchDir::new("local-versions");
+        let ready = data.path().join("versions/0.1.0-rc.6");
+        std::fs::create_dir_all(ready.join("node_modules/@deepseek-ai/dsh/lib")).unwrap();
+        std::fs::write(
+            ready.join("node_modules/@deepseek-ai/dsh/lib/bin.js"),
+            "// dsh\n",
+        )
+        .unwrap();
+        let half = data.path().join("versions/0.1.0-rc.5");
+        std::fs::create_dir_all(&half).unwrap();
+
+        let cfg = crate::config::Config {
+            versions: vec![
+                crate::config::DshVersion {
+                    id: "v-rc6".into(),
+                    version: "0.1.0-rc.6".into(),
+                    dir: ready.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+                crate::config::DshVersion {
+                    id: "v-rc5".into(),
+                    version: "0.1.0-rc.5".into(),
+                    dir: half.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+
+        let listed = block_on(list_versions_for(&state, None)).unwrap();
+
+        assert!(listed[0].bin_ready);
+        assert!(!listed[1].bin_ready, "只有目录、没有 bin：不算装好");
+        assert_eq!(listed[0].dedicated_home, dedicated_home_path(data.path(), "0.1.0-rc.6").to_string_lossy());
+    }
+
+    /// The board shows every host's instances by default, and that is an
+    /// **explicit** request: no host named still means 本机, so a caller that
+    /// never says which machine it wants never quietly gets two of them merged.
+    /// Two instances called the same thing on two hosts stay two rows, each
+    /// carrying its own host — that is what keeps them apart on the board.
+    #[test]
+    fn the_all_hosts_request_lists_every_host_and_silence_still_means_local() {
+        let data = ScratchDir::new("all-instances");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            instances: vec![
+                instance_record("i-local-web", "web", crate::config::LOCAL_HOST_ID),
+                instance_record("i-remote-web", "web", &host.id),
+                instance_record("i-remote-lab", "实验", &host.id),
+            ],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+
+        let local = list_instances_for(&state, None, false).unwrap();
+        assert_eq!(
+            local.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["i-local-web"],
+            "没说主机就是本机"
+        );
+
+        let remote = list_instances_for(&state, Some("host-lab"), false).unwrap();
+        assert_eq!(remote.len(), 2);
+
+        let every = list_instances_for(&state, None, true).unwrap();
+        assert_eq!(every.len(), 3, "显式要全部时才把所有主机的实例合在一起");
+        // Two instances named 「web」 on two hosts are two distinguishable rows.
+        let webs = every.iter().filter(|i| i.name == "web").collect::<Vec<_>>();
+        assert_eq!(webs.len(), 2);
+        assert_ne!(webs[0].host_id, webs[1].host_id);
+    }
+
+    fn instance_record(id: &str, name: &str, host_id: &str) -> crate::config::DshInstance {
+        crate::config::DshInstance {
+            id: id.into(),
+            name: name.into(),
+            version_id: "v1".into(),
+            home_id: "h1".into(),
+            host_id: host_id.into(),
+            env_overrides: Default::default(),
+            default_profile: None,
+            last_profile: None,
+            icon: None,
+            port: None,
+        }
+    }
+
+    /// Opening the host selector made a latent write reachable: a DSH_HOME
+    /// record created while a **remote** host is selected must not touch this
+    /// machine's filesystem. The path belongs to that server, `~` there is that
+    /// machine's home — and `create_dir_all` here would either leave a stray
+    /// directory on this Mac or fail with a permission error that says nothing
+    /// about the server, while the record is written against a path that does
+    /// not exist where the instance will run.
+    #[test]
+    fn a_remote_home_record_is_refused_rather_than_made_on_this_machine() {
+        let data = ScratchDir::new("remote-home");
+        let host = server_host("host-lab", None);
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), host.clone()],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+        let stray = data.path().join("stray-home");
+
+        let err =
+            create_home_record_in(&state, "远端 HOME", &stray.to_string_lossy(), Some("host-lab"))
+                .unwrap_err();
+
+        assert!(!stray.exists(), "本机不该出现这个目录：{err}");
+        assert!(
+            state.config.lock().unwrap().homes.is_empty(),
+            "也不留下一条指向它的记录"
+        );
+        assert!(err.contains("服务器"), "拒绝的理由要指名那台主机：{err}");
+        assert!(err.contains("不在本机"), "{err}");
+
+        // 本机 keeps behaving as it always did: the record is created and so is
+        // the directory it points at.
+        let local = create_home_record_in(&state, "本机 HOME", &stray.to_string_lossy(), None).unwrap();
+        assert_eq!(local.host_id, crate::config::LOCAL_HOST_ID);
+        assert!(stray.is_dir());
+    }
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()

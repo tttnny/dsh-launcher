@@ -149,6 +149,23 @@ impl Host {
             a == b
         }
     }
+
+    /// Whether the launcher may create or remove `what` **with this machine's
+    /// own filesystem calls**: only 本机's paths live here. A remote host's paths
+    /// are paths on that server, and a local `fs` call aimed at one of them
+    /// hits whatever this Mac happens to have at the same spelling — a stray
+    /// directory where the user asked for a remote one, or a deleted local file
+    /// standing in for a remote one.
+    pub fn local_paths_only(&self, what: &str) -> Result<(), String> {
+        if self.builtin {
+            Ok(())
+        } else {
+            Err(format!(
+                "「{}」上的{what}不在本机，启动器不会在本机动它",
+                self.display_name
+            ))
+        }
+    }
 }
 
 /// What the launcher last learned about reaching one host: 连接中 while a test
@@ -836,6 +853,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The launcher's own filesystem calls belong to 本机. A remote host's paths
+    /// are on that server, so asking to create or remove one from here has to
+    /// be refused — the alternative is a stray directory on this Mac where the
+    /// user asked for one on the server, or a deleted local file standing in
+    /// for a remote one.
+    #[test]
+    fn only_the_local_hosts_paths_may_be_touched_from_here() {
+        assert!(Host::local().local_paths_only("DSH_HOME 目录").is_ok());
+
+        let remote = remote_host("host-lab", Some("/home/demo/.local/share/dsh-launcher"));
+        let err = remote.local_paths_only("版本目录").unwrap_err();
+        assert!(err.contains("远端 host-lab"), "{err}");
+        assert!(err.contains("版本目录"), "{err}");
+        assert!(err.contains("不在本机"), "{err}");
     }
 
     /// The config this launcher wrote before hosts existed, byte for byte: one
