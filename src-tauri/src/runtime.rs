@@ -784,7 +784,8 @@ fn write_host_binding(state: &AppState, host_id: &str, binding: &crate::config::
     }
 }
 
-fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {    match (status.path, status.version) {
+fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {
+    match (status.path, status.version) {
         (Some(path), Some(version)) => Some(crate::config::BoundTool {
             path: PathBuf::from(path),
             version,
