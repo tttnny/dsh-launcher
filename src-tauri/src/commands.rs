@@ -1798,12 +1798,18 @@ pub fn open_external(url: String) -> Result<(), String> {
 /// Opens an external terminal (Terminal.app or Ghostty per settings) for one
 /// instance: cwd at the instance's DSH_HOME, DSH_HOME and
 /// DSH_LAUNCHER_INSTANCE injected, plus the instance's env overrides.
+///
+/// A local instance gets a `scripts/term_<id>.sh` file and a terminal that runs
+/// it. An instance on another machine gets the same session over ssh instead
+/// ([`remote_terminal_session`]): one command line, no file, and the machine is
+/// asked first so an unreachable host is a sentence in the page rather than a
+/// window that opens and dies.
 #[tauri::command]
-pub fn open_instance_terminal(
+pub async fn open_instance_terminal(
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<String, String> {
-    let (cfg_home, cfg_inst, cfg_ver) = {
+    let (cfg_home, cfg_inst, cfg_ver, cfg_host) = {
         let cfg = state.config.lock().unwrap();
         let inst = cfg
             .instances
@@ -1822,9 +1828,18 @@ pub fn open_instance_terminal(
             .iter()
             .find(|v| v.id == inst.version_id)
             .cloned();
-        (home, inst, ver)
+        let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?.clone();
+        (home, inst, ver, host)
     };
     let terminal = state.config.lock().unwrap().settings.terminal.clone();
+
+    if !cfg_host.builtin {
+        let session =
+            remote_terminal_session(&state, &cfg_host, &cfg_inst, &cfg_home, cfg_ver.as_ref())
+                .await?;
+        return open_terminal_with(&terminal, &session.label, &session.line);
+    }
+
     std::fs::create_dir_all(&cfg_home.path).map_err(|e| format!("创建 HOME 目录失败: {e}"))?;
     let home_str = cfg_home.path.to_string_lossy().to_string();
 
@@ -1858,9 +1873,10 @@ pub fn open_instance_terminal(
         .join("");
 
     // Create a dedicated launcher script for this instance's terminal session
-    let scripts_dir = state.data_dir.join("scripts");
-    let _ = std::fs::create_dir_all(&scripts_dir);
-    let term_script = scripts_dir.join(format!("term_{}.sh", instance_id));
+    let term_script = local_terminal_script_path(&state.data_dir, &instance_id);
+    if let Some(dir) = term_script.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let shell = shell_program();
     let script_content = format!(
         "#!/bin/sh\n\
@@ -1881,15 +1897,85 @@ pub fn open_instance_terminal(
     }
 
     let label = format!("DSH {} ({})", cfg_inst.name, home_str);
+    open_terminal_with(
+        &terminal,
+        &label,
+        &format!("exec {}", shell_quote(&term_script.to_string_lossy())),
+    )
+}
 
+/// The script a local instance's terminal session runs:
+/// `<数据目录>/scripts/term_<实例 id>.sh`.
+pub(crate) fn local_terminal_script_path(
+    data_dir: &std::path::Path,
+    instance_id: &str,
+) -> std::path::PathBuf {
+    data_dir
+        .join("scripts")
+        .join(format!("term_{instance_id}.sh"))
+}
+
+/// What a terminal window on this Mac needs to open an instance session: the
+/// label the window carries, and the one command line it runs.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSession {
+    pub label: String,
+    pub line: String,
+}
+
+/// The remote twin of a local instance terminal (user story 33): one ssh
+/// command line that lands in the instance's DSH_HOME **on that machine**.
+///
+/// The machine is asked once, up front, so a host that is down is a readable
+/// sentence in the page — and a DSH_HOME that is gone there is reported before
+/// the terminal tries to `cd` into it. Nothing is written on this Mac: unlike
+/// the local session, there is no script file to hand over.
+pub(crate) async fn remote_terminal_session(
+    state: &AppState,
+    host: &Host,
+    inst: &DshInstance,
+    home: &DshHome,
+    version: Option<&crate::config::DshVersion>,
+) -> Result<TerminalSession, String> {
+    let remote = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+    let home_str = home.path.to_string_lossy().to_string();
+    state
+        .host_transport
+        .list_dir(&remote, &home_str)
+        .await
+        .map_err(|e| format!("无法在「{}」上打开终端：{e}", host.display_name))?;
+
+    // The version's own `.bin` on that machine, first on PATH, so a bare `dsh`
+    // in the session is the CLI the launcher drives.
+    let path_dirs = version
+        .map(|v| crate::launch::version_bin_dir(std::path::Path::new(&v.dir)))
+        .map(|dir| vec![dir.to_string_lossy().to_string()])
+        .unwrap_or_default();
+    let env = crate::launch::terminal_env_pairs(&home.path, &inst.name, &inst.env_overrides);
+    let script = crate::remote::terminal_script(&home_str, &env, &path_dirs);
+
+    Ok(TerminalSession {
+        label: format!(
+            "DSH {} ({} → {})",
+            inst.name, host.display_name, home_str
+        ),
+        line: crate::remote::terminal_command(host.ssh_target.trim(), &script),
+    })
+}
+
+/// Hands one interactive shell command line to the terminal the user chose in
+/// settings, and answers with the label the window carries. The local session
+/// (a script file on this Mac) and the remote one (an ssh line) come through
+/// here, so each terminal's own quirks live in one place.
+fn open_terminal_with(terminal: &str, label: &str, line: &str) -> Result<String, String> {
     if terminal == "ghostty" {
-        // Ghostty on macOS: -na opens a new instance and passes --command to execute the script.
+        // Ghostty on macOS: -na opens a new instance and passes --command to execute the command.
         let status = std::process::Command::new("open")
             .arg("-na")
             .arg("Ghostty")
             .arg("--args")
             .arg(format!("--title={label}"))
-            .arg(format!("--command={}", shell_quote(&term_script.to_string_lossy())))
+            .arg(format!("--command={}", shell_quote(line)))
             .spawn()
             .and_then(|mut c| c.wait());
 
@@ -1900,15 +1986,15 @@ pub fn open_instance_terminal(
             .output();
 
         match status {
-            Ok(_) => Ok(label),
+            Ok(_) => Ok(label.to_string()),
             Err(e) => Err(format!("打开 Ghostty 失败: {e}")),
         }
     } else {
         // Terminal.app. A cold-started Terminal always opens a default
         // startup window, so `activate` + `do script` would produce two
         // windows. Instead, on cold start we wait for that startup window
-        // and run the script inside it.
-        let escaped_path = term_script.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        // and run the command inside it.
+        let escaped = line.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!(
             "tell application \"Terminal\"\n\
             set wasRunning to running\n\
@@ -1919,11 +2005,11 @@ pub fn open_instance_terminal(
             delay 0.1\n\
             end repeat\n\
             if (count of windows) > 0 then\n\
-            do script \"exec \\\"{escaped_path}\\\"\" in tab 1 of front window\n\
+            do script \"{escaped}\" in tab 1 of front window\n\
             return\n\
             end if\n\
             end if\n\
-            do script \"exec \\\"{escaped_path}\\\"\"\n\
+            do script \"{escaped}\"\n\
             activate\n\
             end tell"
         );
@@ -1933,7 +2019,7 @@ pub fn open_instance_terminal(
             .output()
             .map_err(|e| format!("打开终端失败: {e}"))?;
         if out.status.success() {
-            Ok(label)
+            Ok(label.to_string())
         } else {
             Err(format!(
                 "打开终端失败: {}",
@@ -1948,8 +2034,11 @@ fn shell_program() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
 }
 
-/// Single-quote a value for sh -c / do-script embedding.
-fn shell_quote(v: &str) -> String {
+/// Single-quote a value for sh -c / do-script embedding. The same rule
+/// [`crate::remote::quote`] applies on the way to another machine, and the one
+/// [`crate::remote::terminal_command`] applies a second time for the shell that
+/// parses the command line here.
+pub(crate) fn shell_quote(v: &str) -> String {
     format!("'{}'", v.replace('\'', "'\\''"))
 }
 
@@ -2076,26 +2165,200 @@ pub fn open_launcher_log(
     reveal_log_file(&app, log_dir.join("latest.log"))
 }
 
-/// Reveals one instance's runtime log (`<data_dir>/logs/<instance_id>.log`)
-/// in the file manager with the file selected.
+/// Reveals one instance's runtime log in the file manager with the file
+/// selected: `<data_dir>/logs/<instance_id>.log` for an instance on this Mac,
+/// and a copy of the tail of that machine's log for one elsewhere (user story
+/// 34). `open -R` needs a local file, so the remote log is fetched first.
 #[tauri::command]
-pub fn open_instance_log(
+pub async fn open_instance_log(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     instance_id: String,
 ) -> Result<String, String> {
-    {
-        let cfg = state.config.lock().unwrap();
-        if !cfg.instances.iter().any(|i| i.id == instance_id) {
-            return Err("实例不存在".to_string());
+    match instance_log_source(&state, &instance_id).await? {
+        InstanceLog::Local(log_path) => {
+            let log_dir = state.data_dir.join("logs");
+            std::fs::create_dir_all(&log_dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
+            reveal_log_file(&app, log_path)
+        }
+        InstanceLog::Remote { host, log_path } => {
+            let local = fetch_remote_log(&state, &host, &log_path, &instance_id).await?;
+            reveal_log_file(&app, local)
         }
     }
-    let log_dir = state.data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
-    reveal_log_file(&app, log_dir.join(format!("{instance_id}.log")))
+}
+
+/// Where one instance's log is read from: the launcher's own log directory for
+/// an instance on this Mac, or the log file that instance writes **on its own
+/// machine** for one elsewhere.
+///
+/// The path is the one the remote run carries in
+/// [`crate::process::RemoteRun::log_path`] when the instance is running, and the
+/// same derivation when it is not — a stopped instance's log is still there to
+/// read, exactly as a local one's is.
+pub(crate) enum InstanceLog {
+    Local(std::path::PathBuf),
+    /// The machine the instance runs on (boxed: a host record is far larger
+    /// than the other arm), and the path of its log **there**.
+    Remote {
+        host: Box<Host>,
+        log_path: String,
+    },
+}
+
+pub(crate) async fn instance_log_source(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<InstanceLog, String> {
+    let host = {
+        let cfg = state.config.lock().unwrap();
+        let inst = cfg
+            .instances
+            .iter()
+            .find(|i| i.id == instance_id)
+            .ok_or_else(|| "实例不存在".to_string())?;
+        let home_id = cfg
+            .homes
+            .iter()
+            .find(|h| h.id == inst.home_id)
+            .map(|h| h.host_id.clone())
+            .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
+        crate::config::resolve_host(&cfg, Some(&home_id))?.clone()
+    };
+    if host.builtin {
+        return Ok(InstanceLog::Local(
+            state
+                .data_dir
+                .join("logs")
+                .join(format!("{instance_id}.log")),
+        ));
+    }
+    let data_dir = host.data_dir(&state.data_dir)?;
+    let from_run = state
+        .running
+        .lock()
+        .await
+        .get(instance_id)
+        .and_then(|entry| entry.remote.as_ref())
+        .map(|run| run.log_path.clone());
+    Ok(InstanceLog::Remote {
+        host: Box::new(host),
+        log_path: from_run.unwrap_or_else(|| crate::process::remote_log_path(&data_dir, instance_id)),
+    })
+}
+
+/// Fetches the last stretch of one remote instance's log into a local file and
+/// answers with where it landed, so the file manager can reveal it the way it
+/// reveals a local log.
+///
+/// The copy is written under the launcher's own log directory and overwritten on
+/// every open: it is a copy of the tail, not a second log to follow.
+pub(crate) async fn fetch_remote_log(
+    state: &AppState,
+    host: &Host,
+    log_path: &str,
+    instance_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let remote = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+    let tail = crate::remote::log_tail(
+        &*state.host_transport,
+        &remote,
+        log_path,
+        crate::remote::LOG_TAIL_BYTES,
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "读取「{}」上的日志失败（{log_path}）：{e}",
+            host.display_name
+        )
+    })?;
+    let local = state
+        .data_dir
+        .join("logs")
+        .join(format!("{instance_id}.remote.log"));
+    if let Some(dir) = local.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
+    }
+    std::fs::write(&local, tail.text.as_bytes()).map_err(|e| format!("写入日志副本失败: {e}"))?;
+    Ok(local)
+}
+
+/// Where one instance lives on another machine, and how a user reaches it from
+/// this Mac: the path to paste, and one runnable command.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InstanceLocation {
+    pub host_id: String,
+    pub host_name: String,
+    pub ssh_target: String,
+    /// The DSH_HOME as that machine spells it.
+    pub path: String,
+    /// `ls -la` at that path, prefixed to run through ssh. Put together by
+    /// [`crate::remote::ssh_command`], which owns the quoting a command the
+    /// user pastes into their own shell needs.
+    pub command: String,
+}
+
+/// The remote instance's location, for the card's copy actions.
+///
+/// A remote DSH_HOME cannot be opened in this Mac's file manager, and a button
+/// that reaches nothing is worse than none (ADR-0006): the path and a command
+/// are what the user can actually use. This answers from the launcher's records
+/// alone, so it works while that machine is off.
+#[tauri::command]
+pub fn instance_remote_location(
+    state: State<'_, AppState>,
+    instance_id: String,
+) -> Result<InstanceLocation, String> {
+    instance_location_for(&state, &instance_id)
+}
+
+pub(crate) fn instance_location_for(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<InstanceLocation, String> {
+    let cfg = state.config.lock().unwrap();
+    let inst = cfg
+        .instances
+        .iter()
+        .find(|i| i.id == instance_id)
+        .ok_or_else(|| "实例不存在".to_string())?;
+    let home = cfg
+        .homes
+        .iter()
+        .find(|h| h.id == inst.home_id)
+        .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
+    let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?;
+    if host.builtin {
+        return Err("本机实例的目录就在这台 Mac 上，用「打开目录」".to_string());
+    }
+    let target = host.ssh_target.trim();
+    if target.is_empty() {
+        return Err(format!("「{}」还没有 ssh 目标", host.display_name));
+    }
+    let path = home.path.to_string_lossy().to_string();
+    Ok(InstanceLocation {
+        host_id: host.id.clone(),
+        host_name: host.display_name.clone(),
+        ssh_target: target.to_string(),
+        command: crate::remote::ssh_command(target, &directory_recipe(&path)),
+        path,
+    })
+}
+
+/// What a user runs on this Mac to look at a remote directory. The path goes in
+/// single quotes so the login shell at the other end sees it as one word;
+/// [`crate::remote::ssh_command`] owns the rest of the quoting.
+fn directory_recipe(path: &str) -> String {
+    format!("ls -la {}", crate::remote::quote(path))
 }
 
 /// Opens the DSH_HOME directory of one instance in the file manager.
+///
+/// Deliberately local-only: a remote instance's HOME is a directory on that
+/// server, and this opens this Mac's file manager. The card offers the copy
+/// actions behind `instance_remote_location` for those instead, and this refuses
+/// with the reason.
 #[tauri::command]
 pub fn open_instance_directory(
     state: State<'_, AppState>,
@@ -2132,6 +2395,9 @@ pub fn open_instance_directory(
 }
 
 /// Opens a DSH_HOME directory in the file manager.
+///
+/// Local-only for the same reason as the instance one above: a remote HOME lives
+/// on that server, and the DSH_HOME list offers 「复制路径」 for it instead.
 #[tauri::command]
 pub fn open_home_directory(
     state: State<'_, AppState>,
@@ -3669,5 +3935,242 @@ mod tests {
         assert_eq!(cfg.homes.len(), 1, "DSH_HOME 不受影响");
         assert_eq!(cfg.settings.last_instance_id, None, "最近使用指针被清空");
         assert!(home_dir.is_dir(), "DSH_HOME 目录留在磁盘上");
+    }
+
+    // -----------------------------------------------------------------------
+    // The machine-side actions of one instance
+    // -----------------------------------------------------------------------
+
+    /// The terminal of an instance on another machine (user story 33): one ssh
+    /// command line that lands in that instance's DSH_HOME there — and nothing
+    /// written on this Mac, unlike the local session's `scripts/term_*.sh`.
+    #[test]
+    fn a_remote_instances_terminal_opens_a_session_on_that_machine() {
+        let data = ScratchDir::new("remote-terminal");
+        let host = server_host("host-lab", None);
+        let cfg = remote_home_cfg(&host, "/home/demo/.dsh");
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::Names(vec!["profiles".to_string()]),
+        );
+        let state = host_state(&data, cfg, fake.clone());
+
+        let (inst, home) = {
+            let cfg = state.config.lock().unwrap();
+            (cfg.instances[0].clone(), cfg.homes[0].clone())
+        };
+        let session =
+            block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap();
+
+        // The machine is asked once, about that instance's own DSH_HOME: a host
+        // that is down, or a HOME that is gone there, is a sentence in the page
+        // instead of a window that opens and dies.
+        assert_eq!(
+            fake.calls(),
+            vec![crate::remote::testing::FakeCall::ListDir(
+                "/home/demo/.dsh".to_string()
+            )]
+        );
+
+        assert!(
+            session.line.starts_with("ssh -t zjq_aliyun "),
+            "本机终端要连上那台机器：{}",
+            session.line
+        );
+        assert!(
+            session.line.contains("cd ") && session.line.contains("/home/demo/.dsh"),
+            "对面那一步要进到 DSH_HOME：{}",
+            session.line
+        );
+        assert!(
+            session.line.contains("DSH_HOME") && session.line.contains("DSH_LAUNCHER_INSTANCE"),
+            "会话要带上实例的变量：{}",
+            session.line
+        );
+        assert!(
+            session.label.contains("zjq") || session.label.contains("服务器"),
+            "窗口标题要说清是哪台机器上的哪个实例：{}",
+            session.label
+        );
+        assert!(
+            !data.path().join("scripts").exists(),
+            "远端会话不在本机写脚本文件"
+        );
+    }
+
+    /// A host that is not reachable says so in the page, rather than opening a
+    /// terminal that prints ssh's error and closes.
+    #[test]
+    fn the_machine_actions_report_an_unreachable_host() {
+        use crate::remote::testing::{FakeAnswer, FakeTransport};
+        let data = ScratchDir::new("remote-actions-down");
+        let host = server_host("host-lab", None);
+        let cfg = remote_home_cfg(&host, "/home/demo/.dsh");
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::fail(
+                crate::ssh::HostErrorKind::Unreachable,
+                "ssh: connect to host zjq_aliyun port 22: Connection refused",
+            ))
+            .answering(FakeAnswer::fail(
+                crate::ssh::HostErrorKind::Unreachable,
+                "ssh: connect to host zjq_aliyun port 22: Connection refused",
+            ));
+        let state = host_state(&data, cfg, fake.clone());
+
+        let (inst, home) = {
+            let cfg = state.config.lock().unwrap();
+            (cfg.instances[0].clone(), cfg.homes[0].clone())
+        };
+        let err =
+            block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap_err();
+        assert!(err.contains("连不上"), "终端要说清是连不上：{err}");
+        assert!(err.contains("服务器"), "还要说清是哪台机器：{err}");
+        assert!(err.contains("Connection refused"), "原因来自 ssh：{err}");
+
+        let err = block_on(fetch_remote_log(
+            &state,
+            &host,
+            "/home/demo/.local/share/dsh-launcher/logs/i-lab.log",
+            "i-lab",
+        ))
+        .unwrap_err();
+        assert!(err.contains("连不上"), "日志要说清是连不上：{err}");
+        assert!(err.contains("Connection refused"), "原因来自 ssh：{err}");
+    }
+
+    /// The local terminal is the file it always was (and the remote one is not
+    /// a file at all): one path rule, pinned here so a remote branch cannot
+    /// quietly move the local session.
+    #[test]
+    fn the_local_terminal_session_is_still_a_script_in_the_data_directory() {
+        let data = ScratchDir::new("local-terminal-path");
+        let path = local_terminal_script_path(data.path(), "i1");
+        assert_eq!(path, data.path().join("scripts").join("term_i1.sh"));
+    }
+
+    /// The directory action for an instance on another machine (issue #20): the
+    /// path to copy and one command that reaches it. It answers from the
+    /// records, so copying works while that machine is off — there is nothing
+    /// about a copy that a dead host could refuse.
+    #[test]
+    fn a_remote_instances_location_is_a_path_and_a_runnable_command() {
+        let data = ScratchDir::new("remote-location");
+        let host = server_host("host-lab", None);
+        let state = host_state(
+            &data,
+            remote_home_cfg(&host, "/home/demo/o'brien dir"),
+            crate::remote::testing::idle(),
+        );
+
+        let location = instance_location_for(&state, "i-lab").unwrap();
+
+        assert_eq!(location.path, "/home/demo/o'brien dir");
+        assert_eq!(location.host_name, "服务器");
+        assert_eq!(location.ssh_target, "zjq_aliyun");
+        assert!(
+            location.command.starts_with("ssh zjq_aliyun "),
+            "命令要能在本机终端里跑：{}",
+            location.command
+        );
+        assert!(
+            location.command.contains("ls -la"),
+            "命令要在那台机器上看那个目录：{}",
+            location.command
+        );
+
+        // The path holds a single quote, so the proof that it survived is the
+        // shape the user's own shell parses: three words, then no more.
+        let handed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s@@@' {}", location.command))
+            .output()
+            .unwrap();
+        let handed_text = String::from_utf8_lossy(&handed.stdout).to_string();
+        let words: Vec<&str> = handed_text.split("@@@").collect();
+        assert_eq!(
+            words.len(),
+            4,
+            "ssh 只该拿到一个参数：{words:?}（路径把它拆开了）"
+        );
+        assert_eq!(words[0], "ssh");
+        assert_eq!(words[1], "zjq_aliyun");
+    }
+
+    /// A local instance keeps 「打开目录」: the copy actions are the remote
+    /// answer to a directory this Mac cannot open, not a replacement for the
+    /// one it can.
+    #[test]
+    fn a_local_instances_directory_is_still_the_one_button_it_was() {
+        let data = ScratchDir::new("local-location");
+        let cfg = crate::config::Config {
+            homes: vec![DshHome {
+                id: "h1".into(),
+                name: "默认".into(),
+                path: data.path().join("home"),
+                host_id: crate::config::LOCAL_HOST_ID.into(),
+            }],
+            instances: vec![instance_record("i1", "本机实例", crate::config::LOCAL_HOST_ID)],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+
+        let err = instance_location_for(&state, "i1").unwrap_err();
+
+        assert!(err.contains("打开目录"), "{err}");
+    }
+
+    /// An instance's log: 本机's is read where it is written, and another
+    /// machine's is copied home — the last stretch of it, into the launcher's
+    /// own log directory, so the file manager can reveal it exactly as it
+    /// reveals a local one (user story 34).
+    #[test]
+    fn a_remote_instances_log_is_copied_home_and_a_local_one_is_read_in_place() {
+        let data = ScratchDir::new("remote-log");
+        let host = server_host("host-lab", None);
+        let mut cfg = remote_home_cfg(&host, "/home/demo/.dsh");
+        cfg.homes.push(DshHome {
+            id: "h1".into(),
+            name: "默认".into(),
+            path: data.path().join("home"),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
+        });
+        cfg.instances
+            .push(instance_record("i1", "本机实例", crate::config::LOCAL_HOST_ID));
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_stdout(r#"{"exists":true,"data":"dGFpbAo="}"#));
+        let state = host_state(&data, cfg, fake.clone());
+
+        let local = block_on(instance_log_source(&state, "i1")).unwrap();
+        match local {
+            InstanceLog::Local(path) => {
+                assert_eq!(path, data.path().join("logs").join("i1.log"));
+            }
+            InstanceLog::Remote { .. } => panic!("本机实例的日志不在远端"),
+        }
+
+        let remote_log = match block_on(instance_log_source(&state, "i-lab")).unwrap() {
+            InstanceLog::Remote { log_path, .. } => log_path,
+            InstanceLog::Local(_) => panic!("远端实例的日志在那台机器上"),
+        };
+        assert_eq!(
+            remote_log,
+            "/home/demo/.local/share/dsh-launcher/logs/i-lab.log",
+            "读的就是那台机器上那个实例的日志"
+        );
+
+        let copied = block_on(fetch_remote_log(
+            &state,
+            &host,
+            &remote_log,
+            "i-lab",
+        ))
+        .unwrap();
+        assert_eq!(copied, data.path().join("logs").join("i-lab.remote.log"));
+        assert_eq!(std::fs::read_to_string(&copied).unwrap(), "tail\n");
+        let script = fake.last_script();
+        assert!(script.contains(&crate::remote::quote(&remote_log)), "{script}");
+        assert!(
+            script.contains(&format!("dsh_bytes={}", crate::remote::LOG_TAIL_BYTES)),
+            "只拉最后一段，不是整个文件：{script}"
+        );
     }
 }
