@@ -111,7 +111,10 @@ profile 的 lan-bind 端口与 pnpm store）全部经传输层，**不要**在�
 可达的地址」**（带 token），远端原始地址存在 `RemoteRun.remote_url`：`manageable_url`、插件
 客户端、托盘、实例行与「打开」读的都是前者，而**远端那份 `running.json` 仍然存远端原始地址**
 （它是转发目标，认领要照它建转发）。`InstanceStatus.url` 是本机可达的那个、`remote_url` 是
-远端位置，界面必须分开说，别让人以为 DSH 绑在本机。转发在实例就绪（日志里出现 URL）时建，
+远端位置，界面必须分开说，别让人以为 DSH 绑在本机。**要地址就走
+`process::reachable_url_for`**（「打开」、托盘、以及插件页在建连之前都该走它）：它把那条
+转发重新确认一遍再返回地址，本机实例则原样返回自己的 URL——插件客户端读到的因此就是本机
+可达的那个地址，协议一个字都不用改。转发在实例就绪（日志里出现 URL）时建，
 退出时由 `tunnel::close_all_blocking` 撤销：每条转发 `-O cancel`，每台主机再 `-O exit` 结束
 启动器自己那条连接——用户自己的连接在别的 socket 上，一个字节都不碰。`ssh -O forward` 是发给
 master 的请求、不会自己建连接，所以 `SshTransport::open_forward` 先把连接带起来；而 master 被

@@ -564,62 +564,60 @@ mod tests {
 
         let url = reqwest::Url::parse(&local).unwrap();
         let port = url.port().unwrap();
-        if far_log.is_none() {
+        match &far_log {
             // The far end is that machine's sshd: what comes back over the
             // launcher's own forward is its banner, which no fake can produce.
-            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut banner = [0u8; 256];
-            let read = std::io::Read::read(&mut socket, &mut banner).unwrap();
-            let banner = String::from_utf8_lossy(&banner[..read]).to_string();
-            assert!(
-                banner.starts_with("SSH-"),
-                "本机端口 {port} 上回来的该是那台机器的 sshd，实际是：{banner}"
-            );
-        } else {
+            None => {
+                let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut banner = [0u8; 256];
+                let read = std::io::Read::read(&mut socket, &mut banner).unwrap();
+                let banner = String::from_utf8_lossy(&banner[..read]).to_string();
+                assert!(
+                    banner.starts_with("SSH-"),
+                    "本机端口 {port} 上回来的该是那台机器的 sshd，实际是：{banner}"
+                );
+            }
             // A service that writes down what it is asked for: the whole
             // request — address and query string — has to arrive there with the
             // launch token in it unchanged, which is what "one click lands
             // logged in" rests on.
-            use std::io::Write;
-            let mut request = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            request
-                .set_read_timeout(Some(Duration::from_secs(10)))
+            Some(log) => {
+                use std::io::Write;
+                let mut request = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                request
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                write!(
+                    request,
+                    "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
+                    match url.query() {
+                        Some(query) => format!("{}?{query}", url.path()),
+                        None => url.path().to_string(),
+                    }
+                )
                 .unwrap();
-            write!(
-                request,
-                "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n",
-                match url.query() {
-                    Some(query) => format!("{}?{query}", url.path()),
-                    None => url.path().to_string(),
-                }
-            )
-            .unwrap();
-            let mut reply = String::new();
-            let _ = std::io::Read::read_to_string(&mut request, &mut reply);
-            assert!(
-                reply.starts_with("HTTP/1."),
-                "本机端口 {port} 上要能做完一次请求，实际回来：{reply}"
-            );
+                let mut reply = String::new();
+                let _ = std::io::Read::read_to_string(&mut request, &mut reply);
+                assert!(
+                    reply.starts_with("HTTP/1."),
+                    "本机端口 {port} 上要能做完一次请求，实际回来：{reply}"
+                );
 
-            let log = far_log.unwrap();
-            let written = state
-                .host_transport
-                .read_file(&host, &log)
-                .await
-                .unwrap();
-            let written = String::from_utf8_lossy(&written).to_string();
-            let token = url
-                .query_pairs()
-                .find(|(k, _)| k == "token")
-                .map(|(_, v)| v.to_string())
-                .expect("地址里要带 token");
-            assert!(
-                written.contains(&format!("token={token}")),
-                "那台机器收到的请求里要有原样的 token：{written}"
-            );
+                let written = state.host_transport.read_file(&host, log).await.unwrap();
+                let written = String::from_utf8_lossy(&written).to_string();
+                let token = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "token")
+                    .map(|(_, v)| v.to_string())
+                    .expect("地址里要带 token");
+                assert!(
+                    written.contains(&format!("token={token}")),
+                    "那台机器收到的请求里要有原样的 token：{written}"
+                );
+            }
         }
 
         close_all(&state).await;
