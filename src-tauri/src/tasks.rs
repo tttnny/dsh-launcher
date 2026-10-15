@@ -140,10 +140,7 @@ async fn start_create_instance_task(
     // HOME record yet — it is created only once the instance is actually made,
     // so a failed/cancelled task leaves no orphan HOME behind.
     let reserved_home_path: Option<std::path::PathBuf> = if dedicated {
-        let path = state
-            .data_dir
-            .join("homes")
-            .join(crate::config::sanitize_name(&name));
+        let path = crate::config::dedicated_home_path(&state.data_dir, &name);
         Some(path)
     } else {
         None
@@ -416,7 +413,7 @@ async fn do_create_instance(
                 .ok_or_else(|| "缺少专属 DSH_HOME 路径".to_string())?
                 .to_string_lossy()
                 .to_string();
-            crate::commands::create_home_record(state, name, &path)?.id
+            crate::commands::create_home_record(state, name, &path, None)?.id
         }
     };
     let home_path = {
@@ -451,6 +448,7 @@ async fn do_create_instance(
             name: name.to_string(),
             version_id: version_record.id.clone(),
             home_id: resolved_home_id,
+            host_id: version_record.host_id.clone(),
             env_overrides: Default::default(),
             default_profile: None,
             last_profile: None,
@@ -880,6 +878,7 @@ fn register_version(
         id: new_id("v"),
         version: version.to_string(),
         dir,
+        host_id: crate::config::LOCAL_HOST_ID.to_string(),
     };
     let mut cfg = state.config.lock().unwrap();
     if let Some(existing) = cfg.versions.iter().find(|v| v.version == *version) {

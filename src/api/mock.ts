@@ -9,6 +9,7 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
+  Host,
   InstanceStatus,
   LauncherSettings,
   PluginView,
@@ -21,12 +22,14 @@ import type {
   TaskLog,
   ToolStatus,
 } from './types'
+import { LOCAL_HOST_ID } from './types'
 
 export type Listener<T> = (payload: T) => void
 
 const MOCK_KEY = 'dsh-launcher.mock.v1'
 
 interface MockDb {
+  hosts: Host[]
   homes: DshHome[]
   versions: DshVersion[]
   instances: DshInstance[]
@@ -34,15 +37,29 @@ interface MockDb {
   running: Record<string, InstanceStatus>
 }
 
+/** The only host the browser preview has: the built-in local one. */
+function localHost(): Host {
+  return {
+    id: LOCAL_HOST_ID,
+    display_name: '本机',
+    ssh_target: '',
+    registry: null,
+    extra_env: {},
+    data_dir: null,
+    builtin: true,
+  }
+}
+
 function seedDb(): MockDb {
   return {
+    hosts: [localHost()],
     homes: [
-      { id: 'h-default', name: '默认 DSH_HOME', path: 'C:\\Users\\Administrator\\.dsh' },
-      { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab' },
+      { id: 'h-default', name: '默认 DSH_HOME', path: 'C:\\Users\\Administrator\\.dsh', host_id: LOCAL_HOST_ID },
+      { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab', host_id: LOCAL_HOST_ID },
     ],
     versions: [
-      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6' },
-      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5' },
+      { id: 'v-rc6', version: '0.1.0-rc.6', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.6', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.6', host_id: LOCAL_HOST_ID },
+      { id: 'v-rc5', version: '0.1.0-rc.5', dir: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\0.1.0-rc.5', dedicated_home: 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\0.1.0-rc.5', host_id: LOCAL_HOST_ID },
     ],
     instances: [
       {
@@ -50,6 +67,7 @@ function seedDb(): MockDb {
         name: '主实例',
         version_id: 'v-rc6',
         home_id: 'h-default',
+        host_id: LOCAL_HOST_ID,
         env_overrides: { DSH_TELEMETRY_DISABLED: '1' },
         default_profile: 'web',
         last_profile: 'web',
@@ -59,6 +77,7 @@ function seedDb(): MockDb {
         name: '实验实例',
         version_id: 'v-rc5',
         home_id: 'h-lab',
+        host_id: LOCAL_HOST_ID,
         env_overrides: {},
         default_profile: null,
         last_profile: null,
@@ -101,6 +120,12 @@ function loadDb(): MockDb {
           v.dedicated_home ??
           `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${v.version}`
       }
+      // Backfill host ownership, which every record gained at once: whatever
+      // was stored before the field existed can only belong to 本机.
+      db.hosts = db.hosts ?? [localHost()]
+      for (const h of db.homes) h.host_id = h.host_id ?? LOCAL_HOST_ID
+      for (const v of db.versions) v.host_id = v.host_id ?? LOCAL_HOST_ID
+      for (const i of db.instances) i.host_id = i.host_id ?? LOCAL_HOST_ID
       return db
     }
   } catch {
@@ -386,6 +411,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
   }
 
   switch (cmd) {
+    case 'list_hosts':
+      return db.hosts as T
     case 'list_homes':
       return db.homes as T
     case 'default_dedicated_home_path': {
@@ -397,7 +424,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const name = String(args?.name ?? '').trim()
       const path = String(args?.path ?? '').trim()
       if (!name || !path) fail('名称与路径不能为空')
-      const home: DshHome = { id: `h-${uuid()}`, name, path }
+      const home: DshHome = { id: `h-${uuid()}`, name, path, host_id: LOCAL_HOST_ID }
       db.homes.push(home)
       saveDb(db)
       return home as T
@@ -498,7 +525,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           if (existing) {
             resolvedHomeId = existing.id
           } else {
-            const home: DshHome = { id: mockNewId('h'), name, path: dedicatedPath! }
+            const home: DshHome = { id: mockNewId('h'), name, path: dedicatedPath!, host_id: LOCAL_HOST_ID }
             cur.homes.push(home)
             resolvedHomeId = home.id
           }
@@ -511,6 +538,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
             version,
             dir: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\versions\\${version}`,
             dedicated_home: `C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher\\homes\\${version}`,
+            host_id: LOCAL_HOST_ID,
           }
           cur.versions.push(ver)
         }
@@ -519,6 +547,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           name,
           version_id: ver.id,
           home_id: resolvedHomeId!,
+          host_id: LOCAL_HOST_ID,
           env_overrides: {},
           default_profile: null,
           last_profile: null,
@@ -595,6 +624,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         name,
         version_id: versionId,
         home_id: homeId,
+        host_id: LOCAL_HOST_ID,
         env_overrides: {},
         default_profile: null,
         last_profile: null,

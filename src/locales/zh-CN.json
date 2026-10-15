@@ -192,6 +192,11 @@
     "title": "设置",
     "subtitle": "启动器自身的行为。DSH 版本、DSH_HOME 与 Profile 在资源库里管理。",
     "general": "常规",
+    "hosts": {
+      "title": "主机",
+      "builtin": "内置",
+      "note": "启动器管理的机器。本机是启动器自己所在的那台 Mac，是内置的一条，不能删除。"
+    },
     "language": "界面语言",
     "theme": {
       "label": "主题",

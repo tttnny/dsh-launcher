@@ -192,6 +192,11 @@
     "title": "Settings",
     "subtitle": "How the launcher itself behaves. DSH versions, DSH_HOMEs and profiles live in the Library.",
     "general": "General",
+    "hosts": {
+      "title": "Hosts",
+      "builtin": "built-in",
+      "note": "The machines the launcher manages. 本机 is the Mac the launcher runs on; it is built in and cannot be removed."
+    },
     "language": "Language",
     "theme": {
       "label": "Theme",

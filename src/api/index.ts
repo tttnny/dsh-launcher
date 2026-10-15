@@ -9,6 +9,7 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
+  Host,
   InstanceStatus,
   LauncherSettings,
   LauncherUpdateInfo,
@@ -47,6 +48,9 @@ export const api = {
   /** 指定某个工具的可执行文件；path 为 null 表示取消指定，回到自动检测。返回刷新后的状态。 */
   setToolchainOverride: (tool: 'node' | 'pnpm', path: string | null) =>
     call<RuntimeStatus>('set_toolchain_override', { tool, path }),
+
+  /** The machines the launcher manages. 本机 is always one of them (ADR-0006). */
+  listHosts: () => call<Host[]>('list_hosts'),
 
   listHomes: () => call<DshHome[]>('list_homes'),
   createHome: (name: string, path: string) => call<DshHome>('create_home', { name, path }),

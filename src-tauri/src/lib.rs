@@ -177,6 +177,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::list_hosts,
             commands::list_homes,
             commands::create_home,
             commands::default_dedicated_home_path,

@@ -1,18 +1,42 @@
 use crate::config::{
-    new_id, paths_equal, sanitize_name, DshHome, DshInstance, LauncherSettings, RemoteVersion,
-    SettingsPatch,
+    new_id, DshHome, DshInstance, Host, LauncherSettings, RemoteVersion, SettingsPatch,
 };
 use crate::{process, AppState};
 use std::collections::BTreeMap;
 use tauri::{AppHandle, State};
 
+/// The one path rule behind ADR-0002, defined next to the record model.
+pub(crate) use crate::config::dedicated_home_path;
+
+// ---------------------------------------------------------------------------
+// Hosts
+// ---------------------------------------------------------------------------
+
+/// The machines the launcher manages. 本机 is always one of them, marked
+/// `builtin` so the page can leave out its delete control (ADR-0006).
+#[tauri::command]
+pub fn list_hosts(state: State<'_, AppState>) -> Result<Vec<Host>, String> {
+    Ok(state.config.lock().unwrap().hosts.clone())
+}
+
 // ---------------------------------------------------------------------------
 // DSH_HOME
 // ---------------------------------------------------------------------------
 
+/// One host's DSH_HOME records; `host_id` absent means 本机.
 #[tauri::command]
-pub fn list_homes(state: State<'_, AppState>) -> Result<Vec<DshHome>, String> {
-    Ok(state.config.lock().unwrap().homes.clone())
+pub fn list_homes(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+) -> Result<Vec<DshHome>, String> {
+    let cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
+    Ok(cfg
+        .homes
+        .iter()
+        .filter(|h| h.host_id == host.id)
+        .cloned()
+        .collect())
 }
 
 #[tauri::command]
@@ -20,21 +44,25 @@ pub fn create_home(
     state: State<'_, AppState>,
     name: String,
     path: String,
+    host_id: Option<String>,
 ) -> Result<DshHome, String> {
-    create_home_record(&state, &name, &path)
+    create_home_record(&state, &name, &path, host_id.as_deref())
 }
 
 /// Shared helper: validates + creates a DSH_HOME record. The path is
 /// normalized first (see [`crate::config::normalize_dir_path`]), so `~/.dsh`
 /// and `/Users/me/.dsh` are recognized as one HOME instead of two records,
 /// and a relative path is refused rather than resolved against the app's cwd.
-/// If a HOME with the same path already exists, the existing record is
-/// returned instead of creating a duplicate (prevents duplicate same-name
-/// HOMEs when a dedicated HOME is requested repeatedly).
+/// If a HOME with the same path already exists *on the same host*, the existing
+/// record is returned instead of creating a duplicate (prevents duplicate
+/// same-name HOMEs when a dedicated HOME is requested repeatedly).
+///
+/// `host_id` absent means 本机.
 pub(crate) fn create_home_record(
     state: &State<'_, AppState>,
     name: &str,
     path: &str,
+    host_id: Option<&str>,
 ) -> Result<DshHome, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -42,16 +70,19 @@ pub(crate) fn create_home_record(
     }
     let path_buf = crate::config::normalize_dir_path(path)?;
 
-    // Reuse an existing HOME with the same path.
-    {
+    // Reuse an existing HOME with the same path on the same host.
+    let (host, existing) = {
         let cfg = state.config.lock().unwrap();
-        if let Some(existing) = cfg
+        let host = crate::config::resolve_host(&cfg, host_id)?.clone();
+        let existing = cfg
             .homes
             .iter()
-            .find(|h| crate::config::paths_equal(&h.path, &path_buf))
-        {
-            return Ok(existing.clone());
-        }
+            .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &path_buf))
+            .cloned();
+        (host, existing)
+    };
+    if let Some(existing) = existing {
+        return Ok(existing);
     }
 
     std::fs::create_dir_all(&path_buf).map_err(|e| format!("创建目录失败: {e}"))?;
@@ -59,6 +90,7 @@ pub(crate) fn create_home_record(
         id: new_id("h"),
         name: name.to_string(),
         path: path_buf,
+        host_id: host.id,
     };
     let mut cfg = state.config.lock().unwrap();
     cfg.homes.push(home.clone());
@@ -70,21 +102,14 @@ pub(crate) fn create_home_record(
 pub fn default_dedicated_home_path(
     state: State<'_, AppState>,
     name: String,
+    host_id: Option<String>,
 ) -> Result<String, String> {
-    Ok(dedicated_home_path(&state.data_dir, &name)
+    let cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
+    Ok(host
+        .dedicated_home_path(&state.data_dir, &name)?
         .to_string_lossy()
         .to_string())
-}
-
-/// The dedicated DSH_HOME for a version: `<数据目录>/homes/<版本名>`.
-///
-/// One version, one directory — the contract the installer enforces
-/// (`migrate_instances_to_dedicated_homes`, `start_create_instance_task`). The
-/// derivation must stay identical to theirs (including [`sanitize_name`]) so
-/// that the path a deletion removes is provably the path the launcher created,
-/// and can never resolve to `~/.dsh` or a user-specified HOME (ADR-0002).
-pub(crate) fn dedicated_home_path(data_dir: &std::path::Path, version: &str) -> std::path::PathBuf {
-    data_dir.join("homes").join(sanitize_name(version))
 }
 
 /// Removes one version's dedicated DSH_HOME, judged by path alone. A path that
@@ -111,22 +136,33 @@ pub(crate) fn remove_dedicated_home(
 /// names: the DSH_HOME list keeps offering the deleted version's HOME, and
 /// opening it puts the directory back, which makes the startup orphan sweep
 /// read it as a real HOME from then on.
+///
+/// `data_dir` is `host`'s data directory, and only `host`'s records are
+/// judged: the same path on another machine is a different HOME.
 pub(crate) fn remove_dedicated_home_record(
     cfg: &mut crate::config::Config,
+    host: &Host,
     data_dir: &std::path::Path,
     version: &str,
 ) {
     let home = dedicated_home_path(data_dir, version);
-    cfg.homes.retain(|h| !paths_equal(&h.path, &home));
+    cfg.homes
+        .retain(|h| !(h.host_id == host.id && host.paths_equal(&h.path, &home)));
 }
 
 #[tauri::command]
-pub fn remove_home(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn remove_home(
+    state: State<'_, AppState>,
+    id: String,
+    host_id: Option<String>,
+) -> Result<(), String> {
     let mut cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
     if cfg.instances.iter().any(|i| i.home_id == id) {
         return Err("该 DSH_HOME 仍被实例引用，无法删除".to_string());
     }
-    cfg.homes.retain(|h| h.id != id);
+    cfg.homes
+        .retain(|h| !(h.id == id && h.host_id == host.id));
     save_state(&state, &cfg)
 }
 
@@ -135,30 +171,38 @@ pub fn remove_home(state: State<'_, AppState>, id: String) -> Result<(), String>
 // ---------------------------------------------------------------------------
 
 /// A version as the frontend sees it: the stored record plus its 专属
-/// DSH_HOME, derived here (where `data_dir` is known) so the delete dialog can
-/// name the exact path it removes and no second implementation of the path
-/// rule exists on the JS side.
+/// DSH_HOME, derived here (where the host's data directory is known) so the
+/// delete dialog can name the exact path it removes and no second
+/// implementation of the path rule exists on the JS side.
 #[derive(serde::Serialize)]
 pub struct DshVersionView {
     pub id: String,
     pub version: String,
     pub dir: std::path::PathBuf,
     pub dedicated_home: String,
+    pub host_id: String,
 }
 
 #[tauri::command]
-pub fn list_versions(state: State<'_, AppState>) -> Result<Vec<DshVersionView>, String> {
+pub fn list_versions(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+) -> Result<Vec<DshVersionView>, String> {
     let cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
+    let data_dir = host.data_dir(&state.data_dir)?;
     Ok(cfg
         .versions
         .iter()
+        .filter(|v| v.host_id == host.id)
         .map(|v| DshVersionView {
             id: v.id.clone(),
             version: v.version.clone(),
             dir: v.dir.clone(),
-            dedicated_home: dedicated_home_path(&state.data_dir, &v.version)
+            dedicated_home: dedicated_home_path(&data_dir, &v.version)
                 .to_string_lossy()
                 .to_string(),
+            host_id: v.host_id.clone(),
         })
         .collect())
 }
@@ -286,10 +330,18 @@ pub async fn remove_version(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
+    host_id: Option<String>,
 ) -> Result<(), String> {
-    let (version, instance_ids) = {
+    let (version, instance_ids, host, data_dir) = {
         let cfg = state.config.lock().unwrap();
-        let Some(version) = cfg.versions.iter().find(|v| v.id == id).cloned() else {
+        let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
+        let data_dir = host.data_dir(&state.data_dir)?;
+        let Some(version) = cfg
+            .versions
+            .iter()
+            .find(|v| v.id == id && v.host_id == host.id)
+            .cloned()
+        else {
             return Err("版本不存在".to_string());
         };
         let inst_ids: Vec<String> = cfg
@@ -298,7 +350,7 @@ pub async fn remove_version(
             .filter(|i| i.version_id == id)
             .map(|i| i.id.clone())
             .collect();
-        (version, inst_ids)
+        (version, inst_ids, host, data_dir)
     };
 
     // Stop and cascade delete associated instances
@@ -317,7 +369,7 @@ pub async fn remove_version(
             }
         }
         cfg.versions.retain(|v| v.id != id);
-        remove_dedicated_home_record(&mut cfg, &state.data_dir, &version.version);
+        remove_dedicated_home_record(&mut cfg, &host, &data_dir, &version.version);
         save_state(&state, &cfg)?;
     }
 
@@ -325,13 +377,14 @@ pub async fn remove_version(
     let _ = std::fs::remove_dir_all(&version.dir);
 
     // The version's 专属 DSH_HOME goes with it, judged by path alone
-    // (ADR-0002): `<数据目录>/homes/<版本名>` is the one path the launcher can
-    // prove it created, so `~/.dsh` and any user-specified HOME — which are
-    // also DSH_HOMEs, possibly pointed at by an instance — are never touched.
-    // This runs after the state save: the state is the source of truth, and a
-    // HOME left behind by a save-then-fail is recoverable, unlike the reverse.
-    // Best-effort, so a foreign file inside the HOME cannot block the delete.
-    if let Err(e) = remove_dedicated_home(&state.data_dir, &version.version) {
+    // (ADR-0002): `<该主机的数据目录>/homes/<版本名>` is the one path the
+    // launcher can prove it created, so `~/.dsh` and any user-specified HOME —
+    // which are also DSH_HOMEs, possibly pointed at by an instance — are never
+    // touched. This runs after the state save: the state is the source of
+    // truth, and a HOME left behind by a save-then-fail is recoverable, unlike
+    // the reverse. Best-effort, so a foreign file inside the HOME cannot block
+    // the delete.
+    if let Err(e) = remove_dedicated_home(&data_dir, &version.version) {
         crate::log_warn!("删除版本 {} 的专属 DSH_HOME 失败，忽略: {e}", version.version);
     }
     Ok(())
@@ -342,41 +395,64 @@ pub async fn remove_version(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_instances(state: State<'_, AppState>) -> Result<Vec<DshInstance>, String> {
-    Ok(state.config.lock().unwrap().instances.clone())
+pub fn list_instances(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+) -> Result<Vec<DshInstance>, String> {
+    let cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?;
+    Ok(cfg
+        .instances
+        .iter()
+        .filter(|i| i.host_id == host.id)
+        .cloned()
+        .collect())
 }
 
 /// Creates a new instance on an already-installed version.
 ///
 /// Installing a version materializes one 1:1 instance; this is how a second
 /// instance of the same version is added (the README's "同一版本可建多个实例"),
-/// and the only path that binds a version to a *different* HOME.
+/// and the only path that binds a version to a *different* HOME. Version and
+/// HOME must be on the host the instance is created on: a binding that spans
+/// two machines is not a binding.
+///
+/// `host_id` absent means 本机.
 #[tauri::command]
 pub fn create_instance(
     state: State<'_, AppState>,
     name: String,
     version_id: String,
     home_id: String,
+    host_id: Option<String>,
 ) -> Result<DshInstance, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("实例名称不能为空".to_string());
     }
     let mut cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
     if cfg.instances.iter().any(|i| i.name == name) {
         return Err("同名实例已存在".to_string());
     }
-    if !cfg.versions.iter().any(|v| v.id == version_id) {
+    let Some(version) = cfg.versions.iter().find(|v| v.id == version_id) else {
         return Err("DSH 版本不存在".to_string());
+    };
+    if version.host_id != host.id {
+        return Err("DSH 版本不属于该主机".to_string());
     }
-    if !cfg.homes.iter().any(|h| h.id == home_id) {
+    let Some(home) = cfg.homes.iter().find(|h| h.id == home_id) else {
         return Err("DSH_HOME 不存在".to_string());
+    };
+    if home.host_id != host.id {
+        return Err("DSH_HOME 不属于该主机".to_string());
     }
     let inst = DshInstance {
         id: new_id("i"),
         name,
         version_id,
         home_id,
+        host_id: host.id,
         env_overrides: Default::default(),
         default_profile: None,
         last_profile: None,
@@ -397,6 +473,7 @@ pub async fn delete_instance(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
+    host_id: Option<String>,
 ) -> Result<(), String> {
     // Stop first: a running process holds the DSH_HOME and would outlive its
     // own record, leaving an orphan nothing can stop from the UI.
@@ -406,7 +483,12 @@ pub async fn delete_instance(
 
     let icon_path = {
         let mut cfg = state.config.lock().unwrap();
-        let Some(pos) = cfg.instances.iter().position(|i| i.id == id) else {
+        let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
+        let Some(pos) = cfg
+            .instances
+            .iter()
+            .position(|i| i.id == id && i.host_id == host.id)
+        else {
             return Err("实例不存在".to_string());
         };
         let inst = cfg.instances.remove(pos);
@@ -436,12 +518,14 @@ pub async fn delete_instance(
 pub fn update_instance(
     state: State<'_, AppState>,
     input: DshInstance,
+    host_id: Option<String>,
 ) -> Result<DshInstance, String> {
     let name = input.name.trim().to_string();
     if name.is_empty() {
         return Err("实例名称不能为空".to_string());
     }
     let mut cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
     if cfg
         .instances
         .iter()
@@ -460,11 +544,16 @@ pub fn update_instance(
     let Some(pos) = cfg.instances.iter().position(|i| i.id == updated.id) else {
         return Err("实例不存在".to_string());
     };
-    // The icon is managed by set/clear_instance_icon and the port by
-    // set_instance_port, not by this form payload; preserve whatever is
-    // currently stored (the frontend spreads a possibly stale instance).
+    if cfg.instances[pos].host_id != host.id {
+        return Err("实例不属于该主机".to_string());
+    }
+    // The icon is managed by set/clear_instance_icon, the port by
+    // set_instance_port and the owning host by the host a record was created
+    // on, not by this form payload; preserve whatever is currently stored (the
+    // frontend spreads a possibly stale instance).
     updated.icon = cfg.instances[pos].icon.clone();
     updated.port = cfg.instances[pos].port;
+    updated.host_id = cfg.instances[pos].host_id.clone();
     cfg.instances[pos] = updated.clone();
     save_state(&state, &cfg)?;
     Ok(updated)
@@ -1355,19 +1444,23 @@ mod tests {
         }
     }
 
+    /// The Settings page's host list: a config written before hosts existed
+    /// still has the built-in local host in it, and only that one.
     #[test]
-    fn dedicated_home_path_uses_homes_dir_and_sanitized_name() {
-        let data_dir = std::path::Path::new("/data/launcher");
-        assert_eq!(
-            dedicated_home_path(data_dir, "0.1.0-rc.6"),
-            std::path::Path::new("/data/launcher/homes/0.1.0-rc.6"),
-        );
-        // The name is sanitized with the SAME rule the installer used, so the
-        // path deleted is provably the path created.
-        assert_eq!(
-            dedicated_home_path(data_dir, "a/b c"),
-            std::path::Path::new("/data/launcher/homes/a_b c"),
-        );
+    fn list_hosts_reports_the_built_in_local_host_for_an_old_config() {
+        let data = ScratchDir::new("list-hosts");
+        let config_path = data.path().join("config.json");
+        std::fs::write(&config_path, r#"{"homes":[],"settings":{"locale":"zh-CN"}}"#).unwrap();
+
+        // The config `list_hosts` answers from.
+        let cfg = crate::config::load_config(&config_path);
+        let hosts = cfg.hosts;
+
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].id, crate::config::LOCAL_HOST_ID);
+        assert!(hosts[0].builtin, "本机是内置的那一条");
+        assert_eq!(hosts[0].display_name, "本机");
+        assert!(hosts[0].ssh_target.is_empty(), "本机不经过 ssh");
     }
 
     #[test]
@@ -1418,37 +1511,126 @@ mod tests {
 
     /// The record goes with the directory, by the same path rule: `~/.dsh` and
     /// a user-specified HOME are DSH_HOMEs too and must survive — a name that
-    /// merely looks like the version's is not enough.
+    /// merely looks like the version's is not enough. A record on another host
+    /// is not this version's HOME even when the path is spelled identically.
     #[test]
     fn remove_dedicated_home_record_drops_only_that_path() {
         let data_dir = std::path::Path::new("/data/launcher");
+        let local = crate::config::Host::local();
+        let remote = crate::config::Host {
+            id: "host-server".into(),
+            display_name: "服务器".into(),
+            ssh_target: "zjq_aliyun".into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
+            builtin: false,
+        };
         let mut cfg = crate::config::Config {
+            hosts: vec![local.clone(), remote.clone()],
             homes: vec![
                 crate::config::DshHome {
                     id: "h-version".into(),
                     name: "0.1.0-rc.6".into(),
                     path: dedicated_home_path(data_dir, "0.1.0-rc.6"),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
                 },
                 crate::config::DshHome {
                     id: "h-user-dsh".into(),
                     name: "用户默认".into(),
                     path: std::path::PathBuf::from("/Users/me/.dsh"),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
                 },
                 crate::config::DshHome {
                     id: "h-sibling".into(),
                     name: "0.1.0-rc.5".into(),
                     path: dedicated_home_path(data_dir, "0.1.0-rc.5"),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+                crate::config::DshHome {
+                    id: "h-remote-same-path".into(),
+                    name: "0.1.0-rc.6".into(),
+                    path: dedicated_home_path(data_dir, "0.1.0-rc.6"),
+                    host_id: "host-server".into(),
                 },
             ],
             ..Default::default()
         };
 
-        remove_dedicated_home_record(&mut cfg, data_dir, "0.1.0-rc.6");
+        remove_dedicated_home_record(&mut cfg, &local, data_dir, "0.1.0-rc.6");
 
         assert_eq!(
             cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
-            vec!["h-user-dsh", "h-sibling"],
+            vec!["h-user-dsh", "h-sibling", "h-remote-same-path"],
         );
+    }
+
+    /// Deleting a version takes its dedicated DSH_HOME with it — record and
+    /// directory, by the one path rule, in that order (ADR-0002). The same path
+    /// on another host is that host's HOME and must survive.
+    #[test]
+    fn remove_version_deletes_the_dedicated_home_record_and_directory() {
+        let data = ScratchDir::new("remove-version");
+        let local = crate::config::Host::local();
+        let remote = crate::config::Host {
+            id: "host-server".into(),
+            display_name: "服务器".into(),
+            ssh_target: "zjq_aliyun".into(),
+            registry: None,
+            extra_env: Default::default(),
+            data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
+            builtin: false,
+        };
+        let version = "0.1.0-rc.6";
+        let dedicated = dedicated_home_path(data.path(), version);
+        std::fs::create_dir_all(dedicated.join("storages")).unwrap();
+        let sibling = dedicated_home_path(data.path(), "0.1.0-rc.5");
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let mut cfg = crate::config::Config {
+            hosts: vec![local.clone(), remote],
+            versions: vec![crate::config::DshVersion {
+                id: "v-rc6".into(),
+                version: version.into(),
+                dir: data.path().join("versions").join(version),
+                host_id: crate::config::LOCAL_HOST_ID.into(),
+            }],
+            homes: vec![
+                crate::config::DshHome {
+                    id: "h-dedicated".into(),
+                    name: version.into(),
+                    path: dedicated.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+                crate::config::DshHome {
+                    id: "h-remote-same-path".into(),
+                    name: version.into(),
+                    path: dedicated.clone(),
+                    host_id: "host-server".into(),
+                },
+                crate::config::DshHome {
+                    id: "h-sibling".into(),
+                    name: "0.1.0-rc.5".into(),
+                    path: sibling.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Mirrors the body of `remove_version` without the Tauri State/app
+        // plumbing: both removals use the resolved host's data directory.
+        let data_dir = local.data_dir(data.path()).unwrap();
+        remove_dedicated_home_record(&mut cfg, &local, &data_dir, version);
+        remove_dedicated_home(&data_dir, version).unwrap();
+
+        assert_eq!(
+            cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h-remote-same-path", "h-sibling"],
+            "记录与目录一起走，别的路径与别的主机的记录都留下"
+        );
+        assert!(!dedicated.exists(), "专属 DSH_HOME 目录被删除");
+        assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
     }
 
     /// An instance is a binding, not a directory: deleting one must leave its
@@ -1465,17 +1647,20 @@ mod tests {
             id: "h1".into(),
             name: "shared".into(),
             path: home_dir.clone(),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
         });
         cfg.versions.push(crate::config::DshVersion {
             id: "v1".into(),
             version: "0.1.0-rc.6".into(),
             dir: data.path().join("versions/0.1.0-rc.6"),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
         });
         cfg.instances.push(crate::config::DshInstance {
             id: "i1".into(),
             name: "one".into(),
             version_id: "v1".into(),
             home_id: "h1".into(),
+            host_id: crate::config::LOCAL_HOST_ID.into(),
             env_overrides: Default::default(),
             default_profile: None,
             last_profile: None,
