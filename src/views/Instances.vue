@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { useProfiles } from '@/composables/useProfiles'
 import { api } from '@/api'
+import { bulkScope } from '@/instancesBulk'
 import { useAction } from '@/composables/useAction'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
@@ -86,33 +87,84 @@ const filtered = computed(() => {
   })
 })
 
-const runningCount = computed(
-  () => filtered.value.filter((i) => store.statusOf(i.id).state === 'running').length,
-)
+// --- What the two bulk buttons act on -----------------------------------------
+
+/**
+ * The visible rows, split by what each button would do to them. The rule lives
+ * in `src/instancesBulk.ts` so the board and the buttons read one definition of
+ * 「the range I am looking at」 — and so it can be driven without a webview.
+ */
+const bulk = computed(() => bulkScope(filtered.value, (id) => store.statusOf(id)))
+
+const runningCount = computed(() => bulk.value.stop.length)
 
 // --- Start all / stop all -----------------------------------------------------
 
 // They act on the rows the board is showing — a filter that says 「只看这台机器」
-// and buttons that reach every machine would disagree with each other.
-const startAllAction = useAction(async () => {
-  const targets = filtered.value.filter((i) => {
-    const st = store.statusOf(i.id).state
-    return st !== 'running' && st !== 'starting' && !!selectionByInstance[i.id]
-  })
-  await Promise.allSettled(
-    targets.map((i) => api.startInstance(i.id, selectionByInstance[i.id]!)),
-  )
-  return targets.length
-})
+// and buttons that reach every machine would disagree with each other. One of
+// those rows can also sit on a machine the launcher cannot reach at all, and
+// 「主机不可达」 is not a kind of 「已停止」: nothing here may start it and have the
+// user believe a second DSH is now running on that server (ADR-0007). Those rows
+// are left alone and counted.
 
-const stopAllAction = useAction(async () => {
-  const targets = filtered.value.filter((i) => store.statusOf(i.id).state === 'running')
-  await Promise.allSettled(targets.map((i) => api.stopInstance(i.id)))
-  return targets.length
-})
+/**
+ * What one bulk action did, in the numbers its toast states: how many went
+ * through, how many failed — with the backend's own sentence for the first
+ * one, so a refusal is not swallowed into `allSettled` — and how many rows were
+ * deliberately left alone.
+ */
+interface BulkOutcome {
+  done: number
+  failed: number
+  reason: string
+  skipped: number
+}
 
-const anyRunning = computed(() => runningCount.value > 0)
-const anyStopped = computed(() => filtered.value.length > runningCount.value)
+function summarize(results: PromiseSettledResult<unknown>[], skipped: number): BulkOutcome {
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+  return {
+    done: results.length - failed.length,
+    failed: failed.length,
+    reason: failed.length ? String(failed[0].reason) : '',
+    skipped,
+  }
+}
+
+function bulkMessage(outcome: BulkOutcome, doneKey: string): string {
+  const parts = [t(doneKey, { count: outcome.done })]
+  if (outcome.failed) {
+    parts.push(t('instances.bulkFailed', { count: outcome.failed, reason: outcome.reason }))
+  }
+  if (outcome.skipped) {
+    parts.push(t('instances.startAllSkipped', { count: outcome.skipped }))
+  }
+  return parts.join('，')
+}
+
+const startAllAction = useAction(
+  async () => {
+    const targets = bulk.value.start.filter((i) => !!selectionByInstance[i.id])
+    const results = await Promise.allSettled(
+      targets.map((i) => api.startInstance(i.id, selectionByInstance[i.id]!)),
+    )
+    return summarize(results, bulk.value.unreachable.length)
+  },
+  { success: (outcome) => bulkMessage(outcome, 'instances.startAllDone') },
+)
+
+const stopAllAction = useAction(
+  async () => {
+    const results = await Promise.allSettled(bulk.value.stop.map((i) => api.stopInstance(i.id)))
+    return summarize(results, 0)
+  },
+  { success: (outcome) => bulkMessage(outcome, 'instances.stopAllDone') },
+)
+
+const anyRunning = computed(() => bulk.value.stop.length > 0)
+// Nothing startable in view means no button: an unreachable row has its own
+// action (the row's 重试), and offering 全部启动 over it would promise an action
+// the launcher is not going to take.
+const anyStopped = computed(() => bulk.value.start.length > 0)
 </script>
 
 <template>
