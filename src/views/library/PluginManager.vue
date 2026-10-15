@@ -38,22 +38,32 @@ const home = computed(() => store.homeById(homeId.value))
 const instance = computed(() => (instanceId.value ? store.instanceById(instanceId.value) : undefined))
 
 /**
- * A read-only page whose instance is known has exactly one way out — start it
- * or (when it is up but we hold no token) restart it — so the banner offers
+ * A read-only page whose instance is known has exactly one way out — start it,
+ * restart it (when it is up but we hold no token), or ask that machine once more
+ * (when the launcher cannot reach the instance at all) — so the banner offers
  * that button instead of only naming the problem.
+ *
+ * 不可达 is not 已停止: a remote instance the launcher cannot reach must never be
+ * handed a 启动 button, because pressing it is how a second DSH ends up running
+ * on a server that was running one all along (ADR-0007). The retry asks the host
+ * again, and it is the same action the instance rows offer for that state.
  */
 const instanceState = computed(() =>
   instanceId.value ? store.statusOf(instanceId.value).state : 'stopped',
 )
+const unreachable = computed(() => instanceState.value === 'unreachable')
 const canFix = computed(() => !!instance.value && !!profile.value && instanceState.value !== 'starting')
-const fixLabel = computed(() =>
-  instanceState.value === 'running' ? t('plugins.instanceRestart') : t('plugins.instanceStart'),
-)
+const fixLabel = computed(() => {
+  if (unreachable.value) return t('home.retryCheck')
+  return instanceState.value === 'running' ? t('plugins.instanceRestart') : t('plugins.instanceStart')
+})
 
 const fixAction = useAction(async () => {
   const id = instanceId.value
   if (!id || !profile.value) return undefined
-  if (instanceState.value === 'running') {
+  if (unreachable.value) {
+    await api.refreshInstanceStatus(id)
+  } else if (instanceState.value === 'running') {
     await api.restartInstance(id)
   } else {
     await api.startInstance(id, profile.value)
@@ -97,6 +107,8 @@ const bundles = computed<BundleItem[]>(() => view.value?.bundles ?? [])
 const mode = computed(() => view.value?.mode ?? 'not-running')
 const managed = computed(() => mode.value === 'managed')
 const reason = computed(() => view.value?.reason ?? null)
+/** Nothing could be asked: not the instance, and not the files either. */
+const unreadable = computed(() => mode.value === 'unreachable')
 
 /**
  * The instance the page is working on. It is the one that answered, not the one
@@ -450,7 +462,7 @@ async function removeBundle(b: BundleItem) {
 
         <div class="dl-surface bundle-list">
           <div v-if="bundles.length === 0" class="dl-row-none">
-            {{ loading ? t('common.loading') : t('plugins.offlineEmpty') }}
+            {{ loading ? t('common.loading') : unreadable ? t('plugins.offlineUnreadable') : t('plugins.offlineEmpty') }}
           </div>
           <template v-else>
             <BundleRow v-for="b in bundles" :key="b.name" tone="own" :bundle="b"

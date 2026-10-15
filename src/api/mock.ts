@@ -490,12 +490,46 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
   return mockNativeStore[key].bundles
 }
 
+/**
+ * The sentence the backend uses when the machine that owns a DSH_HOME cannot be
+ * reached (`plugins.rs`): the machine's own reason, and the action that can
+ * change the answer.
+ */
+function hostUnreachableReason(host: Host): string {
+  const detail = mockHostStatuses[host.id]?.message
+  return detail
+    ? `主机「${host.display_name}」现在连不上：${detail}。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
+    : `主机「${host.display_name}」现在连不上。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
+}
+
+/** The home's own machine, when the preview currently cannot reach it. */
+function hostOutOfReach(db: MockDb, homeId: string): Host | null {
+  const home = db.homes.find((h) => h.id === homeId)
+  const host = home ? hostOf(db, home.host_id ?? LOCAL_HOST_ID) : undefined
+  return host && (mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable'
+    ? host
+    : null
+}
+
 function nativeViewFor(
+  db: MockDb,
   homeId: string,
   profile: string,
   instanceId: string | null,
 ): PluginView {
   const bundles = mockBundlesFor(homeId, profile)
+  // A machine the preview marks 不可达 answers nothing — not the instance, and
+  // not the profile's own files either. A list shown anyway would be the
+  // launcher's memory, not that machine's answer.
+  const unreachable = hostOutOfReach(db, homeId)
+  if (unreachable) {
+    return {
+      mode: 'unreachable',
+      instanceId: null,
+      reason: hostUnreachableReason(unreachable),
+      bundles: [],
+    }
+  }
   if (!instanceId) {
     // No instance answers, so the list is the profile's own files — the same
     // fallback the backend takes, labelled read-only by `mode`.
@@ -1322,16 +1356,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         profile,
         args?.instance_id as string | null | undefined,
       )
-      return nativeViewFor(homeId, profile, instanceId) as T
+      return nativeViewFor(db, homeId, profile, instanceId) as T
     }
     case 'set_bundle_enabled': {
       const input = args?.input as SetBundleEnabledInput
       const homeId = input.homeId
       const profile = input.profile
+      // A machine the preview cannot reach is a plain error naming the machine,
+      // the same one the backend's write path returns: 不可达 is not 已停止.
+      const unreachable = hostOutOfReach(db, homeId)
+      if (unreachable) fail(hostUnreachableReason(unreachable))
       const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
       // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
-      const view = nativeViewFor(homeId, profile, instanceId)
+      const view = nativeViewFor(db, homeId, profile, instanceId)
       const bundle = view.bundles.find((b) => b.name === input.name)
       const refusal = (code: string): ChangeOutcome =>
         mockRefusal('enable', input.name, code)
@@ -1355,10 +1393,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const input = args?.input as RemoveBundleInput
       const homeId = input.homeId
       const profile = input.profile
+      // A machine the preview cannot reach is a plain error naming the machine,
+      // the same one the backend's write path returns: 不可达 is not 已停止.
+      const unreachable = hostOutOfReach(db, homeId)
+      if (unreachable) fail(hostUnreachableReason(unreachable))
       const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
       // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
-      const view = nativeViewFor(homeId, profile, instanceId)
+      const view = nativeViewFor(db, homeId, profile, instanceId)
       const index = view.bundles.findIndex((b) => b.name === input.name)
       if (index < 0) {
         // The instance answers a refusal (not an error) with the code only.

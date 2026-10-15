@@ -171,6 +171,7 @@
     "bundleOrderHint": "顺序 = 优先级：补丁层按列表从上到下依次应用。重新挂载的补丁层会排到末尾，优先级随之改变。",
     "offlineTitle": "这个 Profile 装了什么",
     "offlineEmpty": "这个 Profile 还没有装任何补丁层",
+    "offlineUnreadable": "读不到这个 Profile 上的文件（原因见上面那条提示）",
     "offlineNote": "读自 Profile 自己声明的层与依赖：只读投影，没有实例的实时状态、可用性、卸载规则与条目数。启动实例后可在这里管理。",
     "outcomeApplied": "已生效",
     "outcomeRestartRequired": "需重启该实例后生效",

@@ -59,9 +59,14 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 状态一变就撤掉），不要只靠一条 toast。
 
 **未运行时给的是「文件投影」，不是实例的答案（契约）**：没有实例应答（没在跑 / 被
-接管 / 连不上）时，页面用 `plugins::offline_bundles` 读 Profile 自己的 `package.json`
+接管 / 连不上）时，页面用 `plugins::offline_bundles_in` 读 Profile 自己的 `package.json`
 ——它声明的层（`dsh.profile.bundles`，即优先级顺序）在先，装了的依赖在后，
-`version` 从 `node_modules/<name>/package.json` 读。这份投影**只读**（ADR-0001 一条都
+`version` 从 `node_modules/<name>/package.json` 读。**这份投影读的是「那台机器上的」
+文件**：本机走 `std::fs`，远端经 `remote::profile_packages` 一次 ssh 把
+`package.json` 与各包版本一起读回来（一个包一次连接会让「没有实例时」比有实例时还慢），
+两边共用同一份纯投影（`plugins::offline_bundles_from`）。机器本身连不上时**不读**：那
+路径不在本机，本机的 `fs` 只会问到这台 Mac 上同名的地方，页面给的是
+「主机不可达」的原因与「重试」，而不是一份假列表。这份投影**只读**（ADR-0001 一条都
 不破），而且**故意比在线列表薄**：没有实时状态、可用性、卸载规则、条目数，`removable`
 一律 false——所以它在界面上也长得不一样：平铺、不分组（分组依据是 `removable`，文件
 证明不了），开关禁用，脚注说明它读自文件。别把它当成实例的列表，也别据此把层归到
@@ -77,7 +82,9 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 否则每次「启动器更新或退出重开、实例还在跑」都会白丢 token，插件页从此只剩一句
 「由系统接管」的死路。因此「能不能管理插件」只由 `process::manageable_url`（URL 里
 有没有 token）决定，**不要**再把 `adopted` 当拒绝理由：`adopted` 只表示「停止时按
-pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / 重启实例）。
+pid 杀」。只读横幅必须带一个能离开该状态的按钮：没在跑给「启动」、有 token 在跑给「重启」、
+**主机不可达给「重试」**（`refresh_instance_status`，与实例行同一条规则）——不可达绝不能给
+「启动」，那正是把第二个 DSH 起到服务器上的那一下。
 
 **启动时收养幸存进程（契约）**：`process::adopt_surviving_instances` 在 app 启动后
 后台跑一遍——被替换 / 强杀留下的 DSH 进程会一直占着端口，不主动认领的话，界面会一直
@@ -139,7 +146,7 @@ profile 的 lan-bind 端口与 pnpm store）全部经传输层，**不要**在�
 记录里那个远端原始地址直接填进 `url`，那条路会让本机同端口的别的服务拿到 token，也让托盘与
 「打开」以为实例没就绪。`InstanceStatus.url` 是本机可达的那个、`remote_url` 是远端位置，
 界面必须分开说，别让人以为 DSH 绑在本机。**要地址就走
-`process::reachable_url_for`**（「打开」与托盘都走它）：它把那条转发重新确认一遍再返回地址，
+`process::reachable_url_for`**（「打开」、托盘与插件页都走它）：它把那条转发重新确认一遍再返回地址，
 本机实例则原样返回自己的 URL——插件客户端读到的因此就是本机可达的那个地址，协议一个字都不用改。转发在实例就绪（日志里出现 URL）时建，
 退出时由 `tunnel::close_all_blocking` 撤销：每条转发 `-O cancel`，每台主机再 `-O exit` 结束
 启动器自己那条连接——用户自己的连接在别的 socket 上，一个字节都不碰。`ssh -O forward` 是发给

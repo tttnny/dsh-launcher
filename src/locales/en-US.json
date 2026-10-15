@@ -171,6 +171,7 @@
     "bundleOrderHint": "Order is priority: layers apply top to bottom. A re-mounted layer moves to the end.",
     "offlineTitle": "What this profile holds",
     "offlineEmpty": "This profile holds no patch layers yet",
+    "offlineUnreadable": "This profile's files could not be read (the reason is in the notice above)",
     "offlineNote": "Read from the profile's own declared layers and dependencies: a read-only projection without the instance's live state, availability, removal rules or row counts. Start the instance to manage them here.",
     "outcomeApplied": "Applied",
     "outcomeRestartRequired": "Restart the instance to apply",
