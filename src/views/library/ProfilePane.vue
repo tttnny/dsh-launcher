@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import type { DshInstance } from '@/api/types'
@@ -53,6 +52,7 @@ function usersOf(profile: string): DshInstance[] {
 
 const profiles = ref<string[]>([])
 const profilesLoading = ref(false)
+const profilesError = ref('')
 const newName = ref('')
 const adding = ref(false)
 const renaming = ref<string | null>(null)
@@ -62,12 +62,16 @@ const copyValue = ref('')
 
 async function load() {
   profiles.value = []
+  profilesError.value = ''
   if (!selectedHomeId.value) return
   profilesLoading.value = true
   try {
     profiles.value = await api.listProfiles(selectedHomeId.value)
   } catch (e) {
-    Message.error(String(e))
+    // A HOME whose machine did not answer has no list to show: an empty list
+    // here would read as 「这个 HOME 一个 Profile 都没有」, which is a claim
+    // about a machine the launcher just failed to reach.
+    profilesError.value = String(e)
   } finally {
     profilesLoading.value = false
   }
@@ -162,7 +166,13 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
 </script>
 
 <template>
-  <div v-if="!selectedHomeId" class="dl-surface">
+  <div v-if="store.hostError" class="dl-surface profile-unreachable">
+    <p class="profile-unreachable-title">{{ t('library.hostErrorTitle') }}</p>
+    <p class="profile-unreachable-text">{{ store.hostError }}</p>
+    <p class="profile-unreachable-hint">{{ t('library.hostErrorHint') }}</p>
+  </div>
+
+  <div v-else-if="!selectedHomeId" class="dl-surface">
     <DlEmpty icon="profile" :description="t('profiles.noHomeSelected')" />
   </div>
 
@@ -212,12 +222,15 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
         </div>
 
         <DlEmpty
-          v-if="!profilesLoading && profiles.length === 0 && !adding"
+          v-if="!profilesLoading && profiles.length === 0 && !adding && !profilesError"
           icon="profile"
           :description="t('profiles.profilesEmpty')"
         />
         <div v-else-if="profilesLoading && profiles.length === 0" class="dl-row-none">
           {{ t('common.loading') }}
+        </div>
+        <div v-else-if="profilesError" class="dl-row-none profile-error">
+          {{ profilesError }}
         </div>
 
         <template v-for="p in profiles" :key="p">
@@ -411,6 +424,36 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
   margin: 10px 2px 0;
   font-size: var(--dl-text-sm);
   color: var(--dl-ink-4);
+}
+
+.profile-error {
+  color: var(--dl-danger);
+}
+
+.profile-unreachable {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+}
+
+.profile-unreachable-title {
+  margin: 0;
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.profile-unreachable-text {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-danger);
+}
+
+.profile-unreachable-hint {
+  margin: 0;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
 }
 
 .profile-actions {

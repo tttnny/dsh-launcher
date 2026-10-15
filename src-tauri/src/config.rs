@@ -60,6 +60,24 @@ pub struct DshInstance {
 /// would differ on every machine.
 pub const LOCAL_HOST_ID: &str = "host-local";
 
+/// The record the launcher keeps for a host's own `~/.dsh` (the folder DSH
+/// uses when nobody names one). 本机's is added at load time by
+/// [`ensure_user_dsh_home`]; a remote host's is added the first time that
+/// machine is asked for its DSH_HOMEs.
+pub const USER_DSH_HOME_ID: &str = "home-user-dsh";
+pub const USER_DSH_HOME_NAME: &str = "用户默认 (~/.dsh)";
+
+/// The id of one host's user-default `~/.dsh` record. A remote host gets its
+/// own: `~/.dsh` is a path on *that* machine, and one literal cannot stand for
+/// two machines' home directories.
+pub fn user_dsh_home_id(host: &Host) -> String {
+    if host.builtin {
+        USER_DSH_HOME_ID.to_string()
+    } else {
+        format!("{USER_DSH_HOME_ID}-{}", host.id)
+    }
+}
+
 /// One machine the launcher manages. The local host is the built-in one; every
 /// other host is reached over ssh. A host owns its versions, DSH_HOMEs,
 /// profiles and instances, and knows where its own data directory is —
@@ -606,10 +624,18 @@ fn adopt_legacy_toolchain(document: &serde_json::Value, cfg: &mut Config) -> boo
 /// task or a manually deleted folder). Directories that still exist are kept
 /// even if unreferenced (they may be user-managed).
 ///
-/// Only `host`'s records are judged: "the directory does not exist" is a
-/// statement about *that* machine's filesystem, and the launcher can only look
-/// at its own.
+/// **Only 本机 is swept.** "The directory does not exist" is a statement about a
+/// machine's filesystem, and the launcher can only make it about its own — the
+/// only way to ask a remote host is over the transport, which the load path
+/// where this runs does not have. A remote host's records are therefore left
+/// alone: a record whose directory the user deleted by hand survives a restart,
+/// which is the price of never judging another machine's disk by this Mac's. The
+/// judgement that *can* be asked of a remote host — 「你那台机器上有没有
+/// `~/.dsh`」 — is asked there, the first time that host's DSH_HOMEs are read.
 pub fn cleanup_orphan_homes(host: &Host, cfg: &mut Config) {
+    if !host.builtin {
+        return;
+    }
     let orphans: Vec<String> = cfg
         .homes
         .iter()
@@ -626,9 +652,12 @@ pub fn cleanup_orphan_homes(host: &Host, cfg: &mut Config) {
 /// If the user's home directory contains a `.dsh` folder, make sure a HOME
 /// record points at it so it can be picked as a DSH_HOME and referenced by
 /// instances. Idempotent.
+///
+/// This sweep is 本机's only: `~` here is expanded against the launcher's own
+/// HOME, so the question can only be asked of this Mac. A remote host's
+/// `~/.dsh` is asked of that machine, the first time it is read
+/// ([`crate::commands::list_homes`]).
 pub fn ensure_user_dsh_home(host: &Host, cfg: &mut Config) {
-    // `~` here is expanded against the launcher's own HOME, so this question
-    // can only be asked of the local host.
     if !host.builtin {
         return;
     }
@@ -649,8 +678,8 @@ pub fn ensure_user_dsh_home(host: &Host, cfg: &mut Config) {
         return;
     }
     cfg.homes.push(DshHome {
-        id: "home-user-dsh".to_string(),
-        name: "用户默认 (~/.dsh)".to_string(),
+        id: USER_DSH_HOME_ID.to_string(),
+        name: USER_DSH_HOME_NAME.to_string(),
         path: dsh,
         host_id: host.id.clone(),
     });
@@ -1252,6 +1281,17 @@ mod tests {
             cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             vec!["h-remote"],
             "远端那条记录不能拿本机的文件系统去判"
+        );
+
+        // And it stays that way when a caller names the remote host: the sweep
+        // skips it, because `exists()` here answers about *this* Mac and a path
+        // that happens to share a spelling with a path over there would decide
+        // the record's fate on the wrong machine's evidence.
+        let remote = cfg.hosts[0].clone();
+        cleanup_orphan_homes(&remote, &mut cfg);
+        assert_eq!(
+            cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+            vec!["h-remote"]
         );
     }
 

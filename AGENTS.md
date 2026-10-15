@@ -117,9 +117,15 @@ pid 杀」。只读横幅必须带一个能离开该状态的按钮（启动 / �
 
 **本机之外的主机，启动器不碰本机文件系统（契约）**：`Host::local_paths_only` 是那条规则
 ——远程主机的 DSH_HOME、版本目录都在那台机器上，拿本机的 `fs` 去建或删只会命中这台 Mac
-上同名的路径（`create_home_record`、`remove_version`、`open_home_directory`、
-`open_instance_directory` 都这么守着，浏览器 mock 照同一条规则拒绝）。要在远端建或删，
-就走传输层（`remote.rs` 里那些脚本），别在本机上照路径操作。
+上同名的路径（`remove_version`、`open_home_directory`、`open_instance_directory` 都这么
+守着，浏览器 mock 照同一条规则拒绝）。要在远端建或删，就走传输层（`remote.rs` 里那些
+脚本），别在本机上照路径操作：建 DSH_HOME 就是这么做的——路径由那台机器展开 `~`、按文本
+settle `..`、把目录建出来并确认可写，拿回来的绝对路径才写进记录
+（`remote::ensure_home_path`，一句话一份脚本）；远端 DSH_HOME 的 Profile 读写也全部经
+那些脚本。远端已有的 `~/.dsh` 由 `list_homes` 用一次 ssh 问出来再补一条记录（记录 id
+按主机分开：`config::user_dsh_home_id`）——本机那条在 `load_config` 里由
+`ensure_user_dsh_home` 补，它展开的是本机 `$HOME`。同理 `cleanup_orphan_homes` 只判本机：
+「这个目录不存在」这句话，本机的 `exists()` 只能对这台 Mac 说，所以远程记录不会被它清掉。
 
 **实例行是控制面，展开卡片只是事实（契约）**：行本身讲的是「这台实例是什么、在不在跑」
 ——名字、版本 / DSH_HOME、运行时的 URL、选 Profile、状态、主操作，行尾一个只作指示的
