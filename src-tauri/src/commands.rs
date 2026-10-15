@@ -353,24 +353,22 @@ async fn adopt_user_dsh_home(
     if !answer.exists || answer.dsh_home.is_empty() {
         return Ok(());
     }
-    let path = std::path::PathBuf::from(&answer.dsh_home);
-    {
-        let cfg = state.config.lock().unwrap();
-        if cfg
-            .homes
-            .iter()
-            .any(|h| h.host_id == host.id && host.paths_equal(&h.path, &path))
-        {
-            return Ok(());
-        }
-    }
     let home = DshHome {
         id: crate::config::user_dsh_home_id(host),
         name: crate::config::USER_DSH_HOME_NAME.to_string(),
-        path,
+        path: std::path::PathBuf::from(&answer.dsh_home),
         host_id: host.id.clone(),
     };
+    // The check and the write share one lock: two reads of the same host racing
+    // each other must not leave two records for one directory.
     let mut cfg = state.config.lock().unwrap();
+    if cfg
+        .homes
+        .iter()
+        .any(|h| h.host_id == host.id && host.paths_equal(&h.path, &home.path))
+    {
+        return Ok(());
+    }
     cfg.homes.push(home);
     crate::config::save_config(&state.config_path, &cfg)
 }
@@ -1157,7 +1155,7 @@ impl HomeOn {
         crate::remote::list_profiles(
             &*self.transport,
             target,
-            &text(&self.profiles_dir()),
+            &as_text(&self.profiles_dir()),
         )
         .await
         .map_err(|e| e.to_string())
@@ -1178,7 +1176,7 @@ impl HomeOn {
             }
             return copy_dir_recursive(&from, &to).map_err(|e| format!("复制 Profile 失败: {e}"));
         };
-        crate::remote::copy_profile(&*self.transport, target, &text(&from), &text(&to))
+        crate::remote::copy_profile(&*self.transport, target, &as_text(&from), &as_text(&to))
             .await
             .map_err(|e| e.to_string())
     }
@@ -1196,7 +1194,7 @@ impl HomeOn {
             }
             return std::fs::rename(&from, &to).map_err(|e| format!("重命名 Profile 失败: {e}"));
         };
-        crate::remote::rename_profile(&*self.transport, target, &text(&from), &text(&to))
+        crate::remote::rename_profile(&*self.transport, target, &as_text(&from), &as_text(&to))
             .await
             .map_err(|e| e.to_string())
     }
@@ -1216,14 +1214,14 @@ impl HomeOn {
             return std::fs::remove_dir_all(&target_dir)
                 .map_err(|e| format!("删除 Profile 失败: {e}"));
         };
-        crate::remote::delete_profile(&*self.transport, target, &text(&target_dir))
+        crate::remote::delete_profile(&*self.transport, target, &as_text(&target_dir))
             .await
             .map_err(|e| e.to_string())
     }
 }
 
 /// A path in the spelling a remote script can carry.
-fn text(path: &std::path::Path) -> String {
+fn as_text(path: &std::path::Path) -> String {
     path.to_string_lossy().to_string()
 }
 
