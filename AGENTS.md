@@ -283,7 +283,9 @@ DSH_HOME 打不开，能给的是路径与一条命令；终端与日志两个�
 - 前端没有测试框架（无 vitest/jsdom），能测的那几件事写成 `ci/*.test.mjs` 的源码级检查。
   `ci/setup-guidance.test.mjs` 会**求值** `src/views/Setup.vue` 里两个 guidance 块的 `v-if`
   表达式，往那些条件里引入新变量名会让它抛错。
-- Rust 手工排版：全量 `cargo fmt` 会与并行 worktree 冲突，CI 的 `fmt --check` 不阻塞。
+- Rust 排版以 `rustfmt` 默认值为准（仓库不放 `rustfmt.toml`，所以编辑器与 `cargo fmt` 一致）。
+  基线是干净的，因此在 worktree 里跑 `cargo fmt` 只会重写你自己刚写的那些行，不会碰到别人的；
+  `pnpm verify` 里包含 `cargo fmt --check`，提交前跑它即可。
 - 手工点击验证走 `pnpm tauri dev`（真桌面 + Rust 后端）；`pnpm dev` 只有浏览器
   localStorage mock，测不到真实行为。
 
