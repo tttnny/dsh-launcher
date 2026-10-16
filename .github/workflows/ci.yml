@@ -80,6 +80,8 @@ jobs:
         run: node --test ci/instances-bulk.test.mjs
       - name: Remote-command tests
         run: node --test ci/remote-command.test.mjs
+      - name: Store status tests
+        run: node --test ci/store-status.test.mjs
 
   prepare:
     needs: [quality, integration]
