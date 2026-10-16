@@ -82,12 +82,16 @@ function installSourceHooks() {
   hooksInstalled = true
   registerHooks({
     resolve(specifier, context, nextResolve) {
-      if (specifier === 'pinia') return { url: PINIA_STAND_IN, shortCircuit: true }
+      if (specifier === 'pinia')
+        return { url: PINIA_STAND_IN, shortCircuit: true }
       if (specifier.startsWith('@/')) {
         return { url: sourceUrl(specifier.slice(2), SRC), shortCircuit: true }
       }
       if (specifier.startsWith('.')) {
-        return { url: sourceUrl(specifier, context.parentURL), shortCircuit: true }
+        return {
+          url: sourceUrl(specifier, context.parentURL),
+          shortCircuit: true,
+        }
       }
       return nextResolve(specifier, context)
     },
@@ -102,7 +106,8 @@ function installEnvironment() {
   if (typeof globalThis.localStorage === 'undefined') {
     const entries = new Map()
     globalThis.localStorage = {
-      getItem: (key) => (entries.has(String(key)) ? entries.get(String(key)) : null),
+      getItem: (key) =>
+        entries.has(String(key)) ? entries.get(String(key)) : null,
       setItem: (key, value) => void entries.set(String(key), String(value)),
       removeItem: (key) => void entries.delete(String(key)),
       clear: () => entries.clear(),
@@ -112,7 +117,8 @@ function installEnvironment() {
       },
     }
   }
-  if (typeof globalThis.window === 'undefined') globalThis.window = { open() {} }
+  if (typeof globalThis.window === 'undefined')
+    globalThis.window = { open() {} }
   installSourceHooks()
 }
 

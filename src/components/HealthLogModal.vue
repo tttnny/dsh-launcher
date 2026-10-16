@@ -26,7 +26,9 @@ const filter = ref<'all' | 'error' | 'warn'>('all')
 const rechecking = ref(false)
 
 const logs = computed(() =>
-  filter.value === 'all' ? store.healthLogs : store.healthLogs.filter((l) => l.level === filter.value),
+  filter.value === 'all'
+    ? store.healthLogs
+    : store.healthLogs.filter((l) => l.level === filter.value),
 )
 
 function formatTime(ts: number): string {
@@ -106,24 +108,44 @@ async function onRecheck() {
     <div class="health-body">
       <div class="health-toolbar">
         <div class="dl-segmented">
-          <button :class="{ 'is-active': filter === 'all' }" @click="filter = 'all'">
-            {{ t('home.filterAll') }} <span class="dl-tnum">{{ store.healthTotalCount }}</span>
+          <button
+            :class="{ 'is-active': filter === 'all' }"
+            @click="filter = 'all'"
+          >
+            {{ t('home.filterAll') }}
+            <span class="dl-tnum">{{ store.healthTotalCount }}</span>
           </button>
-          <button :class="{ 'is-active': filter === 'error' }" @click="filter = 'error'">
-            {{ t('home.filterError') }} <span class="dl-tnum">{{ store.healthErrorCount }}</span>
+          <button
+            :class="{ 'is-active': filter === 'error' }"
+            @click="filter = 'error'"
+          >
+            {{ t('home.filterError') }}
+            <span class="dl-tnum">{{ store.healthErrorCount }}</span>
           </button>
-          <button :class="{ 'is-active': filter === 'warn' }" @click="filter = 'warn'">
-            {{ t('home.filterWarn') }} <span class="dl-tnum">{{ store.healthWarnCount }}</span>
+          <button
+            :class="{ 'is-active': filter === 'warn' }"
+            @click="filter = 'warn'"
+          >
+            {{ t('home.filterWarn') }}
+            <span class="dl-tnum">{{ store.healthWarnCount }}</span>
           </button>
         </div>
 
         <span class="health-spacer" />
 
-        <button class="dl-btn dl-btn--quiet" :disabled="rechecking" @click="onRecheck">
+        <button
+          class="dl-btn dl-btn--quiet"
+          :disabled="rechecking"
+          @click="onRecheck"
+        >
           <DlIcon name="refresh" :size="13" />
           {{ t('home.recheckHealth') }}
         </button>
-        <button class="dl-btn dl-btn--quiet" :disabled="store.healthLogs.length === 0" @click="onCopy">
+        <button
+          class="dl-btn dl-btn--quiet"
+          :disabled="store.healthLogs.length === 0"
+          @click="onCopy"
+        >
           <DlIcon name="copy" :size="13" />
           {{ t('home.copyLogs') }}
         </button>
@@ -142,7 +164,12 @@ async function onRecheck() {
           <span>{{ t('home.noHealthLogs') }}</span>
         </div>
 
-        <div v-for="item in logs" :key="item.id" class="health-line" :class="`is-${item.level}`">
+        <div
+          v-for="item in logs"
+          :key="item.id"
+          class="health-line"
+          :class="`is-${item.level}`"
+        >
           <span class="health-meta dl-mono">
             {{ formatTime(item.timestamp) }} · {{ item.level.toUpperCase() }} ·
             {{ item.instanceName }} / {{ item.profile }}

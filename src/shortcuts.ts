@@ -21,7 +21,11 @@ export type ShortcutRoute =
   | 'settings'
 
 /** Canonical first, aliases after. */
-export const MENU_NAVIGATE_EVENTS = ['menu-navigate', 'navigate', 'app-navigate'] as const
+export const MENU_NAVIGATE_EVENTS = [
+  'menu-navigate',
+  'navigate',
+  'app-navigate',
+] as const
 
 /**
  * Single source of truth for the Settings shortcut card. `labelKey` is a
@@ -55,7 +59,8 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   if (
     payload !== null &&
     typeof payload === 'object' &&
-    ('route' in (payload as Record<string, unknown>) || 'name' in (payload as Record<string, unknown>))
+    ('route' in (payload as Record<string, unknown>) ||
+      'name' in (payload as Record<string, unknown>))
   ) {
     const obj = payload as Record<string, unknown>
     raw = obj.route ?? obj.name
@@ -114,7 +119,10 @@ export function isEditableTarget(target: EventTarget | null): boolean {
  * never hijacked; Esc inside a field only blurs instead of navigating. Returns
  * true when the event was handled.
  */
-export function handleAppKeydown(e: KeyboardEvent, actions: ShortcutActions): boolean {
+export function handleAppKeydown(
+  e: KeyboardEvent,
+  actions: ShortcutActions,
+): boolean {
   if (e.defaultPrevented) return false
   // Tauri webviews may deliver key events for IME composition; ignore them.
   if (e.isComposing || e.keyCode === 229) return false

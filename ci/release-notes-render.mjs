@@ -31,15 +31,14 @@ export function render(tag, assets, commits, { repo = 'REPO' } = {}) {
       return KIND_ORDER[c1.kind] - KIND_ORDER[c2.kind]
     })
 
-  const link = (name) => `https://github.com/${repo}/releases/download/${tag}/${name}`
+  const link = (name) =>
+    `https://github.com/${repo}/releases/download/${tag}/${name}`
   const rows = sorted.map((name) => {
     const c = classify(name)
     return `| ${PLATFORM_OF_KIND[c.kind]} | ${c.arch} | [${name}](${link(name)}) (${KIND_LABEL_EN[c.kind]}) |`
   })
 
-  const commitLines = (commits ?? [])
-    .map((c) => `* ${c}`)
-    .join('\n')
+  const commitLines = (commits ?? []).map((c) => `* ${c}`).join('\n')
 
   return `## Downloads
 
@@ -58,16 +57,24 @@ ${commitLines}
 // CLI mode: node ci/release-notes-render.mjs <tag> <assets-json> <commits-file>
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readFileSync } from 'node:fs'
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   const [, , tag, assetsJson, commitsFile] = process.argv
   const assets = JSON.parse(assetsJson)
   const commits = commitsFile
-    ? readFileSync(commitsFile, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean)
+    ? readFileSync(commitsFile, 'utf8')
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
     : []
   const repo = process.env.GITHUB_REPOSITORY ?? 'REPO'
   const unknown = assets.filter((a) => !classify(a))
   if (unknown.length > 0) {
-    console.error(`release-note classifier rejected assets: ${unknown.join(', ')}`)
+    console.error(
+      `release-note classifier rejected assets: ${unknown.join(', ')}`,
+    )
     process.exit(1)
   }
   process.stdout.write(render(tag, assets, commits, { repo }))

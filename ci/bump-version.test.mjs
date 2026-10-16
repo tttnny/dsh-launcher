@@ -4,18 +4,29 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 function runInTempDir(tag, manifestVersion = tag.replace(/^v/, '')) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bump-'))
   const files = {
-    'package.json': JSON.stringify({ name: 'dsh-launcher', version: manifestVersion }, null, 2) + '\n',
-    'src-tauri/tauri.conf.json': JSON.stringify({ version: manifestVersion }, null, 2) + '\n',
+    'package.json':
+      JSON.stringify(
+        { name: 'dsh-launcher', version: manifestVersion },
+        null,
+        2,
+      ) + '\n',
+    'src-tauri/tauri.conf.json':
+      JSON.stringify({ version: manifestVersion }, null, 2) + '\n',
     'src-tauri/Cargo.toml': `name = "dsh-launcher"\nversion = "${manifestVersion}"\n`,
-    'src-tauri/Cargo.lock':
-      `[[package]]\nname = "dsh-launcher"\nversion = "${manifestVersion}"\n`,
+    'src-tauri/Cargo.lock': `[[package]]\nname = "dsh-launcher"\nversion = "${manifestVersion}"\n`,
   }
   for (const [p, content] of Object.entries(files)) {
     const full = join(dir, p)
@@ -23,10 +34,14 @@ function runInTempDir(tag, manifestVersion = tag.replace(/^v/, '')) {
     if (p.includes('/')) mkdirSync(parent, { recursive: true })
     writeFileSync(full, content)
   }
-  const res = spawnSync(process.execPath, [join(process.cwd(), 'ci', 'bump-version.mjs'), tag], {
-    cwd: dir,
-    encoding: 'utf8',
-  })
+  const res = spawnSync(
+    process.execPath,
+    [join(process.cwd(), 'ci', 'bump-version.mjs'), tag],
+    {
+      cwd: dir,
+      encoding: 'utf8',
+    },
+  )
   // Read every file BEFORE deleting the temp dir; the returned map is what
   // the assertions inspect.
   const contents = {}
@@ -48,7 +63,10 @@ test('stable tag bumps patch version across all four manifests', () => {
 })
 
 test('0.3.0 bumps to 0.3.1 and 1.0.0 to 1.0.1', () => {
-  for (const [from, to] of [['v0.3.0', '0.3.1'], ['v1.0.0', '1.0.1']]) {
+  for (const [from, to] of [
+    ['v0.3.0', '0.3.1'],
+    ['v1.0.0', '1.0.1'],
+  ]) {
     const { res, contents } = runInTempDir(from)
     assert.equal(res.status, 0, res.stderr)
     assert.match(contents['package.json'], new RegExp(`"version": "${to}"`))
@@ -74,8 +92,11 @@ test('non-v prefix is rejected', () => {
 test('already-bumped manifests are left untouched (idempotent)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bump-'))
   const files = {
-    'package.json': JSON.stringify({ name: 'dsh-launcher', version: '0.2.5' }, null, 2) + '\n',
-    'src-tauri/tauri.conf.json': JSON.stringify({ version: '0.2.5' }, null, 2) + '\n',
+    'package.json':
+      JSON.stringify({ name: 'dsh-launcher', version: '0.2.5' }, null, 2) +
+      '\n',
+    'src-tauri/tauri.conf.json':
+      JSON.stringify({ version: '0.2.5' }, null, 2) + '\n',
     'src-tauri/Cargo.toml': 'name = "dsh-launcher"\nversion = "0.2.5"\n',
     'src-tauri/Cargo.lock':
       '[[package]]\nname = "dsh-launcher"\nversion = "0.2.5"\n',
@@ -86,12 +107,22 @@ test('already-bumped manifests are left untouched (idempotent)', () => {
     if (p.includes('/')) mkdirSync(parent, { recursive: true })
     writeFileSync(full, content)
   }
-  const res = spawnSync(process.execPath, [join(process.cwd(), 'ci', 'bump-version.mjs'), 'v0.2.4'], {
-    cwd: dir,
-    encoding: 'utf8',
-  })
+  const res = spawnSync(
+    process.execPath,
+    [join(process.cwd(), 'ci', 'bump-version.mjs'), 'v0.2.4'],
+    {
+      cwd: dir,
+      encoding: 'utf8',
+    },
+  )
   assert.equal(res.status, 0, res.stderr)
-  assert.match(res.stdout, /manifest version 0\.2\.5 != released 0\.2\.4; no bump/)
-  assert.match(readFileSync(join(dir, 'package.json'), 'utf8'), /"version": "0\.2\.5"/)
+  assert.match(
+    res.stdout,
+    /manifest version 0\.2\.5 != released 0\.2\.4; no bump/,
+  )
+  assert.match(
+    readFileSync(join(dir, 'package.json'), 'utf8'),
+    /"version": "0\.2\.5"/,
+  )
   rmSync(dir, { recursive: true, force: true })
 })

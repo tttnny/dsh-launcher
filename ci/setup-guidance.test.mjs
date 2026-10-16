@@ -65,13 +65,25 @@ test('a machine missing both tools is shown both commands', () => {
 
   // Evaluate both conditions for the "nothing installed" state, which is the
   // state of a fresh machine. Both must be true.
-  const fn = new Function('nodeOk', 'pnpmOk', `return [${nodeCondition}, ${pnpmCondition}]`)
+  const fn = new Function(
+    'nodeOk',
+    'pnpmOk',
+    `return [${nodeCondition}, ${pnpmCondition}]`,
+  )
   assert.deepEqual(
     fn(false, false),
     [true, true],
     'with node and pnpm both missing, both guidance blocks must render',
   )
   // And each block disappears on its own once its tool arrives.
-  assert.deepEqual(fn(true, false), [false, true], 'node present: only pnpm guidance')
-  assert.deepEqual(fn(false, true), [true, false], 'pnpm present: only node guidance')
+  assert.deepEqual(
+    fn(true, false),
+    [false, true],
+    'node present: only pnpm guidance',
+  )
+  assert.deepEqual(
+    fn(false, true),
+    [true, false],
+    'pnpm present: only node guidance',
+  )
 })

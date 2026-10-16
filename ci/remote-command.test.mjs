@@ -31,7 +31,9 @@ function homeWith(name, marker) {
 
 /** The words the user's own shell hands ssh. One argument is the whole point. */
 function wordsHandedToSsh(command) {
-  const out = spawnSync('/bin/sh', ['-c', `printf '%s\n' ${command}`], { encoding: 'utf8' })
+  const out = spawnSync('/bin/sh', ['-c', `printf '%s\n' ${command}`], {
+    encoding: 'utf8',
+  })
   assert.equal(out.status, 0, out.stderr)
   return out.stdout.split('\n').filter((line) => line.length > 0)
 }
@@ -48,14 +50,18 @@ test('a ~/ path expands on the far side instead of naming a directory called ~',
   const home = homeWith('dsh data', 'found-here')
 
   const words = wordsHandedToSsh(directoryCommand('lab', '~/dsh data'))
-  assert.equal(words.length, 3, `ssh 只该拿到一个参数：${JSON.stringify(words)}`)
+  assert.equal(
+    words.length,
+    3,
+    `ssh 只该拿到一个参数：${JSON.stringify(words)}`,
+  )
 
   const out = onTheOtherMachine(words, home)
   assert.equal(out.status, 0, out.stderr)
   assert.match(out.stdout, /found-here/, out.stdout + out.stderr)
 })
 
-test('a bare ~ is that machine\'s home directory', () => {
+test("a bare ~ is that machine's home directory", () => {
   const home = homeWith('dsh data', 'found-here')
 
   const words = wordsHandedToSsh(directoryCommand('lab', '~'))
@@ -70,7 +76,11 @@ test('an absolute path holding a space and a single quote arrives as one word', 
   const path = join(home, "o'brien dir")
 
   const words = wordsHandedToSsh(directoryCommand('lab', path))
-  assert.equal(words.length, 3, `ssh 只该拿到一个参数：${JSON.stringify(words)}`)
+  assert.equal(
+    words.length,
+    3,
+    `ssh 只该拿到一个参数：${JSON.stringify(words)}`,
+  )
 
   const out = onTheOtherMachine(words, home)
   assert.equal(out.status, 0, out.stderr)

@@ -62,21 +62,39 @@ function rowCount(): string | null {
 
 <template>
   <div class="bundle-row" :class="`is-${tone}`">
-    <span class="bundle-dot" :class="{ 'is-on': bundle.enabled, 'is-bad': !!bundle.errorCode }" />
+    <span
+      class="bundle-dot"
+      :class="{ 'is-on': bundle.enabled, 'is-bad': !!bundle.errorCode }"
+    />
     <div class="bundle-main">
       <div class="bundle-title">
         <!-- Mono exactly when the name on show *is* the package name: machine
              identifiers wear the readout face, a translated title does not. -->
-        <span class="bundle-name" :class="{ 'dl-mono': !bundleHasOwnTitle() }">{{ name() }}</span>
-        <span v-if="bundle.version" class="dl-chip dl-mono">{{ bundle.version }}</span>
+        <span
+          class="bundle-name"
+          :class="{ 'dl-mono': !bundleHasOwnTitle() }"
+          >{{ name() }}</span
+        >
+        <span v-if="bundle.version" class="dl-chip dl-mono">{{
+          bundle.version
+        }}</span>
         <span v-if="rowCount()" class="bundle-rows">{{ rowCount() }}</span>
-        <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{ t('plugins.bundleOptional') }}</span>
-      <span v-if="managedReason()" class="dl-tag dl-tag--muted" :title="managedReason()!">
-        {{ t('plugins.bundleManaged') }}
-      </span>
+        <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{
+          t('plugins.bundleOptional')
+        }}</span>
+        <span
+          v-if="managedReason()"
+          class="dl-tag dl-tag--muted"
+          :title="managedReason()!"
+        >
+          {{ t('plugins.bundleManaged') }}
+        </span>
         <!-- "The package files are unreadable" already says the layer cannot
              load; the error code would be a second amber tag saying it twice. -->
-        <span v-if="bundle.availability === 'missing'" class="dl-tag dl-tag--warn">
+        <span
+          v-if="bundle.availability === 'missing'"
+          class="dl-tag dl-tag--warn"
+        >
           {{ t('plugins.bundleMissing') }}
         </span>
         <span
@@ -87,7 +105,9 @@ function rowCount(): string | null {
           {{ t('plugins.bundleErrored') }}
         </span>
       </div>
-      <span v-if="bundleHasOwnTitle()" class="bundle-sub dl-mono">{{ bundle.name }}</span>
+      <span v-if="bundleHasOwnTitle()" class="bundle-sub dl-mono">{{
+        bundle.name
+      }}</span>
     </div>
     <div class="bundle-actions">
       <a-switch

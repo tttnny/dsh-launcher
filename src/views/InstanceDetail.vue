@@ -72,13 +72,17 @@ const status = computed(() => store.statusOf(id.value))
 /** Where a remote instance really is, as that machine printed it — stated next
  * to the forwarded address so the two are never read as one. */
 const remoteUrl = computed(() => status.value.remote_url ?? null)
-const running = computed(() => status.value.state === 'running' || status.value.state === 'starting')
+const running = computed(
+  () => status.value.state === 'running' || status.value.state === 'starting',
+)
 /**
  * 「主机不可达」 — the machine did not answer, so the state is unknown. The page
  * offers the retry and never turns it into 已停止 (ADR-0007 后果).
  */
 const unreachable = computed(() => status.value.state === 'unreachable')
-const hostReason = computed(() => store.hostById(current.value?.host_id)?.status?.message ?? '')
+const hostReason = computed(
+  () => store.hostById(current.value?.host_id)?.status?.message ?? '',
+)
 const retryAction = useAction(
   async (instanceId: string) => {
     await api.refreshInstanceStatus(instanceId)
@@ -87,7 +91,9 @@ const retryAction = useAction(
   },
   { key: (instanceId) => instanceId },
 )
-const homeLabel = computed(() => store.homeById(homeId.value ?? '')?.name ?? '—')
+const homeLabel = computed(
+  () => store.homeById(homeId.value ?? '')?.name ?? '—',
+)
 /**
  * The machine this instance runs on. Its version and its DSH_HOMEs live there —
  * an instance is one binding on one host (ADR-0006 §1) — so the two selects below
@@ -107,7 +113,8 @@ const hostHomes = computed(() => store.homesByHost[hostId.value] ?? [])
  * what happened instead of listing yesterday's versions.
  */
 const hostError = computed(
-  () => store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
+  () =>
+    store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
 )
 
 function retryHost() {
@@ -140,7 +147,10 @@ function fillForm(inst: DshInstance) {
   homeId.value = inst.home_id
   defaultProfile.value = inst.default_profile ?? undefined
   portInput.value = inst.port ? String(inst.port) : ''
-  envRows.value = Object.entries(inst.env_overrides).map(([key, value]) => ({ key, value }))
+  envRows.value = Object.entries(inst.env_overrides).map(([key, value]) => ({
+    key,
+    value,
+  }))
 }
 
 // --- Profiles of the selected HOME --------------------------------------------
@@ -169,7 +179,11 @@ function onHomePicked() {
 // --- Save ---------------------------------------------------------------------
 
 const formValid = computed(
-  () => name.value.trim().length > 0 && !!versionId.value && !!homeId.value && envValid.value,
+  () =>
+    name.value.trim().length > 0 &&
+    !!versionId.value &&
+    !!homeId.value &&
+    envValid.value,
 )
 
 const saveAction = useAction(
@@ -177,7 +191,8 @@ const saveAction = useAction(
     const inst = current.value
     if (!inst) return undefined
     const envOverrides: Record<string, string> = {}
-    for (const row of envRows.value) if (row.key) envOverrides[row.key] = row.value
+    for (const row of envRows.value)
+      if (row.key) envOverrides[row.key] = row.value
     const updated: DshInstance = {
       ...inst,
       name: name.value.trim(),
@@ -193,7 +208,10 @@ const saveAction = useAction(
 
 const saving = computed(() => saveAction.busy['*'])
 /** True once the form differs from what is saved on the instance. */
-const dirty = computed(() => loaded.value && baseline.value !== '' && formSnapshot() !== baseline.value)
+const dirty = computed(
+  () =>
+    loaded.value && baseline.value !== '' && formSnapshot() !== baseline.value,
+)
 
 async function onSave() {
   if (!formValid.value) return
@@ -220,12 +238,15 @@ function parsePort(raw: string): number | null {
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
 }
 
-const portAction = useAction(() => api.setInstancePort(id.value, parsePort(portInput.value)), {
-  success: (updated) =>
-    updated.port
-      ? t('instanceEdit.portSaved', { port: updated.port })
-      : t('instanceEdit.portSavedRandom'),
-})
+const portAction = useAction(
+  () => api.setInstancePort(id.value, parsePort(portInput.value)),
+  {
+    success: (updated) =>
+      updated.port
+        ? t('instanceEdit.portSaved', { port: updated.port })
+        : t('instanceEdit.portSavedRandom'),
+  },
+)
 
 async function applyPort() {
   const updated = await portAction.run()
@@ -274,7 +295,12 @@ async function pickIconFile() {
   const { open } = await import('@tauri-apps/plugin-dialog')
   const file = await open({
     multiple: false,
-    filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+    filters: [
+      {
+        name: 'Image',
+        extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'],
+      },
+    ],
   })
   if (typeof file !== 'string') return
   const ok = await iconAction.run(file)
@@ -325,7 +351,10 @@ function confirmDelete() {
   if (!current.value) return
   Modal.confirm({
     title: t('instances.deleteTitle', { name: name.value }),
-    content: t('instances.deleteContent', { name: name.value, home: homeLabel.value }),
+    content: t('instances.deleteContent', {
+      name: name.value,
+      home: homeLabel.value,
+    }),
     okText: t('instances.table.delete'),
     cancelText: t('common.cancel'),
     okButtonProps: { status: 'danger' },
@@ -354,8 +383,14 @@ function removeEnvRow(idx: number) {
       <div class="dl-head-text">
         <h1 class="detail-title">
           <InstanceAvatar :id="id" :icon="current?.icon" :size="34" />
-          <span class="detail-name">{{ name.trim() || t('instanceEdit.titleEdit') }}</span>
-          <span class="dl-status" :class="`is-${status.state}`" :title="unreachable ? hostReason : undefined">
+          <span class="detail-name">{{
+            name.trim() || t('instanceEdit.titleEdit')
+          }}</span>
+          <span
+            class="dl-status"
+            :class="`is-${status.state}`"
+            :title="unreachable ? hostReason : undefined"
+          >
             {{ t(`home.status.${status.state}`) }}
           </span>
         </h1>
@@ -364,7 +399,9 @@ function removeEnvRow(idx: number) {
             <span>{{ host.display_name }}</span>
             <span class="detail-dot">·</span>
           </template>
-          <span class="dl-mono">{{ store.versionById(versionId ?? '')?.version ?? '—' }}</span>
+          <span class="dl-mono">{{
+            store.versionById(versionId ?? '')?.version ?? '—'
+          }}</span>
           <span class="detail-dot">·</span>
           <span>{{ homeLabel }}</span>
           <span class="detail-dot">·</span>
@@ -376,11 +413,15 @@ function removeEnvRow(idx: number) {
              instance must not have to be read without them. -->
         <p v-if="remoteUrl" class="dl-head-sub detail-sub detail-addresses">
           <span class="detail-dot">{{ t('instances.remoteAddress') }}</span>
-          <span class="dl-mono detail-id" :title="remoteUrl">{{ remoteUrl }}</span>
+          <span class="dl-mono detail-id" :title="remoteUrl">{{
+            remoteUrl
+          }}</span>
           <template v-if="status.url">
             <span class="detail-dot">·</span>
             <span>{{ t('instances.localAddress') }}</span>
-            <span class="dl-mono detail-id" :title="status.url">{{ status.url }}</span>
+            <span class="dl-mono detail-id" :title="status.url">{{
+              status.url
+            }}</span>
           </template>
         </p>
       </div>
@@ -398,7 +439,11 @@ function removeEnvRow(idx: number) {
           {{ t('home.retryCheck') }}
         </button>
         <!-- Only a running instance has a plugin manager to talk to. -->
-        <button v-if="canManagePlugins(id)" class="dl-btn dl-btn--quiet" @click="openPlugins(id, 'instance-detail')">
+        <button
+          v-if="canManagePlugins(id)"
+          class="dl-btn dl-btn--quiet"
+          @click="openPlugins(id, 'instance-detail')"
+        >
           <DlIcon name="plugin" :size="13" />
           {{ t('profiles.managePlugins') }}
         </button>
@@ -407,11 +452,17 @@ function removeEnvRow(idx: number) {
           {{ t('home.openTerminal') }}
         </button>
         <template v-if="remote">
-          <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('path')">
+          <button
+            class="dl-btn dl-btn--quiet"
+            @click="remoteCopyAction.run('path')"
+          >
             <DlIcon name="copy" :size="13" />
             {{ t('instances.copyPath') }}
           </button>
-          <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('command')">
+          <button
+            class="dl-btn dl-btn--quiet"
+            @click="remoteCopyAction.run('command')"
+          >
             <DlIcon name="copy" :size="13" />
             {{ t('instances.copyCommand') }}
           </button>
@@ -434,7 +485,9 @@ function removeEnvRow(idx: number) {
     <div class="detail-grid">
       <div class="detail-col">
         <section class="dl-section">
-          <div class="dl-section-label">{{ t('instanceEdit.sectionBinding') }}</div>
+          <div class="dl-section-label">
+            {{ t('instanceEdit.sectionBinding') }}
+          </div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
@@ -452,17 +505,26 @@ function removeEnvRow(idx: number) {
               <p class="dl-failure-text">{{ hostError }}</p>
               <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
               <div style="margin-top: 6px">
-                <button class="dl-btn" @click="retryHost">{{ t('common.refresh') }}</button>
+                <button class="dl-btn" @click="retryHost">
+                  {{ t('common.refresh') }}
+                </button>
               </div>
             </div>
 
             <template v-else>
               <div class="dl-row">
                 <div class="dl-row-info">
-                  <span class="dl-row-label">{{ t('instanceEdit.version') }}</span>
+                  <span class="dl-row-label">{{
+                    t('instanceEdit.version')
+                  }}</span>
                 </div>
                 <a-select v-model="versionId" style="width: 230px">
-                  <a-option v-for="v in hostVersions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
+                  <a-option
+                    v-for="v in hostVersions"
+                    :key="v.id"
+                    :value="v.id"
+                    >{{ v.version }}</a-option
+                  >
                 </a-select>
               </div>
 
@@ -470,7 +532,11 @@ function removeEnvRow(idx: number) {
                 <div class="dl-row-info">
                   <span class="dl-row-label">{{ t('instanceEdit.home') }}</span>
                 </div>
-                <a-select v-model="homeId" style="width: 230px" @change="onHomePicked">
+                <a-select
+                  v-model="homeId"
+                  style="width: 230px"
+                  @change="onHomePicked"
+                >
                   <a-option v-for="h in hostHomes" :key="h.id" :value="h.id">
                     {{ h.name }} — {{ h.path }}
                   </a-option>
@@ -480,8 +546,12 @@ function removeEnvRow(idx: number) {
 
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('instanceEdit.defaultProfile') }}</span>
-                <span class="dl-row-desc">{{ t('instanceEdit.defaultProfileHint') }}</span>
+                <span class="dl-row-label">{{
+                  t('instanceEdit.defaultProfile')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('instanceEdit.defaultProfileHint')
+                }}</span>
               </div>
               <a-select
                 v-model="defaultProfile"
@@ -489,19 +559,25 @@ function removeEnvRow(idx: number) {
                 :placeholder="t('instanceEdit.defaultProfilePlaceholder')"
                 allow-clear
               >
-                <a-option v-for="p in profiles" :key="p" :value="p">{{ p }}</a-option>
+                <a-option v-for="p in profiles" :key="p" :value="p">{{
+                  p
+                }}</a-option>
               </a-select>
             </div>
           </div>
         </section>
 
         <section class="dl-section">
-          <div class="dl-section-label">{{ t('instanceEdit.sectionLaunch') }}</div>
+          <div class="dl-section-label">
+            {{ t('instanceEdit.sectionLaunch') }}
+          </div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">{{ t('instanceEdit.port') }}</span>
-                <span class="dl-row-desc">{{ t('instanceEdit.portHint') }}</span>
+                <span class="dl-row-desc">{{
+                  t('instanceEdit.portHint')
+                }}</span>
               </div>
               <div class="detail-inline">
                 <input
@@ -510,7 +586,11 @@ function removeEnvRow(idx: number) {
                   :placeholder="t('instanceEdit.portPlaceholder')"
                   @keydown.enter="applyPort"
                 />
-                <button class="dl-btn dl-btn--quiet" :disabled="portAction.busy['*']" @click="applyPort">
+                <button
+                  class="dl-btn dl-btn--quiet"
+                  :disabled="portAction.busy['*']"
+                  @click="applyPort"
+                >
                   {{ t('instanceEdit.portApply') }}
                 </button>
               </div>
@@ -526,7 +606,13 @@ function removeEnvRow(idx: number) {
             <div class="icon-block">
               <span class="icon-preview">
                 <img v-if="iconUrl" :src="iconUrl" alt="" />
-                <InstanceAvatar v-else :id="id" :icon="null" :size="46" class="icon-preview-fallback" />
+                <InstanceAvatar
+                  v-else
+                  :id="id"
+                  :icon="null"
+                  :size="46"
+                  class="icon-preview-fallback"
+                />
               </span>
               <div class="icon-controls">
                 <div class="detail-inline">
@@ -544,10 +630,18 @@ function removeEnvRow(idx: number) {
                   </button>
                 </div>
                 <div class="detail-inline">
-                  <button class="dl-btn dl-btn--quiet" :disabled="iconAction.busy['*']" @click="pickIconFile">
+                  <button
+                    class="dl-btn dl-btn--quiet"
+                    :disabled="iconAction.busy['*']"
+                    @click="pickIconFile"
+                  >
                     {{ t('instanceEdit.iconPickFile') }}
                   </button>
-                  <button v-if="iconUrl" class="dl-btn dl-btn--danger" @click="clearIcon">
+                  <button
+                    v-if="iconUrl"
+                    class="dl-btn dl-btn--danger"
+                    @click="clearIcon"
+                  >
                     {{ t('instanceEdit.iconClear') }}
                   </button>
                 </div>
@@ -579,7 +673,9 @@ function removeEnvRow(idx: number) {
               <button class="dl-icon-btn" @click="removeEnvRow(idx)">
                 <DlIcon name="trash" :size="14" />
               </button>
-              <span v-if="envKeyError(row)" class="dl-error-text env-error">{{ envKeyError(row) }}</span>
+              <span v-if="envKeyError(row)" class="dl-error-text env-error">{{
+                envKeyError(row)
+              }}</span>
             </div>
             <button class="dl-btn dl-btn--quiet" @click="addEnvRow">
               <DlIcon name="plus" :size="13" />
@@ -589,13 +685,21 @@ function removeEnvRow(idx: number) {
         </section>
 
         <section class="dl-section">
-          <div class="dl-section-label">{{ t('instanceEdit.sectionDanger') }}</div>
+          <div class="dl-section-label">
+            {{ t('instanceEdit.sectionDanger') }}
+          </div>
           <div class="dl-surface detail-pad danger-card">
             <div class="danger-text">
-              <span class="danger-title">{{ t('instances.deleteTitleShort') }}</span>
+              <span class="danger-title">{{
+                t('instances.deleteTitleShort')
+              }}</span>
               <span class="dl-row-desc">{{ t('instances.deleteHint') }}</span>
             </div>
-            <button class="dl-btn dl-btn--danger" :disabled="deleteAction.busy['*']" @click="confirmDelete">
+            <button
+              class="dl-btn dl-btn--danger"
+              :disabled="deleteAction.busy['*']"
+              @click="confirmDelete"
+            >
               <DlIcon name="trash" :size="13" />
               {{ t('instances.table.delete') }}
             </button>
@@ -606,11 +710,21 @@ function removeEnvRow(idx: number) {
 
     <!-- Footer: the sticky save bar for the whole form. -->
     <div class="detail-footer">
-      <span v-if="dirty" class="footer-dirty">{{ t('instanceEdit.unsaved') }}</span>
-      <button class="dl-btn dl-btn--quiet" :disabled="!dirty || saving" @click="onCancel">
+      <span v-if="dirty" class="footer-dirty">{{
+        t('instanceEdit.unsaved')
+      }}</span>
+      <button
+        class="dl-btn dl-btn--quiet"
+        :disabled="!dirty || saving"
+        @click="onCancel"
+      >
         {{ t('instanceEdit.cancel') }}
       </button>
-      <button class="dl-btn dl-btn--primary" :disabled="!formValid || !dirty || saving" @click="onSave">
+      <button
+        class="dl-btn dl-btn--primary"
+        :disabled="!formValid || !dirty || saving"
+        @click="onSave"
+      >
         {{ t('instanceEdit.save') }}
       </button>
     </div>

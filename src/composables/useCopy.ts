@@ -16,7 +16,10 @@ import { useI18n } from 'vue-i18n'
 export function useCopy() {
   const { t } = useI18n()
 
-  async function copy(text: string, successKey = 'common.copied'): Promise<boolean> {
+  async function copy(
+    text: string,
+    successKey = 'common.copied',
+  ): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text)
       Message.success(t(successKey))

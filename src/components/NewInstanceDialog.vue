@@ -19,7 +19,12 @@ const props = defineProps<{
    * original runs on — the sheet then offers that machine's versions and
    * DSH_HOMEs, not the current host's.
    */
-  preset?: { name: string; versionId: string; homeId: string; hostId?: string } | null
+  preset?: {
+    name: string
+    versionId: string
+    homeId: string
+    hostId?: string
+  } | null
 }>()
 const emit = defineEmits<{
   (e: 'update:visible', v: boolean): void
@@ -51,7 +56,8 @@ const homes = computed(() => store.homesByHost[hostId.value] ?? [])
  * today's — or, worse, 「还没有装任何版本」 about a machine that never answered.
  */
 const hostError = computed(
-  () => store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
+  () =>
+    store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
 )
 
 function retryHost() {
@@ -62,7 +68,9 @@ function retryHost() {
  *  host** (ADR-0006 §1), so only this machine's names are in the way: `web` on
  *  another machine says nothing about `web` here. */
 function uniqueName(base: string): string {
-  const existing = new Set(store.instancesOfHost(hostId.value).map((i) => i.name))
+  const existing = new Set(
+    store.instancesOfHost(hostId.value).map((i) => i.name),
+  )
   if (!existing.has(base)) return base
   let n = 2
   while (existing.has(`${base} ${n}`)) n += 1
@@ -104,13 +112,24 @@ const createAction = useAction(
   // The instance is bound on the machine whose versions and DSH_HOMEs the two
   // selects are listing — the current host (ADR-0006 §3: a binding never spans
   // two machines).
-  () => api.createInstance(name.value.trim(), versionId.value!, homeId.value!, hostId.value),
+  () =>
+    api.createInstance(
+      name.value.trim(),
+      versionId.value!,
+      homeId.value!,
+      hostId.value,
+    ),
   { success: () => t('instances.created') },
 )
 const saving = computed(() => createAction.busy['*'])
 
 const valid = computed(
-  () => !!name.value.trim() && !!versionId.value && !!homeId.value && !noVersions.value && !noHomes.value,
+  () =>
+    !!name.value.trim() &&
+    !!versionId.value &&
+    !!homeId.value &&
+    !noVersions.value &&
+    !noHomes.value,
 )
 
 async function onCreate() {
@@ -135,7 +154,9 @@ function close() {
     modal-class="dl-sheet"
     @update:visible="(v) => emit('update:visible', v)"
   >
-    <template #title>{{ preset ? t('instances.duplicate') : t('instances.newInstance') }}</template>
+    <template #title>{{
+      preset ? t('instances.duplicate') : t('instances.newInstance')
+    }}</template>
 
     <!-- The machine has to answer before the sheet can offer anything: a host
          whose read failed gets the reason and a retry, never a stale list. -->
@@ -156,7 +177,11 @@ function close() {
     <div v-else-if="noVersions" class="dl-empty">
       <p class="dl-empty-title">{{ t('instances.noVersionsTitle') }}</p>
       <p class="dl-empty-text">{{ t('instances.noVersionsDesc') }}</p>
-      <button class="dl-btn dl-btn--primary" style="margin-top: 6px" @click="close">
+      <button
+        class="dl-btn dl-btn--primary"
+        style="margin-top: 6px"
+        @click="close"
+      >
         {{ t('common.close') }}
       </button>
     </div>
@@ -178,7 +203,9 @@ function close() {
       <div class="dl-field">
         <label class="dl-field-label">{{ t('instanceEdit.version') }}</label>
         <a-select v-model="versionId" style="width: 100%">
-          <a-option v-for="v in versions" :key="v.id" :value="v.id">{{ v.version }}</a-option>
+          <a-option v-for="v in versions" :key="v.id" :value="v.id">{{
+            v.version
+          }}</a-option>
         </a-select>
       </div>
 
@@ -191,13 +218,18 @@ function close() {
         </a-select>
         <p class="dl-field-hint">{{ t('instances.homeHint') }}</p>
       </div>
-
     </div>
 
     <template v-if="!noVersions" #footer>
       <div class="sheet-footer">
-        <button class="dl-btn dl-btn--quiet" @click="close">{{ t('common.cancel') }}</button>
-        <button class="dl-btn dl-btn--primary" :disabled="!valid || saving" @click="onCreate">
+        <button class="dl-btn dl-btn--quiet" @click="close">
+          {{ t('common.cancel') }}
+        </button>
+        <button
+          class="dl-btn dl-btn--primary"
+          :disabled="!valid || saving"
+          @click="onCreate"
+        >
           {{ t('instances.create') }}
         </button>
       </div>

@@ -4,9 +4,12 @@ import { createI18n } from 'vue-i18n'
 // @intlify/unplugin-vue-i18n (see vite.config.ts): they are pre-compiled at
 // build time and hot-reloaded during development. The glob below collects
 // them into the runtime messages map.
-const modules = import.meta.glob<{ default: Record<string, unknown> }>('../locales/*.json', {
-  eager: true,
-})
+const modules = import.meta.glob<{ default: Record<string, unknown> }>(
+  '../locales/*.json',
+  {
+    eager: true,
+  },
+)
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const messages: Record<string, any> = {}

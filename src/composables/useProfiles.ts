@@ -55,13 +55,19 @@ export function useProfiles() {
 
   /** Ensures the instance's selection exists and still exists in its HOME's
    *  list, applying the fallback chain; returns the effective profile. */
-  async function ensureSelection(inst: DshInstance): Promise<string | undefined> {
+  async function ensureSelection(
+    inst: DshInstance,
+  ): Promise<string | undefined> {
     const list = await loadForHome(inst.home_id)
     const kept = selectionByInstance[inst.id]
     if (kept && list.includes(kept)) return kept
     const fallback =
-      (inst.last_profile && list.includes(inst.last_profile) && inst.last_profile) ||
-      (inst.default_profile && list.includes(inst.default_profile) && inst.default_profile) ||
+      (inst.last_profile &&
+        list.includes(inst.last_profile) &&
+        inst.last_profile) ||
+      (inst.default_profile &&
+        list.includes(inst.default_profile) &&
+        inst.default_profile) ||
       list[0] ||
       undefined
     selectionByInstance[inst.id] = fallback

@@ -11,7 +11,12 @@ export default defineConfig({
     // messages at build time and hot-reloads them during development.
     VueI18nPlugin({
       // Normalize to posix separators so picomatch patterns always match.
-      include: [fileURLToPath(new URL('./src/locales/**', import.meta.url)).replace(/\\/g, '/')],
+      include: [
+        fileURLToPath(new URL('./src/locales/**', import.meta.url)).replace(
+          /\\/g,
+          '/',
+        ),
+      ],
       strictMessage: false,
       escapeHtml: false,
     }),
