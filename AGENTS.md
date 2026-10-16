@@ -276,8 +276,9 @@ DSH_HOME 打不开，能给的是路径与一条命令；终端与日志两个�
   `src-tauri/src/lib.rs`（`generate_handler!`）。**参数拼写也是契约**：
   `#[tauri::command(rename_all = "snake_case")]` 的命令后端按 snake_case 读，前端发的名字
   对不上时 Tauri 不会报错——`Option<T>` 直接变成 `None` 走了默认值（真发生过：远程安装在
-  界面说「正在服务器上装」的同时装到了本机）。`ci/api-contract.test.mjs` 会逐参数比对两边
-  的拼写，新增参数后跑它；浏览器 mock 对拼写宽松，所以这一类比预览里看不出来。
+  界面说「正在服务器上装」的同时装到了本机）。`ci/api-contract.test.mjs` 会逐参数比对两边的
+  拼写，并盯住 mock 每个分支读的键——浏览器 mock 与后端读的是同一把键，所以拼错在预览里
+  就是可见的错值（前端发的键与后端读的键，两处对不上的当场报出来）。
 - 测试断言**可观察的结果**——公开接口的行为、界面读到的内容；私有函数用真实输入测它的
   产出，不测「内部调用了谁」（`assert_eq!(fake.calls(), vec![…])` 这种）。
 - 前端没有测试框架（无 vitest/jsdom），能测的那几件事写成 `ci/*.test.mjs` 的源码级检查。
