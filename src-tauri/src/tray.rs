@@ -351,15 +351,13 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "实例", true, None::<&str>)?;
     // DSH 版本 / DSH_HOME / Profile 都是资源库的标签页，点进去直达对应那一页。
     // 插件管理不占格：它属于运行中的实例，入口在实例行展开的卡片里。
-    let quick_versions = MenuItem::with_id(app, MENU_QUICK_VERSIONS, "DSH 版本", true, None::<&str>)?;
+    let quick_versions =
+        MenuItem::with_id(app, MENU_QUICK_VERSIONS, "DSH 版本", true, None::<&str>)?;
     let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "DSH_HOME", true, None::<&str>)?;
-    let quick_profiles = MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;
-    let quick_refs: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![
-        &quick_home,
-        &quick_homes,
-        &quick_profiles,
-        &quick_versions,
-    ];
+    let quick_profiles =
+        MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;
+    let quick_refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        vec![&quick_home, &quick_homes, &quick_profiles, &quick_versions];
     let quick_sub = Submenu::with_id_and_items(app, MENU_QUICK_SUB, "快捷入口", true, &quick_refs)?;
 
     // Running profiles live in a second-level submenu: each instance gets an
@@ -553,7 +551,11 @@ fn bulk_start_targets(
 ) -> (Vec<StartTarget>, Vec<String>) {
     let mut targets = Vec::new();
     let mut skipped = Vec::new();
-    for inst in cfg.instances.iter().filter(|i| !running.contains_key(&i.id)) {
+    for inst in cfg
+        .instances
+        .iter()
+        .filter(|i| !running.contains_key(&i.id))
+    {
         let host_id = if inst.host_id.trim().is_empty() {
             LOCAL_HOST_ID
         } else {
@@ -814,7 +816,9 @@ mod tests {
             ssh_target: "zjq_aliyun".into(),
             registry: None,
             extra_env: Default::default(),
-            data_dir: Some(std::path::PathBuf::from("/home/demo/.local/share/dsh-launcher")),
+            data_dir: Some(std::path::PathBuf::from(
+                "/home/demo/.local/share/dsh-launcher",
+            )),
             builtin: false,
             toolchain: Default::default(),
             toolchain_overrides: Default::default(),
@@ -970,7 +974,10 @@ mod tests {
     #[test]
     fn a_stop_that_failed_names_the_instance_and_the_reason() {
         let note = stop_failure_note("web（阿里云服务器）", "主机不可达：连接超时");
-        assert!(note.contains("web（阿里云服务器）"), "要说清是哪一台：{note}");
+        assert!(
+            note.contains("web（阿里云服务器）"),
+            "要说清是哪一台：{note}"
+        );
         assert!(note.contains("主机不可达：连接超时"), "要带上原因：{note}");
     }
 
@@ -1016,21 +1023,30 @@ mod tests {
     fn a_start_all_says_what_it_did_not_do() {
         assert!(start_all_report(&[], &[]).is_none(), "都起来了就别弹窗");
 
-        let failures = vec![(
-            "web（本机）".to_string(),
-            "端口 3000 被占用".to_string(),
-        )];
+        let failures = vec![("web（本机）".to_string(), "端口 3000 被占用".to_string())];
         let note = start_all_report(&failures, &["api（阿里云服务器）".to_string()])
             .expect("没做完的事要说出来");
         assert!(note.contains("web（本机）"), "{note}");
-        assert!(note.contains("端口 3000 被占用"), "失败要带后端那句原因：{note}");
-        assert!(note.contains("api（阿里云服务器）"), "跳过的那台要点名：{note}");
+        assert!(
+            note.contains("端口 3000 被占用"),
+            "失败要带后端那句原因：{note}"
+        );
+        assert!(
+            note.contains("api（阿里云服务器）"),
+            "跳过的那台要点名：{note}"
+        );
         assert!(note.contains("跳过"), "跳过与失败不是一回事：{note}");
 
         // 只有跳过的：没有失败也照样要说，否则用户看到的是一个没反应的按钮。
         let only_skipped =
             start_all_report(&[], &["api（阿里云服务器）".to_string()]).expect("跳过要说");
-        assert!(only_skipped.contains("api（阿里云服务器）"), "{only_skipped}");
-        assert!(!only_skipped.contains("失败"), "没失败就别提失败：{only_skipped}");
+        assert!(
+            only_skipped.contains("api（阿里云服务器）"),
+            "{only_skipped}"
+        );
+        assert!(
+            !only_skipped.contains("失败"),
+            "没失败就别提失败：{only_skipped}"
+        );
     }
 }

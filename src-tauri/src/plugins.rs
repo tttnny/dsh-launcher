@@ -140,8 +140,7 @@ async fn list_plugins_via(
 ) -> Result<PluginView, String> {
     // The read-only reasons are distinct on purpose: the UI shows them
     // verbatim, so each one has to say what happened and what to do.
-    const NOT_RUNNING: &str =
-        "实例未在运行：启动该实例后即可在这里管理它的补丁层。";
+    const NOT_RUNNING: &str = "实例未在运行：启动该实例后即可在这里管理它的补丁层。";
     const ADOPTED: &str =
         "该实例由系统接管（DSH 自行重启），没有可用的启动 token，无法管理补丁层。请从启动器重启该实例。";
 
@@ -168,7 +167,11 @@ async fn list_plugins_via(
         // came with ("这个 Profile 装了什么？") from the profile's own files,
         // read where they live.
         let bundles = profile_projection(state, &host, &home, profile).await;
-        return Ok(PluginView::readonly(PluginViewMode::NotRunning, NOT_RUNNING, bundles));
+        return Ok(PluginView::readonly(
+            PluginViewMode::NotRunning,
+            NOT_RUNNING,
+            bundles,
+        ));
     };
     // What decides is the token, not how we came to own the entry: an adopted
     // process whose launch URL we remembered is as manageable as a child of
@@ -194,7 +197,11 @@ async fn list_plugins_via(
         Ok(url) => url,
         Err(e) => {
             let bundles = profile_projection(state, &host, &home, profile).await;
-            return Ok(PluginView::readonly(PluginViewMode::Unreachable, e, bundles));
+            return Ok(PluginView::readonly(
+                PluginViewMode::Unreachable,
+                e,
+                bundles,
+            ));
         }
     };
     // A refused session / unreachable instance is read-only rather than a
@@ -203,7 +210,11 @@ async fn list_plugins_via(
         Ok(client) => client,
         Err(e) => {
             let bundles = profile_projection(state, &host, &home, profile).await;
-            return Ok(PluginView::readonly(PluginViewMode::Unreachable, e, bundles));
+            return Ok(PluginView::readonly(
+                PluginViewMode::Unreachable,
+                e,
+                bundles,
+            ));
         }
     };
     let bundles = client.list_bundles().await?;
@@ -365,16 +376,26 @@ pub(crate) fn offline_bundles_in(
         return Vec::new();
     };
     let manifest = std::fs::read_to_string(dir.join("package.json")).ok();
-    offline_bundles_from(manifest.as_deref(), |name| read_installed_version(&dir, name))
+    offline_bundles_from(manifest.as_deref(), |name| {
+        read_installed_version(&dir, name)
+    })
 }
 
 /// The version of an installed package, read from the copy pnpm linked into the
 /// profile's `node_modules`. Absent when it is not there (or not readable),
 /// which is exactly the case the page shows as "no version".
 fn read_installed_version(profile_dir: &std::path::Path, name: &str) -> Option<String> {
-    let raw = std::fs::read_to_string(profile_dir.join("node_modules").join(name).join("package.json")).ok()?;
+    let raw = std::fs::read_to_string(
+        profile_dir
+            .join("node_modules")
+            .join(name)
+            .join("package.json"),
+    )
+    .ok()?;
     let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    doc.get("version").and_then(|v| v.as_str()).map(str::to_string)
+    doc.get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// The launcher's own UI language. The service localizes its metadata
@@ -450,7 +471,10 @@ pub(crate) async fn set_bundle_enabled_for(
 ) -> Result<ChangeOutcome, String> {
     let client = write_client(state, home_id, profile, instance_id).await?;
     let result = client.set_bundle_enabled(name, enabled).await?;
-    Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
+    Ok(localize_refusal(ChangeOutcome::from_native(
+        result,
+        &ui_locale(state),
+    )))
 }
 
 /// A write result handed to the frontend (design §4 frozen contract): the
@@ -548,10 +572,18 @@ pub(crate) async fn remove_bundle_for(
     state: &AppState,
     input: &RemoveBundleInput,
 ) -> Result<ChangeOutcome, String> {
-    let client = write_client(state, &input.home_id, &input.profile, input.instance_id.as_deref())
-        .await?;
+    let client = write_client(
+        state,
+        &input.home_id,
+        &input.profile,
+        input.instance_id.as_deref(),
+    )
+    .await?;
     let result = client.remove_bundle(&input.name).await?;
-    Ok(localize_refusal(ChangeOutcome::from_native(result, &ui_locale(state))))
+    Ok(localize_refusal(ChangeOutcome::from_native(
+        result,
+        &ui_locale(state),
+    )))
 }
 
 /// Reads the store a profile's `node_modules` is currently linked from, via
@@ -683,10 +715,7 @@ pub(crate) fn ensure_profile_store_pin(
 /// writer never touches an existing file, so a thinner one created here would
 /// permanently deny the profile its `nodeLinker: hoisted` (the setting
 /// out-of-tree plugins depend on).
-pub(crate) fn store_pin_document(
-    raw: Option<&str>,
-    store_dir: &std::path::Path,
-) -> Option<String> {
+pub(crate) fn store_pin_document(raw: Option<&str>, store_dir: &std::path::Path) -> Option<String> {
     const FRESH: &str = "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n";
     let raw = raw.unwrap_or(FRESH);
     let pinned = format!(
@@ -1494,7 +1523,10 @@ mod tests {
             ],
             "web",
         );
-        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+        let state = app_state(
+            vec![home_with_path("h1", &home)],
+            vec![instance_of("i1", "h1")],
+        );
 
         let view = list_plugins_for(&state, "h1", "web", None).await.unwrap();
 
@@ -1506,7 +1538,10 @@ mod tests {
 
         // The profile's own order first, then the rest of what it installs.
         let names: Vec<&str> = view.bundles.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, ["@deepseek-ai/dsh-base", "@dsh-plugin/dsh-auxiliary"]);
+        assert_eq!(
+            names,
+            ["@deepseek-ai/dsh-base", "@dsh-plugin/dsh-auxiliary"]
+        );
         assert!(view.bundles.iter().all(|b| b.enabled && b.installed));
         // Nothing a file cannot prove: no row counts, no removal rule, no
         // version (nothing is linked into node_modules in this scratch HOME).
@@ -1537,7 +1572,9 @@ mod tests {
         // add; here ds-bot has no node_modules copy, so it gets none.
         std::fs::create_dir_all(dir.join("node_modules").join("@deepseek-ai/dsh-base")).unwrap();
         std::fs::write(
-            dir.join("node_modules").join("@deepseek-ai/dsh-base").join("package.json"),
+            dir.join("node_modules")
+                .join("@deepseek-ai/dsh-base")
+                .join("package.json"),
             r#"{"name":"@deepseek-ai/dsh-base","version":"0.2.1-alpha.2"}"#,
         )
         .unwrap();
@@ -1564,7 +1601,10 @@ mod tests {
     #[tokio::test]
     async fn list_plugins_marks_adopted_instances_readonly() {
         let home = scratch_home("adopted");
-        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+        let state = app_state(
+            vec![home_with_path("h1", &home)],
+            vec![instance_of("i1", "h1")],
+        );
         {
             let mut running = state.running.lock().await;
             running.insert(
@@ -1607,7 +1647,10 @@ mod tests {
     #[tokio::test]
     async fn an_adopted_instance_with_a_token_is_still_addressed() {
         let home = scratch_home("adopted-token");
-        let state = app_state(vec![home_with_path("h1", &home)], vec![instance_of("i1", "h1")]);
+        let state = app_state(
+            vec![home_with_path("h1", &home)],
+            vec![instance_of("i1", "h1")],
+        );
         {
             let mut running = state.running.lock().await;
             running.insert(
@@ -1819,7 +1862,10 @@ mod tests {
         };
 
         // Bundle toggle: `management-required` (the "ships with DSH" refusal).
-        let bundle = localize_refusal(ChangeOutcome::from_native(refusal("management-required"), "zh-CN"));
+        let bundle = localize_refusal(ChangeOutcome::from_native(
+            refusal("management-required"),
+            "zh-CN",
+        ));
         assert_eq!(bundle.error_code.as_deref(), Some("management-required"));
         assert_eq!(
             bundle.diagnostic.as_deref(),
@@ -1827,7 +1873,10 @@ mod tests {
         );
 
         // Bundle removal: `not-removable`.
-        let removed = localize_refusal(ChangeOutcome::from_native(refusal("not-removable"), "zh-CN"));
+        let removed = localize_refusal(ChangeOutcome::from_native(
+            refusal("not-removable"),
+            "zh-CN",
+        ));
         assert_eq!(removed.error_code.as_deref(), Some("not-removable"));
         assert_eq!(
             removed.diagnostic.as_deref(),
@@ -1835,12 +1884,12 @@ mod tests {
         );
 
         // A write naming a layer the profile does not have: `unknown-plugin`.
-        let entry = localize_refusal(ChangeOutcome::from_native(refusal("unknown-plugin"), "zh-CN"));
+        let entry = localize_refusal(ChangeOutcome::from_native(
+            refusal("unknown-plugin"),
+            "zh-CN",
+        ));
         assert_eq!(entry.error_code.as_deref(), Some("unknown-plugin"));
-        assert_eq!(
-            entry.diagnostic.as_deref(),
-            Some("实例里找不到这个插件")
-        );
+        assert_eq!(entry.diagnostic.as_deref(), Some("实例里找不到这个插件"));
 
         // An empty code still reads as a sentence, never an empty diagnostic.
         let bare = localize_refusal(ChangeOutcome::from_native(refusal(""), "zh-CN"));
@@ -2074,7 +2123,12 @@ mod tests {
         put_running(
             &state,
             "i2",
-            running_entry("web", stale_local_url(), false, Some(remote_run(&host, &remote_url()))),
+            running_entry(
+                "web",
+                stale_local_url(),
+                false,
+                Some(remote_run(&host, &remote_url())),
+            ),
         )
         .await;
 
@@ -2121,12 +2175,18 @@ mod tests {
         assert_eq!(forwards.len(), 1, "一条实例地址一条转发");
         assert_eq!(forwards[0].remote_host, "192.0.2.7");
         assert_eq!(forwards[0].remote_port, 3080);
-        assert_eq!(forwards[0].local_port, 3080, "本机端口与远端相同（没被占时）");
+        assert_eq!(
+            forwards[0].local_port, 3080,
+            "本机端口与远端相同（没被占时）"
+        );
 
         // …and the client talked to loopback on the port the forward gave it,
         // with the launch token intact.
         let minted = server.minted();
-        assert_eq!(minted, vec![format!("http://127.0.0.1:3080/?token={TOKEN}")]);
+        assert_eq!(
+            minted,
+            vec![format!("http://127.0.0.1:3080/?token={TOKEN}")]
+        );
         assert_eq!(
             server.last_sent().url,
             "http://127.0.0.1:3080/api/pluginManager/listBundles"
@@ -2155,7 +2215,12 @@ mod tests {
         put_running(
             &state,
             "i2",
-            running_entry("web", stale_local_url(), true, Some(remote_run(&host, &remote_url()))),
+            running_entry(
+                "web",
+                stale_local_url(),
+                true,
+                Some(remote_run(&host, &remote_url())),
+            ),
         )
         .await;
 
@@ -2178,7 +2243,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(view.mode, PluginViewMode::Managed, "有 token 的接管实例照样能管");
+        assert_eq!(
+            view.mode,
+            PluginViewMode::Managed,
+            "有 token 的接管实例照样能管"
+        );
         assert_eq!(view.instance_id.as_deref(), Some("i2"));
         let forwards = forwarded(&hosts);
         assert_eq!(forwards.len(), 1, "一条实例地址一条转发");
@@ -2209,7 +2278,12 @@ mod tests {
         put_running(
             &state,
             "i2",
-            running_entry("web", stale_local_url(), true, Some(remote_run(&host, &remote_url()))),
+            running_entry(
+                "web",
+                stale_local_url(),
+                true,
+                Some(remote_run(&host, &remote_url())),
+            ),
         )
         .await;
 
@@ -2279,7 +2353,10 @@ mod tests {
             ]))],
         );
         let transport: Arc<dyn crate::native::NativeTransport> = server.clone();
-        let state = AppState { host_transport: hosts.clone(), ..state };
+        let state = AppState {
+            host_transport: hosts.clone(),
+            ..state
+        };
 
         let view = list_plugins_via(&state, transport, "h1", "web", Some("i1"))
             .await
@@ -2330,9 +2407,17 @@ mod tests {
 
         let names: Vec<&str> = view.bundles.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["@deepseek-ai/dsh-base", "ds-bot"]);
-        let base = view.bundles.iter().find(|b| b.name == "@deepseek-ai/dsh-base").unwrap();
+        let base = view
+            .bundles
+            .iter()
+            .find(|b| b.name == "@deepseek-ai/dsh-base")
+            .unwrap();
         assert!(base.enabled && base.installed);
-        assert_eq!(base.version.as_deref(), Some("0.2.1-alpha.2"), "版本读自那台机器");
+        assert_eq!(
+            base.version.as_deref(),
+            Some("0.2.1-alpha.2"),
+            "版本读自那台机器"
+        );
         assert!(
             view.bundles.iter().all(|b| b.row_count == 0
                 && !b.removable
@@ -2344,7 +2429,9 @@ mod tests {
         // One call for the whole profile, aimed at that machine's own path.
         assert_eq!(hosts.calls().len(), 1, "一次 ssh 读回整个 Profile");
         assert!(
-            hosts.last_script().contains(&format!("{REMOTE_HOME}/profiles/web")),
+            hosts
+                .last_script()
+                .contains(&format!("{REMOTE_HOME}/profiles/web")),
             "读的是那台机器上的路径：{}",
             hosts.last_script()
         );
@@ -2395,7 +2482,10 @@ mod tests {
             reason.contains("Connection refused"),
             "那台机器自己的话要带出来：{reason}"
         );
-        assert!(reason.contains("重试"), "给出能离开这个状态的动作：{reason}");
+        assert!(
+            reason.contains("重试"),
+            "给出能离开这个状态的动作：{reason}"
+        );
         assert!(view.bundles.is_empty(), "读不到就不假装读过");
         assert!(hosts.calls().is_empty(), "已经知道连不上，不再问一遍");
         assert!(server.minted().is_empty(), "也不去连实例");
@@ -2421,7 +2511,12 @@ mod tests {
         put_running(
             &state,
             "i2",
-            running_entry("web", stale_local_url(), false, Some(remote_run(&host, &remote_url()))),
+            running_entry(
+                "web",
+                stale_local_url(),
+                false,
+                Some(remote_run(&host, &remote_url())),
+            ),
         )
         .await;
         let server = PluginServer::new(COOKIE, vec![]);
@@ -2434,8 +2529,14 @@ mod tests {
         assert_eq!(view.mode, PluginViewMode::Unreachable);
         let reason = view.reason.expect("read-only reason");
         assert!(reason.contains("隧道"), "reason: {reason}");
-        assert!(reason.contains("192.0.2.7"), "远端原始地址要念出来：{reason}");
-        assert!(reason.contains(&format!("ssh {TARGET}")), "给出可执行的命令：{reason}");
+        assert!(
+            reason.contains("192.0.2.7"),
+            "远端原始地址要念出来：{reason}"
+        );
+        assert!(
+            reason.contains(&format!("ssh {TARGET}")),
+            "给出可执行的命令：{reason}"
+        );
         assert!(
             reason.contains("不是 DSH 拒绝"),
             "与「DSH 拒绝了这次操作」读起来不一样：{reason}"
@@ -2481,7 +2582,10 @@ mod tests {
         let reason = view.reason.expect("read-only reason");
         assert!(reason.contains("接管"), "reason: {reason}");
         assert_eq!(
-            view.bundles.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            view.bundles
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
             ["ds-bot"]
         );
         assert_eq!(view.bundles[0].version.as_deref(), Some("0.9.4"));

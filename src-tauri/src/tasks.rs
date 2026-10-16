@@ -127,10 +127,7 @@ pub(crate) fn valid_version_string(v: &str) -> bool {
 /// at stage boundaries so a task cancelled during a phase without a
 /// registered child (npm probing, pnpm bootstrap, profile boot) stops instead
 /// of silently creating the HOME/instance records afterwards.
-pub(crate) async fn task_is_running(
-    state: &State<'_, AppState>,
-    task_id: &str,
-) -> bool {
+pub(crate) async fn task_is_running(state: &State<'_, AppState>, task_id: &str) -> bool {
     let tasks = state.tasks.lock().await;
     tasks
         .get(task_id)
@@ -330,7 +327,14 @@ pub(crate) async fn finish_task<T>(
             task.state = TaskState::Done;
             task.percent = 100;
             on_done(task, payload);
-            emit_progress(app, task_id, TaskState::Done, 100, None, task.instance_id.clone());
+            emit_progress(
+                app,
+                task_id,
+                TaskState::Done,
+                100,
+                None,
+                task.instance_id.clone(),
+            );
         }
         Err(msg) => {
             task.state = TaskState::Error;
@@ -553,8 +557,13 @@ async fn do_create_instance<R: tauri::Runtime>(
             &format!("正在「{}」上生成 web profile 模板…", host.display_name),
         )
         .await;
-        crate::process::ensure_remote_web_profile_template(state, host, &version_record, &home_path)
-            .await?;
+        crate::process::ensure_remote_web_profile_template(
+            state,
+            host,
+            &version_record,
+            &home_path,
+        )
+        .await?;
     }
 
     // 3. Create the instance record.
@@ -620,7 +629,13 @@ async fn ensure_web_profile_template<R: tauri::Runtime>(
             .map(|mut d| d.next().is_some())
             .unwrap_or(false);
     if web_populated {
-        push_task_log(app, state, task_id, "web profile 已存在，直接复制为 __temp__ 模板").await;
+        push_task_log(
+            app,
+            state,
+            task_id,
+            "web profile 已存在，直接复制为 __temp__ 模板",
+        )
+        .await;
         copy_dir(&web_dir, &temp_dir).map_err(|e| format!("复制 __temp__ profile 失败: {e}"))?;
         crate::profile::scrub_profile_port_pin(&temp_dir);
         push_task_log(app, state, task_id, "web profile 模板 __temp__ 已创建").await;
@@ -849,7 +864,16 @@ async fn install_version_streamed<R: tauri::Runtime>(
     // launcher's data dir via npm.
     let pnpm_prog = crate::toolchain::ensure_pnpm_for_task(app, state, task_id).await?;
 
-    let install_result = install_via_pnpm(app, state, task_id, &dir, &layout.store_dir, &pnpm_prog, version).await;
+    let install_result = install_via_pnpm(
+        app,
+        state,
+        task_id,
+        &dir,
+        &layout.store_dir,
+        &pnpm_prog,
+        version,
+    )
+    .await;
     if install_result.is_err() {
         // A half-installed tree (plus the allowBuilds workspace manifest this
         // path writes) makes a retry's semantics unclear and wastes disk —
@@ -951,8 +975,8 @@ async fn install_version_remote<R: tauri::Runtime>(
     // The pnpm that drives the install is the one that machine's own probe
     // resolved: the same binary the environment page reports, or a failure that
     // names the command installing one there.
-    let pnpm = crate::toolchain::ensure_pnpm_for_task_on(app, state, task_id, Some(&host.id))
-        .await?;
+    let pnpm =
+        crate::toolchain::ensure_pnpm_for_task_on(app, state, task_id, Some(&host.id)).await?;
 
     // Whether that machine's npm knows the version decides between installing
     // it there and building it from source there — the same fork the local
@@ -1044,22 +1068,15 @@ async fn install_remote_from_npm<R: tauri::Runtime>(
         let argv = remote_npm_install_argv(pnpm, layout, version);
         let log_path = remote_step_log_path(&layout.data_dir, task_id, &format!("npm-{round}"));
 
-        let outcome = match run_remote_streamed(
-            app,
-            state,
-            task_id,
-            target,
-            &log_path,
-            argv,
-            "pnpm install",
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            // A transport failure is not the install's own failure: retrying a
-            // machine the launcher cannot reach would only repeat it.
-            Err(e) => return Err(e),
-        };
+        let outcome =
+            match run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install")
+                .await
+            {
+                Ok(outcome) => outcome,
+                // A transport failure is not the install's own failure: retrying a
+                // machine the launcher cannot reach would only repeat it.
+                Err(e) => return Err(e),
+            };
         let logs = task_logs(state, task_id).await;
         // `None` is a command that was killed before it could record how it
         // exited: the log then carries the only evidence there is.
@@ -1194,8 +1211,8 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         let log_path = remote_step_log_path(&layout.data_dir, task_id, "clone");
         let outcome =
             run_remote_streamed(app, state, task_id, target, &log_path, argv, "git clone")
-            .await
-            .map_err(RemoteStepFailure::message)?;
+                .await
+                .map_err(RemoteStepFailure::message)?;
         let logs = task_logs(state, task_id).await;
         let code = outcome.status(&logs, &log_path)?;
         if code != 0 {
@@ -1219,13 +1236,22 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         "http",
         layout.registry.as_deref(),
     ));
-    let argv =
-        crate::remote::measured_argv(&remote_pnpm_argv(pnpm, layout, &deps), &layout.dir.to_string_lossy());
+    let argv = crate::remote::measured_argv(
+        &remote_pnpm_argv(pnpm, layout, &deps),
+        &layout.dir.to_string_lossy(),
+    );
     let log_path = remote_step_log_path(&layout.data_dir, task_id, "deps");
-    let outcome =
-        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm install（源码）")
-            .await
-            .map_err(RemoteStepFailure::message)?;
+    let outcome = run_remote_streamed(
+        app,
+        state,
+        task_id,
+        target,
+        &log_path,
+        argv,
+        "pnpm install（源码）",
+    )
+    .await
+    .map_err(RemoteStepFailure::message)?;
     let logs = task_logs(state, task_id).await;
     let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
@@ -1243,10 +1269,17 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         &layout.dir.to_string_lossy(),
     );
     let log_path = remote_step_log_path(&layout.data_dir, task_id, "build");
-    let outcome =
-        run_remote_streamed(app, state, task_id, target, &log_path, argv, "pnpm run build")
-            .await
-            .map_err(RemoteStepFailure::message)?;
+    let outcome = run_remote_streamed(
+        app,
+        state,
+        task_id,
+        target,
+        &log_path,
+        argv,
+        "pnpm run build",
+    )
+    .await
+    .map_err(RemoteStepFailure::message)?;
     let logs = task_logs(state, task_id).await;
     let code = outcome.status(&logs, &log_path)?;
     if code != 0 {
@@ -1256,13 +1289,11 @@ async fn install_remote_from_source<R: tauri::Runtime>(
     // 4. Verify: the same two layouts the local flow checks, read on the
     //    machine that produced them.
     let versions_dir = layout.versions_dir.to_string_lossy().to_string();
-    let installed = crate::remote::installed_versions(&*state.host_transport, target, &versions_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !installed
-        .iter()
-        .any(|v| v.name == version && v.bin_ready)
-    {
+    let installed =
+        crate::remote::installed_versions(&*state.host_transport, target, &versions_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+    if !installed.iter().any(|v| v.name == version && v.bin_ready) {
         return Err(format!(
             "构建完成后未找到 CLI 入口 {}/apps/cli/lib/bin.js，请查看任务日志中的构建输出",
             layout.dir.display()
@@ -1290,7 +1321,12 @@ async fn ensure_remote_pending_builds<R: tauri::Runtime>(
     if pending.is_empty() {
         return Ok(());
     }
-    let shown = pending.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let shown = pending
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     push_task_log(
         app,
         state,
@@ -1321,7 +1357,12 @@ async fn ensure_remote_pending_builds<R: tauri::Runtime>(
     }
     pending = remote_pending_builds(state, target, &path).await;
     if !pending.is_empty() {
-        let shown = pending.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let shown = pending
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(RemoteStepFailure::failed(format!(
             "pnpm rebuild 后仍有 {} 个依赖未完成构建: {shown}",
             pending.len()
@@ -1544,8 +1585,7 @@ async fn run_remote_streamed<R: tauri::Runtime>(
         }
     }
 
-    let outcome =
-        follow_remote_log(app, state, task_id, &transport, &run, log_path, what).await;
+    let outcome = follow_remote_log(app, state, task_id, &transport, &run, log_path, what).await;
     clear_remote_run(state, task_id).await;
     outcome
 }
@@ -1724,7 +1764,12 @@ async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Result<(), String
     let deadline = tokio::time::Instant::now() + REMOTE_STOP_TIMEOUT;
     while crate::remote::alive(&*transport, &run.host, run.pid)
         .await
-        .map_err(|e| format!("没能确认那台机器上的安装进程是否已停止（pid {}）：{e}", run.pid))?
+        .map_err(|e| {
+            format!(
+                "没能确认那台机器上的安装进程是否已停止（pid {}）：{e}",
+                run.pid
+            )
+        })?
     {
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -1902,9 +1947,11 @@ fn failure_evidence(log: &str, words: &[&str]) -> Option<String> {
     log.lines()
         .rev()
         .map(str::trim)
-        .find(|line| !line.is_empty() && {
-            let said = line.to_lowercase();
-            words.iter().any(|word| said.contains(word))
+        .find(|line| {
+            !line.is_empty() && {
+                let said = line.to_lowercase();
+                words.iter().any(|word| said.contains(word))
+            }
         })
         .map(shorten_line)
 }
@@ -2129,8 +2176,7 @@ async fn install_via_pnpm<R: tauri::Runtime>(
                 if mentions_ignored_builds(&logs) {
                     match approvals.step(&logs) {
                         ApprovalStep::Approve(fresh) => {
-                            push_task_log(app, state, task_id, &approval_round_note(&fresh))
-                                .await;
+                            push_task_log(app, state, task_id, &approval_round_note(&fresh)).await;
                             continue;
                         }
                         ApprovalStep::Rewrite => {
@@ -2168,8 +2214,7 @@ async fn install_via_pnpm<R: tauri::Runtime>(
                     if let Err(e) = std::fs::remove_dir_all(dir) {
                         crate::log_warn!("清理版本目录失败: {e}");
                     }
-                    std::fs::create_dir_all(dir)
-                        .map_err(|e| format!("创建版本目录失败: {e}"))?;
+                    std::fs::create_dir_all(dir).map_err(|e| format!("创建版本目录失败: {e}"))?;
                 } else {
                     push_task_log(
                         app,
@@ -2204,7 +2249,12 @@ async fn ensure_pending_builds<R: tauri::Runtime>(
     if pending.is_empty() {
         return Ok(());
     }
-    let shown = pending.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let shown = pending
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     push_task_log(
         app,
         state,
@@ -2431,7 +2481,11 @@ impl tokio::io::AsyncRead for StreamPipe {
     }
 }
 
-async fn stream_pipe<R: tauri::Runtime>(app: tauri::AppHandle<R>, task_id: String, pipe: StreamPipe) {
+async fn stream_pipe<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    task_id: String,
+    pipe: StreamPipe,
+) {
     let state = app.state::<AppState>();
     let mut lines = BufReader::new(pipe).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -2769,8 +2823,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
     fn assert_lan_bind_port_rewrites_only_the_managed_port() {
         let home = patch_fixture("web", MANAGED_BLOCK);
         crate::profile::assert_profile_lan_bind_port(&home, "web", 3099);
-        let text =
-            std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
+        let text = std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert!(text.contains("port: 3099"), "{text}");
         assert!(!text.contains("port: 3080"), "{text}");
         // Host (the LAN toggle's other half) and the rest of the block survive.
@@ -2785,8 +2838,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
         // and a hand-authored webserver row keeps its pin.
         let home = patch_fixture("web", "[]\n\n- id: webserver\n  config:\n    port: 3080\n");
         crate::profile::assert_profile_lan_bind_port(&home, "web", 3099);
-        let text =
-            std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
+        let text = std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert_eq!(text, "[]\n\n- id: webserver\n  config:\n    port: 3080\n");
 
         // A missing patch file is a no-op, not an error.
@@ -2802,8 +2854,7 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
         crate::profile::assert_profile_lan_bind_port(&home, "../web", 3099);
         crate::profile::assert_profile_lan_bind_port(&home, "..", 3099);
         crate::profile::assert_profile_lan_bind_port(&home, "/tmp/evil", 3099);
-        let text =
-            std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
+        let text = std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
         assert!(text.contains("port: 3080"), "{text}");
         std::fs::remove_dir_all(&home).ok();
     }
@@ -3031,7 +3082,8 @@ help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n
         transport: Arc<dyn crate::ssh::HostTransport>,
         tag: &str,
     ) -> (AppState, PathBuf, Host) {
-        let root = std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        let root =
+            std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
         // The machine's own id: the probe answer is cached per host for a
         // while, so a test that reused another's id would read that one's
@@ -3122,7 +3174,8 @@ help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n
         running_install_task(&app, "t-1").await;
         let state = app.state::<AppState>();
 
-        let outcome = install_version_remote(app.handle(), &state, "t-1", &host, "0.1.0-rc.6").await;
+        let outcome =
+            install_version_remote(app.handle(), &state, "t-1", &host, "0.1.0-rc.6").await;
 
         let record = outcome.expect("装好的版本不该因为一次读日志超时被丢掉");
         assert_eq!(record.version, "0.1.0-rc.6");
@@ -3201,7 +3254,9 @@ help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n
         let app = install_app(state);
         let state = app.state::<AppState>();
         running_install_task(&app, "t-1").await;
-        let reserved = host.dedicated_home_path(&state.data_dir, "lab-web").unwrap();
+        let reserved = host
+            .dedicated_home_path(&state.data_dir, "lab-web")
+            .unwrap();
         {
             // The enqueue's own record: this host, this version, this reserved
             // HOME path (what `start_create_instance_task` leaves behind).
@@ -3423,7 +3478,10 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
             layout.versions_dir,
             Path::new(&format!("{REMOTE_DATA_DIR}/versions"))
         );
-        assert_eq!(layout.registry.as_deref(), Some("https://mirror.example/npm"));
+        assert_eq!(
+            layout.registry.as_deref(),
+            Some("https://mirror.example/npm")
+        );
         assert_eq!(
             layout.extra_env,
             vec![(
@@ -3450,7 +3508,11 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
             "要在那台机器上建好版本目录：{}",
             argv[2]
         );
-        assert!(argv[2].contains("<<<DSH-EXIT>>>"), "退出码要写进日志：{}", argv[2]);
+        assert!(
+            argv[2].contains("<<<DSH-EXIT>>>"),
+            "退出码要写进日志：{}",
+            argv[2]
+        );
         assert!(
             argv[2].contains("/home/demo/.local/share/pnpm/pnpm"),
             "工具用探到的绝对路径：{}",
@@ -3514,7 +3576,9 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
             pid: 4242,
         };
 
-        stop_remote_run(&state, &run).await.expect("停掉之后要确认它没了");
+        stop_remote_run(&state, &run)
+            .await
+            .expect("停掉之后要确认它没了");
 
         let calls = fake.calls();
         assert_eq!(
@@ -3584,7 +3648,10 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
             &format!("{REMOTE_DATA_DIR}/logs/install-t-1-npm-3.log"),
         );
         assert!(memory.contains("内存不够"), "{memory}");
-        assert!(memory.contains("Killed"), "理由要带上日志里的证据：{memory}");
+        assert!(
+            memory.contains("Killed"),
+            "理由要带上日志里的证据：{memory}"
+        );
         assert!(memory.contains(REMOTE_DATA_DIR), "要说清日志在哪：{memory}");
 
         let network = remote_install_failure(
@@ -3612,10 +3679,7 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
         // what happens when the out-of-memory killer takes the whole group. The
         // log is then the only evidence, and it is enough.
         let killed = remote_install_failure(
-            &[
-                "Progress: resolved 213".to_string(),
-                "Killed".to_string(),
-            ],
+            &["Progress: resolved 213".to_string(), "Killed".to_string()],
             None,
             &format!("{REMOTE_DATA_DIR}/logs/install-t-1-npm-2.log"),
         );
@@ -3630,7 +3694,10 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
             &format!("{REMOTE_DATA_DIR}/logs/install-t-1-npm-1.log"),
         );
         assert!(other.contains("unknown option"), "{other}");
-        assert!(!other.contains("内存不够") && !other.contains("连不上"), "{other}");
+        assert!(
+            !other.contains("内存不够") && !other.contains("连不上"),
+            "{other}"
+        );
     }
 
     /// The rule that keeps every remote cleanup inside the host that owns the
@@ -3644,7 +3711,10 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
         assert!(inside(root, &root.join(".pnpm-store")));
         assert!(!inside(root, root), "数据目录本身不是可以删的东西");
         assert!(!inside(root, Path::new("/home/demo/.dsh")));
-        assert!(!inside(root, Path::new("/home/demo/.local/share/dsh-launcher-other")));
+        assert!(!inside(
+            root,
+            Path::new("/home/demo/.local/share/dsh-launcher-other")
+        ));
         assert!(
             !inside(root, &root.join("../secrets")),
             "带 .. 的路径一律拒绝"

@@ -800,10 +800,7 @@ fn binding_matches(
     a: &crate::config::ToolchainBinding,
     b: &crate::config::ToolchainBinding,
 ) -> bool {
-    fn same(
-        x: &Option<crate::config::BoundTool>,
-        y: &Option<crate::config::BoundTool>,
-    ) -> bool {
+    fn same(x: &Option<crate::config::BoundTool>, y: &Option<crate::config::BoundTool>) -> bool {
         match (x, y) {
             (Some(x), Some(y)) => x.path == y.path && x.version == y.version,
             (None, None) => true,
@@ -818,7 +815,9 @@ fn binding_matches(
 /// (a config written before the binding existed), in which case PATH resolution
 /// is still better than refusing to launch.
 fn node_for_spawn(cfg: &crate::config::Config) -> PathBuf {
-    let bound = cfg.local_host().and_then(|host| host.toolchain.node.clone());
+    let bound = cfg
+        .local_host()
+        .and_then(|host| host.toolchain.node.clone());
     match bound {
         Some(bound) if bound.path.is_file() => bound.path,
         _ => PathBuf::from(crate::process::node()),
@@ -837,9 +836,7 @@ pub fn node_missing_error() -> String {
 /// Probes node and returns its absolute path, refreshing a stale binding first.
 /// Used by spawn paths so a toolchain installed while the app was running is
 /// picked up without a restart.
-pub async fn node_for_spawn_checked(
-    state: &State<'_, AppState>,
-) -> Result<PathBuf, String> {
+pub async fn node_for_spawn_checked(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     node_for_spawn_checked_for(state, None).await
 }
 
@@ -1047,10 +1044,7 @@ async fn remote_runtime_status(
 /// One remote tool as the page reports it: where it is, what it says, and which
 /// source it came from. The user's own choice is carried back even when it was
 /// passed over, so the page can say the pick has stopped working.
-fn remote_status(
-    tool: &crate::remote::RemoteToolStatus,
-    manual: Option<&Path>,
-) -> ToolStatus {
+fn remote_status(tool: &crate::remote::RemoteToolStatus, manual: Option<&Path>) -> ToolStatus {
     let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
     match (tool.path.as_deref(), tool.version.as_deref()) {
         (Some(path), Some(version)) => ToolStatus {
@@ -1075,7 +1069,10 @@ fn remote_status(
 }
 
 /// The candidates the remote probe passed over on its way to one tool.
-fn skipped_candidates(tool: &str, status: &crate::remote::RemoteToolStatus) -> Vec<SkippedCandidate> {
+fn skipped_candidates(
+    tool: &str,
+    status: &crate::remote::RemoteToolStatus,
+) -> Vec<SkippedCandidate> {
     status
         .skipped
         .iter()
@@ -1227,9 +1224,7 @@ fn detected_managers() -> Vec<String> {
     if !fnm_bin_dirs(&home).is_empty() || home.join(".fnm").is_dir() {
         found.push("fnm".to_string());
     }
-    if Path::new("/opt/homebrew/bin/brew").is_file()
-        || Path::new("/usr/local/bin/brew").is_file()
-    {
+    if Path::new("/opt/homebrew/bin/brew").is_file() || Path::new("/usr/local/bin/brew").is_file() {
         found.push("brew".to_string());
     }
     found
@@ -1628,7 +1623,11 @@ mod tests {
         std::fs::write(&manual, "#!/bin/sh\n").unwrap();
 
         let list = candidates("node", Some(&manual), std::slice::from_ref(&system_dir));
-        assert_eq!(list[0], (manual.clone(), ToolSource::Manual), "the user's pick decides");
+        assert_eq!(
+            list[0],
+            (manual.clone(), ToolSource::Manual),
+            "the user's pick decides"
+        );
         assert_eq!(
             list[1],
             (system_dir.join("node"), ToolSource::System),
@@ -1680,10 +1679,7 @@ mod tests {
             std::slice::from_ref(&shell_dir),
             std::slice::from_ref(&durable_dir),
         );
-        assert_eq!(
-            list,
-            vec![(durable_dir.join("node"), ToolSource::System)],
-        );
+        assert_eq!(list, vec![(durable_dir.join("node"), ToolSource::System)],);
 
         std::fs::remove_dir_all(&shell_dir).ok();
         std::fs::remove_dir_all(&durable_dir).ok();
@@ -1757,14 +1753,24 @@ mod tests {
             ToolSource::Manual
         );
         assert_eq!(
-            source_of("node", &system_dir.join("node"), Some(&manual), &system_dirs),
+            source_of(
+                "node",
+                &system_dir.join("node"),
+                Some(&manual),
+                &system_dirs
+            ),
             ToolSource::System
         );
         // A path outside both the pick and the system environment — including
         // one the launcher would not itself offer — reads as a fallback rather
         // than making the page claim a source it cannot prove.
         assert_eq!(
-            source_of("node", Path::new("/nowhere/bin/node"), Some(&manual), &system_dirs),
+            source_of(
+                "node",
+                Path::new("/nowhere/bin/node"),
+                Some(&manual),
+                &system_dirs
+            ),
             ToolSource::Fallback
         );
 
@@ -1824,12 +1830,21 @@ mod tests {
         assert_eq!(node_install_command(&m(&["nvm"])), "nvm install --lts");
         assert_eq!(node_install_command(&m(&["fnm"])), "fnm install --lts");
         assert_eq!(node_install_command(&m(&["brew"])), "brew install node");
-        assert_eq!(node_install_command(&m(&["nvm", "brew"])), "nvm install --lts");
-        assert_eq!(node_install_command(&m(&["fnm", "brew"])), "fnm install --lts");
+        assert_eq!(
+            node_install_command(&m(&["nvm", "brew"])),
+            "nvm install --lts"
+        );
+        assert_eq!(
+            node_install_command(&m(&["fnm", "brew"])),
+            "fnm install --lts"
+        );
 
         // Nothing to extend: install a manager first, then Node.
         let bare = node_install_command(&m(&[]));
-        assert!(bare.contains("nvm-sh/nvm"), "should install nvm first: {bare}");
+        assert!(
+            bare.contains("nvm-sh/nvm"),
+            "should install nvm first: {bare}"
+        );
         assert!(bare.contains("nvm install --lts"));
     }
 
@@ -1991,21 +2006,21 @@ mod tests {
         );
         let local_node = fake_exe(data.path(), "local-node", "v24.0.0");
 
-        let remote = set_toolchain_override_for(
-            &state,
-            "node",
-            Some("/opt/pick/node"),
-            Some(&remote_id),
-        )
-        .await
-        .unwrap();
-        let local = set_toolchain_override_for(&state, "node", Some(local_node.to_str().unwrap()), None)
-            .await
-            .unwrap();
+        let remote =
+            set_toolchain_override_for(&state, "node", Some("/opt/pick/node"), Some(&remote_id))
+                .await
+                .unwrap();
+        let local =
+            set_toolchain_override_for(&state, "node", Some(local_node.to_str().unwrap()), None)
+                .await
+                .unwrap();
 
         assert_eq!(remote.node.path.as_deref(), Some("/opt/pick/node"));
         assert_eq!(remote.node.source, Some(ToolSource::Manual));
-        assert_eq!(local.node.path.as_deref(), Some(local_node.to_str().unwrap()));
+        assert_eq!(
+            local.node.path.as_deref(),
+            Some(local_node.to_str().unwrap())
+        );
         assert_eq!(local.node.source, Some(ToolSource::Manual));
 
         // Each record keeps its own pair, on disk as well as in memory.
@@ -2020,7 +2035,8 @@ mod tests {
             Some(Path::new("/opt/pick/node"))
         );
         assert!(
-            local_record.toolchain_overrides.pnpm.is_none() && remote_record.toolchain_overrides.pnpm.is_none(),
+            local_record.toolchain_overrides.pnpm.is_none()
+                && remote_record.toolchain_overrides.pnpm.is_none(),
             "指定 node 不该动 pnpm"
         );
     }
@@ -2035,7 +2051,11 @@ mod tests {
         let fake = crate::remote::testing::FakeTransport::new()
             .answering(crate::remote::testing::FakeAnswer::stdout(
                 crate::remote::testing::environment_stdout(
-                    crate::remote::testing::remote_tool("/home/a/.nvm/bin/node", "v22.1.0", "system"),
+                    crate::remote::testing::remote_tool(
+                        "/home/a/.nvm/bin/node",
+                        "v22.1.0",
+                        "system",
+                    ),
                     crate::remote::testing::remote_tool_missing(vec![]),
                     &["nvm"],
                 ),
@@ -2061,8 +2081,12 @@ mod tests {
             fake,
         );
 
-        let first = runtime_status_for(&state, Some(&first_id), false).await.unwrap();
-        let second = runtime_status_for(&state, Some(&second_id), false).await.unwrap();
+        let first = runtime_status_for(&state, Some(&first_id), false)
+            .await
+            .unwrap();
+        let second = runtime_status_for(&state, Some(&second_id), false)
+            .await
+            .unwrap();
 
         assert_eq!(first.host_id, first_id);
         assert_eq!(second.host_id, second_id);
@@ -2116,7 +2140,9 @@ mod tests {
             fake,
         );
 
-        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+        let status = runtime_status_for(&state, Some(&remote_id), false)
+            .await
+            .unwrap();
 
         assert_eq!(status.node.source, Some(ToolSource::System));
         assert_eq!(status.system_env_shell.as_deref(), Some("/bin/bash"));
@@ -2128,7 +2154,12 @@ mod tests {
             .iter()
             .filter(|candidate| candidate.reason == "below-minimum")
             .collect();
-        assert_eq!(skipped.len(), 2, "两个候选都要如实报出来：{:?}", status.skipped_candidates);
+        assert_eq!(
+            skipped.len(),
+            2,
+            "两个候选都要如实报出来：{:?}",
+            status.skipped_candidates
+        );
         assert_eq!(skipped[0].tool, "node");
         assert_eq!(skipped[0].path, old);
         assert_eq!(skipped[0].major, Some(18));
@@ -2146,11 +2177,17 @@ mod tests {
             status.requirements.pnpm_install_command
         );
         assert!(
-            status.requirements.pnpm_install_command.contains("get.pnpm.io"),
+            status
+                .requirements
+                .pnpm_install_command
+                .contains("get.pnpm.io"),
             "{}",
             status.requirements.pnpm_install_command
         );
-        assert!(status.requirements.node_install_command.contains("nvm install --lts"));
+        assert!(status
+            .requirements
+            .node_install_command
+            .contains("nvm install --lts"));
     }
 
     /// Probing and execution are the same resolution on a remote host too: the
@@ -2177,12 +2214,17 @@ mod tests {
             fake.clone(),
         );
 
-        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+        let status = runtime_status_for(&state, Some(&remote_id), false)
+            .await
+            .unwrap();
         let to_spawn = node_for_spawn_checked_for(&state, Some(&remote_id))
             .await
             .unwrap();
 
-        assert_eq!(status.node.path.as_deref(), Some(to_spawn.to_str().unwrap()));
+        assert_eq!(
+            status.node.path.as_deref(),
+            Some(to_spawn.to_str().unwrap())
+        );
         assert_eq!(
             fake.calls().len(),
             1,
@@ -2192,7 +2234,11 @@ mod tests {
         // And the record a restart would read agrees too.
         let record = persisted(&state, &remote_id);
         assert_eq!(
-            record.toolchain.node.as_ref().map(|bound| bound.path.clone()),
+            record
+                .toolchain
+                .node
+                .as_ref()
+                .map(|bound| bound.path.clone()),
             Some(to_spawn)
         );
     }
@@ -2237,9 +2283,10 @@ mod tests {
 
         // There, but a pnpm the launcher will not drive: refused, with the
         // command that fixes it on that machine.
-        let err = set_toolchain_override_for(&state, "pnpm", Some("/usr/bin/pnpm"), Some(&remote_id))
-            .await
-            .unwrap_err();
+        let err =
+            set_toolchain_override_for(&state, "pnpm", Some("/usr/bin/pnpm"), Some(&remote_id))
+                .await
+                .unwrap_err();
         assert!(err.contains("pnpm 9") && err.contains("ssh lab "), "{err}");
         assert!(nothing_written(&state, &remote_id), "被拒绝的指定不能落库");
 
@@ -2286,13 +2333,11 @@ mod tests {
                 &[],
             )),
         );
-        let state = app_state(
-            data.path(),
-            vec![crate::config::Host::local(), host],
-            fake,
-        );
+        let state = app_state(data.path(), vec![crate::config::Host::local(), host], fake);
 
-        let status = runtime_status_for(&state, Some(&remote_id), false).await.unwrap();
+        let status = runtime_status_for(&state, Some(&remote_id), false)
+            .await
+            .unwrap();
 
         assert!(status.node.installed, "退回自动探测，工具本身还是可用的");
         assert_eq!(status.node.path.as_deref(), Some("/usr/local/bin/node"));

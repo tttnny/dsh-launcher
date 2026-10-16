@@ -259,8 +259,8 @@ pub(crate) async fn remove_icon_file(
     if host.builtin {
         let _ = std::fs::remove_file(&dest);
     } else if let Ok(remote) = crate::ssh::RemoteHost::of(host, &state.data_dir) {
-        let _ =
-            crate::remote::remove_dir(&*state.host_transport, &remote, &dest.to_string_lossy()).await;
+        let _ = crate::remote::remove_dir(&*state.host_transport, &remote, &dest.to_string_lossy())
+            .await;
     }
 }
 
@@ -502,7 +502,10 @@ mod tests {
 
         assert_eq!(first, second, "同一个图标两次渲染是同一个答案");
         assert!(
-            first.as_deref().unwrap_or("").starts_with("data:image/png;base64,"),
+            first
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("data:image/png;base64,"),
             "页面拿到的是图本身：{first:?}"
         );
         let reads = |fake: &FakeTransport| {
@@ -534,7 +537,13 @@ mod tests {
         let data = ScratchDir::new("icon-local");
         let fake = FakeTransport::new();
         let home = data.path().join("home");
-        let state = state_with(&data, fake.clone(), Host::local(), home.clone(), "i-icon-local");
+        let state = state_with(
+            &data,
+            fake.clone(),
+            Host::local(),
+            home.clone(),
+            "i-icon-local",
+        );
         let src = data.path().join("picked.png");
         std::fs::write(&src, rect_png()).unwrap();
 
@@ -550,6 +559,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(read.starts_with("data:image/png;base64,"));
-        assert!(fake.calls().is_empty(), "本机的图标不过 ssh：{:?}", fake.calls());
+        assert!(
+            fake.calls().is_empty(),
+            "本机的图标不过 ssh：{:?}",
+            fake.calls()
+        );
     }
 }

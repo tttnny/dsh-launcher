@@ -186,9 +186,8 @@ pub(crate) fn close_all_blocking(state: &AppState) {
             else {
                 return;
             };
-            let _ = runtime.block_on(async {
-                tokio::time::timeout(EXIT_BUDGET, close_all(state)).await
-            });
+            let _ = runtime
+                .block_on(async { tokio::time::timeout(EXIT_BUDGET, close_all(state)).await });
         });
     });
 }
@@ -290,7 +289,9 @@ mod tests {
                 ssh_target: target.into(),
                 registry: None,
                 extra_env: Default::default(),
-                data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
+                data_dir: Some(std::path::PathBuf::from(
+                    "/home/u/.local/share/dsh-launcher",
+                )),
                 builtin: false,
                 toolchain: Default::default(),
                 toolchain_overrides: Default::default(),
@@ -345,13 +346,18 @@ mod tests {
         let state = app_state(fake.clone());
         let host = host("host-a", TARGET);
 
-        let local = reachable_url(&state, &host, &instance_url(port)).await.unwrap();
+        let local = reachable_url(&state, &host, &instance_url(port))
+            .await
+            .unwrap();
 
         let open = asked(&fake);
         assert_eq!(open.len(), 1, "{open:?}");
         let (called_host, forward) = &open[0];
         assert_eq!(called_host.socket, host.socket, "走的是启动器自己那条连接");
-        assert_eq!(forward.remote_host, "127.0.0.1", "转发目标照搬运行记录里的地址");
+        assert_eq!(
+            forward.remote_host, "127.0.0.1",
+            "转发目标照搬运行记录里的地址"
+        );
         assert_eq!(forward.remote_port, port);
         assert_eq!(forward.local_port, port, "本机端口默认与远端相同");
         assert!(
@@ -399,9 +405,13 @@ mod tests {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
         let state = app_state(fake.clone());
 
-        let local = reachable_url(&state, &host("host-a", TARGET), "http://127.0.0.1:80/?token=x")
-            .await
-            .unwrap();
+        let local = reachable_url(
+            &state,
+            &host("host-a", TARGET),
+            "http://127.0.0.1:80/?token=x",
+        )
+        .await
+        .unwrap();
 
         let (_, forward) = asked(&fake).remove(0);
         assert_eq!(forward.remote_port, 80, "远端那一头照搬");
@@ -425,16 +435,22 @@ mod tests {
         let state = app_state(fake.clone());
         let host = host("host-a", TARGET);
 
-        let first = reachable_url(&state, &host, &instance_url(port)).await.unwrap();
+        let first = reachable_url(&state, &host, &instance_url(port))
+            .await
+            .unwrap();
         // ssh holds the local port for as long as the forward lives.
         let alive = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-        let again = reachable_url(&state, &host, &instance_url(port)).await.unwrap();
+        let again = reachable_url(&state, &host, &instance_url(port))
+            .await
+            .unwrap();
         assert_eq!(again, first);
         assert_eq!(asked(&fake).len(), 1, "还活着的那条不用再问一次");
 
         drop(alive);
         fake.answering(FakeAnswer::Done);
-        let rebuilt = reachable_url(&state, &host, &instance_url(port)).await.unwrap();
+        let rebuilt = reachable_url(&state, &host, &instance_url(port))
+            .await
+            .unwrap();
         assert_eq!(rebuilt, first);
         assert_eq!(asked(&fake).len(), 2, "端口没了就要重建");
     }
@@ -452,9 +468,15 @@ mod tests {
         let first = host("host-a", TARGET);
         let second = host("host-b", "other_aliyun");
 
-        reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
-        reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
-        reachable_url(&state, &second, &instance_url(free_local_port())).await.unwrap();
+        reachable_url(&state, &first, &instance_url(free_local_port()))
+            .await
+            .unwrap();
+        reachable_url(&state, &first, &instance_url(free_local_port()))
+            .await
+            .unwrap();
+        reachable_url(&state, &second, &instance_url(free_local_port()))
+            .await
+            .unwrap();
 
         let sockets: Vec<String> = asked(&fake)
             .into_iter()
@@ -476,9 +498,15 @@ mod tests {
         let state = app_state(fake.clone());
         let first = host("host-a", TARGET);
         let second = host("host-b", "other_aliyun");
-        reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
-        reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
-        reachable_url(&state, &second, &instance_url(free_local_port())).await.unwrap();
+        reachable_url(&state, &first, &instance_url(free_local_port()))
+            .await
+            .unwrap();
+        reachable_url(&state, &first, &instance_url(free_local_port()))
+            .await
+            .unwrap();
+        reachable_url(&state, &second, &instance_url(free_local_port()))
+            .await
+            .unwrap();
 
         close_all(&state).await;
 
@@ -491,7 +519,9 @@ mod tests {
 
         // Withdrawn means forgotten: the next one is asked for again.
         fake.answering(FakeAnswer::Done);
-        reachable_url(&state, &first, &instance_url(free_local_port())).await.unwrap();
+        reachable_url(&state, &first, &instance_url(free_local_port()))
+            .await
+            .unwrap();
         assert_eq!(asked(&fake).len(), 4);
     }
 
@@ -542,7 +572,10 @@ mod tests {
 
         assert!(reason.contains("隧道"), "{reason}");
         assert!(reason.contains(&url), "远端原始地址要念出来：{reason}");
-        assert!(reason.contains("ssh zjq_aliyun"), "给出可直接执行的命令：{reason}");
+        assert!(
+            reason.contains("ssh zjq_aliyun"),
+            "给出可直接执行的命令：{reason}"
+        );
         assert!(
             reason.contains("不是 DSH 拒绝"),
             "与「DSH 拒绝了这次操作」必须读起来不一样：{reason}"
@@ -679,7 +712,9 @@ mod tests {
     async fn a_dsh_refusal_does_not_read_like_a_broken_tunnel() {
         // A tunnel that is up: something answers on the local port, as ssh's
         // forward does, and DSH refuses the request behind it.
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         let serving = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -708,8 +743,14 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(refused.contains("token"), "DSH 的答案是关于 token 的：{refused}");
-        assert!(!refused.contains("隧道"), "DSH 的拒绝不是隧道的错：{refused}");
+        assert!(
+            refused.contains("token"),
+            "DSH 的答案是关于 token 的：{refused}"
+        );
+        assert!(
+            !refused.contains("隧道"),
+            "DSH 的拒绝不是隧道的错：{refused}"
+        );
         assert!(
             broken.contains("隧道") && broken.contains("ssh zjq_aliyun"),
             "{broken}"
@@ -720,4 +761,3 @@ mod tests {
         );
     }
 }
-

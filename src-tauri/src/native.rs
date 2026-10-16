@@ -26,8 +26,7 @@ const ENDPOINT_PREFIX: &str = "/api/pluginManager";
 
 /// A boxed future, so [`NativeTransport`] stays object-safe (`Arc<dyn …>`)
 /// without pulling in an async-trait dependency.
-pub type NativeFuture<'a, T> =
-    Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub type NativeFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -247,10 +246,7 @@ pub trait NativeTransport: Send + Sync {
     fn mint<'a>(&'a self, url: &'a str) -> NativeFuture<'a, Result<String, String>>;
 
     /// Sends one unary RPC and returns the raw HTTP response.
-    fn send(
-        &self,
-        req: NativeRequest,
-    ) -> NativeFuture<'_, Result<NativeResponse, String>>;
+    fn send(&self, req: NativeRequest) -> NativeFuture<'_, Result<NativeResponse, String>>;
 }
 
 /// The real transport: `reqwest` over `rustls`, deliberately **not** proxied.
@@ -309,13 +305,10 @@ impl NativeTransport for ReqwestTransport {
         })
     }
 
-    fn send(
-        &self,
-        req: NativeRequest,
-    ) -> NativeFuture<'_, Result<NativeResponse, String>> {
+    fn send(&self, req: NativeRequest) -> NativeFuture<'_, Result<NativeResponse, String>> {
         Box::pin(async move {
-            let body = serde_json::to_string(&req.envelope)
-                .map_err(|e| format!("序列化请求失败: {e}"))?;
+            let body =
+                serde_json::to_string(&req.envelope).map_err(|e| format!("序列化请求失败: {e}"))?;
             let resp = self
                 .client
                 .post(&req.url)
@@ -424,7 +417,10 @@ impl NativeClient {
         enabled: bool,
     ) -> Result<NativeChangeResult, String> {
         let value = self
-            .call("setBundleEnabled", serde_json::json!({ "name": name, "enabled": enabled }))
+            .call(
+                "setBundleEnabled",
+                serde_json::json!({ "name": name, "enabled": enabled }),
+            )
             .await?;
         serde_json::from_value(value).map_err(|e| format!("解析改动结果失败: {e}"))
     }
@@ -472,7 +468,10 @@ fn parse_value(resp: NativeResponse) -> Result<serde_json::Value, String> {
         .get("result")
         .ok_or_else(|| "实例响应缺少 result".to_string())?;
     match result.get("ok").and_then(|v| v.as_bool()) {
-        Some(true) => Ok(result.get("value").cloned().unwrap_or(serde_json::Value::Null)),
+        Some(true) => Ok(result
+            .get("value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)),
         Some(false) => {
             let code = result
                 .pointer("/error/code")
@@ -797,10 +796,7 @@ pub(crate) mod testing {
             })
         }
 
-        fn send(
-            &self,
-            req: NativeRequest,
-        ) -> NativeFuture<'_, Result<NativeResponse, String>> {
+        fn send(&self, req: NativeRequest) -> NativeFuture<'_, Result<NativeResponse, String>> {
             Box::pin(async move {
                 self.sent.lock().unwrap().push(req);
                 self.responses
@@ -813,7 +809,9 @@ pub(crate) mod testing {
     }
 
     /// A connected client over the fake, and the fake itself.
-    pub(crate) fn client_with(responses: Vec<NativeResponse>) -> (NativeClient, Arc<FakeTransport>) {
+    pub(crate) fn client_with(
+        responses: Vec<NativeResponse>,
+    ) -> (NativeClient, Arc<FakeTransport>) {
         let fake = FakeTransport::new(COOKIE, responses);
         let transport: Arc<dyn NativeTransport> = fake.clone();
         let client = block_on(NativeClient::connect_with(transport, INSTANCE_URL)).unwrap();
@@ -847,7 +845,12 @@ mod tests {
 
         // Exactly the four wire fields, nothing extra that the service rejects.
         let body = serde_json::to_value(&req.envelope).unwrap();
-        let keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(keys.len(), 4, "body: {body}");
         assert!(body.get("type").is_some());
         assert!(body.get("rpcId").is_some());
@@ -904,8 +907,8 @@ mod tests {
             }
         ]);
         let (client, _) = client_with(vec![ok_response(payload)]);
-        let bundles = block_on(client.list_bundles())
-            .expect("a translated title must not fail the list");
+        let bundles =
+            block_on(client.list_bundles()).expect("a translated title must not fail the list");
 
         let zh: Vec<BundleItem> = bundles
             .clone()
@@ -940,16 +943,23 @@ mod tests {
         let map: NativeText =
             serde_json::from_value(serde_json::json!({ "en": "Hello", "zh": "你好" })).unwrap();
         assert_eq!(map.pick("zh-CN"), "你好");
-        assert_eq!(map.pick("zh-TW"), "你好", "a base language matches its regions");
+        assert_eq!(
+            map.pick("zh-TW"),
+            "你好",
+            "a base language matches its regions"
+        );
         assert_eq!(map.pick("en-GB"), "Hello");
-        assert_eq!(map.pick("fr"), "Hello", "`en` is the service's own fallback");
+        assert_eq!(
+            map.pick("fr"),
+            "Hello",
+            "`en` is the service's own fallback"
+        );
 
         let only_other: NativeText =
             serde_json::from_value(serde_json::json!({ "fr": "Bonjour" })).unwrap();
         assert_eq!(only_other.pick("zh-CN"), "Bonjour");
 
-        let blank: NativeText =
-            serde_json::from_value(serde_json::json!({ "fr": "   " })).unwrap();
+        let blank: NativeText = serde_json::from_value(serde_json::json!({ "fr": "   " })).unwrap();
         assert_eq!(blank.pick_opt("zh-CN"), None);
     }
     #[test]
@@ -982,9 +992,18 @@ mod tests {
     #[test]
     fn transport_and_envelope_failures_surface_as_err() {
         let cases = vec![
-            NativeResponse { status: 401, body: String::new() },
-            NativeResponse { status: 403, body: String::new() },
-            NativeResponse { status: 404, body: "not found".to_string() },
+            NativeResponse {
+                status: 401,
+                body: String::new(),
+            },
+            NativeResponse {
+                status: 403,
+                body: String::new(),
+            },
+            NativeResponse {
+                status: 404,
+                body: "not found".to_string(),
+            },
             NativeResponse {
                 status: 200,
                 body: serde_json::json!({
@@ -1007,7 +1026,10 @@ mod tests {
 
     #[test]
     fn token_and_base_url_helpers_reject_bad_input() {
-        assert_eq!(token_of(INSTANCE_URL).unwrap(), "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ");
+        assert_eq!(
+            token_of(INSTANCE_URL).unwrap(),
+            "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ"
+        );
         assert!(token_of("http://127.0.0.1:34567/").is_err());
         assert_eq!(base_url_of(INSTANCE_URL).unwrap(), "http://127.0.0.1:34567");
         assert!(base_url_of("ftp://127.0.0.1:21/").is_err());
@@ -1036,10 +1058,7 @@ mod tests {
     #[test]
     fn rpc_headers_carry_cookie_without_origin_or_host() {
         let headers = rpc_headers(COOKIE);
-        assert_eq!(
-            headers.get(reqwest::header::COOKIE).unwrap(),
-            COOKIE
-        );
+        assert_eq!(headers.get(reqwest::header::COOKIE).unwrap(), COOKIE);
         assert_eq!(
             headers.get(reqwest::header::CONTENT_TYPE).unwrap(),
             "application/json"
@@ -1059,7 +1078,8 @@ mod tests {
             "stage": "enable",
             "target": "@deepseek-ai/dsh-web-app"
         }))]);
-        let outcome = block_on(client.set_bundle_enabled("@deepseek-ai/dsh-web-app", false)).unwrap();
+        let outcome =
+            block_on(client.set_bundle_enabled("@deepseek-ai/dsh-web-app", false)).unwrap();
 
         let req = fake.last_sent();
         assert_eq!(req.envelope.method, "pluginManager/setBundleEnabled");
@@ -1118,7 +1138,10 @@ mod tests {
         assert_eq!(view.bundles.len(), 1);
         assert_eq!(view.bundles[0].name, "ds-bot");
         assert!(view.bundles[0].enabled);
-        assert!(!view.bundles[0].removable, "a file projection proves nothing about removal");
+        assert!(
+            !view.bundles[0].removable,
+            "a file projection proves nothing about removal"
+        );
         let json = serde_json::to_value(&view).unwrap();
         assert_eq!(json["mode"], "not-running");
         assert!(json["instanceId"].is_null());
@@ -1208,9 +1231,15 @@ mod tests {
         let outcome = block_on(client.remove_bundle("ds-bot")).unwrap();
 
         let req = fake.last_sent();
-        assert_eq!(req.url, "http://127.0.0.1:34567/api/pluginManager/removeBundle");
+        assert_eq!(
+            req.url,
+            "http://127.0.0.1:34567/api/pluginManager/removeBundle"
+        );
         assert_eq!(req.envelope.method, "pluginManager/removeBundle");
-        assert_eq!(req.envelope.payload.args, serde_json::json!({ "name": "ds-bot" }));
+        assert_eq!(
+            req.envelope.payload.args,
+            serde_json::json!({ "name": "ds-bot" })
+        );
         assert!(outcome.changed);
         assert_eq!(outcome.application, "applied");
         assert_eq!(outcome.stage, "remove");

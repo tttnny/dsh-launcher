@@ -1,6 +1,4 @@
-use crate::config::{
-    DshInstance, DshVersion, Host, HostStatus, InstanceState, InstanceStatus,
-};
+use crate::config::{DshInstance, DshVersion, Host, HostStatus, InstanceState, InstanceStatus};
 use crate::AppState;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -188,7 +186,10 @@ fn looks_like_dsh(command: &str) -> bool {
 fn pid_alive(pid: i32) -> bool {
     // SAFETY: kill(2) with signal 0 performs the permission+existence check
     // without delivering anything.
-    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
+    unsafe {
+        libc::kill(pid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
 }
 
 /// Register an externally-owned DSH process (DSH restarted itself in-place, or
@@ -233,7 +234,11 @@ async fn adopt_external_process(
                 kill: Arc::new(Notify::new()),
                 profile: profile.to_string(),
                 url: Some(url.clone()),
-                adopted: Some(Adopted { pid, port, host: host.to_string() }),
+                adopted: Some(Adopted {
+                    pid,
+                    port,
+                    host: host.to_string(),
+                }),
                 remote: None,
             },
         );
@@ -344,10 +349,14 @@ pub async fn adopt_surviving_instances(app: &AppHandle) {
             // local probe below would be asking this Mac about it — a local
             // process wearing the same port number would be adopted as a remote
             // instance. Adopting there is that machine's own pass (ADR-0007).
-            .filter(|inst| inst.host_id.trim().is_empty() || inst.host_id == crate::config::LOCAL_HOST_ID)
+            .filter(|inst| {
+                inst.host_id.trim().is_empty() || inst.host_id == crate::config::LOCAL_HOST_ID
+            })
             .filter_map(|inst| {
                 let remembered = recall_url(&data_dir, &inst.id);
-                let port = inst.port.or_else(|| remembered.as_deref().and_then(port_of_url))?;
+                let port = inst
+                    .port
+                    .or_else(|| remembered.as_deref().and_then(port_of_url))?;
                 // The remembered profile is what it was actually started with;
                 // the stored defaults are the best guess after that.
                 let profile = recall_profile(&data_dir, &inst.id)
@@ -413,10 +422,7 @@ fn read_remembered(data_dir: &std::path::Path) -> serde_json::Map<String, serde_
         .unwrap_or_default()
 }
 
-fn write_remembered(
-    data_dir: &std::path::Path,
-    map: &serde_json::Map<String, serde_json::Value>,
-) {
+fn write_remembered(data_dir: &std::path::Path, map: &serde_json::Map<String, serde_json::Value>) {
     let path = remembered_path(data_dir);
     let tmp = path.with_extension("json.tmp");
     let Ok(raw) = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone())) else {
@@ -428,7 +434,12 @@ fn write_remembered(
 }
 
 /// Records the URL an instance printed when it became ready.
-pub(crate) fn remember_url(data_dir: &std::path::Path, instance_id: &str, url: &str, profile: &str) {
+pub(crate) fn remember_url(
+    data_dir: &std::path::Path,
+    instance_id: &str,
+    url: &str,
+    profile: &str,
+) {
     let mut map = read_remembered(data_dir);
     map.insert(
         instance_id.to_string(),
@@ -662,7 +673,12 @@ fn profile_package_json(home_path: &Path, profile: &str) -> PathBuf {
     crate::profile::profile_dir(home_path, profile)
         .ok()
         .map(|dir| dir.join("package.json"))
-        .unwrap_or_else(|| home_path.join("profiles").join(profile).join("package.json"))
+        .unwrap_or_else(|| {
+            home_path
+                .join("profiles")
+                .join(profile)
+                .join("package.json")
+        })
 }
 
 /// Whether one profile document declares the DSH web application among its
@@ -709,8 +725,12 @@ async fn profile_nature_remote(
     profile: &str,
 ) -> ProfileNature {
     let pkg = profile_package_json(home_path, profile);
-    match crate::remote::read_file_optional(&*state.host_transport, run_host, &pkg.to_string_lossy())
-        .await
+    match crate::remote::read_file_optional(
+        &*state.host_transport,
+        run_host,
+        &pkg.to_string_lossy(),
+    )
+    .await
     {
         Ok(Some(bytes)) => {
             if web_profile_document(&String::from_utf8_lossy(&bytes)) {
@@ -813,7 +833,10 @@ async fn pin_remote_profile_store(
         Ok(Some(raw)) => crate::plugins::linked_store_document(&raw),
         _ => None,
     };
-    let store = crate::plugins::store_target_from(linked.as_deref(), &crate::toolchain::store_dir(data_dir));
+    let store = crate::plugins::store_target_from(
+        linked.as_deref(),
+        &crate::toolchain::store_dir(data_dir),
+    );
 
     let workspace = dir.join("pnpm-workspace.yaml");
     match read(workspace.clone()).await {
@@ -850,10 +873,7 @@ async fn pin_remote_profile_store(
                 }
             }
         }
-        Err(e) => crate::log_warn!(
-            "读取那台机器上的 .npmrc 失败（{}）: {e}",
-            npmrc.display()
-        ),
+        Err(e) => crate::log_warn!("读取那台机器上的 .npmrc 失败（{}）: {e}", npmrc.display()),
     }
 }
 
@@ -904,9 +924,10 @@ pub(crate) async fn spawn_remote_instance(
     // directory: `version_bin_ready` is a local `exists()`, which at a remote
     // path answers about this Mac.
     let bin = crate::launch::version_bin(&version.dir);
-    let ready = crate::remote::file_ready(&*state.host_transport, &run_host, &bin.to_string_lossy())
-        .await
-        .map_err(|e| format!("无法确认那台机器上的 {}：{e}", bin.display()))?;
+    let ready =
+        crate::remote::file_ready(&*state.host_transport, &run_host, &bin.to_string_lossy())
+            .await
+            .map_err(|e| format!("无法确认那台机器上的 {}：{e}", bin.display()))?;
     if !ready {
         return Err(format!(
             "版本 {} 安装不完整（缺少 {}），请重新安装",
@@ -958,7 +979,8 @@ pub(crate) async fn spawn_remote_instance(
     // the flags are the launcher's policy — `--host` deliberately never among
     // them, `--no-open` only when that machine's bundle understands it.
     let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
-    let no_open = web_port.is_some() && supports_no_open_remote(state, &run_host, &version.dir).await;
+    let no_open =
+        web_port.is_some() && supports_no_open_remote(state, &run_host, &version.dir).await;
     let instance_argv =
         crate::launch::instance_argv(&node, &version.dir, profile, web_port, no_open);
 
@@ -1205,7 +1227,11 @@ pub(crate) async fn ensure_remote_web_profile_template(
 fn remote_prime_log_path(data_dir: &Path, home_path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(home_path.to_string_lossy().as_bytes());
-    let short: String = digest.iter().take(6).map(|byte| format!("{byte:02x}")).collect();
+    let short: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     data_dir
         .join("logs")
         .join(format!("profile-{short}.log"))
@@ -1400,7 +1426,8 @@ async fn start_remote_instance(
             profile: running_profile,
         } => {
             state.set_host_status(&host.id, HostStatus::reachable());
-            let run_host = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
+            let run_host =
+                crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
             let data_dir = host.data_dir(&state.data_dir)?;
             adopt_remote_process(
                 app,
@@ -1625,10 +1652,7 @@ pub(crate) enum RemoteVerdict {
     /// The instance's **pinned** port is held by something that is not DSH. The
     /// instance is not running, and a start must name who is in the way instead
     /// of dying with EADDRINUSE.
-    Occupied {
-        pid: Option<i32>,
-        command: String,
-    },
+    Occupied { pid: Option<i32>, command: String },
     /// The machine could not answer, so nothing can be said about the instance.
     Unreachable(String),
 }
@@ -1750,7 +1774,10 @@ async fn recall_remote_run(
 /// launcher cannot place is a host it cannot ask. The directory's own reason is
 /// kept as [`Host::data_dir`] wrote it: it is what the row shows as the
 /// explanation of 「主机不可达」, and it carries the way out of that state.
-fn remote_parts(host: &Host, launcher_data_dir: &Path) -> Result<(crate::ssh::RemoteHost, PathBuf), String> {
+fn remote_parts(
+    host: &Host,
+    launcher_data_dir: &Path,
+) -> Result<(crate::ssh::RemoteHost, PathBuf), String> {
     let run_host = crate::ssh::RemoteHost::of(host, launcher_data_dir)
         .map_err(|_| format!("「{}」是本机，它上面没有远端进程", host.display_name))?;
     let data_dir = host.data_dir(launcher_data_dir)?;
@@ -1951,12 +1978,7 @@ async fn adopt_remote_process(
 /// rather than 「已停止」 — and the watch keeps trying at a lower rate, so an
 /// instance that comes back (a reboot of the server, a network that returns)
 /// converges without the user doing anything.
-fn watch_remote_process(
-    app: &AppHandle,
-    instance_id: &str,
-    profile: &str,
-    run: RemoteRun,
-) {
+fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: RemoteRun) {
     let app = app.clone();
     let id = instance_id.to_string();
     let profile = profile.to_string();
@@ -2008,7 +2030,11 @@ fn watch_remote_process(
                     interval = REMOTE_WATCH_INTERVAL;
                 }
                 Ok(false) => {
-                    crate::log_info!("实例 {id} 在「{}」上已退出（pid {}）", run.host.target, run.pid);
+                    crate::log_info!(
+                        "实例 {id} 在「{}」上已退出（pid {}）",
+                        run.host.target,
+                        run.pid
+                    );
                     unregister_running(
                         &app,
                         &state,
@@ -2126,7 +2152,10 @@ pub(crate) async fn settle_remote_instance(
                     state: InstanceState::Stopped,
                     url: None,
                     remote_url: None,
-                    profile: inst.last_profile.clone().or_else(|| inst.default_profile.clone()),
+                    profile: inst
+                        .last_profile
+                        .clone()
+                        .or_else(|| inst.default_profile.clone()),
                     exit_code: None,
                 },
             );
@@ -2248,7 +2277,12 @@ fn is_web_profile(home_path: &std::path::Path, profile: &str) -> bool {
     let pkg = crate::profile::profile_dir(home_path, profile)
         .ok()
         .map(|d| d.join("package.json"))
-        .unwrap_or_else(|| home_path.join("profiles").join(profile).join("package.json"));
+        .unwrap_or_else(|| {
+            home_path
+                .join("profiles")
+                .join(profile)
+                .join("package.json")
+        });
     let Ok(raw) = std::fs::read_to_string(&pkg) else {
         return false;
     };
@@ -2353,7 +2387,11 @@ pub async fn start_instance_process(
             return Err(format!(
                 "端口 {port} 已被其他进程占用（pid {}，{}），请先释放该端口或修改实例端口",
                 owner.pid,
-                if owner.command.is_empty() { "未知进程" } else { &owner.command }
+                if owner.command.is_empty() {
+                    "未知进程"
+                } else {
+                    &owner.command
+                }
             ));
         }
     }
@@ -2618,19 +2656,14 @@ async fn running_snapshot(
     state: &State<'_, AppState>,
     instance_id: &str,
 ) -> Option<(Arc<Notify>, Option<Adopted>, Option<RemoteRun>, String)> {
-    state
-        .running
-        .lock()
-        .await
-        .get(instance_id)
-        .map(|r| {
-            (
-                r.kill.clone(),
-                r.adopted.clone(),
-                r.remote.clone(),
-                r.profile.clone(),
-            )
-        })
+    state.running.lock().await.get(instance_id).map(|r| {
+        (
+            r.kill.clone(),
+            r.adopted.clone(),
+            r.remote.clone(),
+            r.profile.clone(),
+        )
+    })
 }
 
 /// Stops a running instance: signals the waiter task to kill the child and
@@ -2764,7 +2797,10 @@ pub async fn stop_instance_process(
     if let Some(a) = adopted {
         // Adopted external process: no child handle, terminate by pid. The
         // watcher notices the exit and emits the terminal status.
-        crate::log_info!("停止实例 {instance_id}：结束收养的外部进程（pid {}）", a.pid);
+        crate::log_info!(
+            "停止实例 {instance_id}：结束收养的外部进程（pid {}）",
+            a.pid
+        );
         let kill_result = unsafe { libc::kill(a.pid, libc::SIGTERM) };
         if kill_result != 0 && !pid_alive(a.pid) {
             return Ok(());
@@ -2840,7 +2876,9 @@ pub async fn restart_instance_process(
 
 /// The profile a status talks about when the process itself has nothing to say.
 fn profile_hint(inst: &DshInstance) -> Option<String> {
-    inst.last_profile.clone().or_else(|| inst.default_profile.clone())
+    inst.last_profile
+        .clone()
+        .or_else(|| inst.default_profile.clone())
 }
 
 /// Every instance the launcher can say something about right now.
@@ -2980,7 +3018,12 @@ pub async fn running_for_profile(
         // can only be pointing at an instance of the HOME it asked about.
         Some(preferred) if instance_ids.iter().any(|id| id == preferred) => {
             let mut order = vec![preferred.to_string()];
-            order.extend(instance_ids.iter().filter(|id| id.as_str() != preferred).cloned());
+            order.extend(
+                instance_ids
+                    .iter()
+                    .filter(|id| id.as_str() != preferred)
+                    .cloned(),
+            );
             order
         }
         _ => instance_ids,
@@ -3164,9 +3207,12 @@ mod tests {
             display_name: "阿里云服务器".into(),
             ssh_target: "zjq_aliyun".into(),
             registry: None,
-            extra_env: [("HTTPS_PROXY".to_string(), "http://10.0.0.9:3128".to_string())]
-                .into_iter()
-                .collect(),
+            extra_env: [(
+                "HTTPS_PROXY".to_string(),
+                "http://10.0.0.9:3128".to_string(),
+            )]
+            .into_iter()
+            .collect(),
             data_dir: Some(PathBuf::from(REMOTE_DATA)),
             builtin: false,
             toolchain: Default::default(),
@@ -3187,7 +3233,9 @@ mod tests {
         crate::config::DshVersion {
             id: "v-remote".into(),
             version: "0.1.0-rc.6".into(),
-            dir: PathBuf::from(REMOTE_DATA).join("versions").join("0.1.0-rc.6"),
+            dir: PathBuf::from(REMOTE_DATA)
+                .join("versions")
+                .join("0.1.0-rc.6"),
             host_id: host_id.to_string(),
         }
     }
@@ -3302,7 +3350,8 @@ mod tests {
     }
 
     /// The URL DSH prints on readiness, and the line it arrives on.
-    const READY_URL: &str = "http://127.0.0.1:3080/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
+    const READY_URL: &str =
+        "http://127.0.0.1:3080/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
     const READY_TOKEN: &str = "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
 
     fn remote_run() -> RemoteRun {
@@ -3359,7 +3408,10 @@ mod tests {
                 _ => None,
             })
             .expect("那台机器上要先跑一次 DSH，`profiles/web` 才会出现");
-        assert!(spawn.contains("nohup setsid"), "那次启动也要脱离会话：{spawn}");
+        assert!(
+            spawn.contains("nohup setsid"),
+            "那次启动也要脱离会话：{spawn}"
+        );
         assert!(spawn.contains("'--profile' 'web'"), "{spawn}");
         assert!(
             spawn.contains(&format!("'DSH_HOME={REMOTE_HOME}'")),
@@ -3382,7 +3434,10 @@ mod tests {
 
         // 模板里不能留下这次启动钉住的端口，否则从它派生出的每个 Profile 都会
         // 去抢同一个端口，并且压过启动器给的 `--port`。
-        let written = last_write_of(&fake, &format!("{REMOTE_HOME}/profiles/__temp__/cordis.patch.yml"));
+        let written = last_write_of(
+            &fake,
+            &format!("{REMOTE_HOME}/profiles/__temp__/cordis.patch.yml"),
+        );
         let document = String::from_utf8_lossy(&written);
         assert!(document.contains("port: 0"), "{document}");
         assert!(
@@ -3397,9 +3452,8 @@ mod tests {
     #[tokio::test]
     async fn a_remote_home_that_already_has_profiles_is_left_alone() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
-        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
-            r#"{"profiles":["web"]}"#,
-        )));
+        let fake =
+            FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"profiles":["web"]}"#)));
         let state = remote_app_state(
             fake.clone(),
             remote_host(&host_id),
@@ -3485,7 +3539,11 @@ mod tests {
         for answer in remote_start_answers(node) {
             fake.answering(answer);
         }
-        let state = remote_app_state(fake.clone(), remote_host(&host_id), remote_instance(&host_id, Some(3080)));
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(&host_id),
+            remote_instance(&host_id, Some(3080)),
+        );
         let cfg = state.config.lock().unwrap().clone();
         let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
         let inst = cfg.instances[0].clone();
@@ -3522,14 +3580,29 @@ mod tests {
         );
         assert!(script.contains("'--profile' 'web'"), "{script}");
         assert!(script.contains("'--port' '3080'"), "{script}");
-        assert!(script.contains("'--no-open'"), "那台机器的 bundle 认这个 flag：{script}");
-        assert!(!script.contains("--host"), "绑定地址归 profile 层：{script}");
+        assert!(
+            script.contains("'--no-open'"),
+            "那台机器的 bundle 认这个 flag：{script}"
+        );
+        assert!(
+            !script.contains("--host"),
+            "绑定地址归 profile 层：{script}"
+        );
         // The environment: DSH_HOME, the instance's name, its own variables, and
         // the host record's variables.
-        assert!(script.contains(&format!("'DSH_HOME={REMOTE_HOME}'")), "{script}");
-        assert!(script.contains("'DSH_LAUNCHER_INSTANCE=服务器实例'"), "{script}");
+        assert!(
+            script.contains(&format!("'DSH_HOME={REMOTE_HOME}'")),
+            "{script}"
+        );
+        assert!(
+            script.contains("'DSH_LAUNCHER_INSTANCE=服务器实例'"),
+            "{script}"
+        );
         assert!(script.contains("'DSH_TELEMETRY_DISABLED=1'"), "{script}");
-        assert!(script.contains("'HTTPS_PROXY=http://10.0.0.9:3128'"), "远端的出口由主机记录决定：{script}");
+        assert!(
+            script.contains("'HTTPS_PROXY=http://10.0.0.9:3128'"),
+            "远端的出口由主机记录决定：{script}"
+        );
         assert!(
             !script.contains("127.0.0.1:7890"),
             "本机代理只作用于本机实例：{script}"
@@ -3554,7 +3627,11 @@ mod tests {
         for answer in remote_start_answers("/usr/bin/node") {
             fake.answering(answer);
         }
-        let state = remote_app_state(fake.clone(), remote_host(&host_id), remote_instance(&host_id, Some(3080)));
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(&host_id),
+            remote_instance(&host_id, Some(3080)),
+        );
         let cfg = state.config.lock().unwrap().clone();
         let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
         let inst = cfg.instances[0].clone();
@@ -3604,11 +3681,7 @@ mod tests {
         let written = last_write_of(&fake, &format!("{REMOTE_DATA}/running.json"));
         let entry = &serde_json::from_slice::<serde_json::Value>(&written).unwrap()["i-remote"];
         assert_eq!(entry["url"], READY_URL, "{entry}");
-        assert_eq!(
-            entry["token"],
-            READY_TOKEN,
-            "token 必须落到记录里：{entry}"
-        );
+        assert_eq!(entry["token"], READY_TOKEN, "token 必须落到记录里：{entry}");
         assert_eq!(entry["pid"], 4242, "{entry}");
         assert_eq!(entry["started_at"], 117384720, "{entry}");
         assert_eq!(entry["profile"], "web", "{entry}");
@@ -3645,7 +3718,10 @@ mod tests {
         let second = read_remote_log(&state, "i-remote", "web", &run, first.offset, &mut pending)
             .await
             .unwrap();
-        assert_eq!(second.url.as_deref(), Some("http://127.0.0.1:3080/?token=abc123"));
+        assert_eq!(
+            second.url.as_deref(),
+            Some("http://127.0.0.1:3080/?token=abc123")
+        );
     }
 
     /// A DSH that exited on that machine (a crash, a bad profile) is not the same
@@ -3692,12 +3768,17 @@ mod tests {
             ..app_state(Vec::new(), Vec::new())
         };
 
-        forget_remote_run(&state, "i-remote", &remote_run()).await.unwrap();
+        forget_remote_run(&state, "i-remote", &remote_run())
+            .await
+            .unwrap();
 
         let written = last_write_of(&fake, &format!("{REMOTE_DATA}/running.json"));
         let doc: serde_json::Value = serde_json::from_slice(&written).unwrap();
         assert!(doc.get("i-remote").is_none(), "{doc}");
-        assert_eq!(doc["i-other"]["url"], "http://127.0.0.1:1/?token=keep", "{doc}");
+        assert_eq!(
+            doc["i-other"]["url"], "http://127.0.0.1:1/?token=keep",
+            "{doc}"
+        );
     }
 
     /// A port this Mac has free right now, for a remote instance to have used.
@@ -3798,9 +3879,11 @@ mod tests {
         };
         let remote_url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
 
-        assert!(local_address_for(&state, "i-remote", &remote_run().host, &remote_url)
-            .await
-            .is_none(),);
+        assert!(
+            local_address_for(&state, "i-remote", &remote_run().host, &remote_url)
+                .await
+                .is_none(),
+        );
     }
 
     /// 本机's path is untouched: an instance running here is already reachable
@@ -3825,7 +3908,11 @@ mod tests {
         );
 
         assert_eq!(reachable_url_for(&state, "i-local").await.unwrap(), url);
-        assert!(forwarded(&fake).is_empty(), "本机不需要转发：{:?}", fake.calls());
+        assert!(
+            forwarded(&fake).is_empty(),
+            "本机不需要转发：{:?}",
+            fake.calls()
+        );
     }
 
     /// The board states both addresses for a remote instance: the one that
@@ -3896,9 +3983,12 @@ mod tests {
                 .await
                 .expect("本机的实例退出启动器时要停掉");
             assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(300), remote_kill.notified())
-                    .await
-                    .is_err(),
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(300),
+                    remote_kill.notified()
+                )
+                .await
+                .is_err(),
                 "远端实例不该在退出启动器时收到信号"
             );
         });
@@ -3917,7 +4007,8 @@ mod tests {
     /// The cookie name that machine's instance mints for `127.0.0.1:3080` —
     /// `dsh-auth-<base64url(sha256(authority))>`, computed independently of the
     /// code under test.
-    const REMOTE_COOKIE: &str = "dsh-auth-VPhEEcLKeqRDBoBalzN2Nm7CnfxKhLE00pKIDWxt1sw=v1.payload.sig";
+    const REMOTE_COOKIE: &str =
+        "dsh-auth-VPhEEcLKeqRDBoBalzN2Nm7CnfxKhLE00pKIDWxt1sw=v1.payload.sig";
 
     /// An `AppState` whose only machine is the transport double.
     fn transport_state(fake: &std::sync::Arc<FakeTransport>) -> AppState {
@@ -3961,7 +4052,11 @@ mod tests {
         host_id: &str,
         port: Option<u16>,
     ) -> (AppState, DshInstance, Host) {
-        let state = remote_app_state(fake.clone(), remote_host(host_id), remote_instance(host_id, port));
+        let state = remote_app_state(
+            fake.clone(),
+            remote_host(host_id),
+            remote_instance(host_id, port),
+        );
         let cfg = state.config.lock().unwrap().clone();
         let inst = cfg.instances[0].clone();
         let host = cfg.hosts.iter().find(|h| h.id == host_id).unwrap().clone();
@@ -3994,9 +4089,8 @@ mod tests {
     /// nothing may be signalled.
     #[tokio::test]
     async fn a_pid_whose_start_time_does_not_match_is_never_signalled() {
-        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
-            r#"{"started_at":999}"#,
-        )));
+        let fake =
+            FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"started_at":999}"#)));
         let state = transport_state(&fake);
 
         let outcome = stop_remote_run(&state, &remote_run()).await;
@@ -4162,7 +4256,10 @@ mod tests {
 
         let verdict = check_remote_instance(&state, &inst, &host).await;
 
-        assert!(matches!(verdict, RemoteVerdict::Unreachable(_)), "{verdict:?}");
+        assert!(
+            matches!(verdict, RemoteVerdict::Unreachable(_)),
+            "{verdict:?}"
+        );
     }
 
     /// A host whose data directory is still what the user typed (`~/dsh`, before
@@ -4181,7 +4278,10 @@ mod tests {
 
         match verdict {
             RemoteVerdict::Unreachable(reason) => {
-                assert!(reason.contains("~/dsh"), "理由要说出现在记的是什么：{reason}");
+                assert!(
+                    reason.contains("~/dsh"),
+                    "理由要说出现在记的是什么：{reason}"
+                );
                 assert!(reason.contains("测试连接"), "理由还要说怎么办：{reason}");
             }
             other => panic!("远端数据目录没 settle 就没法问那台机器：{other:?}"),
@@ -4253,7 +4353,11 @@ mod tests {
         );
         let statuses = list_statuses(&state).await;
         assert_eq!(statuses.len(), 1, "{statuses:?}");
-        assert_eq!(statuses[0].state, InstanceState::Unreachable, "{statuses:?}");
+        assert_eq!(
+            statuses[0].state,
+            InstanceState::Unreachable,
+            "{statuses:?}"
+        );
 
         // A machine that answers again puts it back to running.
         state.set_host_status(&host_id, HostStatus::reachable());
@@ -4341,7 +4445,10 @@ mod tests {
 
         forget_url(&dir, "i1");
         assert_eq!(recall_url(&dir, "i1"), None);
-        assert!(recall_url(&dir, "i2").is_some(), "forget must be per instance");
+        assert!(
+            recall_url(&dir, "i2").is_some(),
+            "forget must be per instance"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4408,18 +4515,29 @@ mod tests {
             );
         }
 
-        let hit = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
+        let hit = running_for_profile(&state, "h1", "web", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
         assert!(!hit.adopted);
 
         // A different HOME never borrows another HOME's instance.
-        let other = running_for_profile(&state, "h2", "web", None).await.unwrap().unwrap();
+        let other = running_for_profile(&state, "h2", "web", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(other.url.as_deref(), Some("http://127.0.0.1:3/?token=c"));
 
         // Instance registered but not started -> no running entry.
-        assert!(running_for_profile(&state, "h1", "demo", None).await.unwrap().is_none());
+        assert!(running_for_profile(&state, "h1", "demo", None)
+            .await
+            .unwrap()
+            .is_none());
         // Unknown HOME is an error, distinct from "not running".
-        assert!(running_for_profile(&state, "nope", "web", None).await.is_err());
+        assert!(running_for_profile(&state, "nope", "web", None)
+            .await
+            .is_err());
     }
 
     /// Two instances can run one DSH_HOME and one profile at the same time. The
@@ -4437,25 +4555,46 @@ mod tests {
         );
         {
             let mut running = state.running.lock().await;
-            running.insert("i1".to_string(), running_entry("web", Some("http://127.0.0.1:1/?token=a")));
-            running.insert("i2".to_string(), running_entry("web", Some("http://127.0.0.1:2/?token=b")));
-            running.insert("i9".to_string(), running_entry("web", Some("http://127.0.0.1:3/?token=c")));
+            running.insert(
+                "i1".to_string(),
+                running_entry("web", Some("http://127.0.0.1:1/?token=a")),
+            );
+            running.insert(
+                "i2".to_string(),
+                running_entry("web", Some("http://127.0.0.1:2/?token=b")),
+            );
+            running.insert(
+                "i9".to_string(),
+                running_entry("web", Some("http://127.0.0.1:3/?token=c")),
+            );
         }
 
         // Without a preference: registration order, as before.
-        let first = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
+        let first = running_for_profile(&state, "h1", "web", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(first.id, "i1");
 
         // With one: the named instance answers, and it says which one it is.
-        let preferred = running_for_profile(&state, "h1", "web", Some("i2")).await.unwrap().unwrap();
+        let preferred = running_for_profile(&state, "h1", "web", Some("i2"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(preferred.id, "i2");
-        assert_eq!(preferred.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
+        assert_eq!(
+            preferred.url.as_deref(),
+            Some("http://127.0.0.1:2/?token=b")
+        );
 
         // A stale id (the instance was deleted), and one belonging to another
         // HOME, only rank: the page is scoped by (HOME, Profile), so neither
         // can borrow another HOME's process or turn into an error.
         for ignored in ["nope", "i9"] {
-            let hit = running_for_profile(&state, "h1", "web", Some(ignored)).await.unwrap().unwrap();
+            let hit = running_for_profile(&state, "h1", "web", Some(ignored))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(hit.id, "i1", "{ignored} must not change the answer");
         }
     }
@@ -4467,7 +4606,10 @@ mod tests {
         let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);
         {
             let mut running = state.running.lock().await;
-            running.insert("i1".to_string(), running_entry("web", Some("http://127.0.0.1:3089")));
+            running.insert(
+                "i1".to_string(),
+                running_entry("web", Some("http://127.0.0.1:3089")),
+            );
             if let Some(entry) = running.get_mut("i1") {
                 entry.adopted = Some(Adopted {
                     pid: 42,
@@ -4476,7 +4618,10 @@ mod tests {
                 });
             }
         }
-        let hit = running_for_profile(&state, "h1", "web", None).await.unwrap().unwrap();
+        let hit = running_for_profile(&state, "h1", "web", None)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(hit.adopted);
         assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:3089"));
     }

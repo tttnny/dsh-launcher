@@ -227,7 +227,10 @@ mod tests {
         let out = set_lan_bind_port(&raw, 1234);
         assert!(out.contains("port: 1234"), "out: {out}");
         assert!(out.contains("host: 0.0.0.0"), "sibling row kept: {out}");
-        assert!(out.contains("port: 1"), "block outside managed area kept: {out}");
+        assert!(
+            out.contains("port: 1"),
+            "block outside managed area kept: {out}"
+        );
     }
 
     #[test]

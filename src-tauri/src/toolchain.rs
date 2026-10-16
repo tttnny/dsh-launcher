@@ -339,7 +339,11 @@ pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
                 app,
                 state,
                 task_id,
-                &format!("使用那台机器上的 pnpm {}（{}）", bound.version, bound.path.display()),
+                &format!(
+                    "使用那台机器上的 pnpm {}（{}）",
+                    bound.version,
+                    bound.path.display()
+                ),
             )
             .await;
             Ok(bound.path)
@@ -407,7 +411,9 @@ mod tests {
         .await;
         assert_eq!(picked, Some((good, "12.4.2".to_string())));
         assert!(
-            notes.iter().any(|n| n.contains("pnpm 9") && n.contains(&old.display().to_string())),
+            notes
+                .iter()
+                .any(|n| n.contains("pnpm 9") && n.contains(&old.display().to_string())),
             "the user has to be told why their pnpm was passed over: {notes:?}"
         );
 
@@ -415,11 +421,16 @@ mod tests {
         // skipped — that is what tells the user their path went stale.
         let mut notes = Vec::new();
         let gone = old_dir.join("gone");
-        assert!(resolve_pnpm_from(vec![(gone.clone(), ToolSource::Manual)], &mut |s| notes.push(s))
-            .await
-            .is_none());
         assert!(
-            notes.iter().any(|n| n.contains(&gone.display().to_string())),
+            resolve_pnpm_from(vec![(gone.clone(), ToolSource::Manual)], &mut |s| notes
+                .push(s))
+            .await
+            .is_none()
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains(&gone.display().to_string())),
             "a stale pick must be named: {notes:?}"
         );
 
@@ -449,10 +460,7 @@ mod tests {
                 key.starts_with("pnpm_config_"),
                 "network settings must use the pnpm_config_ env prefix: {key}"
             );
-            assert!(
-                !key.contains('-'),
-                "env keys cannot contain dashes: {key}"
-            );
+            assert!(!key.contains('-'), "env keys cannot contain dashes: {key}");
             assert!(!value.is_empty(), "missing value for {key}");
         }
         // The three settings the flag set used to carry must all still be here.

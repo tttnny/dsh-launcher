@@ -69,10 +69,7 @@ fn cli_core_version(version_dir: &Path) -> Option<String> {
 /// commonly imported by plugins and do not participate in DSH singleton/scheduler state.
 fn is_core_package(name: &str) -> bool {
     let short = name.strip_prefix("@deepseek-ai/").unwrap_or(name);
-    short == "dsh"
-        || short.starts_with("dsh-")
-        || short == "cordis"
-        || short.starts_with("cordis-")
+    short == "dsh" || short.starts_with("dsh-") || short == "cordis" || short.starts_with("cordis-")
 }
 
 /// Version of a package inside the CLI's dependency tree.
@@ -80,7 +77,12 @@ fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
     let short = pkg_name.strip_prefix("@deepseek-ai/").unwrap_or(pkg_name);
 
     // 1. Direct path in node_modules/@deepseek-ai/<name>
-    if let Some(v) = package_version(&version_dir.join("node_modules").join("@deepseek-ai").join(short)) {
+    if let Some(v) = package_version(
+        &version_dir
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join(short),
+    ) {
         return Some(v);
     }
 

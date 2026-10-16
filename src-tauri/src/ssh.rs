@@ -403,11 +403,7 @@ impl SshTransport {
         })
     }
 
-    async fn script(
-        &self,
-        host: &RemoteHost,
-        call: RemoteCall,
-    ) -> Result<RemoteOutput, HostError> {
+    async fn script(&self, host: &RemoteHost, call: RemoteCall) -> Result<RemoteOutput, HostError> {
         let command = script_command(&call.script);
         self.dial(host, &command, call.timeout).await
     }
@@ -566,8 +562,7 @@ impl HostTransport for SshTransport {
 /// the launcher's own data directory on macOS is
 /// `/Users/<name>/Library/Application Support/in.dsh-plug.dsh-launcher`.
 fn config_value(value: &str) -> String {
-    const PLAIN: &str =
-        "-_./~:@+,=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const PLAIN: &str = "-_./~:@+,=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     if value.chars().all(|c| PLAIN.contains(c)) {
         value.to_string()
     } else {
@@ -635,7 +630,11 @@ pub fn script_command(script: &str) -> Vec<String> {
 /// configurations' commands on the same session.
 fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
     let digest = Sha256::digest(target.as_bytes());
-    let short: String = digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect();
+    let short: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
 
     let own = launcher_data_dir.join("ssh").join(format!("{short}.sock"));
     if own.as_os_str().len() <= MAX_SOCKET_PATH {
@@ -647,7 +646,9 @@ fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
     // directory did, and `/tmp` is shared with every other user on the machine —
     // a control socket somebody else can create first is a connection somebody
     // else can answer on.
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     if home.as_os_str().is_empty() {
         // No home to move into: keep the launcher's own directory and let ssh say
         // what is wrong with the path ([`socket_path_too_long`] turns that into a
@@ -970,10 +971,7 @@ mod tests {
             "必须非交互：{argv:?}"
         );
         assert!(
-            argv.contains(&format!(
-                "ControlPath=\"{}\"",
-                host.socket.display()
-            )),
+            argv.contains(&format!("ControlPath=\"{}\"", host.socket.display())),
             "socket 路径里有空格（macOS 的 Application Support），必须是加引号的 -o 值：{argv:?}"
         );
         assert!(argv.contains(&"ControlMaster=auto".to_string()));
@@ -1148,7 +1146,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("ssh 连不上（socket {}）：{e}", host.socket.display()));
 
         assert!(out.stdout.contains("bound"), "{:?}", out.stdout);
-        assert!(socket_len(&host) <= SOCKET_BUDGET, "{}", host.socket.display());
+        assert!(
+            socket_len(&host) <= SOCKET_BUDGET,
+            "{}",
+            host.socket.display()
+        );
         // End the launcher's own connection first, the way the app's exit path
         // does, and only then take the socket away: a master that is still alive
         // owns it.
@@ -1294,7 +1296,11 @@ mod tests {
     #[test]
     fn the_local_host_has_nothing_to_dial() {
         let err = RemoteHost::of(&Host::local(), Path::new("/tmp/launcher")).unwrap_err();
-        assert!(err.message.contains("本机"), "拒绝的理由要说清是本机：{}", err.message);
+        assert!(
+            err.message.contains("本机"),
+            "拒绝的理由要说清是本机：{}",
+            err.message
+        );
     }
 
     /// The four classes, each with a message a user can act on. The first
@@ -1303,7 +1309,10 @@ mod tests {
     /// launcher can neither show the prompt nor take the password.
     #[test]
     fn ssh_failures_are_classified_into_four_readable_classes() {
-        let refused = ssh_failure("lab", "ssh: connect to host lab port 22: Connection refused\n");
+        let refused = ssh_failure(
+            "lab",
+            "ssh: connect to host lab port 22: Connection refused\n",
+        );
         assert_eq!(refused.kind, HostErrorKind::Unreachable);
         assert!(
             refused.message.contains("Connection refused"),
@@ -1328,7 +1337,10 @@ mod tests {
             unknown_key.message
         );
 
-        let slow = ssh_failure("lab", "ssh: connect to host lab port 22: Operation timed out\n");
+        let slow = ssh_failure(
+            "lab",
+            "ssh: connect to host lab port 22: Operation timed out\n",
+        );
         assert_eq!(slow.kind, HostErrorKind::Timeout);
         assert_eq!(slow.label(), "超时");
 
@@ -1336,7 +1348,11 @@ mod tests {
         // launcher can use, and it is not an authentication problem.
         let dropped = ssh_failure("lab", "Connection closed by 198.18.0.65 port 22\n");
         assert_eq!(dropped.kind, HostErrorKind::Unreachable);
-        assert!(dropped.message.contains("Connection closed"), "{}", dropped.message);
+        assert!(
+            dropped.message.contains("Connection closed"),
+            "{}",
+            dropped.message
+        );
 
         let failed = HostError::remote_command("远端命令失败（退出码 1）：npm ERR! missing pnpm");
         assert_eq!(failed.kind, HostErrorKind::RemoteCommand);
@@ -1376,7 +1392,10 @@ mod tests {
 
         // ssh's own words still carry the reason whenever it said anything:
         // 「连不上」 for these is not a guess.
-        let refused = ssh_failure("lab", "ssh: connect to host lab port 22: Connection refused\n");
+        let refused = ssh_failure(
+            "lab",
+            "ssh: connect to host lab port 22: Connection refused\n",
+        );
         assert!(
             refused.message.contains("确认 ssh lab") && refused.message.contains("机器开着"),
             "{}",
@@ -1392,7 +1411,11 @@ mod tests {
                       bash: cannot set terminal process group (-1): Inappropriate ioctl for device\n\
                       sh: line 3: pnpm: command not found\n";
         let err = ssh_failure("lab", stderr);
-        assert!(err.message.contains("pnpm: command not found"), "{}", err.message);
+        assert!(
+            err.message.contains("pnpm: command not found"),
+            "{}",
+            err.message
+        );
         assert!(!err.message.contains("no job control"), "{}", err.message);
     }
 
@@ -1434,7 +1457,11 @@ Match host lab
         assert_eq!(aliases[0].host_name.as_deref(), Some("10.0.0.7"));
         assert_eq!(aliases[0].user.as_deref(), Some("deploy"));
         assert_eq!(aliases[0].port, Some(2222));
-        assert_eq!(aliases[1].user.as_deref(), Some("root"), "Host web db 一行两个别名");
+        assert_eq!(
+            aliases[1].user.as_deref(),
+            Some("root"),
+            "Host web db 一行两个别名"
+        );
         assert_eq!(aliases[2].user.as_deref(), Some("root"));
         assert_eq!(aliases[3].host_name.as_deref(), Some("example.com"));
         assert_eq!(aliases[3].port, None, "Match 块里的 Port 不属于它");

@@ -20,8 +20,7 @@
 //! than re-deriving it (ADR-0005 追加).
 
 use crate::ssh::{
-    HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput,
-    DEFAULT_TIMEOUT,
+    HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput, DEFAULT_TIMEOUT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -53,10 +52,9 @@ pub fn quote(value: &str) -> String {
 /// did not do what it was asked, and its stderr is the best explanation there
 /// is.
 pub fn parse_marked<T: DeserializeOwned>(out: &RemoteOutput) -> Result<T, HostError> {
-    let payload = between_markers(&out.stdout)
-        .ok_or_else(|| failed(out, "远端脚本没有返回结果标记"))?;
-    serde_json::from_str(payload)
-        .map_err(|e| failed(out, &format!("远端脚本的结果无法解析：{e}")))
+    let payload =
+        between_markers(&out.stdout).ok_or_else(|| failed(out, "远端脚本没有返回结果标记"))?;
+    serde_json::from_str(payload).map_err(|e| failed(out, &format!("远端脚本的结果无法解析：{e}")))
 }
 
 fn between_markers(stdout: &str) -> Option<&str> {
@@ -86,7 +84,9 @@ pub async fn json<T: DeserializeOwned>(
     script: String,
     timeout: Duration,
 ) -> Result<T, HostError> {
-    let out = transport.run(host, RemoteCall::within(script, timeout)).await?;
+    let out = transport
+        .run(host, RemoteCall::within(script, timeout))
+        .await?;
     parse_marked(&out)
 }
 
@@ -248,7 +248,10 @@ pub async fn installed_versions(
     versions_dir: &str,
 ) -> Result<Vec<RemoteInstalledVersion>, HostError> {
     let out = transport
-        .run(host, RemoteCall::new(installed_versions_script(versions_dir)))
+        .run(
+            host,
+            RemoteCall::new(installed_versions_script(versions_dir)),
+        )
         .await?;
     decode_installed_versions(&out)
 }
@@ -317,7 +320,9 @@ pub async fn tail(
         alive: bool,
     }
     let script = tail_script(log_path, offset, pid, wait_secs);
-    let out = transport.run(host, RemoteCall::within(script, budget_for(wait_secs))).await?;
+    let out = transport
+        .run(host, RemoteCall::within(script, budget_for(wait_secs)))
+        .await?;
     let chunk: Chunk = parse_marked(&out)?;
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -1082,10 +1087,7 @@ pub(crate) fn environment_script_with(
                 "%%NODE_MIN%%",
                 crate::runtime::RECOMMENDED_NODE_MAJOR.to_string(),
             ),
-            (
-                "%%PNPM_MIN%%",
-                crate::toolchain::MIN_PNPM_MAJOR.to_string(),
-            ),
+            ("%%PNPM_MIN%%", crate::toolchain::MIN_PNPM_MAJOR.to_string()),
             (
                 "%%MANUAL_NODE%%",
                 manual_node.map(quote).unwrap_or_default(),
@@ -1119,7 +1121,10 @@ printf '<<<DSH-JSON>>>{"exists":%s,"version":%s}<<<DSH-END>>>' "$dsh_exists" "$d
 pub fn manual_tool_script(path: &str) -> String {
     fill(
         MANUAL_TOOL,
-        &[("%%ESCAPER%%", ESCAPER.to_string()), ("%%PATH%%", quote(path))],
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATH%%", quote(path)),
+        ],
     )
 }
 
@@ -1338,7 +1343,10 @@ printf '<<<DSH-JSON>>>{"manifest":%s,"installed":[%s]}<<<DSH-END>>>' "$dsh_manif
 pub fn home_path_script(path: &str) -> String {
     fill(
         HOME_PATH,
-        &[("%%ESCAPER%%", ESCAPER.to_string()), ("%%PATH%%", quote(path))],
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATH%%", quote(path)),
+        ],
     )
 }
 
@@ -1904,10 +1912,7 @@ pub fn spawn_script(argv: &[String], log_path: &str) -> String {
         .join(" ");
     fill(
         SPAWN,
-        &[
-            ("%%LOG%%", quote(log_path)),
-            ("%%ARGV%%", command),
-        ],
+        &[("%%LOG%%", quote(log_path)), ("%%ARGV%%", command)],
     )
 }
 
@@ -2183,9 +2188,11 @@ struct ProfilePackages {
 pub fn decode_profile_packages(out: &RemoteOutput) -> Result<RemoteProfilePackages, HostError> {
     use base64::Engine as _;
     let answer: ProfilePackages = parse_marked(out)?;
-    let manifest = answer
-        .manifest
-        .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).ok());
+    let manifest = answer.manifest.and_then(|data| {
+        base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .ok()
+    });
     let installed = answer
         .installed
         .into_iter()
@@ -2316,8 +2323,7 @@ pub(crate) mod testing {
         /// launcher asked the remote machine for the right thing.
         pub(crate) fn last_script(&self) -> String {
             match self.calls.lock().unwrap().last() {
-                Some(FakeCall::Run(script))
-                | Some(FakeCall::Spawn(script)) => script.clone(),
+                Some(FakeCall::Run(script)) | Some(FakeCall::Spawn(script)) => script.clone(),
                 _ => String::new(),
             }
         }
@@ -2357,11 +2363,7 @@ pub(crate) mod testing {
         node: Option<(&str, &str)>,
         pnpm: Option<(&str, &str)>,
     ) -> String {
-        connection_stdout_with_dir(
-            "/home/demo/.local/share/dsh-launcher",
-            node,
-            pnpm,
-        )
+        connection_stdout_with_dir("/home/demo/.local/share/dsh-launcher", node, pnpm)
     }
 
     /// The same answer for a machine that settled the directory the user typed —
@@ -2499,9 +2501,7 @@ pub(crate) mod testing {
     }
 
     /// A tool the probe did not find, with what it passed over on the way.
-    pub(crate) fn remote_tool_missing(
-        skipped: Vec<serde_json::Value>,
-    ) -> serde_json::Value {
+    pub(crate) fn remote_tool_missing(skipped: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "path": null,
             "version": null,
@@ -2788,7 +2788,10 @@ mod tests {
             test.node.as_ref().map(|t| t.version.as_str()),
             Some("v26.0.0")
         );
-        assert_eq!(test.pnpm.as_ref().map(|t| t.path.as_str()), Some("/home/demo/.local/share/pnpm/pnpm"));
+        assert_eq!(
+            test.pnpm.as_ref().map(|t| t.path.as_str()),
+            Some("/home/demo/.local/share/pnpm/pnpm")
+        );
     }
 
     /// A machine without Node or pnpm is still a machine worth connecting to;
@@ -2833,8 +2836,7 @@ mod tests {
             ),
         ];
         for (kind, message, label) in cases {
-            let fake =
-                FakeTransport::new().answering(FakeAnswer::fail(kind, message));
+            let fake = FakeTransport::new().answering(FakeAnswer::fail(kind, message));
             let transport: &dyn HostTransport = &*fake;
 
             let test = block_on(connection_test(transport, &host(), None));
@@ -2865,7 +2867,10 @@ mod tests {
         let said = test.message.unwrap();
         assert!(said.contains("pnpm: command not found"), "{said}");
         assert!(said.contains("退出码 127"), "{said}");
-        assert!(!said.contains("no job control"), "登录 shell 的废话不是失败原因：{said}");
+        assert!(
+            !said.contains("no job control"),
+            "登录 shell 的废话不是失败原因：{said}"
+        );
     }
 
     /// The configured data directory reaches the script as one quoted word, and
@@ -3130,7 +3135,11 @@ mod tests {
             let transport: &dyn HostTransport = &*fake;
 
             let versions = block_on(installed_versions(transport, &host(), "/opt/dsh/versions"));
-            let available = block_on(available_versions(transport, &host(), "https://npm.example.com"));
+            let available = block_on(available_versions(
+                transport,
+                &host(),
+                "https://npm.example.com",
+            ));
 
             assert!(versions.is_err(), "{versions:?}");
             assert!(available.is_err(), "{available:?}");
@@ -3180,7 +3189,10 @@ mod tests {
             other => panic!("排错了：{other:?}"),
         };
         assert!(spawned.contains("nohup setsid"), "{spawned}");
-        assert!(spawned.contains("< /dev/null"), "脱离会话的进程要断掉 stdin：{spawned}");
+        assert!(
+            spawned.contains("< /dev/null"),
+            "脱离会话的进程要断掉 stdin：{spawned}"
+        );
         assert!(
             spawned.contains("'/usr/bin/node' '/opt/dsh/bin.js'"),
             "argv 逐段引用，调用处不拼 shell 字符串：{spawned}"
@@ -3188,10 +3200,7 @@ mod tests {
         assert_eq!(calls[3], FakeCall::StopPid(4242));
         assert_eq!(
             calls[4],
-            FakeCall::WriteFile(
-                "/home/demo/.dsh/icons/i-1.png".into(),
-                vec![1, 2, 3]
-            )
+            FakeCall::WriteFile("/home/demo/.dsh/icons/i-1.png".into(), vec![1, 2, 3])
         );
     }
 
@@ -3351,7 +3360,10 @@ mod tests {
         let env = run_probe(&home, &path, None, &fallback);
         assert_eq!(env.node.path.as_deref(), Some(from_path.to_str().unwrap()));
         assert_eq!(env.node.source.as_deref(), Some("system"));
-        assert!(env.node.skipped.is_empty(), "没有低于门槛的候选就不该报跳过");
+        assert!(
+            env.node.skipped.is_empty(),
+            "没有低于门槛的候选就不该报跳过"
+        );
 
         let env = run_probe(&home, &path, Some(picked.to_str().unwrap()), &fallback);
         assert_eq!(
@@ -3495,7 +3507,13 @@ mod tests {
         )));
         let transport: &dyn HostTransport = &*fake;
 
-        let env = block_on(environment(transport, &host(), Some("/opt/pick/node"), None)).unwrap();
+        let env = block_on(environment(
+            transport,
+            &host(),
+            Some("/opt/pick/node"),
+            None,
+        ))
+        .unwrap();
 
         assert_eq!(env.shell, "/bin/bash");
         assert_eq!(env.node.source.as_deref(), Some("system"));
@@ -3508,7 +3526,10 @@ mod tests {
         // the Linux install directories, not this Mac's.
         let script = fake.last_script();
         assert!(script.contains("'/opt/pick/node'"), "{script}");
-        assert!(script.contains("$HOME/.nvm/versions/node/*/bin"), "{script}");
+        assert!(
+            script.contains("$HOME/.nvm/versions/node/*/bin"),
+            "{script}"
+        );
         assert!(script.contains("$HOME/.local/share/pnpm"), "{script}");
     }
 
@@ -3538,7 +3559,10 @@ mod tests {
                 script.contains("'/opt/node/bin/node'"),
                 "要真的在那台机器上跑这个路径：{script}"
             );
-            assert!(script.contains("--version"), "校验方式就是跑一次 --version：{script}");
+            assert!(
+                script.contains("--version"),
+                "校验方式就是跑一次 --version：{script}"
+            );
         }
     }
 
@@ -3629,9 +3653,18 @@ mod tests {
     /// machine with none leaves it with both nvm and a Node.
     #[test]
     fn the_install_recipes_extend_what_the_machine_already_has() {
-        assert_eq!(node_install_recipe(&["nvm".to_string()]), "nvm install --lts");
-        assert_eq!(node_install_recipe(&["fnm".to_string()]), "fnm install --lts");
-        assert_eq!(node_install_recipe(&["brew".to_string()]), "brew install node");
+        assert_eq!(
+            node_install_recipe(&["nvm".to_string()]),
+            "nvm install --lts"
+        );
+        assert_eq!(
+            node_install_recipe(&["fnm".to_string()]),
+            "fnm install --lts"
+        );
+        assert_eq!(
+            node_install_recipe(&["brew".to_string()]),
+            "brew install node"
+        );
         let bare = node_install_recipe(&[]);
         assert!(
             bare.contains("install.sh") && bare.contains("nvm.sh") && bare.contains("nvm install --lts"),
@@ -3650,7 +3683,6 @@ mod tests {
             assert!(!recipe.contains('"'), "配方里不能有双引号：{recipe}");
         }
     }
-
 
     // -----------------------------------------------------------------------
     // Following and stopping a detached command
@@ -3782,7 +3814,13 @@ mod tests {
         let target = dir.join("tree");
 
         let argv = measured_argv(
-            &["/usr/bin/env".to_string(), "CI=true".to_string(), "/bin/sh".to_string(), "-c".to_string(), "echo out; echo err >&2; exit 3".to_string()],
+            &[
+                "/usr/bin/env".to_string(),
+                "CI=true".to_string(),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo out; echo err >&2; exit 3".to_string(),
+            ],
             &target.to_string_lossy(),
         );
         let out = std::process::Command::new("/bin/sh")
@@ -3797,7 +3835,11 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
 
-        assert!(target.is_dir(), "工作目录要在那里被建出来：{}", target.display());
+        assert!(
+            target.is_dir(),
+            "工作目录要在那里被建出来：{}",
+            target.display()
+        );
         assert!(logged.contains("out") && logged.contains("err"), "{logged}");
         let code = logged
             .lines()
@@ -3893,9 +3935,15 @@ mod tests {
     /// machine's own, against the registry its record names.
     #[test]
     fn the_version_lookup_asks_that_machines_own_npm() {
-        let with_registry = npm_has_version_script("@deepseek-ai/dsh@1.2.3", Some("https://mirror.example/it's"));
+        let with_registry = npm_has_version_script(
+            "@deepseek-ai/dsh@1.2.3",
+            Some("https://mirror.example/it's"),
+        );
         assert!(with_registry.contains("command -v npm"), "{with_registry}");
-        assert!(with_registry.contains("'@deepseek-ai/dsh@1.2.3'"), "{with_registry}");
+        assert!(
+            with_registry.contains("'@deepseek-ai/dsh@1.2.3'"),
+            "{with_registry}"
+        );
         assert!(
             with_registry.contains("--registry 'https://mirror.example/it'\\''s'"),
             "主机自己的 registry 要带进去：{with_registry}"
@@ -3931,7 +3979,6 @@ mod tests {
         );
         assert!(stop_group_script(4242).contains("-$dsh_pid"));
     }
-
 
     /// Runs one script the way the transport runs it, with a chosen `HOME` —
     /// the remote machine's home directory is not this one, and `~` is expanded
@@ -3980,7 +4027,10 @@ mod tests {
 
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"offset":12}"#)));
         assert_eq!(block_on(log_size(&*fake, &host(), &path)).unwrap(), 12);
-        assert!(fake.last_script().contains(&path), "问的是那台机器上的这个日志");
+        assert!(
+            fake.last_script().contains(&path),
+            "问的是那台机器上的这个日志"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3999,7 +4049,10 @@ mod tests {
         let manifest = "{\n  \"dsh\": { \"profile\": { \"bundles\": [\"plain\"] } },\n  \"dependencies\": { \"plain\": \"^1\" }\n}\n";
         std::fs::write(web.join("package.json"), manifest).unwrap();
         std::fs::write(
-            web.join("node_modules").join("@scope").join("one").join("package.json"),
+            web.join("node_modules")
+                .join("@scope")
+                .join("one")
+                .join("package.json"),
             "{\n  \"name\": \"@scope/one\",\n  \"version\": \"3.1.4\"\n}\n",
         )
         .unwrap();
@@ -4009,7 +4062,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            web.join("node_modules").join("versionless").join("package.json"),
+            web.join("node_modules")
+                .join("versionless")
+                .join("package.json"),
             r#"{"name":"versionless"}"#,
         )
         .unwrap();
@@ -4018,8 +4073,14 @@ mod tests {
         let files = decode_profile_packages(&out).expect("一次调用读回整个 Profile");
 
         assert_eq!(files.manifest.as_deref(), Some(manifest.as_bytes()));
-        assert_eq!(files.installed.get("@scope/one").map(String::as_str), Some("3.1.4"));
-        assert_eq!(files.installed.get("plain").map(String::as_str), Some("1.0.0"));
+        assert_eq!(
+            files.installed.get("@scope/one").map(String::as_str),
+            Some("3.1.4")
+        );
+        assert_eq!(
+            files.installed.get("plain").map(String::as_str),
+            Some("1.0.0")
+        );
         assert!(
             !files.installed.contains_key("versionless"),
             "清单里没有版本就不报版本：{:?}",
@@ -4027,7 +4088,9 @@ mod tests {
         );
 
         // 没有这个 Profile：读回一个空的答案，而不是一次失败。
-        let absent = local_shell(&profile_packages_script(&dir.join("nope").to_string_lossy()));
+        let absent = local_shell(&profile_packages_script(
+            &dir.join("nope").to_string_lossy(),
+        ));
         let files = decode_profile_packages(&absent).unwrap();
         assert!(files.manifest.is_none());
         assert!(files.installed.is_empty());
@@ -4060,7 +4123,10 @@ mod tests {
 
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"ready":true}"#)));
         assert!(block_on(file_ready(&*fake, &host(), &path)).unwrap());
-        assert!(fake.last_script().contains(&path), "问的是那台机器上的这个文件");
+        assert!(
+            fake.last_script().contains(&path),
+            "问的是那台机器上的这个文件"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4078,12 +4144,14 @@ mod tests {
         let gone: Started = parse_marked(&local_shell(&start_time_script(4_000_000))).unwrap();
         assert_eq!(gone.started_at, None, "没人占用的 pid 没有启动时间");
 
-        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
-            r#"{"started_at":117384720}"#,
-        )));
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)));
         let started = block_on(process_start_time(&*fake, &host(), 4242)).unwrap();
         assert_eq!(started, Some(117384720));
-        assert!(fake.last_script().contains("dsh_pid=4242"), "读的是那个 pid 自己的记录");
+        assert!(
+            fake.last_script().contains("dsh_pid=4242"),
+            "读的是那个 pid 自己的记录"
+        );
     }
 
     /// `~` is expanded **by the machine that owns the home directory**, and the
@@ -4117,7 +4185,9 @@ mod tests {
 
         assert_eq!(resolved.path, home.join("a/b").to_string_lossy());
         assert_eq!(
-            decode_names(&local_shell(&list_dir_script(&home.to_string_lossy()))).unwrap().len(),
+            decode_names(&local_shell(&list_dir_script(&home.to_string_lossy())))
+                .unwrap()
+                .len(),
             1,
             "只留下一层 a"
         );
@@ -4175,9 +4245,7 @@ mod tests {
         );
 
         let empty = home.join("nothing-here");
-        let out = local_shell(&profiles_script(
-            &empty.join("profiles").to_string_lossy(),
-        ));
+        let out = local_shell(&profiles_script(&empty.join("profiles").to_string_lossy()));
         assert!(decode_profiles(&out).unwrap().is_empty());
 
         std::fs::remove_dir_all(&home).ok();
@@ -4207,7 +4275,11 @@ mod tests {
         let missing = profiles.join("nope").to_string_lossy().to_string();
         let out = local_shell(&copy_profile_script(&missing, &to));
         assert_ne!(out.status, 0);
-        assert!(out.stderr.contains("远端没有这个 Profile 目录"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("远端没有这个 Profile 目录"),
+            "{}",
+            out.stderr
+        );
 
         let renamed = profiles.join("renamed").to_string_lossy().to_string();
         decode_ack(&local_shell(&rename_profile_script(&to, &renamed))).unwrap();
@@ -4245,8 +4317,9 @@ mod tests {
                 "服务器 实例".to_string(),
             ),
         ];
-        let path_dirs = vec!["/home/demo/.local/share/dsh-launcher/versions/0.1.0/node_modules/.bin"
-            .to_string()];
+        let path_dirs = vec![
+            "/home/demo/.local/share/dsh-launcher/versions/0.1.0/node_modules/.bin".to_string(),
+        ];
         let script = terminal_script(&home, &env, &path_dirs);
         let command = terminal_command(TARGET, &script);
         assert!(command.starts_with("ssh -t zjq_aliyun "), "{command}");
@@ -4261,11 +4334,19 @@ mod tests {
             .unwrap();
         let handed_text = String::from_utf8_lossy(&handed.stdout).to_string();
         let mut words: Vec<String> = handed_text.split("@@@").map(str::to_string).collect();
-        assert_eq!(words.pop().as_deref(), Some(""), "最后一个 @@ 后面不该有东西");
+        assert_eq!(
+            words.pop().as_deref(),
+            Some(""),
+            "最后一个 @@ 后面不该有东西"
+        );
         assert_eq!(words[0], "ssh");
         assert_eq!(words[1], "-t", "远端会话要有终端，否则 shell 不是交互的");
         assert_eq!(words[2], TARGET);
-        assert_eq!(words.len(), 4, "ssh 只该拿到一个参数（脚本可能被换行拆开了）");
+        assert_eq!(
+            words.len(),
+            4,
+            "ssh 只该拿到一个参数（脚本可能被换行拆开了）"
+        );
 
         // What ssh hands the remote login shell: its arguments joined with
         // spaces. Running that here is what the machine does with it — the
@@ -4298,21 +4379,14 @@ mod tests {
             .collect();
         assert_eq!(
             printed,
-            vec![
-                home.clone(),
-                home.clone(),
-                "服务器 实例".to_string()
-            ],
+            vec![home.clone(), home.clone(), "服务器 实例".to_string()],
             "远端会话要 cd 进那个目录，并带上这两个变量：{:?} / {:?} / {:?}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
             out.status
         );
         assert!(
-            script.contains(&format!(
-                "export PATH={}:",
-                quote(path_dirs[0].as_str())
-            )),
+            script.contains(&format!("export PATH={}:", quote(path_dirs[0].as_str()))),
             "版本的 bin 目录要排在最前（远端不写 wrapper，pnpm 自己的 .bin 就是入口）：{script}"
         );
 
@@ -4445,14 +4519,15 @@ mod tests {
         let transport = crate::ssh::SshTransport::new();
         let transport: &dyn HostTransport = &transport;
 
-        let dir = format!(
-            "/tmp/dsh-profile-real-{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let dir = format!("/tmp/dsh-profile-real-{}", uuid::Uuid::new_v4().simple());
         let web = format!("{dir}/profiles/web");
         let manifest = r#"{"dsh":{"profile":{"bundles":["plain"]}},"dependencies":{"plain":"^1"}}"#;
         transport
-            .write_file(&host, &format!("{web}/package.json"), manifest.as_bytes().to_vec())
+            .write_file(
+                &host,
+                &format!("{web}/package.json"),
+                manifest.as_bytes().to_vec(),
+            )
             .await
             .unwrap();
         transport
@@ -4477,7 +4552,10 @@ mod tests {
             .expect("真机上的一次调用要读回整个 Profile");
 
         assert_eq!(files.manifest.as_deref(), Some(manifest.as_bytes()));
-        assert_eq!(files.installed.get("plain").map(String::as_str), Some("1.2.3"));
+        assert_eq!(
+            files.installed.get("plain").map(String::as_str),
+            Some("1.2.3")
+        );
         assert_eq!(
             files.installed.get("@scope/one").map(String::as_str),
             Some("4.5.6")

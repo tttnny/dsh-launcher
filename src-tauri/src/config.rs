@@ -446,7 +446,9 @@ impl Config {
 /// none — which is what every call site written before hosts existed does.
 pub fn resolve_host<'a>(cfg: &'a Config, host_id: Option<&str>) -> Result<&'a Host, String> {
     match host_id.map(str::trim).filter(|id| !id.is_empty()) {
-        None => cfg.local_host().ok_or_else(|| "配置里没有本机记录".to_string()),
+        None => cfg
+            .local_host()
+            .ok_or_else(|| "配置里没有本机记录".to_string()),
         Some(id) => cfg
             .hosts
             .iter()
@@ -754,10 +756,7 @@ pub fn dedupe_homes(host: &Host, cfg: &mut Config) {
     {
         let mut kept: Vec<&DshHome> = Vec::new();
         for home in cfg.homes.iter().filter(|h| h.host_id == host.id) {
-            if let Some(existing) = kept
-                .iter()
-                .find(|e| host.paths_equal(&e.path, &home.path))
-            {
+            if let Some(existing) = kept.iter().find(|e| host.paths_equal(&e.path, &home.path)) {
                 redirect.insert(home.id.clone(), existing.id.clone());
             } else {
                 kept.push(home);
@@ -778,12 +777,17 @@ pub fn dedupe_homes(host: &Host, cfg: &mut Config) {
 /// Enforces the 1-version-1-instance contract and migrates `host`'s instances
 /// to dedicated homes under `<data_dir>/homes/<version>` (issue #3, #4), where
 /// `data_dir` is that host's data directory.
-pub fn migrate_instances_to_dedicated_homes(host: &Host, data_dir: &Path, cfg: &mut Config) -> bool {
+pub fn migrate_instances_to_dedicated_homes(
+    host: &Host,
+    data_dir: &Path,
+    cfg: &mut Config,
+) -> bool {
     let mut modified = false;
 
     // 1. Remove instances whose version no longer exists.
     let old_inst_len = cfg.instances.len();
-    cfg.instances.retain(|i| cfg.versions.iter().any(|v| v.id == i.version_id));
+    cfg.instances
+        .retain(|i| cfg.versions.iter().any(|v| v.id == i.version_id));
     if cfg.instances.len() != old_inst_len {
         modified = true;
     }
@@ -892,7 +896,8 @@ pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let expanded: PathBuf = if trimmed == "~" {
-        home.clone().ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
+        home.clone()
+            .ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
     } else if let Some(rest) = trimmed.strip_prefix("~/") {
         home.clone()
             .ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
@@ -1055,7 +1060,10 @@ mod tests {
         assert_eq!(home.path, PathBuf::from("/data/launcher/homes/0.1.0-rc.6"));
         let version = cfg.versions.iter().find(|v| v.id == "v-rc6").unwrap();
         assert_eq!(version.version, "0.1.0-rc.6");
-        assert_eq!(version.dir, PathBuf::from("/data/launcher/versions/0.1.0-rc.6"));
+        assert_eq!(
+            version.dir,
+            PathBuf::from("/data/launcher/versions/0.1.0-rc.6")
+        );
         let inst = cfg.instances.iter().find(|i| i.id == "i-web").unwrap();
         assert_eq!(inst.version_id, "v-rc6");
         assert_eq!(inst.home_id, "h-dedicated");
@@ -1283,7 +1291,10 @@ mod tests {
             cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             vec!["h-one"]
         );
-        assert_eq!(cfg.instances[0].home_id, "h-one", "引用被重定向到留下的那条");
+        assert_eq!(
+            cfg.instances[0].home_id, "h-one",
+            "引用被重定向到留下的那条"
+        );
     }
 
     /// "This directory does not exist" is a statement about one machine's
@@ -1330,7 +1341,10 @@ mod tests {
     fn normalize_expands_tilde() {
         assert_eq!(normalize_dir_path("~/.dsh").unwrap(), home().join(".dsh"));
         assert_eq!(normalize_dir_path("~").unwrap(), home());
-        assert_eq!(normalize_dir_path("  ~/.dsh  ").unwrap(), home().join(".dsh"));
+        assert_eq!(
+            normalize_dir_path("  ~/.dsh  ").unwrap(),
+            home().join(".dsh")
+        );
     }
 
     #[test]
@@ -1356,7 +1370,10 @@ mod tests {
         // A relative path would mean "relative to the app's cwd" — the exact
         // bug that produced a literal `~` directory.
         assert!(normalize_dir_path("relative/dsh").is_err());
-        assert!(normalize_dir_path("~/../x").is_ok(), ".. inside an absolute path is fine");
+        assert!(
+            normalize_dir_path("~/../x").is_ok(),
+            ".. inside an absolute path is fine"
+        );
         assert!(normalize_dir_path("~someone/.dsh").is_err());
         assert!(normalize_dir_path("").is_err());
         assert!(normalize_dir_path("   ").is_err());
@@ -1389,10 +1406,16 @@ mod tests {
             pnpm: None,
         };
         assert!(binding.node_is_fresh(None));
-        assert!(!binding.pnpm_is_fresh(None), "an absent binding is never fresh");
+        assert!(
+            !binding.pnpm_is_fresh(None),
+            "an absent binding is never fresh"
+        );
 
         std::fs::remove_file(&exe).unwrap();
-        assert!(!binding.node_is_fresh(None), "a vanished path must be stale");
+        assert!(
+            !binding.node_is_fresh(None),
+            "a vanished path must be stale"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

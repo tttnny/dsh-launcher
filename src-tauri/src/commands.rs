@@ -285,7 +285,9 @@ fn checked_name(raw: &str) -> Result<String, String> {
 fn checked_target(raw: &str) -> Result<String, String> {
     let target = raw.trim();
     if target.is_empty() {
-        return Err("请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串".to_string());
+        return Err(
+            "请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串".to_string(),
+        );
     }
     Ok(target.to_string())
 }
@@ -536,8 +538,7 @@ pub(crate) fn remove_home_record(
         return Err("该 DSH_HOME 仍被实例引用，无法删除".to_string());
     }
     let before = cfg.homes.len();
-    cfg.homes
-        .retain(|h| !(h.id == id && h.host_id == host.id));
+    cfg.homes.retain(|h| !(h.id == id && h.host_id == host.id));
     if cfg.homes.len() == before {
         // Nothing belonged to this host: the caller named the wrong machine, or
         // the record is already gone. Either way 「删掉了」 would be a claim
@@ -688,8 +689,8 @@ pub(crate) fn versions_from_npm(
         match serde_json::from_str::<BTreeMap<String, serde_json::Value>>(time_json) {
             Ok(map) => map,
             Err(_) => {
-                let arr: Vec<BTreeMap<String, serde_json::Value>> =
-                    serde_json::from_str(time_json).map_err(|e| format!("解析发布时间失败: {e}"))?;
+                let arr: Vec<BTreeMap<String, serde_json::Value>> = serde_json::from_str(time_json)
+                    .map_err(|e| format!("解析发布时间失败: {e}"))?;
                 arr.into_iter().next().unwrap_or_default()
             }
         };
@@ -727,19 +728,18 @@ pub async fn fetch_available_versions(
     };
     let mut out = match versions_source(&host) {
         VersionsSource::Local { registry } => {
-            let versions_json = run_npm_view("@deepseek-ai/dsh", "versions", registry.as_deref()).await?;
+            let versions_json =
+                run_npm_view("@deepseek-ai/dsh", "versions", registry.as_deref()).await?;
             let time_json = run_npm_view("@deepseek-ai/dsh", "time", registry.as_deref()).await?;
             versions_from_npm(&versions_json, &time_json)?
         }
         VersionsSource::Remote { registry } => {
-            let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
-            let listings = crate::remote::available_versions(
-                &*state.host_transport,
-                &target,
-                &registry,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            let target =
+                crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+            let listings =
+                crate::remote::available_versions(&*state.host_transport, &target, &registry)
+                    .await
+                    .map_err(|e| e.to_string())?;
             versions_from_npm(&listings.versions, &listings.time)?
         }
     };
@@ -801,11 +801,7 @@ async fn fetch_github_tag_versions() -> Result<Vec<RemoteVersion>, String> {
     Ok(out)
 }
 
-async fn run_npm_view(
-    pkg: &str,
-    field: &str,
-    registry: Option<&str>,
-) -> Result<String, String> {
+async fn run_npm_view(pkg: &str, field: &str, registry: Option<&str>) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new(process::npm());
     // Keep the listing consistent with the installer's npm probe: both honor
     // the DSH_NPM_REGISTRY mirror, so a mirror user doesn't see official-
@@ -814,7 +810,10 @@ async fn run_npm_view(
     // that is the registry this machine's versions come from.
     crate::proxy::apply_to_command(&mut cmd);
     cmd.args(["view", pkg, field, "--json"]);
-    if let Some(registry) = registry.map(str::to_string).or_else(crate::toolchain::registry_mirror) {
+    if let Some(registry) = registry
+        .map(str::to_string)
+        .or_else(crate::toolchain::registry_mirror)
+    {
         cmd.args(["--registry", &registry]);
     }
     let output = crate::process::hide_console(&mut cmd)
@@ -910,7 +909,10 @@ pub async fn remove_version(
     // the reverse. Best-effort, so a foreign file inside the HOME cannot block
     // the delete.
     if let Err(e) = remove_dedicated_home(&data_dir, &version.version) {
-        crate::log_warn!("删除版本 {} 的专属 DSH_HOME 失败，忽略: {e}", version.version);
+        crate::log_warn!(
+            "删除版本 {} 的专属 DSH_HOME 失败，忽略: {e}",
+            version.version
+        );
     }
     Ok(())
 }
@@ -1277,13 +1279,9 @@ impl HomeOn {
         let Some(target) = self.remote.as_ref() else {
             return Ok(list_profile_dirs(&self.profiles_dir()));
         };
-        crate::remote::list_profiles(
-            &*self.transport,
-            target,
-            &as_text(&self.profiles_dir()),
-        )
-        .await
-        .map_err(|e| e.to_string())
+        crate::remote::list_profiles(&*self.transport, target, &as_text(&self.profiles_dir()))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Copies one profile to a new name inside the same HOME. Nothing is
@@ -1454,11 +1452,14 @@ pub fn create_profile(
                 }
             }
         }
-        found.ok_or_else(|| "未找到可用的 Profile __temp__ 模板，请先安装至少一个 DSH 版本".to_string())?
+        found.ok_or_else(|| {
+            "未找到可用的 Profile __temp__ 模板，请先安装至少一个 DSH 版本".to_string()
+        })?
     };
 
     if !profiles_dir.is_dir() {
-        std::fs::create_dir_all(&profiles_dir).map_err(|e| format!("创建 profiles 目录失败: {e}"))?;
+        std::fs::create_dir_all(&profiles_dir)
+            .map_err(|e| format!("创建 profiles 目录失败: {e}"))?;
     }
 
     copy_dir_recursive(&template_path, &target).map_err(|e| format!("创建 Profile 失败: {e}"))?;
@@ -1487,7 +1488,9 @@ pub(crate) async fn copy_profile_for(
     source: &str,
     name: &str,
 ) -> Result<String, String> {
-    HomeOn::of(state, home_id)?.copy_profile(source, name).await?;
+    HomeOn::of(state, home_id)?
+        .copy_profile(source, name)
+        .await?;
     Ok(name.to_string())
 }
 
@@ -1939,9 +1942,8 @@ pub async fn open_instance_terminal(
 
     // Prepend the instance's DSH version bin directory to PATH so `dsh` is
     // immediately available; the launch module owns the wrapper + PATH policy.
-    let version_dir: Option<std::path::PathBuf> = cfg_ver
-        .as_ref()
-        .map(|v| std::path::PathBuf::from(&v.dir));
+    let version_dir: Option<std::path::PathBuf> =
+        cfg_ver.as_ref().map(|v| std::path::PathBuf::from(&v.dir));
     let path_dirs = crate::launch::terminal_path_dirs(version_dir.as_deref());
 
     let path_prefix = if !path_dirs.is_empty() {
@@ -1955,11 +1957,8 @@ pub async fn open_instance_terminal(
         String::new()
     };
 
-    let env_pairs = crate::launch::terminal_env_pairs(
-        &cfg_home.path,
-        &cfg_inst.name,
-        &cfg_inst.env_overrides,
-    );
+    let env_pairs =
+        crate::launch::terminal_env_pairs(&cfg_home.path, &cfg_inst.name, &cfg_inst.env_overrides);
     let exports = env_pairs
         .iter()
         .map(|(k, v)| format!("export {}={}\n", k, crate::remote::quote(v)))
@@ -1994,7 +1993,10 @@ pub async fn open_instance_terminal(
     open_terminal_with(
         &terminal,
         &label,
-        &format!("exec {}", crate::remote::quote(&term_script.to_string_lossy())),
+        &format!(
+            "exec {}",
+            crate::remote::quote(&term_script.to_string_lossy())
+        ),
     )
 }
 
@@ -2049,10 +2051,7 @@ pub(crate) async fn remote_terminal_session(
     let script = crate::remote::terminal_script(&home_str, &env, &path_dirs);
 
     Ok(TerminalSession {
-        label: format!(
-            "DSH {} ({} → {})",
-            inst.name, host.display_name, home_str
-        ),
+        label: format!("DSH {} ({} → {})", inst.name, host.display_name, home_str),
         line: crate::remote::terminal_command(host.ssh_target.trim(), &script),
     })
 }
@@ -2138,9 +2137,7 @@ fn open_folder_in_file_manager(dir: &std::path::Path) -> Result<(), String> {
     {
         // Canonicalize so the comparison matches Finder's POSIX path
         // (resolves /tmp -> /private/tmp and other symlinks).
-        let canon = dir
-            .canonicalize()
-            .unwrap_or_else(|_| dir.to_path_buf());
+        let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let posix = format!("{}/", canon.to_string_lossy().trim_end_matches('/'));
         let script = r#"on run argv
     set posixPath to item 1 of argv
@@ -2329,7 +2326,8 @@ pub(crate) async fn instance_log_source(
         .map(|run| run.log_path.clone());
     Ok(InstanceLog::Remote {
         host: Box::new(host),
-        log_path: from_run.unwrap_or_else(|| crate::process::remote_instance_log_path(&data_dir, instance_id)),
+        log_path: from_run
+            .unwrap_or_else(|| crate::process::remote_instance_log_path(&data_dir, instance_id)),
     })
 }
 
@@ -2465,7 +2463,8 @@ pub fn open_instance_directory(
         // A remote instance's HOME is a directory on that server: creating it
         // here would leave a stray directory on this Mac at the same spelling,
         // and opening it in the file manager would show the wrong machine.
-        crate::config::resolve_host(&cfg, Some(&home.host_id))?.local_paths_only("DSH_HOME 目录")?;
+        crate::config::resolve_host(&cfg, Some(&home.host_id))?
+            .local_paths_only("DSH_HOME 目录")?;
         home.path.clone()
     };
     if !home.is_dir() {
@@ -2485,10 +2484,7 @@ pub fn open_instance_directory(
 /// Local-only for the same reason as the instance one above: a remote HOME lives
 /// on that server, and the DSH_HOME list offers 「复制路径」 for it instead.
 #[tauri::command]
-pub fn open_home_directory(
-    state: State<'_, AppState>,
-    home_id: String,
-) -> Result<String, String> {
+pub fn open_home_directory(state: State<'_, AppState>, home_id: String) -> Result<String, String> {
     let home = {
         let cfg = state.config.lock().unwrap();
         let home = cfg
@@ -2498,7 +2494,8 @@ pub fn open_home_directory(
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
         // Same rule as the instance one: a remote HOME is that machine's
         // directory, and this Mac must not be made to have a copy of its path.
-        crate::config::resolve_host(&cfg, Some(&home.host_id))?.local_paths_only("DSH_HOME 目录")?;
+        crate::config::resolve_host(&cfg, Some(&home.host_id))?
+            .local_paths_only("DSH_HOME 目录")?;
         home.path.clone()
     };
     if !home.is_dir() {
@@ -2545,7 +2542,11 @@ mod tests {
     fn list_hosts_reports_the_built_in_local_host_for_an_old_config() {
         let data = ScratchDir::new("list-hosts");
         let config_path = data.path().join("config.json");
-        std::fs::write(&config_path, r#"{"homes":[],"settings":{"locale":"zh-CN"}}"#).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"homes":[],"settings":{"locale":"zh-CN"}}"#,
+        )
+        .unwrap();
 
         // The config `list_hosts` answers from.
         let cfg = crate::config::load_config(&config_path);
@@ -2639,7 +2640,10 @@ mod tests {
             "[{\"0.1.0-rc.6\":\"2026-08-01T12:00:00Z\"}]",
         )
         .unwrap();
-        assert_eq!(wrapped[0].released_at.as_deref(), Some("2026-08-01T12:00:00Z"));
+        assert_eq!(
+            wrapped[0].released_at.as_deref(),
+            Some("2026-08-01T12:00:00Z")
+        );
 
         assert!(
             versions_from_npm("not json", "{}").is_err(),
@@ -2696,20 +2700,27 @@ mod tests {
         let listed = block_on(list_versions_for(&state, Some("host-lab"))).unwrap();
 
         assert_eq!(
-            listed.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(),
+            listed
+                .iter()
+                .map(|v| v.version.as_str())
+                .collect::<Vec<_>>(),
             vec!["0.1.0-rc.6", "0.1.0-rc.5"],
             "只列这台主机的记录"
         );
         assert!(listed[0].bin_ready, "机器说 rc.6 的 bin 就绪");
         assert!(!listed[1].bin_ready, "安装没走完：如实报不就绪");
-        assert_eq!(listed[1].dir.to_string_lossy(), format!("{remote_data}/versions/0.1.0-rc.5"));
+        assert_eq!(
+            listed[1].dir.to_string_lossy(),
+            format!("{remote_data}/versions/0.1.0-rc.5")
+        );
         assert_eq!(
             listed[0].dedicated_home,
             format!("{remote_data}/homes/0.1.0-rc.6"),
             "专属 DSH_HOME 按那台主机的数据目录算"
         );
         assert!(
-            fake.last_script().contains(&format!("'{remote_data}/versions'")),
+            fake.last_script()
+                .contains(&format!("'{remote_data}/versions'")),
             "一次 ssh 问那台机器的 versions 目录：{}",
             fake.last_script()
         );
@@ -2786,7 +2797,10 @@ mod tests {
 
         assert!(listed[0].bin_ready);
         assert!(!listed[1].bin_ready, "只有目录、没有 bin：不算装好");
-        assert_eq!(listed[0].dedicated_home, dedicated_home_path(data.path(), "0.1.0-rc.6").to_string_lossy());
+        assert_eq!(
+            listed[0].dedicated_home,
+            dedicated_home_path(data.path(), "0.1.0-rc.6").to_string_lossy()
+        );
     }
 
     /// The board shows every host's instances by default, and that is an
@@ -2927,8 +2941,7 @@ mod tests {
     #[test]
     fn copying_a_remote_profile_is_one_command_on_that_machine() {
         let data = ScratchDir::new("remote-profile-copy");
-        let fake = crate::remote::testing::FakeTransport::new()
-            .answering(remote_ack());
+        let fake = crate::remote::testing::FakeTransport::new().answering(remote_ack());
         let state = host_state(
             &data,
             remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
@@ -2953,8 +2966,7 @@ mod tests {
     #[test]
     fn renaming_a_remote_profile_happens_there_and_follows_the_instances() {
         let data = ScratchDir::new("remote-profile-rename");
-        let fake = crate::remote::testing::FakeTransport::new()
-            .answering(remote_ack());
+        let fake = crate::remote::testing::FakeTransport::new().answering(remote_ack());
         let state = host_state(
             &data,
             remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
@@ -2984,8 +2996,7 @@ mod tests {
     #[test]
     fn deleting_a_remote_profile_happens_there_and_clears_the_instances() {
         let data = ScratchDir::new("remote-profile-delete");
-        let fake = crate::remote::testing::FakeTransport::new()
-            .answering(remote_ack());
+        let fake = crate::remote::testing::FakeTransport::new().answering(remote_ack());
         let state = host_state(
             &data,
             remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
@@ -3019,7 +3030,11 @@ mod tests {
         let err = block_on(copy_profile_for(&state, "h-lab", "../../etc", "x")).unwrap_err();
 
         assert!(err.contains("名称不合法"), "{err}");
-        assert!(fake.calls().is_empty(), "拒绝发生在拼路径的时候：{:?}", fake.calls());
+        assert!(
+            fake.calls().is_empty(),
+            "拒绝发生在拼路径的时候：{:?}",
+            fake.calls()
+        );
     }
 
     /// 本机's profile operations are unchanged: the same files, directly, with
@@ -3086,11 +3101,20 @@ mod tests {
             .answering(answer);
         let state = host_state(&data, cfg, fake.clone());
 
-        let home = block_on(create_home_record_in(&state, "远端 HOME", typed, Some("host-lab")))
-            .unwrap();
+        let home = block_on(create_home_record_in(
+            &state,
+            "远端 HOME",
+            typed,
+            Some("host-lab"),
+        ))
+        .unwrap();
 
         assert_eq!(home.host_id, "host-lab");
-        assert_eq!(home.path.to_string_lossy(), settled, "记录的是那台机器给的路径");
+        assert_eq!(
+            home.path.to_string_lossy(),
+            settled,
+            "记录的是那台机器给的路径"
+        );
         assert!(
             !std::path::Path::new(typed).exists(),
             "这台 Mac 上不因为这条记录多出任何目录"
@@ -3135,9 +3159,13 @@ mod tests {
         );
         let state = host_state(&data, cfg, fake.clone());
 
-        let err =
-            block_on(create_home_record_in(&state, "远端 HOME", "relative/homes", Some("host-lab")))
-                .unwrap_err();
+        let err = block_on(create_home_record_in(
+            &state,
+            "远端 HOME",
+            "relative/homes",
+            Some("host-lab"),
+        ))
+        .unwrap_err();
 
         assert!(
             state.config.lock().unwrap().homes.is_empty(),
@@ -3167,10 +3195,20 @@ mod tests {
             ));
         let state = host_state(&data, cfg, fake.clone());
 
-        block_on(create_home_record_in(&state, "小写", "/home/demo/.dsh", Some("host-lab")))
-            .unwrap();
-        block_on(create_home_record_in(&state, "大写", "/home/demo/.DSH", Some("host-lab")))
-            .unwrap();
+        block_on(create_home_record_in(
+            &state,
+            "小写",
+            "/home/demo/.dsh",
+            Some("host-lab"),
+        ))
+        .unwrap();
+        block_on(create_home_record_in(
+            &state,
+            "大写",
+            "/home/demo/.DSH",
+            Some("host-lab"),
+        ))
+        .unwrap();
 
         assert_eq!(
             state.config.lock().unwrap().homes.len(),
@@ -3180,8 +3218,13 @@ mod tests {
 
         // 本机 keeps folding case: one directory, one record.
         let scratch = data.path().join("Case");
-        block_on(create_home_record_in(&state, "本机小写", &scratch.to_string_lossy(), None))
-            .unwrap();
+        block_on(create_home_record_in(
+            &state,
+            "本机小写",
+            &scratch.to_string_lossy(),
+            None,
+        ))
+        .unwrap();
         let same = block_on(create_home_record_in(
             &state,
             "本机大写",
@@ -3305,10 +3348,12 @@ mod tests {
         let fake = crate::remote::testing::FakeTransport::new();
         let state = host_state(&data, cfg, fake);
 
-        let refused =
-            remove_home_record(&state, "h-lab", Some(crate::config::LOCAL_HOST_ID));
+        let refused = remove_home_record(&state, "h-lab", Some(crate::config::LOCAL_HOST_ID));
 
-        assert!(refused.is_err(), "张冠李戴的宿主 id 不能算删掉了：{refused:?}");
+        assert!(
+            refused.is_err(),
+            "张冠李戴的宿主 id 不能算删掉了：{refused:?}"
+        );
         assert_eq!(
             state.config.lock().unwrap().homes.len(),
             1,
@@ -3481,7 +3526,11 @@ mod tests {
         assert_eq!(saved.host.display_name, "实验室", "连不上的主机照样存下来");
         let status = saved.status.as_ref().unwrap();
         assert_eq!(status.state, crate::config::HostState::Unreachable);
-        assert!(status.message.as_ref().unwrap().contains("Connection refused"));
+        assert!(status
+            .message
+            .as_ref()
+            .unwrap()
+            .contains("Connection refused"));
         // 本机 never gets a status: it is not a machine to reach.
         let local = views.iter().find(|v| v.host.builtin).unwrap();
         assert!(local.status.is_none());
@@ -3613,7 +3662,9 @@ mod tests {
         assert_eq!(test.kind, None);
         assert!(test.data_dir.is_none());
         assert!(
-            test.data_dir_problem.unwrap_or_default().contains("绝对路径"),
+            test.data_dir_problem
+                .unwrap_or_default()
+                .contains("绝对路径"),
             "页面要拿到理由"
         );
         let saved = list_hosts_with_status(&state)
@@ -3764,7 +3815,11 @@ mod tests {
 
         assert_eq!(updated.display_name, "实验室");
         assert_eq!(
-            updated.toolchain.node.as_ref().map(|bound| bound.path.clone()),
+            updated
+                .toolchain
+                .node
+                .as_ref()
+                .map(|bound| bound.path.clone()),
             Some(std::path::PathBuf::from("/opt/node/bin/node")),
             "探测结论不该被表单抹掉"
         );
@@ -3849,7 +3904,10 @@ mod tests {
         );
         assert!(cfg.versions.is_empty(), "那台主机的版本记录跟着主机走");
         assert_eq!(
-            cfg.instances.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            cfg.instances
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["i-local"]
         );
         assert_eq!(
@@ -3878,7 +3936,10 @@ mod tests {
 
         create_host_record(&state, host_input("实验室", "lab")).unwrap();
         let again = create_host_record(&state, host_input("另一个名字", " lab ")).unwrap_err();
-        assert!(again.contains("实验室"), "重复的 ssh 目标要指名道姓：{again}");
+        assert!(
+            again.contains("实验室"),
+            "重复的 ssh 目标要指名道姓：{again}"
+        );
     }
 
     /// The built-in host is this Mac: there is nothing to connect to, and saying
@@ -3892,8 +3953,11 @@ mod tests {
             crate::remote::testing::idle(),
         );
 
-        let err =
-            block_on(test_host_connection_for(&state, crate::config::LOCAL_HOST_ID)).unwrap_err();
+        let err = block_on(test_host_connection_for(
+            &state,
+            crate::config::LOCAL_HOST_ID,
+        ))
+        .unwrap_err();
         assert!(err.contains("本机"), "{err}");
 
         let missing = block_on(test_host_connection_for(&state, "host-nope")).unwrap_err();
@@ -3943,7 +4007,10 @@ mod tests {
         assert!(!target.exists());
         assert!(sibling.exists(), "别的版本专属 DSH_HOME 不受影响");
         assert!(user_dsh.join("sessions").is_dir(), "~/.dsh 不受影响");
-        assert!(user_home.join("sessions").is_dir(), "用户指定的 HOME 不受影响");
+        assert!(
+            user_home.join("sessions").is_dir(),
+            "用户指定的 HOME 不受影响"
+        );
     }
 
     /// The record goes with the directory, by the same path rule: `~/.dsh` and
@@ -3960,7 +4027,9 @@ mod tests {
             ssh_target: "zjq_aliyun".into(),
             registry: None,
             extra_env: Default::default(),
-            data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
+            data_dir: Some(std::path::PathBuf::from(
+                "/home/u/.local/share/dsh-launcher",
+            )),
             builtin: false,
             toolchain: Default::default(),
             toolchain_overrides: Default::default(),
@@ -4017,7 +4086,9 @@ mod tests {
             ssh_target: "zjq_aliyun".into(),
             registry: None,
             extra_env: Default::default(),
-            data_dir: Some(std::path::PathBuf::from("/home/u/.local/share/dsh-launcher")),
+            data_dir: Some(std::path::PathBuf::from(
+                "/home/u/.local/share/dsh-launcher",
+            )),
             builtin: false,
             toolchain: Default::default(),
             toolchain_overrides: Default::default(),
@@ -4135,10 +4206,7 @@ mod tests {
             &[&version_dir, &dedicated],
         ));
 
-        assert!(
-            cfg.versions.is_empty(),
-            "版本记录随它一起走"
-        );
+        assert!(cfg.versions.is_empty(), "版本记录随它一起走");
         assert_eq!(
             cfg.homes.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
             vec!["h-local-same-path"],
@@ -4164,7 +4232,8 @@ mod tests {
             removed[1].contains(&dedicated.to_string_lossy().to_string()),
             "远端专属 DSH_HOME 目录：{}",
             removed[1]
-        );        assert!(
+        );
+        assert!(
             !data.path().join("versions").exists() && !data.path().join("homes").exists(),
             "远端路径不在本机，本机不该被碰"
         );
@@ -4272,8 +4341,7 @@ mod tests {
             let cfg = state.config.lock().unwrap();
             (cfg.instances[0].clone(), cfg.homes[0].clone())
         };
-        let session =
-            block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap();
+        let session = block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap();
 
         // The machine is asked once, about that instance's own DSH_HOME: a host
         // that is down, or a HOME that is gone there, is a sentence in the page
@@ -4334,8 +4402,7 @@ mod tests {
             let cfg = state.config.lock().unwrap();
             (cfg.instances[0].clone(), cfg.homes[0].clone())
         };
-        let err =
-            block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap_err();
+        let err = block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap_err();
         assert!(err.contains("连不上"), "终端要说清是连不上：{err}");
         assert!(err.contains("服务器"), "还要说清是哪台机器：{err}");
         assert!(err.contains("Connection refused"), "原因来自 ssh：{err}");
@@ -4422,7 +4489,11 @@ mod tests {
                 path: data.path().join("home"),
                 host_id: crate::config::LOCAL_HOST_ID.into(),
             }],
-            instances: vec![instance_record("i1", "本机实例", crate::config::LOCAL_HOST_ID)],
+            instances: vec![instance_record(
+                "i1",
+                "本机实例",
+                crate::config::LOCAL_HOST_ID,
+            )],
             ..Default::default()
         };
         let state = host_state(&data, cfg, crate::remote::testing::idle());
@@ -4447,8 +4518,11 @@ mod tests {
             path: data.path().join("home"),
             host_id: crate::config::LOCAL_HOST_ID.into(),
         });
-        cfg.instances
-            .push(instance_record("i1", "本机实例", crate::config::LOCAL_HOST_ID));
+        cfg.instances.push(instance_record(
+            "i1",
+            "本机实例",
+            crate::config::LOCAL_HOST_ID,
+        ));
         let fake = crate::remote::testing::FakeTransport::new()
             .answering(remote_stdout(r#"{"exists":true,"data":"dGFpbAo="}"#));
         let state = host_state(&data, cfg, fake.clone());
@@ -4466,22 +4540,18 @@ mod tests {
             InstanceLog::Local(_) => panic!("远端实例的日志在那台机器上"),
         };
         assert_eq!(
-            remote_log,
-            "/home/demo/.local/share/dsh-launcher/logs/i-lab.log",
+            remote_log, "/home/demo/.local/share/dsh-launcher/logs/i-lab.log",
             "读的就是那台机器上那个实例的日志"
         );
 
-        let copied = block_on(fetch_remote_log(
-            &state,
-            &host,
-            &remote_log,
-            "i-lab",
-        ))
-        .unwrap();
+        let copied = block_on(fetch_remote_log(&state, &host, &remote_log, "i-lab")).unwrap();
         assert_eq!(copied, data.path().join("logs").join("i-lab.remote.log"));
         assert_eq!(std::fs::read_to_string(&copied).unwrap(), "tail\n");
         let script = fake.last_script();
-        assert!(script.contains(&crate::remote::quote(&remote_log)), "{script}");
+        assert!(
+            script.contains(&crate::remote::quote(&remote_log)),
+            "{script}"
+        );
         assert!(
             script.contains(&format!("dsh_bytes={}", crate::remote::LOG_TAIL_BYTES)),
             "只拉最后一段，不是整个文件：{script}"
@@ -4512,8 +4582,8 @@ mod tests {
             eprintln!("跳过：没有设置 DSH_LAUNCHER_TEST_SSH_HOST");
             return;
         };
-        let version_number =
-            std::env::var("DSH_LAUNCHER_TEST_REMOTE_VERSION").unwrap_or_else(|_| "0.2.0-rc.2".into());
+        let version_number = std::env::var("DSH_LAUNCHER_TEST_REMOTE_VERSION")
+            .unwrap_or_else(|_| "0.2.0-rc.2".into());
         let data = ScratchDir::new("real-fresh-home");
         let transport = std::sync::Arc::new(crate::ssh::SshTransport::new());
         let host = crate::config::Host {
@@ -4539,14 +4609,11 @@ mod tests {
             transport.clone(),
         );
         let run_host = crate::ssh::RemoteHost::of(&host, data.path()).unwrap();
-        let home_of_that_machine = block_on(crate::remote::user_home(
-            &*transport,
-            &run_host,
-        ))
-        .unwrap()
-        .home;
-        let remote_data = std::path::PathBuf::from(&home_of_that_machine)
-            .join(".local/share/dsh-launcher");
+        let home_of_that_machine = block_on(crate::remote::user_home(&*transport, &run_host))
+            .unwrap()
+            .home;
+        let remote_data =
+            std::path::PathBuf::from(&home_of_that_machine).join(".local/share/dsh-launcher");
         let version_dir = remote_data.join("versions").join(&version_number);
 
         {

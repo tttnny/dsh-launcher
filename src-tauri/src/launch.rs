@@ -442,7 +442,10 @@ pub fn terminal_env_pairs(
             "DSH_HOME".to_string(),
             home_path.to_string_lossy().to_string(),
         ),
-        ("DSH_LAUNCHER_INSTANCE".to_string(), instance_name.to_string()),
+        (
+            "DSH_LAUNCHER_INSTANCE".to_string(),
+            instance_name.to_string(),
+        ),
     ];
     for (k, v) in overrides {
         if k != "DSH_HOME" && k != "PATH" {
@@ -555,7 +558,10 @@ mod tests {
 
         let env = instance_env(&cfg, "i1").unwrap();
         assert_eq!(env_of(&env, "DSH_HOME").as_deref(), Some("/Users/me/.dsh"));
-        assert_eq!(env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(), Some("主实例"));
+        assert_eq!(
+            env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(),
+            Some("主实例")
+        );
         assert_eq!(env_of(&env, "DSH_TELEMETRY_DISABLED").as_deref(), Some("1"));
         assert_eq!(
             env_of(&env, "HTTPS_PROXY").as_deref(),
@@ -574,7 +580,10 @@ mod tests {
         let env = instance_env_for(&cfg, "i9", &remote_host()).unwrap();
 
         assert_eq!(env_of(&env, "DSH_HOME").as_deref(), Some("/home/demo/.dsh"));
-        assert_eq!(env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(), Some("服务器实例"));
+        assert_eq!(
+            env_of(&env, "DSH_LAUNCHER_INSTANCE").as_deref(),
+            Some("服务器实例")
+        );
         assert_eq!(env_of(&env, "DSH_TELEMETRY_DISABLED").as_deref(), Some("1"));
         assert_eq!(
             env_of(&env, "HTTPS_PROXY").as_deref(),
@@ -696,7 +705,10 @@ mod tests {
         let node = Path::new("/opt/test/bin/node");
         let cmd = instance_command(node, &dir, "web", Some(3099)).unwrap();
         let std_cmd = cmd.as_std();
-        assert_eq!(std_cmd.get_program().to_string_lossy(), node.to_string_lossy());
+        assert_eq!(
+            std_cmd.get_program().to_string_lossy(),
+            node.to_string_lossy()
+        );
         let argv: Vec<String> = std_cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())

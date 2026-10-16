@@ -135,21 +135,11 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     // 所以 DSH 版本 / DSH_HOME / Profile 仍然一键直达。插件管理不占位：它属于
     // 运行中的实例，入口在实例页那一行展开的卡片里。
     let view_home = MenuItem::with_id(app, ID_VIEW_HOME, "实例", true, Some("CmdOrCtrl+1"))?;
-    let view_versions = MenuItem::with_id(
-        app,
-        ID_VIEW_VERSIONS,
-        "DSH 版本",
-        true,
-        Some("CmdOrCtrl+2"),
-    )?;
+    let view_versions =
+        MenuItem::with_id(app, ID_VIEW_VERSIONS, "DSH 版本", true, Some("CmdOrCtrl+2"))?;
     let view_homes = MenuItem::with_id(app, ID_VIEW_HOMES, "DSH_HOME", true, Some("CmdOrCtrl+3"))?;
-    let view_profiles = MenuItem::with_id(
-        app,
-        ID_VIEW_PROFILES,
-        "Profile",
-        true,
-        Some("CmdOrCtrl+4"),
-    )?;
+    let view_profiles =
+        MenuItem::with_id(app, ID_VIEW_PROFILES, "Profile", true, Some("CmdOrCtrl+4"))?;
     // “设置”不重复占用 Cmd+,，加速键归偏好设置独占。
     let view_settings = MenuItem::with_id(app, ID_VIEW_SETTINGS, "设置", true, None::<&str>)?;
     let sep_v = PredefinedMenuItem::separator(app)?;
