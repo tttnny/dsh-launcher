@@ -549,12 +549,57 @@ function mockNewId(prefix: string): string {
 }
 
 /**
+ * The commands whose Rust signature declares `rename_all = "snake_case"`: they
+ * read their arguments under the underscore spelling, every other command under
+ * the camelCase one. The backend decides this, so this list is the mock's copy
+ * of a rule it cannot see — `ci/api-contract.test.mjs` checks the copy against
+ * the Rust sources, and every argument the mock reads against the keys its
+ * command really takes, so neither can drift silently.
+ */
+const SNAKE_CASE_COMMANDS = new Set([
+  'start_install_version_task',
+  'set_instance_port',
+  'list_profiles',
+  'create_profile',
+  'copy_profile',
+  'rename_profile',
+  'delete_profile',
+  'check_instance_health',
+  'list_plugins',
+  'set_bundle_enabled',
+  'remove_bundle',
+])
+
+/** The key `cmd` reads the argument `name` (camelCase) under. */
+function backendKey(cmd: string, name: string): string {
+  if (!SNAKE_CASE_COMMANDS.has(cmd)) return name
+  return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
+}
+
+/**
+ * One argument, read under the exact key its own command reads — and under no
+ * other spelling. Tauri looks an argument up by that one name, and a miss is not
+ * an error: an `Option<T>` argument reads as `None` there (here: as 本机), which
+ * is how a remote install once landed on this Mac while the page named the
+ * user's server. A mock that accepted either spelling would keep the preview
+ * working through exactly that bug, so it reads like the backend does.
+ *
+ * Only the arguments whose key depends on the command go through here — the host
+ * one, shared by commands of both kinds, and the terminal's instance id. Every
+ * other read in this file spells one literal key, and the contract test holds
+ * those against the same Rust sources.
+ */
+function argOf(args: Record<string, unknown> | undefined, cmd: string, name: string): unknown {
+  return args?.[backendKey(cmd, name)]
+}
+
+/**
  * The host a host-aware list belongs to. Absent means 本机 — the backend's own
  * rule (`config::resolve_host`) — so a list that was not told which machine it
  * is for never merges two of them.
  */
-function hostIdArg(args?: Record<string, unknown>): string {
-  const raw = args?.hostId ?? args?.host_id
+function hostIdArg(cmd: string, args?: Record<string, unknown>): string {
+  const raw = argOf(args, cmd, 'hostId')
   const id = raw === undefined || raw === null ? '' : String(raw).trim()
   return id || LOCAL_HOST_ID
 }
@@ -755,7 +800,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
 
     // --- DSH_HOME ------------------------------------------------------------
     case 'list_homes': {
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, hostIdArg(cmd, args))
       // A DSH_HOME is a record the launcher keeps, so a machine the preview
       // cannot reach still has its list here; the one thing only that machine
       // can answer — whether it has a `~/.dsh` of its own — is skipped rather
@@ -783,14 +828,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'default_dedicated_home_path': {
       const name = String(args?.name ?? 'instance')
       const safe = name.replace(/[^\w一-龥.-]+/g, '_')
-      const hostDir = hostDirOf(db, hostIdArg(args))
+      const hostDir = hostDirOf(db, hostIdArg(cmd, args))
       // The sample paths are Windows-style on 本机 and POSIX on the remote
       // machine; the joined path follows whichever the host's directory is.
       const sep = hostDir.includes('\\') ? '\\' : '/'
       return `${hostDir}${sep}homes${sep}${safe}` as T
     }
     case 'create_home': {
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, hostIdArg(cmd, args))
       const name = String(args?.name ?? '').trim()
       const raw = String(args?.path ?? '').trim()
       if (!name || !raw) fail('名称与路径不能为空')
@@ -809,7 +854,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_home': {
       const id = String(args?.id)
-      const hostId = hostIdArg(args)
+      const hostId = hostIdArg(cmd, args)
       if (db.instances.some((i) => i.home_id === id)) fail('该 DSH_HOME 仍被实例引用，无法删除')
       // The record must belong to the host the caller names: the same path on
       // another machine is a different HOME, and a deletion that did nothing
@@ -821,7 +866,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return undefined as T
     }
     case 'list_versions': {
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, hostIdArg(cmd, args))
       // A machine the preview cannot reach answers with an error, not with a
       // list: 「装了哪些」 is a claim only that machine can make.
       refuseUnreachable(host)
@@ -830,7 +875,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         .map((v) => ({ ...v, bin_ready: v.bin_ready ?? true })) as T
     }
     case 'fetch_available_versions': {
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, hostIdArg(cmd, args))
       // Only a host with a registry of its own is asked over ssh; a host
       // without one is listed from the same registry this Mac uses, so the
       // list is the local one either way in the preview.
@@ -857,15 +902,18 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         version,
         home_id: null,
         dedicated: true,
-        host_id: hostIdArg(args),
+        host_id: hostIdArg(cmd, args),
       })
     }
     case 'start_create_instance_task': {
+      // Internal: reached only through `start_install_version_task`, so Tauri
+      // never looks this one up and its keys are not subject to
+      // `SNAKE_CASE_COMMANDS` — they mirror the Rust function's parameter names.
       const name = String(args?.name ?? '').trim()
       const version = String(args?.version ?? '').trim()
       const dedicated = Boolean(args?.dedicated)
       const homeIdArg = args?.home_id as string | null
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, String(args?.host_id ?? '').trim() || LOCAL_HOST_ID)
       refuseUnreachable(host)
       if (!name) fail('实例名称不能为空')
       if (!version) fail('版本号不能为空')
@@ -1005,14 +1053,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'get_runtime_status': {
       // Browser preview: assume the tools are there so the UI is usable, per host.
-      const hostId = String(args?.hostId ?? LOCAL_HOST_ID)
-      return mockRuntimeStatus(hostId) as T
+      return mockRuntimeStatus(hostIdArg(cmd, args)) as T
     }
     case 'set_toolchain_override': {
       const tool = args?.tool
       if (tool !== 'node' && tool !== 'pnpm') fail('工具名必须是 node 或 pnpm')
       const path = typeof args?.path === 'string' ? args.path.trim() : ''
-      const hostId = String(args?.hostId ?? LOCAL_HOST_ID)
+      const hostId = hostIdArg(cmd, args)
       mockOverridesOf(hostId)[tool] = path || undefined
       return mockRuntimeStatus(hostId) as T
     }
@@ -1038,7 +1085,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'remove_version': {
       const id = String(args?.id)
-      const host = hostOf(db, hostIdArg(args))
+      const host = hostOf(db, hostIdArg(cmd, args))
       refuseUnreachable(host)
       if (db.instances.some((i) => i.version_id === id)) fail('该版本仍被实例引用，无法删除')
       const removed = db.versions.find((v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id)
@@ -1061,14 +1108,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'list_instances': {
       // The board's 全部 view is an explicit request; silence still means 本机.
       if (args?.allHosts) return db.instances as T
-      const hostId = hostIdArg(args)
+      const hostId = hostIdArg(cmd, args)
       return db.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId) as T
     }
     case 'create_instance': {
       const name = String(args?.name ?? '').trim()
       const versionId = String(args?.versionId ?? '')
       const homeId = String(args?.homeId ?? '')
-      const hostId = hostIdArg(args)
+      const hostId = hostIdArg(cmd, args)
       if (!name) fail('实例名称不能为空')
       // Names are unique per host: two machines may each have an instance
       // called 「web」, and the row, the tray and the plugin link tell them
@@ -1098,7 +1145,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'delete_instance': {
       const id = String(args?.id)
-      const hostId = hostIdArg(args)
+      const hostId = hostIdArg(cmd, args)
       const inst = db.instances.find((i) => i.id === id)
       if (!inst || (inst.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
       db.instances = db.instances.filter((i) => i.id !== id)
@@ -1109,7 +1156,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'update_instance': {
       const input = args?.input as DshInstance
-      const hostId = hostIdArg(args)
+      const hostId = hostIdArg(cmd, args)
       const existing = db.instances.find((i) => i.id === input.id)
       if (!existing || (existing.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
       if (
@@ -1379,7 +1426,7 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'read_instance_icon':
       return null as T
     case 'open_instance_terminal':
-      return `DSH ${String(args?.instanceId ?? args?.instance_id ?? '')}` as T
+      return `DSH ${String(argOf(args, cmd, 'instanceId') ?? '')}` as T
     case 'list_instance_status': {
       // Mirrors `process::list_statuses`: the machine that runs an instance
       // decides what may be said about it. A record with no process says
