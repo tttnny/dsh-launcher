@@ -17,8 +17,8 @@
 #                 node_modules，也不需要 pnpm 与 Rust 工具链，是 Linux CI job
 #                 （它刻意不装任何依赖）能跑的那一份。
 #
-# 需要的工具：无参数要 cargo（含 rustfmt 与 clippy 组件）、node、pnpm；
-#             --quick 要 cargo（含 clippy）；--source-only 只要 node。
+# 需要的工具：无参数要 cargo（含 rustfmt 与 clippy 组件）、node、pnpm（含 node_modules
+#             里的 prettier）；--quick 要 cargo（含 clippy）；--source-only 只要 node。
 #
 # 任何一步失败立即以非零退出码结束，并说出是哪一步失败。
 set -euo pipefail
@@ -32,7 +32,8 @@ usage() {
 用法: ci/verify.sh [--quick | --source-only]
 
   （无参数）     全部检查：cargo fmt --check、clippy、Rust 测试、版本同步、
-                 ci/*.test.mjs（通配符发现）、pnpm build。合并前跑这一次。
+                 ci/*.test.mjs（通配符发现）、prettier --check、pnpm build。
+                 合并前跑这一次。
   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
   --source-only 只跑版本同步检查与 ci/*.test.mjs，不需要 node_modules、
                  pnpm 与 Rust 工具链（Linux CI job 跑的就是这一份）。
@@ -88,7 +89,7 @@ if [ ! -e "${SUITES[0]}" ]; then
 fi
 
 case "$MODE" in
-  full) TOTAL=$((4 + ${#SUITES[@]} + 1)) ;;
+  full) TOTAL=$((5 + ${#SUITES[@]} + 1)) ;;
   quick) TOTAL=2 ;;
   source_only) TOTAL=$((1 + ${#SUITES[@]})) ;;
 esac
@@ -144,6 +145,8 @@ case "$MODE" in
     step "版本同步（package.json / Cargo.toml / tauri.conf.json）" \
       node ci/check-versions.mjs
     run_suites
+    step "前端格式检查（prettier --check）" \
+      pnpm exec prettier --check .
     step "前端构建（vue-tsc --noEmit && vite build）" \
       pnpm build
     ;;

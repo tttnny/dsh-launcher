@@ -1,4 +1,4 @@
-# 排版类提交登记在这里：`git blame` 跳过这些提交，免得整片 Rust 代码都记到
+# 排版类提交登记在这里：`git blame` 跳过这些提交，免得整片代码都记到
 # 那一次全工作区重排上，真正的作者被埋掉。
 #
 # GitHub 自动认这份文件。本机 git 要显式打开，二选一：
@@ -9,3 +9,6 @@
 
 # style(fmt): 全工作区按 rustfmt 默认值排版
 8616a9c7c2adf885999f4a00c05e85e5293ccfb4
+
+# style(format): 前端按 Prettier 排版
+48a312a7cd8824f8ce9efade4ea0f17c1249d197
