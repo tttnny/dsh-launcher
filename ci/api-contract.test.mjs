@@ -128,26 +128,37 @@ function parametersOf(text) {
   return parts
 }
 
+/** Every `#[tauri::command]` declaration in the files the handler list draws from. */
+function* rustCommands() {
+  const command =
+    /#\[tauri::command([^\]]*)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([\s\S]*?)\)\s*(?:->|\{)/g
+  // `lib.rs` included: one command lives there.
+  for (const file of ['lib', 'commands', 'tasks', 'plugins', 'runtime', 'icons', 'update']) {
+    const src = read(file === 'lib' ? 'src-tauri/src/lib.rs' : `src-tauri/src/${file}.rs`)
+    for (const m of src.matchAll(command)) {
+      yield { name: m[2], attribute: m[1], params: m[3] }
+    }
+  }
+}
+
+/** Whether one declaration reads its arguments under the underscore spelling. */
+function readsSnakeCase(attribute) {
+  return /rename_all\s*=\s*"snake_case"/.test(attribute)
+}
+
 /** The argument names each backend command reads, by command. */
 function backendArguments() {
   const out = new Map()
-  // Every file the handler list draws commands from, `lib.rs` included (one
-  // command lives there).
-  for (const file of ['lib', 'commands', 'tasks', 'plugins', 'runtime', 'icons', 'update']) {
-    const src = read(file === 'lib' ? 'src-tauri/src/lib.rs' : `src-tauri/src/${file}.rs`)
-    const command =
-      /#\[tauri::command([^\]]*)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([\s\S]*?)\)\s*(?:->|\{)/g
-    for (const m of src.matchAll(command)) {
-      const snake = /rename_all\s*=\s*"snake_case"/.test(m[1])
-      // key -> whether the command cannot be called without it.
-      const keys = new Map()
-      for (const param of parametersOf(m[3])) {
-        const named = /^([a-z_]\w*)\s*:\s*([\s\S]+)$/.exec(param.trim())
-        if (!named || INJECTED.has(named[1])) continue
-        keys.set(snake ? named[1] : toCamel(named[1]), !/^Option\s*</.test(named[2].trim()))
-      }
-      out.set(m[2], keys)
+  for (const { name, attribute, params } of rustCommands()) {
+    const snake = readsSnakeCase(attribute)
+    // key -> whether the command cannot be called without it.
+    const keys = new Map()
+    for (const param of parametersOf(params)) {
+      const named = /^([a-z_]\w*)\s*:\s*([\s\S]+)$/.exec(param.trim())
+      if (!named || INJECTED.has(named[1])) continue
+      keys.set(snake ? named[1] : toCamel(named[1]), !/^Option\s*</.test(named[2].trim()))
     }
+    out.set(name, keys)
   }
   return out
 }
@@ -177,4 +188,107 @@ test('every argument the api sends is spelled the way the backend reads it', () 
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
   assert.deepEqual(missing, [], missing.join('\n'))
+})
+
+// ---------------------------------------------------------------------------
+// The mock reads the same keys
+// ---------------------------------------------------------------------------
+// The check above compares the api with the backend. The mock adapter is the
+// third reader, and the one a human actually watches, but a key it accepts under
+// either spelling can never disagree with the api — so the whole class above was
+// invisible in the browser preview. The mock resolves an argument through one
+// table now (`SNAKE_CASE_COMMANDS` + `argOf` in mock.ts) and reads the rest as
+// literal keys; both are checked here against the Rust sources.
+
+/** The commands the mock declares as reading the underscore spelling. */
+function mockSnakeCommands() {
+  const src = read('src/api/mock.ts')
+  const block = /const SNAKE_CASE_COMMANDS[\s\S]*?\[([\s\S]*?)\]/.exec(src)
+  if (!block) throw new Error('mock.ts no longer declares SNAKE_CASE_COMMANDS')
+  return new Set([...block[1].matchAll(/'(\w+)'/g)].map((m) => m[1]))
+}
+
+/** The commands whose Rust attribute says `rename_all = "snake_case"`. */
+function backendSnakeCommands() {
+  const names = new Set()
+  for (const { name, attribute } of rustCommands()) {
+    if (readsSnakeCase(attribute)) names.add(name)
+  }
+  return names
+}
+
+test('the mock reads underscore keys for exactly the commands the backend does', () => {
+  const mock = mockSnakeCommands()
+  const backend = backendSnakeCommands()
+  assert.ok(mock.size >= 5, `expected the mock's table to name >=5 commands, found ${mock.size}`)
+  assert.ok(backend.size >= 5, `expected >=5 Rust commands with rename_all, found ${backend.size}`)
+  assert.deepEqual(
+    [...mock].sort(),
+    [...backend].sort(),
+    'the mock table and the backend disagree about which commands read the underscore spelling',
+  )
+})
+
+/** camelCase -> the underscore spelling one of those commands reads. */
+function toSnake(name) {
+  return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
+}
+
+/** Each `case '<cmd>':` body of the mock adapter, by command. */
+function mockCaseBodies() {
+  const src = read('src/api/mock.ts')
+  const labels = [...src.matchAll(/case '(\w+)':|default:/g)]
+  const out = new Map()
+  labels.forEach((m, i) => {
+    if (!m[1]) return
+    const end = i + 1 < labels.length ? labels[i + 1].index : src.length
+    out.set(m[1], src.slice(m.index, end))
+  })
+  return out
+}
+
+test('every argument the mock reads is one its command reads', () => {
+  const backend = backendArguments()
+  const snake = backendSnakeCommands()
+  const bodies = mockCaseBodies()
+  assert.ok(bodies.size >= 40, `expected the mock to implement >=40 commands, found ${bodies.size}`)
+
+  // Reached only through another command, never through Tauri: its keys are the
+  // Rust function's own parameter names, so the attribute rule does not apply.
+  const internal = new Set(['start_create_instance_task'])
+
+  const wrong = []
+  for (const [name, body] of bodies) {
+    if (!backend.has(name)) {
+      if (!internal.has(name)) wrong.push(`${name}: not a command the backend registers`)
+      continue
+    }
+    const keys = backend.get(name)
+    // What the body spells literally, plus what it hands to `argOf` — the two
+    // ways an argument is read there.
+    const reads = [
+      ...[...body.matchAll(/args\?\.(\w+)/g)].map((m) => m[1]),
+      ...[...body.matchAll(/argOf\(\s*args\s*,\s*cmd\s*,\s*'(\w+)'\s*\)/g)].map((m) =>
+        snake.has(name) ? toSnake(m[1]) : m[1],
+      ),
+    ]
+    for (const key of new Set(reads)) {
+      if (!keys.has(key)) {
+        wrong.push(`${name}: reads '${key}', backend reads ${[...keys.keys()].join(', ') || '(nothing)'}`)
+      }
+    }
+  }
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('no mock argument read falls back to a second spelling', () => {
+  const src = read('src/api/mock.ts')
+  const fallbacks = [...src.matchAll(/args\?\.(\w+)\s*\?\?\s*args\?\.(\w+)/g)].map(
+    (m) => `${m[1]} ?? ${m[2]}`,
+  )
+  assert.deepEqual(
+    fallbacks,
+    [],
+    `a command reads one name per argument, so one of these keys is always the wrong spelling: ${fallbacks.join('; ')}`,
+  )
 })
