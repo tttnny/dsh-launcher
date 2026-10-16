@@ -1,8 +1,9 @@
 // 一个实例状态活在三个地方（契约里的「四处」第四处是 store，见文件末尾）。
 //
-// AGENTS.md 把这件事写成了一条契约：往 `InstanceState` 加一个值，要四处一起改——
-// `src/api/types.ts` 的联合、两边 locale 的 `home.status.*`、`src/styles/index.scss`
-// 里 `.dl-status` 的 `is-*` 变体、以及 `src/stores/launcher.ts` 的 `statusOf`。
+// 实例状态那几处的契约写在 `docs/agents/rules/instances.md`：往 `InstanceState`
+// 加一个值，要四处一起改——`src/api/types.ts` 的联合、两边 locale 的
+// `home.status.*`、`src/styles/index.scss` 里 `.dl-status` 的 `is-*` 变体、以及
+// `src/stores/launcher.ts` 的 `statusOf`。
 // 少改一处，这个状态就渲染成别的东西；而「主机不可达」渲染成「已停止」，是把用户送到
 // 服务器上去点「启动」的那一下（ADR-0007）。
 //

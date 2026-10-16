@@ -2198,10 +2198,10 @@ mod tests {
         );
     }
 
-    /// Adoption is not a refusal on the read path either (AGENTS.md): an adopted
-    /// remote instance the launcher holds a launch token for is listed as
-    /// managed, over the address this Mac reaches it at — the same rule the
-    /// write path follows.
+    /// Adoption is not a refusal on the read path either
+    /// (`docs/agents/rules/instances.md`): an adopted remote instance the
+    /// launcher holds a launch token for is listed as managed, over the
+    /// address this Mac reaches it at — the same rule the write path follows.
     #[tokio::test]
     async fn an_adopted_remote_instance_with_a_token_is_still_listed_over_the_forward() {
         let host = remote_host();
@@ -2262,9 +2262,9 @@ mod tests {
     }
 
     /// A write goes exactly where the read goes. And adoption is not a refusal
-    /// (AGENTS.md): what decides is the token, so an adopted remote instance the
-    /// launcher holds a launch token for is written to over the forward and
-    /// reported truthfully.
+    /// (`docs/agents/rules/instances.md`): what decides is the token, so an
+    /// adopted remote instance the launcher holds a launch token for is written
+    /// to over the forward and reported truthfully.
     #[tokio::test]
     async fn a_write_to_an_adopted_remote_instance_reaches_the_forwarded_address() {
         let host = remote_host();

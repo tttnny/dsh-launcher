@@ -147,8 +147,8 @@ pnpm dev            # 仅浏览器预览：localStorage mock，无 Rust 后端
   - `tasks` 后台任务 runner（目前只有安装版本一种）· `doctor` 实例健康检查 · `proxy` 代理注入
   - `tray` 系统托盘 · `app_menu` 原生菜单栏 · `windows` 窗口管理 · `update` 自更新检查
 
-`AGENTS.md` 记录了开发约定与几处不可回退的契约（例如「打开实例 = 用系统浏览器打开
-实例 URL」）。
+`AGENTS.md` 是入口：开发命令的速查表与规则文档的索引，规则本身按主题放在
+`docs/agents/rules/` 里（例如「打开实例 = 用系统浏览器打开实例 URL」）。
 
 ## 发版
 
