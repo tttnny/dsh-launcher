@@ -29,7 +29,10 @@ function statusOf(byId) {
 test('a stopped row is what 全部启动 acts on', () => {
   const scope = bulkScope([instance('i-1')], statusOf({ 'i-1': 'stopped' }))
 
-  assert.deepEqual(scope.start.map((i) => i.id), ['i-1'])
+  assert.deepEqual(
+    scope.start.map((i) => i.id),
+    ['i-1'],
+  )
   assert.deepEqual(scope.stop, [])
   assert.deepEqual(scope.unreachable, [])
 })
@@ -37,7 +40,10 @@ test('a stopped row is what 全部启动 acts on', () => {
 test('a running row is what 全部停止 acts on', () => {
   const scope = bulkScope([instance('i-1')], statusOf({ 'i-1': 'running' }))
 
-  assert.deepEqual(scope.stop.map((i) => i.id), ['i-1'])
+  assert.deepEqual(
+    scope.stop.map((i) => i.id),
+    ['i-1'],
+  )
   assert.deepEqual(scope.start, [])
 })
 
@@ -63,11 +69,23 @@ test('a row that is still starting is left to finish', () => {
 
 test('the scope is the rows it was handed, and no others', () => {
   const rows = [instance('i-1'), instance('i-2'), instance('i-3')]
-  const scope = bulkScope(rows, statusOf({ 'i-2': 'running', 'i-3': 'unreachable' }))
+  const scope = bulkScope(
+    rows,
+    statusOf({ 'i-2': 'running', 'i-3': 'unreachable' }),
+  )
 
-  assert.deepEqual(scope.start.map((i) => i.id), ['i-1'])
-  assert.deepEqual(scope.stop.map((i) => i.id), ['i-2'])
-  assert.deepEqual(scope.unreachable.map((i) => i.id), ['i-3'])
+  assert.deepEqual(
+    scope.start.map((i) => i.id),
+    ['i-1'],
+  )
+  assert.deepEqual(
+    scope.stop.map((i) => i.id),
+    ['i-2'],
+  )
+  assert.deepEqual(
+    scope.unreachable.map((i) => i.id),
+    ['i-3'],
+  )
   assert.equal(
     scope.start.length + scope.stop.length + scope.unreachable.length,
     rows.length,

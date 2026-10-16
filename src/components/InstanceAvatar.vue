@@ -7,9 +7,12 @@ import launcherDefaultIcon from '@/assets/launcher-icon.png'
 // HOME, both resolved backend-side) or the launcher mark. Loading lives here so
 // the row and the detail header cannot disagree about which image to show.
 
-const props = withDefaults(defineProps<{ id: string; icon?: string | null; size?: number }>(), {
-  size: 34,
-})
+const props = withDefaults(
+  defineProps<{ id: string; icon?: string | null; size?: number }>(),
+  {
+    size: 34,
+  },
+)
 
 const src = ref<string | null>(null)
 

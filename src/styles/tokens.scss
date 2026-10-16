@@ -42,10 +42,12 @@
   // UI keeps the macOS system stack (the platform convention for a native
   // app); machine data switches to mono, which is the vernacular of the thing
   // being managed — a CLI harness.
-  --dl-font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+  --dl-font-ui:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
     'Hiragino Sans GB', 'Segoe UI', system-ui, sans-serif;
-  --dl-font-mono: 'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Monaco,
-    'PingFang SC', monospace;
+  --dl-font-mono:
+    'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Monaco, 'PingFang SC',
+    monospace;
 
   --dl-text-xs: 11px;
   --dl-text-sm: 12px;
@@ -74,7 +76,8 @@
   // --- Elevation ------------------------------------------------------------
   // Flat by default; a raised surface is a real overlay, not a hover decoration.
   --dl-lift-1: 0 1px 2px rgba(19, 26, 36, 0.06);
-  --dl-lift-2: 0 8px 24px -6px rgba(19, 26, 36, 0.14), 0 1px 2px rgba(19, 26, 36, 0.05);
+  --dl-lift-2:
+    0 8px 24px -6px rgba(19, 26, 36, 0.14), 0 1px 2px rgba(19, 26, 36, 0.05);
   --dl-lift-3: 0 24px 60px -16px rgba(19, 26, 36, 0.3);
 
   // --- Readout --------------------------------------------------------------
@@ -118,7 +121,8 @@ body[arco-theme='dark'] {
   --dl-danger-soft: rgba(240, 117, 106, 0.18);
 
   --dl-lift-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --dl-lift-2: 0 10px 28px -8px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --dl-lift-2:
+    0 10px 28px -8px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4);
   --dl-lift-3: 0 28px 70px -18px rgba(0, 0, 0, 0.75);
 }
 
@@ -136,4 +140,3 @@ body[arco-theme='dark'] {
 .dl-tnum {
   font-variant-numeric: tabular-nums;
 }
-

@@ -55,7 +55,9 @@ if (!pkgName) {
 }
 const lockPath = 'src-tauri/Cargo.lock'
 const lock = readFileSync(lockPath, 'utf8')
-const blockRe = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${pkgName}"\\r?\\nversion = ")[^"]+"`)
+const blockRe = new RegExp(
+  `(\\[\\[package\\]\\]\\r?\\nname = "${pkgName}"\\r?\\nversion = ")[^"]+"`,
+)
 if (!blockRe.test(lock)) {
   console.error(`${lockPath}: workspace package entry not found`)
   process.exit(1)

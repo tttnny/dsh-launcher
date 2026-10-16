@@ -33,14 +33,19 @@ const instancesOfHome = store.instancesOfHome
 const selectedHost = computed(() =>
   store.hostById(selectedHome.value?.host_id ?? LOCAL_HOST_ID),
 )
-const remoteHome = computed(() => !!selectedHost.value && !selectedHost.value.builtin)
+const remoteHome = computed(
+  () => !!selectedHost.value && !selectedHost.value.builtin,
+)
 
 watch(
   [() => route.query.homeId, () => store.homes],
   ([qHomeId]) => {
     const q = typeof qHomeId === 'string' ? qHomeId : undefined
     if (q && store.homes.some((h) => h.id === q)) selectedHomeId.value = q
-    else if (!selectedHomeId.value || !store.homes.some((h) => h.id === selectedHomeId.value)) {
+    else if (
+      !selectedHomeId.value ||
+      !store.homes.some((h) => h.id === selectedHomeId.value)
+    ) {
       selectedHomeId.value = store.homes[0]?.id
     }
   },
@@ -49,7 +54,10 @@ watch(
 
 function onSelectHome(id: string) {
   selectedHomeId.value = id
-  void router.replace({ name: 'library', query: { ...route.query, tab: 'profiles', homeId: id } })
+  void router.replace({
+    name: 'library',
+    query: { ...route.query, tab: 'profiles', homeId: id },
+  })
 }
 
 /** Instances that launch with this profile by default (or last did). */
@@ -91,9 +99,12 @@ async function load() {
 
 watch(selectedHomeId, () => void load(), { immediate: true })
 
-const createAction = useAction((homeId: string, name: string) => api.createProfile(homeId, name), {
-  success: (name) => t('profiles.profileCreated', { name }),
-})
+const createAction = useAction(
+  (homeId: string, name: string) => api.createProfile(homeId, name),
+  {
+    success: (name) => t('profiles.profileCreated', { name }),
+  },
+)
 
 async function onCreate() {
   const name = newName.value.trim()
@@ -110,7 +121,10 @@ const renameAction = useAction(
     const renamed = await api.renameProfile(homeId, oldName, next)
     return { old: oldName, name: renamed }
   },
-  { key: (_h, old) => old, success: ({ old, name }) => t('profiles.profileRenamed', { old, name }) },
+  {
+    key: (_h, old) => old,
+    success: ({ old, name }) => t('profiles.profileRenamed', { old, name }),
+  },
 )
 
 function startRename(name: string) {
@@ -163,7 +177,10 @@ const deleteAction = useAction(
     await api.deleteProfile(homeId, name)
     return name
   },
-  { key: (_h, name) => name, success: (name) => t('profiles.profileDeleted', { name }) },
+  {
+    key: (_h, name) => name,
+    success: (name) => t('profiles.profileDeleted', { name }),
+  },
 )
 
 async function confirmDelete(name: string) {
@@ -174,7 +191,8 @@ async function confirmDelete(name: string) {
   await load()
 }
 
-const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[name]
+const busy = (name: string) =>
+  !!renameAction.busy[name] || !!deleteAction.busy[name]
 </script>
 
 <template>
@@ -206,7 +224,11 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
       >
         {{ h.name }}
       </button>
-      <span v-if="selectedHome" class="home-tab-path dl-mono" :title="selectedHome.path">
+      <span
+        v-if="selectedHome"
+        class="home-tab-path dl-mono"
+        :title="selectedHome.path"
+      >
         {{ selectedHome.path }}
       </span>
     </div>
@@ -216,13 +238,21 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
         {{ t('profiles.profilesTitle') }}
         <span class="dl-section-count">{{ profiles.length }}</span>
         <span class="profile-label-spacer" />
-        <button v-if="!adding && !remoteHome" class="dl-btn dl-btn--quiet" @click="adding = true">
+        <button
+          v-if="!adding && !remoteHome"
+          class="dl-btn dl-btn--quiet"
+          @click="adding = true"
+        >
           <DlIcon name="plus" :size="13" />
           {{ t('profiles.profileAdd') }}
         </button>
       </div>
       <p v-if="remoteHome" class="dl-field-hint">
-        {{ t('profiles.profileAddRemoteNote', { host: selectedHost?.display_name ?? '' }) }}
+        {{
+          t('profiles.profileAddRemoteNote', {
+            host: selectedHost?.display_name ?? '',
+          })
+        }}
       </p>
 
       <div class="dl-surface profile-list">
@@ -233,18 +263,32 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
             :placeholder="t('profiles.profileCreatePlaceholder')"
             @keydown.enter="onCreate"
           />
-          <button class="dl-btn dl-btn--primary" :disabled="createAction.busy['*']" @click="onCreate">
+          <button
+            class="dl-btn dl-btn--primary"
+            :disabled="createAction.busy['*']"
+            @click="onCreate"
+          >
             {{ t('profiles.profileCreate') }}
           </button>
-          <button class="dl-btn dl-btn--quiet" @click="adding = false">{{ t('common.cancel') }}</button>
+          <button class="dl-btn dl-btn--quiet" @click="adding = false">
+            {{ t('common.cancel') }}
+          </button>
         </div>
 
         <DlEmpty
-          v-if="!profilesLoading && profiles.length === 0 && !adding && !profilesError"
+          v-if="
+            !profilesLoading &&
+            profiles.length === 0 &&
+            !adding &&
+            !profilesError
+          "
           icon="profile"
           :description="t('profiles.profilesEmpty')"
         />
-        <div v-else-if="profilesLoading && profiles.length === 0" class="dl-row-none">
+        <div
+          v-else-if="profilesLoading && profiles.length === 0"
+          class="dl-row-none"
+        >
           {{ t('common.loading') }}
         </div>
         <div v-else-if="profilesError" class="dl-row-none profile-error">
@@ -255,21 +299,45 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
           <!-- Rename / copy turn the row into its own editor, so the row that
                is being changed is the row you type in. -->
           <div v-if="renaming === p" class="profile-row is-editing">
-            <input v-model="renameValue" class="dl-input" @keydown.enter="confirmRename" />
-            <button class="dl-btn dl-btn--primary" :disabled="renameAction.busy[p]" @click="confirmRename">
+            <input
+              v-model="renameValue"
+              class="dl-input"
+              @keydown.enter="confirmRename"
+            />
+            <button
+              class="dl-btn dl-btn--primary"
+              :disabled="renameAction.busy[p]"
+              @click="confirmRename"
+            >
               {{ t('profiles.profileRenameSave') }}
             </button>
-            <button class="dl-btn dl-btn--quiet" @click="renaming = null">{{ t('common.cancel') }}</button>
+            <button class="dl-btn dl-btn--quiet" @click="renaming = null">
+              {{ t('common.cancel') }}
+            </button>
           </div>
 
           <div v-else-if="copying === p" class="profile-row is-editing">
             <span class="profile-copy-from dl-mono">{{ p }}</span>
-            <DlIcon name="chevron-right" :size="13" class="profile-copy-arrow" />
-            <input v-model="copyValue" class="dl-input" @keydown.enter="confirmCopy" />
-            <button class="dl-btn dl-btn--primary" :disabled="copyAction.busy['*']" @click="confirmCopy">
+            <DlIcon
+              name="chevron-right"
+              :size="13"
+              class="profile-copy-arrow"
+            />
+            <input
+              v-model="copyValue"
+              class="dl-input"
+              @keydown.enter="confirmCopy"
+            />
+            <button
+              class="dl-btn dl-btn--primary"
+              :disabled="copyAction.busy['*']"
+              @click="confirmCopy"
+            >
               {{ t('profiles.profileCopySave') }}
             </button>
-            <button class="dl-btn dl-btn--quiet" @click="copying = null">{{ t('common.cancel') }}</button>
+            <button class="dl-btn dl-btn--quiet" @click="copying = null">
+              {{ t('common.cancel') }}
+            </button>
           </div>
 
           <div v-else class="profile-row">
@@ -282,17 +350,34 @@ const busy = (name: string) => !!renameAction.busy[name] || !!deleteAction.busy[
                    on the instance. Showing a select here made a profile row
                    read "web → web" and implied it did something to the profile. -->
               <div v-if="usersOf(p).length > 0" class="profile-users">
-                <span class="profile-users-label">{{ t('profiles.usedByInstances') }}</span>
-                <span v-for="inst in usersOf(p)" :key="inst.id" class="profile-user">{{ inst.name }}</span>
+                <span class="profile-users-label">{{
+                  t('profiles.usedByInstances')
+                }}</span>
+                <span
+                  v-for="inst in usersOf(p)"
+                  :key="inst.id"
+                  class="profile-user"
+                  >{{ inst.name }}</span
+                >
               </div>
-              <span v-else class="profile-no-user">{{ t('profiles.noInstances') }}</span>
+              <span v-else class="profile-no-user">{{
+                t('profiles.noInstances')
+              }}</span>
             </div>
 
             <div class="profile-actions">
-              <button class="dl-btn dl-btn--ghost" :disabled="busy(p)" @click="startRename(p)">
+              <button
+                class="dl-btn dl-btn--ghost"
+                :disabled="busy(p)"
+                @click="startRename(p)"
+              >
                 {{ t('profiles.profileRename') }}
               </button>
-              <button class="dl-btn dl-btn--ghost" :disabled="busy(p)" @click="startCopy(p)">
+              <button
+                class="dl-btn dl-btn--ghost"
+                :disabled="busy(p)"
+                @click="startCopy(p)"
+              >
                 {{ t('profiles.profileCopy') }}
               </button>
               <a-popconfirm

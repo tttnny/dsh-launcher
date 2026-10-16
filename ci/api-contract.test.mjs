@@ -21,7 +21,8 @@ function apiCommands() {
   const names = new Set()
   for (const m of src.matchAll(/call<[^>]*>\('([\w]+)'/g)) names.add(m[1])
   // Multi-line generic form: call<SomeThing[]>\n  ('cmd'
-  for (const m of src.matchAll(/call<([^>]*)>\s*\(\s*'([\w]+)'/g)) names.add(m[2])
+  for (const m of src.matchAll(/call<([^>]*)>\s*\(\s*'([\w]+)'/g))
+    names.add(m[2])
   return names
 }
 
@@ -38,7 +39,14 @@ function backendCommands() {
   const src = read('src-tauri/src/lib.rs')
   const names = new Set()
   for (const m of src.matchAll(/(\w+)::(\w+),/g)) {
-    if (m[1] === 'commands' || m[1] === 'tasks' || m[1] === 'plugins' || m[1] === 'runtime' || m[1] === 'icons' || m[1] === 'update') {
+    if (
+      m[1] === 'commands' ||
+      m[1] === 'tasks' ||
+      m[1] === 'plugins' ||
+      m[1] === 'runtime' ||
+      m[1] === 'icons' ||
+      m[1] === 'update'
+    ) {
       names.add(m[2])
     }
   }
@@ -48,9 +56,16 @@ function backendCommands() {
 test('every command the api invokes has a mock implementation', () => {
   const api = apiCommands()
   const mock = mockCommands()
-  assert.ok(api.size >= 40, `expected the api surface to cover >=40 commands, found ${api.size}`)
+  assert.ok(
+    api.size >= 40,
+    `expected the api surface to cover >=40 commands, found ${api.size}`,
+  )
   const missing = [...api].filter((c) => !mock.has(c))
-  assert.deepEqual(missing, [], `mock adapter is missing: ${missing.join(', ')}`)
+  assert.deepEqual(
+    missing,
+    [],
+    `mock adapter is missing: ${missing.join(', ')}`,
+  )
 })
 
 test('mock does not implement commands outside the api surface', () => {
@@ -60,7 +75,11 @@ test('mock does not implement commands outside the api surface', () => {
   // it, mirroring the backend).
   const internal = new Set(['start_create_instance_task'])
   const extra = [...mock].filter((c) => !api.has(c) && !internal.has(c))
-  assert.deepEqual(extra, [], `mock implements commands no caller uses: ${extra.join(', ')}`)
+  assert.deepEqual(
+    extra,
+    [],
+    `mock implements commands no caller uses: ${extra.join(', ')}`,
+  )
 })
 
 test('every backend command is either invoked by the api or deliberately absent', () => {
@@ -68,8 +87,14 @@ test('every backend command is either invoked by the api or deliberately absent'
   const backend = backendCommands()
   // Deliberately not exposed to the frontend (internal/pending commands).
   const intentional = new Set(['pending_deep_link', 'get_launcher_directory'])
-  const unexposed = [...backend].filter((c) => !api.has(c) && !intentional.has(c))
-  assert.deepEqual(unexposed, [], `backend commands with no frontend caller: ${unexposed.join(', ')}`)
+  const unexposed = [...backend].filter(
+    (c) => !api.has(c) && !intentional.has(c),
+  )
+  assert.deepEqual(
+    unexposed,
+    [],
+    `backend commands with no frontend caller: ${unexposed.join(', ')}`,
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -89,7 +114,9 @@ function apiArguments() {
   const out = new Map()
   // No argument object in this file nests braces or parens, so the literal ends
   // at its first `}`.
-  for (const m of src.matchAll(/call<[^<>]*>\s*\(\s*'(\w+)'\s*(?:,\s*(\{[\s\S]*?\})\s*)?\)/g)) {
+  for (const m of src.matchAll(
+    /call<[^<>]*>\s*\(\s*'(\w+)'\s*(?:,\s*(\{[\s\S]*?\})\s*)?\)/g,
+  )) {
     const keys = new Set()
     if (m[2]) {
       for (const part of m[2].slice(1, -1).split(',')) {
@@ -103,7 +130,14 @@ function apiArguments() {
 }
 
 /** Arguments Tauri supplies itself; a caller never sends them. */
-const INJECTED = new Set(['app', '_app', 'state', 'window', 'webview', 'webview_window'])
+const INJECTED = new Set([
+  'app',
+  '_app',
+  'state',
+  'window',
+  'webview',
+  'webview_window',
+])
 
 function toCamel(name) {
   return name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
@@ -133,8 +167,18 @@ function* rustCommands() {
   const command =
     /#\[tauri::command([^\]]*)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([\s\S]*?)\)\s*(?:->|\{)/g
   // `lib.rs` included: one command lives there.
-  for (const file of ['lib', 'commands', 'tasks', 'plugins', 'runtime', 'icons', 'update']) {
-    const src = read(file === 'lib' ? 'src-tauri/src/lib.rs' : `src-tauri/src/${file}.rs`)
+  for (const file of [
+    'lib',
+    'commands',
+    'tasks',
+    'plugins',
+    'runtime',
+    'icons',
+    'update',
+  ]) {
+    const src = read(
+      file === 'lib' ? 'src-tauri/src/lib.rs' : `src-tauri/src/${file}.rs`,
+    )
     for (const m of src.matchAll(command)) {
       yield { name: m[2], attribute: m[1], params: m[3] }
     }
@@ -156,7 +200,10 @@ function backendArguments() {
     for (const param of parametersOf(params)) {
       const named = /^([a-z_]\w*)\s*:\s*([\s\S]+)$/.exec(param.trim())
       if (!named || INJECTED.has(named[1])) continue
-      keys.set(snake ? named[1] : toCamel(named[1]), !/^Option\s*</.test(named[2].trim()))
+      keys.set(
+        snake ? named[1] : toCamel(named[1]),
+        !/^Option\s*</.test(named[2].trim()),
+      )
     }
     out.set(name, keys)
   }
@@ -166,12 +213,24 @@ function backendArguments() {
 test('every argument the api sends is spelled the way the backend reads it', () => {
   const api = apiArguments()
   const backend = backendArguments()
-  assert.ok(api.size >= 40, `expected the api surface to cover >=40 commands, found ${api.size}`)
-  assert.ok(backend.size >= 40, `expected >=40 backend commands, found ${backend.size}`)
+  assert.ok(
+    api.size >= 40,
+    `expected the api surface to cover >=40 commands, found ${api.size}`,
+  )
+  assert.ok(
+    backend.size >= 40,
+    `expected >=40 backend commands, found ${backend.size}`,
+  )
 
   // A command this file cannot find is a hole in the check, not a passing case.
-  const unread = [...api].filter(([name]) => !backend.has(name)).map(([name]) => name)
-  assert.deepEqual(unread, [], `api commands with no parsed backend signature: ${unread.join(', ')}`)
+  const unread = [...api]
+    .filter(([name]) => !backend.has(name))
+    .map(([name]) => name)
+  assert.deepEqual(
+    unread,
+    [],
+    `api commands with no parsed backend signature: ${unread.join(', ')}`,
+  )
 
   const wrong = []
   const missing = []
@@ -179,11 +238,14 @@ test('every argument the api sends is spelled the way the backend reads it', () 
     const expected = backend.get(name)
     for (const key of keys) {
       if (!expected.has(key)) {
-        wrong.push(`${name}: sends '${key}', reads ${[...expected.keys()].join(', ') || '(nothing)'}`)
+        wrong.push(
+          `${name}: sends '${key}', reads ${[...expected.keys()].join(', ') || '(nothing)'}`,
+        )
       }
     }
     for (const [key, required] of expected) {
-      if (required && !keys.has(key)) missing.push(`${name}: '${key}' is required and never sent`)
+      if (required && !keys.has(key))
+        missing.push(`${name}: '${key}' is required and never sent`)
     }
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
@@ -220,8 +282,14 @@ function backendSnakeCommands() {
 test('the mock reads underscore keys for exactly the commands the backend does', () => {
   const mock = mockSnakeCommands()
   const backend = backendSnakeCommands()
-  assert.ok(mock.size >= 5, `expected the mock's table to name >=5 commands, found ${mock.size}`)
-  assert.ok(backend.size >= 5, `expected >=5 Rust commands with rename_all, found ${backend.size}`)
+  assert.ok(
+    mock.size >= 5,
+    `expected the mock's table to name >=5 commands, found ${mock.size}`,
+  )
+  assert.ok(
+    backend.size >= 5,
+    `expected >=5 Rust commands with rename_all, found ${backend.size}`,
+  )
   assert.deepEqual(
     [...mock].sort(),
     [...backend].sort(),
@@ -251,7 +319,10 @@ test('every argument the mock reads is one its command reads', () => {
   const backend = backendArguments()
   const snake = backendSnakeCommands()
   const bodies = mockCaseBodies()
-  assert.ok(bodies.size >= 40, `expected the mock to implement >=40 commands, found ${bodies.size}`)
+  assert.ok(
+    bodies.size >= 40,
+    `expected the mock to implement >=40 commands, found ${bodies.size}`,
+  )
 
   // Reached only through another command, never through Tauri: its keys are the
   // Rust function's own parameter names, so the attribute rule does not apply.
@@ -260,7 +331,8 @@ test('every argument the mock reads is one its command reads', () => {
   const wrong = []
   for (const [name, body] of bodies) {
     if (!backend.has(name)) {
-      if (!internal.has(name)) wrong.push(`${name}: not a command the backend registers`)
+      if (!internal.has(name))
+        wrong.push(`${name}: not a command the backend registers`)
       continue
     }
     const keys = backend.get(name)
@@ -268,13 +340,15 @@ test('every argument the mock reads is one its command reads', () => {
     // ways an argument is read there.
     const reads = [
       ...[...body.matchAll(/args\?\.(\w+)/g)].map((m) => m[1]),
-      ...[...body.matchAll(/argOf\(\s*args\s*,\s*cmd\s*,\s*'(\w+)'\s*\)/g)].map((m) =>
-        snake.has(name) ? toSnake(m[1]) : m[1],
+      ...[...body.matchAll(/argOf\(\s*args\s*,\s*cmd\s*,\s*'(\w+)'\s*\)/g)].map(
+        (m) => (snake.has(name) ? toSnake(m[1]) : m[1]),
       ),
     ]
     for (const key of new Set(reads)) {
       if (!keys.has(key)) {
-        wrong.push(`${name}: reads '${key}', backend reads ${[...keys.keys()].join(', ') || '(nothing)'}`)
+        wrong.push(
+          `${name}: reads '${key}', backend reads ${[...keys.keys()].join(', ') || '(nothing)'}`,
+        )
       }
     }
   }
@@ -283,9 +357,9 @@ test('every argument the mock reads is one its command reads', () => {
 
 test('no mock argument read falls back to a second spelling', () => {
   const src = read('src/api/mock.ts')
-  const fallbacks = [...src.matchAll(/args\?\.(\w+)\s*\?\?\s*args\?\.(\w+)/g)].map(
-    (m) => `${m[1]} ?? ${m[2]}`,
-  )
+  const fallbacks = [
+    ...src.matchAll(/args\?\.(\w+)\s*\?\?\s*args\?\.(\w+)/g),
+  ].map((m) => `${m[1]} ?? ${m[2]}`)
   assert.deepEqual(
     fallbacks,
     [],

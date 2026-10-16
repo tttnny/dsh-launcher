@@ -44,7 +44,10 @@ function installLedger(tasks: TaskInfo[]): Record<string, TaskInfo> {
  * a host id is a uuid or the local literal), so one string identifies one
  * install.
  */
-export function installKey(hostId: string | undefined, version: string): string {
+export function installKey(
+  hostId: string | undefined,
+  version: string,
+): string {
   return `${hostId ?? LOCAL_HOST_ID}:${version}`
 }
 
@@ -98,7 +101,10 @@ interface LauncherState {
    * the claim says which host and version a progress event belongs to. `null`
    * means a task that was never claimed here.
    */
-  pendingInstallTasks: Record<string, { hostId: string; version: string } | null>
+  pendingInstallTasks: Record<
+    string,
+    { hostId: string; version: string } | null
+  >
   /** The installable list per host, so switching back to a host does not ask
    *  again; the refresh button is what asks again. */
   remoteVersionsByHost: Record<string, RemoteVersion[]>
@@ -150,7 +156,8 @@ export const useLauncherStore = defineStore('launcher', {
     /** The machine the Library is showing. */
     currentHost: (s): HostWithStatus | null =>
       s.hosts.find((h) => h.id === s.currentHostId) ?? s.hosts[0] ?? null,
-    hostById: (s) => (id?: string | null) => s.hosts.find((h) => h.id === id) ?? null,
+    hostById: (s) => (id?: string | null) =>
+      s.hosts.find((h) => h.id === id) ?? null,
     instanceById: (s) => (id: string) => s.instances.find((i) => i.id === id),
     /** The current host's versions — what the Library's first tab shows. */
     versions: (s) => s.versionsByHost[s.currentHostId] ?? [],
@@ -169,9 +176,13 @@ export const useLauncherStore = defineStore('launcher', {
      * to a machine other than the current one, and it still has a name.
      */
     versionById: (s) => (id: string) =>
-      Object.values(s.versionsByHost).flat().find((v) => v.id === id),
+      Object.values(s.versionsByHost)
+        .flat()
+        .find((v) => v.id === id),
     homeById: (s) => (id: string) =>
-      Object.values(s.homesByHost).flat().find((h) => h.id === id),
+      Object.values(s.homesByHost)
+        .flat()
+        .find((h) => h.id === id),
     instancesOfHost: (s) => (hostId: string) =>
       s.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId),
     /**
@@ -182,11 +193,14 @@ export const useLauncherStore = defineStore('launcher', {
     visibleInstances: (s) =>
       s.allHosts
         ? s.instances
-        : s.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === s.currentHostId),
+        : s.instances.filter(
+            (i) => (i.host_id ?? LOCAL_HOST_ID) === s.currentHostId,
+          ),
     // Referential integrity: "who uses this HOME / version" is answered here,
     // once, instead of being re-derived per view. Ids are unique across hosts,
     // so these need no host of their own.
-    instancesOfHome: (s) => (homeId: string) => s.instances.filter((i) => i.home_id === homeId),
+    instancesOfHome: (s) => (homeId: string) =>
+      s.instances.filter((i) => i.home_id === homeId),
     instancesOfVersion: (s) => (versionId: string) =>
       s.instances.filter((i) => i.version_id === versionId),
     isHomeShared: (s) => (homeId: string) =>
@@ -203,10 +217,20 @@ export const useLauncherStore = defineStore('launcher', {
      * at — the one word that leads a user to start a second DSH on a server
      * (ADR-0007 后果).
      */
-    statusOf: (s) => (id: string): InstanceStatus =>
-      s.statusById[id] ?? { id, state: 'stopped', url: null, profile: null, exit_code: null },
-    healthErrorCount: (s) => s.healthLogs.filter((l) => l.level === 'error').length,
-    healthWarnCount: (s) => s.healthLogs.filter((l) => l.level === 'warn').length,
+    statusOf:
+      (s) =>
+      (id: string): InstanceStatus =>
+        s.statusById[id] ?? {
+          id,
+          state: 'stopped',
+          url: null,
+          profile: null,
+          exit_code: null,
+        },
+    healthErrorCount: (s) =>
+      s.healthLogs.filter((l) => l.level === 'error').length,
+    healthWarnCount: (s) =>
+      s.healthLogs.filter((l) => l.level === 'warn').length,
     healthTotalCount: (s) => s.healthLogs.length,
   },
 
@@ -231,22 +255,24 @@ export const useLauncherStore = defineStore('launcher', {
         else pending.push(st)
       })
 
-      const [hosts, instances, settings, statuses, runtime, tasks] = await Promise.all([
-        api.listHosts(),
-        // Every host's instances: the board's 全部 view is the default, and the
-        // request says so explicitly (「没说话」 means 本机 everywhere else).
-        api.listInstances(null, true),
-        api.getSettings(),
-        api.listInstanceStatus(),
-        api.getRuntimeStatus(),
-        // The task list is the install ledger. It is fetched after the rest
-        // because a task that just finished is an instance that must be in
-        // `this.instances` before its progress row is retired.
-        api.listTasks(),
-      ])
+      const [hosts, instances, settings, statuses, runtime, tasks] =
+        await Promise.all([
+          api.listHosts(),
+          // Every host's instances: the board's 全部 view is the default, and the
+          // request says so explicitly (「没说话」 means 本机 everywhere else).
+          api.listInstances(null, true),
+          api.getSettings(),
+          api.listInstanceStatus(),
+          api.getRuntimeStatus(),
+          // The task list is the install ledger. It is fetched after the rest
+          // because a task that just finished is an instance that must be in
+          // `this.instances` before its progress row is retired.
+          api.listTasks(),
+        ])
       this.hosts = hosts
       if (!hosts.some((h) => h.id === this.currentHostId)) {
-        this.currentHostId = hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
+        this.currentHostId =
+          hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
       }
       this.instances = instances
       this.settings = settings
@@ -277,7 +303,9 @@ export const useLauncherStore = defineStore('launcher', {
         // under that id.
         const claim = this.pendingInstallTasks[p.id]
         if (claim !== undefined) delete this.pendingInstallTasks[p.id]
-        const known = Object.values(this.installingVersions).find((t) => t.id === p.id)
+        const known = Object.values(this.installingVersions).find(
+          (t) => t.id === p.id,
+        )
         const hostId = known?.host_id ?? claim?.hostId
         const version = known?.version ?? claim?.version
         if (hostId == null || version == null) {
@@ -341,7 +369,9 @@ export const useLauncherStore = defineStore('launcher', {
       })
 
       await api.onTaskLog((l) => {
-        const existing = Object.values(this.installingVersions).find((t) => t.id === l.id)
+        const existing = Object.values(this.installingVersions).find(
+          (t) => t.id === l.id,
+        )
         if (!existing) return
         if (existing.logs.length >= 1000) existing.logs.shift()
         existing.logs.push(l.line)
@@ -436,7 +466,8 @@ export const useLauncherStore = defineStore('launcher', {
       if (!hosts.some((h) => h.id === this.currentHostId)) {
         // The current host was deleted. 本机 is the one machine that is always
         // there, and every page can show it.
-        this.currentHostId = hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
+        this.currentHostId =
+          hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
         currentWentStale = true
       }
       if (currentWentStale) void this.loadHostResources(this.currentHostId)

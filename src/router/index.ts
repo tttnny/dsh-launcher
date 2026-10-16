@@ -11,8 +11,16 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'instances', component: () => import('@/views/Instances.vue') },
-    { path: '/instances/:id', name: 'instance-detail', component: () => import('@/views/InstanceDetail.vue') },
+    {
+      path: '/',
+      name: 'instances',
+      component: () => import('@/views/Instances.vue'),
+    },
+    {
+      path: '/instances/:id',
+      name: 'instance-detail',
+      component: () => import('@/views/InstanceDetail.vue'),
+    },
 
     // Library: versions / HOME directories / profiles, chosen by `tab`.
     {
@@ -29,15 +37,32 @@ const router = createRouter({
       name: 'plugins',
       component: () => import('@/views/library/PluginManager.vue'),
     },
-    { path: '/settings', name: 'settings', component: () => import('@/views/Settings.vue') },
-    { path: '/setup', name: 'setup', component: () => import('@/views/Setup.vue') },
+    {
+      path: '/settings',
+      name: 'settings',
+      component: () => import('@/views/Settings.vue'),
+    },
+    {
+      path: '/setup',
+      name: 'setup',
+      component: () => import('@/views/Setup.vue'),
+    },
 
     // --- Legacy paths -------------------------------------------------------
     { path: '/home', redirect: '/' },
     { path: '/homes', redirect: { name: 'library', query: { tab: 'homes' } } },
-    { path: '/profiles', redirect: { name: 'library', query: { tab: 'profiles' } } },
-    { path: '/versions', redirect: { name: 'library', query: { tab: 'versions' } } },
-    { path: '/tasks', redirect: { name: 'library', query: { tab: 'versions' } } },
+    {
+      path: '/profiles',
+      redirect: { name: 'library', query: { tab: 'profiles' } },
+    },
+    {
+      path: '/versions',
+      redirect: { name: 'library', query: { tab: 'versions' } },
+    },
+    {
+      path: '/tasks',
+      redirect: { name: 'library', query: { tab: 'versions' } },
+    },
     { path: '/instances', redirect: '/' },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

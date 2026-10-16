@@ -29,7 +29,11 @@ const workflow = read('.github/workflows/ci.yml')
 const pkg = JSON.parse(read('package.json'))
 
 test('verify.sh discovers the suites by glob, never from a written list', () => {
-  assert.match(verifySh, /ci\/\*\.test\.mjs/, 'verify.sh no longer globs ci/*.test.mjs')
+  assert.match(
+    verifySh,
+    /ci\/\*\.test\.mjs/,
+    'verify.sh no longer globs ci/*.test.mjs',
+  )
   assert.deepEqual(
     verifySh.match(/[\w-]+\.test\.mjs/g) ?? [],
     [],
@@ -38,7 +42,11 @@ test('verify.sh discovers the suites by glob, never from a written list', () => 
 })
 
 test('the workflow runs the gates through verify.sh, not from its own list', () => {
-  assert.match(workflow, /^ *run: pnpm verify$/m, 'the macOS job no longer runs pnpm verify')
+  assert.match(
+    workflow,
+    /^ *run: pnpm verify$/m,
+    'the macOS job no longer runs pnpm verify',
+  )
   assert.match(
     workflow,
     /^ *run: \.\/ci\/verify\.sh --source-only$/m,
@@ -61,7 +69,11 @@ test('the workflow runs the gates through verify.sh, not from its own list', () 
 })
 
 test('package.json exposes both modes of verify.sh', () => {
-  assert.match(pkg.scripts?.verify ?? '', /ci\/verify\.sh/, 'no `pnpm verify` script')
+  assert.match(
+    pkg.scripts?.verify ?? '',
+    /ci\/verify\.sh/,
+    'no `pnpm verify` script',
+  )
   assert.match(
     pkg.scripts?.['verify:quick'] ?? '',
     /ci\/verify\.sh --quick/,

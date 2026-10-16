@@ -61,7 +61,8 @@ onMounted(async () => {
   // hard requirement for installing a version and for plugin management, and
   // the launcher no longer installs one itself. Navigation stays open, so a
   // network-restricted user can still reach Settings and configure a proxy.
-  const runtimeIncomplete = !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
+  const runtimeIncomplete =
+    !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
   if (runtimeIncomplete && route.name !== 'setup') {
     void router.push({ name: 'setup' })
   }
@@ -120,7 +121,13 @@ async function refreshAll() {
 }
 
 function onAppKeydown(e: KeyboardEvent) {
-  if (handleAppKeydown(e, { go: goShortcut, refresh: () => void refreshAll(), back: backShortcut })) {
+  if (
+    handleAppKeydown(e, {
+      go: goShortcut,
+      refresh: () => void refreshAll(),
+      back: backShortcut,
+    })
+  ) {
     e.preventDefault()
   }
 }
@@ -145,7 +152,9 @@ async function setupMenuListeners() {
       })
       unlistenMenu.push(un)
     }
-    unlistenMenu.push(await listen('check-update', () => void onMenuCheckUpdate()))
+    unlistenMenu.push(
+      await listen('check-update', () => void onMenuCheckUpdate()),
+    )
     unlistenMenu.push(await listen('open-help', () => void onMenuOpenHelp()))
   } catch {
     // Event bridge unavailable (browser preview); shortcuts still work.
@@ -161,7 +170,9 @@ async function onMenuCheckUpdate() {
     const info = await api.checkLauncherUpdate('dev')
     if (info.up_to_date) Message.success(t('settings.update.upToDate'))
     else {
-      Message.info(t('settings.update.available', { version: info.latest ?? '' }))
+      Message.info(
+        t('settings.update.available', { version: info.latest ?? '' }),
+      )
       if (info.url) await api.openExternal(info.url)
     }
   } catch (e) {
@@ -188,7 +199,9 @@ async function setupLaunchDeepLink() {
   const pending = await api.pendingDeepLink()
   if (pending) handleDeepLink(pending)
   const { listen } = await import('@tauri-apps/api/event')
-  unlistenDeepLink = await listen<string>('deep-link', (event) => handleDeepLink(event.payload))
+  unlistenDeepLink = await listen<string>('deep-link', (event) =>
+    handleDeepLink(event.payload),
+  )
 }
 
 function handleDeepLink(raw: string) {
@@ -232,7 +245,8 @@ async function launchFromDeepLink(u: URL) {
   try {
     const state = store.statusOf(inst.id).state
     if (state !== 'running' && state !== 'starting') {
-      const profile = u.searchParams.get('profile') || inst.default_profile || 'web'
+      const profile =
+        u.searchParams.get('profile') || inst.default_profile || 'web'
       await api.startInstance(inst.id, profile)
     }
     await openBrowserWhenReady(inst.id)
@@ -283,12 +297,17 @@ watch(
 
 type NavKey = 'instances' | 'library' | 'settings'
 
-const siderCollapsed = ref(localStorage.getItem('dsh-launcher.siderCollapsed') === '1')
+const siderCollapsed = ref(
+  localStorage.getItem('dsh-launcher.siderCollapsed') === '1',
+)
 
 function toggleSider() {
   siderCollapsed.value = !siderCollapsed.value
   try {
-    localStorage.setItem('dsh-launcher.siderCollapsed', siderCollapsed.value ? '1' : '0')
+    localStorage.setItem(
+      'dsh-launcher.siderCollapsed',
+      siderCollapsed.value ? '1' : '0',
+    )
   } catch {
     // Private mode fallback
   }
@@ -304,7 +323,9 @@ const navSelected = computed<NavKey>(() => {
 const navGo = goShortcut
 
 const runningCount = computed(
-  () => store.instances.filter((i) => store.statusOf(i.id).state === 'running').length,
+  () =>
+    store.instances.filter((i) => store.statusOf(i.id).state === 'running')
+      .length,
 )
 
 const envOk = computed(
@@ -313,7 +334,9 @@ const envOk = computed(
 
 // --- Header -------------------------------------------------------------------
 
-const showBack = computed(() => route.name === 'instance-detail' || route.name === 'setup')
+const showBack = computed(
+  () => route.name === 'instance-detail' || route.name === 'setup',
+)
 
 function onHeaderBack() {
   router.back()
@@ -394,8 +417,14 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           @click="navGo('instances')"
         >
           <DlIcon name="instances" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.instances') }}</span>
-          <span v-if="!siderCollapsed && runningCount > 0" class="dl-nav-badge">{{ runningCount }}</span>
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{
+            t('nav.instances')
+          }}</span>
+          <span
+            v-if="!siderCollapsed && runningCount > 0"
+            class="dl-nav-badge"
+            >{{ runningCount }}</span
+          >
         </button>
 
         <button
@@ -405,7 +434,9 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           @click="navGo('library')"
         >
           <DlIcon name="library" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.library') }}</span>
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{
+            t('nav.library')
+          }}</span>
         </button>
 
         <button
@@ -415,7 +446,9 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           @click="navGo('settings')"
         >
           <DlIcon name="settings" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ t('nav.settings') }}</span>
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{
+            t('nav.settings')
+          }}</span>
         </button>
       </nav>
 
@@ -428,8 +461,12 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           @click="navGo('instances')"
         >
           <DlIcon name="health" :size="15" />
-          <span v-if="!siderCollapsed" class="dl-foot-label">{{ t('home.healthLogs') }}</span>
-          <span v-if="!siderCollapsed" class="dl-foot-count">{{ store.healthTotalCount }}</span>
+          <span v-if="!siderCollapsed" class="dl-foot-label">{{
+            t('home.healthLogs')
+          }}</span>
+          <span v-if="!siderCollapsed" class="dl-foot-count">{{
+            store.healthTotalCount
+          }}</span>
         </button>
 
         <button
@@ -447,15 +484,34 @@ async function onHeaderDoubleClick(e: MouseEvent) {
     </aside>
 
     <main class="dl-main">
-      <header class="dl-toolbar" @mousedown="onHeaderMouseDown" @dblclick="onHeaderDoubleClick">
-        <button class="dl-icon-btn" :title="t('nav.toggleSider')" data-no-drag @click="toggleSider">
+      <header
+        class="dl-toolbar"
+        @mousedown="onHeaderMouseDown"
+        @dblclick="onHeaderDoubleClick"
+      >
+        <button
+          class="dl-icon-btn"
+          :title="t('nav.toggleSider')"
+          data-no-drag
+          @click="toggleSider"
+        >
           <DlIcon name="sidebar" :size="15" />
         </button>
-        <button v-if="showBack" class="dl-icon-btn" :title="t('common.back')" data-no-drag @click="onHeaderBack">
+        <button
+          v-if="showBack"
+          class="dl-icon-btn"
+          :title="t('common.back')"
+          data-no-drag
+          @click="onHeaderBack"
+        >
           <DlIcon name="back" :size="15" />
         </button>
 
-        <span v-if="!isTauri" class="dl-tag dl-tag--muted" style="margin-left: 4px">
+        <span
+          v-if="!isTauri"
+          class="dl-tag dl-tag--muted"
+          style="margin-left: 4px"
+        >
           {{ t('app.mockBadge') }}
         </span>
 

@@ -54,7 +54,8 @@ export interface HostInput {
 }
 
 /** The four ways a remote call fails, as the page tells them apart. */
-export type HostErrorKind = 'unreachable' | 'auth' | 'timeout' | 'remote_command'
+export type HostErrorKind =
+  'unreachable' | 'auth' | 'timeout' | 'remote_command'
 
 /** One probe of one tool on a remote machine: the path it resolves to, and its version. */
 export interface RemoteTool {
@@ -222,7 +223,8 @@ export interface LauncherUpdateInfo {
  * press 启动 and end up with a second DSH on a server that was running one all
  * along (ADR-0007).
  */
-export type InstanceState = 'stopped' | 'starting' | 'running' | 'exited' | 'unreachable'
+export type InstanceState =
+  'stopped' | 'starting' | 'running' | 'exited' | 'unreachable'
 
 export interface InstanceStatus {
   id: string
@@ -341,7 +343,8 @@ export interface RemoteVersion {
 // ---------------------------------------------------------------------------
 
 /** How the Plugins page may treat the snapshot: managed, or a reason it can't. */
-export type PluginViewMode = 'managed' | 'not-running' | 'adopted' | 'unreachable'
+export type PluginViewMode =
+  'managed' | 'not-running' | 'adopted' | 'unreachable'
 
 /**
  * A Bundle（补丁层）— the unit this page manages: what a profile selects and

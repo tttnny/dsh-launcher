@@ -27,12 +27,17 @@ const query = ref('')
  * The row the user was handed back to (`?focus=<id>`) — the plugin manager
  * sends this so "返回实例" lands on the instance they left, expanded.
  */
-const focusId = computed(() => (typeof route.query.focus === 'string' ? route.query.focus : ''))
+const focusId = computed(() =>
+  typeof route.query.focus === 'string' ? route.query.focus : '',
+)
 const newDialogVisible = ref(false)
 /** Set when the sheet is opened as "duplicate this instance". */
-const newPreset = ref<{ name: string; versionId: string; homeId: string; hostId?: string } | null>(
-  null,
-)
+const newPreset = ref<{
+  name: string
+  versionId: string
+  homeId: string
+  hostId?: string
+} | null>(null)
 const healthVisible = ref(false)
 
 function openNewInstance() {
@@ -76,13 +81,15 @@ const filtered = computed(() => {
   const list = !q
     ? store.visibleInstances
     : store.visibleInstances.filter(
-        (i) => i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q),
+        (i) =>
+          i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q),
       )
   // Live instances float to the top: the board is a control surface, and the
   // thing you are controlling should be nearest your hand.
   return [...list].sort((a, b) => {
     const rank = (s: string) => (s === 'running' ? 0 : s === 'starting' ? 1 : 2)
-    const d = rank(store.statusOf(a.id).state) - rank(store.statusOf(b.id).state)
+    const d =
+      rank(store.statusOf(a.id).state) - rank(store.statusOf(b.id).state)
     return d !== 0 ? d : a.name.localeCompare(b.name)
   })
 })
@@ -95,7 +102,9 @@ const filtered = computed(() => {
  * 「the range I am looking at」 — and so it can be driven without a webview
  * (`ci/instances-bulk.test.mjs`).
  */
-const bulk = computed(() => bulkScope(filtered.value, (id) => store.statusOf(id)))
+const bulk = computed(() =>
+  bulkScope(filtered.value, (id) => store.statusOf(id)),
+)
 
 const runningCount = computed(() => bulk.value.stop.length)
 
@@ -121,8 +130,13 @@ interface BulkOutcome {
   skipped: number
 }
 
-function summarize(results: PromiseSettledResult<unknown>[], skipped: number): BulkOutcome {
-  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+function summarize(
+  results: PromiseSettledResult<unknown>[],
+  skipped: number,
+): BulkOutcome {
+  const failed = results.filter(
+    (r): r is PromiseRejectedResult => r.status === 'rejected',
+  )
   return {
     done: results.length - failed.length,
     failed: failed.length,
@@ -134,7 +148,12 @@ function summarize(results: PromiseSettledResult<unknown>[], skipped: number): B
 function bulkMessage(outcome: BulkOutcome, doneKey: string): string {
   const parts = [t(doneKey, { count: outcome.done })]
   if (outcome.failed) {
-    parts.push(t('instances.bulkFailed', { count: outcome.failed, reason: outcome.reason }))
+    parts.push(
+      t('instances.bulkFailed', {
+        count: outcome.failed,
+        reason: outcome.reason,
+      }),
+    )
   }
   if (outcome.skipped) {
     parts.push(t('instances.startAllSkipped', { count: outcome.skipped }))
@@ -155,7 +174,9 @@ const startAllAction = useAction(
 
 const stopAllAction = useAction(
   async () => {
-    const results = await Promise.allSettled(bulk.value.stop.map((i) => api.stopInstance(i.id)))
+    const results = await Promise.allSettled(
+      bulk.value.stop.map((i) => api.stopInstance(i.id)),
+    )
     return summarize(results, 0)
   },
   { success: (outcome) => bulkMessage(outcome, 'instances.stopAllDone') },
@@ -204,8 +225,15 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
     <!-- Empty: the launcher has nothing to run yet. The only useful next step
          is installing a version, so the empty state says exactly that. -->
     <div v-if="store.instances.length === 0" class="dl-surface">
-      <DlEmpty icon="version" :title="t('instances.emptyTitle')" :description="t('instances.emptyDesc')">
-        <button class="dl-btn dl-btn--primary" @click="router.push({ name: 'library', query: { tab: 'versions' } })">
+      <DlEmpty
+        icon="version"
+        :title="t('instances.emptyTitle')"
+        :description="t('instances.emptyDesc')"
+      >
+        <button
+          class="dl-btn dl-btn--primary"
+          @click="router.push({ name: 'library', query: { tab: 'versions' } })"
+        >
           <DlIcon name="download" :size="13" />
           {{ t('instances.emptyCta') }}
         </button>
@@ -219,15 +247,26 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
       <div class="board-toolbar">
         <div class="dl-input dl-search board-search">
           <DlIcon name="search" :size="14" />
-          <input v-model="query" class="dl-search-input" :placeholder="t('home.searchPlaceholder')" />
-          <button v-if="query" class="dl-icon-btn dl-search-clear" @click="query = ''">
+          <input
+            v-model="query"
+            class="dl-search-input"
+            :placeholder="t('home.searchPlaceholder')"
+          />
+          <button
+            v-if="query"
+            class="dl-icon-btn dl-search-clear"
+            @click="query = ''"
+          >
             <DlIcon name="close" :size="12" />
           </button>
         </div>
 
         <span class="board-host-label">{{ t('instances.hostFilter') }}</span>
         <div class="dl-segmented board-hosts">
-          <button :class="{ 'is-active': hostFilter === HOST_ALL }" @click="hostFilter = HOST_ALL">
+          <button
+            :class="{ 'is-active': hostFilter === HOST_ALL }"
+            @click="hostFilter = HOST_ALL"
+          >
             {{ t('instances.hostAll') }}
           </button>
           <button
@@ -242,7 +281,12 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
         </div>
 
         <span class="board-summary dl-tnum">
-          {{ t('instances.summary', { total: filtered.length, running: runningCount }) }}
+          {{
+            t('instances.summary', {
+              total: filtered.length,
+              running: runningCount,
+            })
+          }}
         </span>
 
         <span class="board-spacer" />
@@ -251,7 +295,8 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           class="dl-btn dl-btn--quiet board-health"
           :class="{
             'is-danger': store.healthErrorCount > 0,
-            'is-warn': store.healthErrorCount === 0 && store.healthWarnCount > 0,
+            'is-warn':
+              store.healthErrorCount === 0 && store.healthWarnCount > 0,
           }"
           @click="healthVisible = true"
         >
@@ -279,8 +324,15 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
       </div>
     </template>
 
-    <NewInstanceDialog v-model:visible="newDialogVisible" :preset="newPreset" @created="() => {}" />
-    <HealthLogModal v-model:visible="healthVisible" :profile-map="selectionByInstance" />
+    <NewInstanceDialog
+      v-model:visible="newDialogVisible"
+      :preset="newPreset"
+      @created="() => {}"
+    />
+    <HealthLogModal
+      v-model:visible="healthVisible"
+      :profile-map="selectionByInstance"
+    />
   </div>
 </template>
 

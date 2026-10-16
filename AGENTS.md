@@ -271,9 +271,10 @@ DSH_HOME 打不开，能给的是路径与一条命令；终端与日志两个�
 ## 日常开发
 
 - 提交前跑 `pnpm verify`：它聚合 `cargo fmt --check`、clippy、Rust 测试、版本同步、全部
-  `ci/*.test.mjs`（通配符发现）与前端构建，与 CI 同一份名单——名单只有这一处，
-  `ci/gate-list.test.mjs` 会盯住它没被抄成第二份。合并之间想快过一次用 `pnpm verify:quick`
-  （只跑 clippy 与 Rust 测试）；想单独跑一个门禁，用对应的 `pnpm test:*` 脚本。
+  `ci/*.test.mjs`（通配符发现）、前端排版（`prettier --check`）与前端构建，与 CI 同一份
+  名单——名单只有这一处，`ci/gate-list.test.mjs` 会盯住它没被抄成第二份。合并之间想快过
+  一次用 `pnpm verify:quick`（只跑 clippy 与 Rust 测试）；想单独跑一个门禁，用对应的
+  `pnpm test:*` 脚本。
 - 新增 Tauri 命令要同时改三处，否则 `pnpm test:api-contract` 会失败：
   `src/api/index.ts`（interface）、`src/api/mock.ts`（switch case）、
   `src-tauri/src/lib.rs`（`generate_handler!`）。**参数拼写也是契约**：
@@ -290,6 +291,12 @@ DSH_HOME 打不开，能给的是路径与一条命令；终端与日志两个�
 - Rust 排版以 `rustfmt` 默认值为准（仓库不放 `rustfmt.toml`，所以编辑器与 `cargo fmt` 一致）。
   基线是干净的，因此在 worktree 里跑 `cargo fmt` 只会重写你自己刚写的那些行，不会碰到别人的；
   `pnpm verify` 里包含 `cargo fmt --check`，提交前跑它即可。
+- 前端排版以 Prettier 默认值为准：`prettier.config.mjs` 只有 `semi: false` 与
+  `singleQuote: true` 两条——树里本来就没有分号、只用单引号，照默认值排版等于改写每一行；
+  其余（缩进、换行宽度、多行列表尾逗号、单参数箭头函数的括号）一律用默认值，别再往里加
+  选项。`pnpm format` 就地排好，`pnpm verify` 里的 `prettier --check` 是硬门禁。
+  `.prettierignore` 只排除四类不该由它管的东西：Rust（归 rustfmt）、Markdown（Prettier 会
+  重排正文段落）、YAML（工作流、pnpm workspace、lockfile）与 Tauri 自己的 JSON。
 - 手工点击验证走 `pnpm tauri dev`（真桌面 + Rust 后端）；`pnpm dev` 只有浏览器
   localStorage mock，测不到真实行为。
 

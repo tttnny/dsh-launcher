@@ -7,7 +7,11 @@ import { classify, render } from './release-notes-render.mjs'
 const TAG = 'v0.1.0-dev.42'
 const REPO = 'acme/dsh-launcher'
 
-const COMMITS = ['feat: add theme switcher', 'fix: hide window on close', 'ci: build macos dmg']
+const COMMITS = [
+  'feat: add theme switcher',
+  'fix: hide window on close',
+  'ci: build macos dmg',
+]
 
 const ASSETS = [
   'dsh-launcher_0.1.0_aarch64.dmg',
@@ -40,7 +44,9 @@ test('every artifact row is a clickable link to the release asset URL', () => {
   const body = render(TAG, ASSETS, COMMITS, { repo: REPO })
   for (const name of ASSETS) {
     const url = `https://github.com/${REPO}/releases/download/${TAG}/${name}`
-    const row = new RegExp(`\\| [^|]+ \\| [^|]+ \\| \\[${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`)
+    const row = new RegExp(
+      `\\| [^|]+ \\| [^|]+ \\| \\[${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]\\(${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`,
+    )
     assert.match(body, row, `expected a clickable row for ${name}`)
   }
 })
@@ -49,7 +55,7 @@ test('rendered body has English-only table and a commit list', () => {
   const body = render(TAG, ASSETS, COMMITS, { repo: REPO })
   assert.ok(body.includes('## Downloads'))
   assert.ok(body.includes('| Platform | Architecture | File |'))
-  assert.ok(body.includes('## What\'s Changed'))
+  assert.ok(body.includes("## What's Changed"))
   for (const c of COMMITS) {
     assert.ok(body.includes(`* ${c}`), `expected commit line for ${c}`)
   }
@@ -58,7 +64,7 @@ test('rendered body has English-only table and a commit list', () => {
   assert.ok(!body.includes('安装包'))
 })
 
-test('empty commit list renders an empty What\'s Changed section', () => {
+test("empty commit list renders an empty What's Changed section", () => {
   const body = render(TAG, ASSETS, [], { repo: REPO })
-  assert.ok(body.includes('## What\'s Changed'))
+  assert.ok(body.includes("## What's Changed"))
 })

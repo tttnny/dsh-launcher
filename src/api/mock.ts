@@ -61,7 +61,8 @@ function localHost(): Host {
 const REMOTE_HOST_ID = 'host-aliyun'
 
 /** 本机's data directory as the preview spells it (sample paths are Windows-style). */
-const LOCAL_DATA_DIR = 'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher'
+const LOCAL_DATA_DIR =
+  'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher'
 
 function remoteHost(): Host {
   return {
@@ -84,7 +85,8 @@ function remoteHost(): Host {
 const mockHostStatuses: Record<string, HostStatus> = {
   [REMOTE_HOST_ID]: {
     state: 'unreachable',
-    message: 'ssh: connect to host zjq_aliyun port 22: Connection refused。确认 ssh zjq_aliyun 这台机器开着、地址没写错',
+    message:
+      'ssh: connect to host zjq_aliyun port 22: Connection refused。确认 ssh zjq_aliyun 这台机器开着、地址没写错',
   },
 }
 
@@ -92,14 +94,50 @@ function seedDb(): MockDb {
   return {
     hosts: [localHost(), remoteHost()],
     homes: [
-      { id: 'h-default', name: '默认 DSH_HOME', path: 'C:\\Users\\Administrator\\.dsh', host_id: LOCAL_HOST_ID },
-      { id: 'h-lab', name: '实验室环境', path: 'D:\\dsh-homes\\lab', host_id: LOCAL_HOST_ID },
-      { id: 'h-remote', name: '服务器默认', path: '/home/demo/.dsh', host_id: REMOTE_HOST_ID },
+      {
+        id: 'h-default',
+        name: '默认 DSH_HOME',
+        path: 'C:\\Users\\Administrator\\.dsh',
+        host_id: LOCAL_HOST_ID,
+      },
+      {
+        id: 'h-lab',
+        name: '实验室环境',
+        path: 'D:\\dsh-homes\\lab',
+        host_id: LOCAL_HOST_ID,
+      },
+      {
+        id: 'h-remote',
+        name: '服务器默认',
+        path: '/home/demo/.dsh',
+        host_id: REMOTE_HOST_ID,
+      },
     ],
     versions: [
-      { id: 'v-rc6', version: '0.1.0-rc.6', dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.6`, dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.6`, bin_ready: true, host_id: LOCAL_HOST_ID },
-      { id: 'v-rc5', version: '0.1.0-rc.5', dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.5`, dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.5`, bin_ready: true, host_id: LOCAL_HOST_ID },
-      { id: 'v-remote', version: '0.1.0-rc.6', dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6', dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6', bin_ready: true, host_id: REMOTE_HOST_ID },
+      {
+        id: 'v-rc6',
+        version: '0.1.0-rc.6',
+        dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.6`,
+        dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.6`,
+        bin_ready: true,
+        host_id: LOCAL_HOST_ID,
+      },
+      {
+        id: 'v-rc5',
+        version: '0.1.0-rc.5',
+        dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.5`,
+        dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.5`,
+        bin_ready: true,
+        host_id: LOCAL_HOST_ID,
+      },
+      {
+        id: 'v-remote',
+        version: '0.1.0-rc.6',
+        dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6',
+        dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6',
+        bin_ready: true,
+        host_id: REMOTE_HOST_ID,
+      },
     ],
     instances: [
       {
@@ -167,8 +205,7 @@ function loadDb(): MockDb {
       // Backfill the dedicated DSH_HOME added with the version-delete change.
       for (const v of db.versions) {
         v.dedicated_home =
-          v.dedicated_home ??
-          `${LOCAL_DATA_DIR}\\homes\\${v.version}`
+          v.dedicated_home ?? `${LOCAL_DATA_DIR}\\homes\\${v.version}`
         // Bin readiness is what the machine answers; a version stored before
         // the field existed was installed by the launcher, so it is ready.
         v.bin_ready = v.bin_ready ?? true
@@ -200,7 +237,9 @@ function saveDb(db: MockDb) {
 }
 
 function uuid(): string {
-  return 'xxxxxxxx-xxxx-4xxx'.replace(/x/g, () => ((Math.random() * 16) | 0).toString(16))
+  return 'xxxxxxxx-xxxx-4xxx'.replace(/x/g, () =>
+    ((Math.random() * 16) | 0).toString(16),
+  )
 }
 
 // Simple event emitter used by the mock to mimic Tauri events.
@@ -229,22 +268,37 @@ const mockNativeStore: Record<string, PluginView> = {}
 // The hand-picked executables of the browser preview, **per host** — as the
 // backend keys them. There is no backend here, so a path chosen on the setup
 // page is only remembered in this module.
-const mockToolchainOverrides: Record<string, Partial<Record<'node' | 'pnpm', string>>> = {}
+const mockToolchainOverrides: Record<
+  string,
+  Partial<Record<'node' | 'pnpm', string>>
+> = {}
 
-function mockOverridesOf(hostId: string): Partial<Record<'node' | 'pnpm', string>> {
+function mockOverridesOf(
+  hostId: string,
+): Partial<Record<'node' | 'pnpm', string>> {
   if (!mockToolchainOverrides[hostId]) mockToolchainOverrides[hostId] = {}
   return mockToolchainOverrides[hostId]
 }
 
 /** Where each preview machine's tools are, as its own probe would report them. */
-const MOCK_TOOLS: Record<string, { node: { version: string; path: string }; pnpm: { version: string; path: string }; managers: string[] }> = {
+const MOCK_TOOLS: Record<
+  string,
+  {
+    node: { version: string; path: string }
+    pnpm: { version: string; path: string }
+    managers: string[]
+  }
+> = {
   [LOCAL_HOST_ID]: {
     node: { version: 'v22.14.0', path: '/usr/local/bin/node' },
     pnpm: { version: '11.17.0', path: '/usr/local/bin/pnpm' },
     managers: ['brew'],
   },
   [REMOTE_HOST_ID]: {
-    node: { version: 'v22.14.0', path: '/home/demo/.nvm/versions/node/v22.14.0/bin/node' },
+    node: {
+      version: 'v22.14.0',
+      path: '/home/demo/.nvm/versions/node/v22.14.0/bin/node',
+    },
     pnpm: { version: '11.17.0', path: '/home/demo/.local/share/pnpm/pnpm' },
     managers: ['nvm'],
   },
@@ -260,7 +314,10 @@ const MOCK_TOOLS: Record<string, { node: { version: string; path: string }; pnpm
 function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
   const tools = MOCK_TOOLS[hostId]
   const overrides = mockOverridesOf(hostId)
-  const tool = (name: 'node' | 'pnpm', fallbackSource: ToolSource): ToolStatus => {
+  const tool = (
+    name: 'node' | 'pnpm',
+    fallbackSource: ToolSource,
+  ): ToolStatus => {
     const base = tools?.[name]
     const manual = overrides[name]
     if (manual) {
@@ -275,7 +332,13 @@ function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
     if (!base) {
       // A host the preview has never probed: saying "not found" is the honest
       // answer, and it is what a real fresh host reports.
-      return { installed: false, version: null, path: null, source: null, manual_path: null }
+      return {
+        installed: false,
+        version: null,
+        path: null,
+        source: null,
+        manual_path: null,
+      }
     }
     return {
       installed: true,
@@ -332,7 +395,11 @@ function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
  * `errorCode` carries the **raw** native code and `diagnostic` carries the
  * **localized** reason the UI renders verbatim. `changed:false`, never an error.
  */
-function mockRefusal(stage: string, target: string, code: string): ChangeOutcome {
+function mockRefusal(
+  stage: string,
+  target: string,
+  code: string,
+): ChangeOutcome {
   const reasons: Record<string, string> = {
     'management-required': '该条目由 DSH 自身管理，不能在这里改动',
     unaddressable: '该条目由 DSH 自身管理，不能在这里改动',
@@ -363,8 +430,11 @@ function resolveRunningInstance(
 ): string | null {
   const own = db.instances.filter((i) => i.home_id === homeId)
   const live = (i: DshInstance) =>
-    db.running[i.id]?.state === 'running' && db.running[i.id]?.profile === profile
-  const preferred = prefer ? own.find((i) => i.id === prefer && live(i)) : undefined
+    db.running[i.id]?.state === 'running' &&
+    db.running[i.id]?.profile === profile
+  const preferred = prefer
+    ? own.find((i) => i.id === prefer && live(i))
+    : undefined
   return (preferred ?? own.find(live))?.id ?? null
 }
 
@@ -497,7 +567,8 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
  * change the answer.
  */
 function hostUnreachableReason(host: Host): string {
-  const detail = mockHostStatuses[host.id]?.message?.trim() || '那台机器没有回应'
+  const detail =
+    mockHostStatuses[host.id]?.message?.trim() || '那台机器没有回应'
   return `主机「${host.display_name}」现在连不上（${detail}）。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
 }
 
@@ -505,7 +576,8 @@ function hostUnreachableReason(host: Host): string {
 function hostOutOfReach(db: MockDb, homeId: string): Host | null {
   const home = db.homes.find((h) => h.id === homeId)
   const host = home ? hostOf(db, home.host_id ?? LOCAL_HOST_ID) : undefined
-  return host && (mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable'
+  return host &&
+    (mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable'
     ? host
     : null
 }
@@ -535,8 +607,7 @@ function nativeViewFor(
     return {
       mode: 'not-running',
       instanceId: null,
-      reason:
-        '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
+      reason: '实例未在运行：启动该实例后即可在这里管理它的补丁层。',
       bundles: offlineProjection(bundles),
     }
   }
@@ -589,7 +660,11 @@ function backendKey(cmd: string, name: string): string {
  * other read in this file spells one literal key, and the contract test holds
  * those against the same Rust sources.
  */
-function argOf(args: Record<string, unknown> | undefined, cmd: string, name: string): unknown {
+function argOf(
+  args: Record<string, unknown> | undefined,
+  cmd: string,
+  name: string,
+): unknown {
   return args?.[backendKey(cmd, name)]
 }
 
@@ -668,7 +743,9 @@ function refuseUnreachable(host: Host) {
  */
 function refuseRemotePathTouches(host: Host, what: string) {
   if (!host.builtin) {
-    throw new Error(`「${host.display_name}」上的${what}不在本机，启动器不会在本机动它`)
+    throw new Error(
+      `「${host.display_name}」上的${what}不在本机，启动器不会在本机动它`,
+    )
   }
 }
 
@@ -691,9 +768,11 @@ function settleRemotePath(host: Host, raw: string): string {
   let requested: string
   if (raw === '~') requested = home
   else if (raw.startsWith('~/')) requested = `${home}/${raw.slice(2)}`
-  else if (raw.startsWith('~')) throw new Error(`不支持 ~用户名 形式的路径：${raw}`)
+  else if (raw.startsWith('~'))
+    throw new Error(`不支持 ~用户名 形式的路径：${raw}`)
   else requested = raw
-  if (!requested.startsWith('/')) throw new Error(`请填写绝对路径（以 / 开头）：${raw}`)
+  if (!requested.startsWith('/'))
+    throw new Error(`请填写绝对路径（以 / 开头）：${raw}`)
 
   const parts: string[] = []
   for (const segment of requested.split('/')) {
@@ -704,7 +783,10 @@ function settleRemotePath(host: Host, raw: string): string {
   return `/${parts.join('/')}`
 }
 
-export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export async function mockCall<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   const db = loadDb()
   function fail(msg: string): never {
     throw new Error(msg)
@@ -719,8 +801,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const name = String(input.display_name ?? '').trim()
       const target = String(input.ssh_target ?? '').trim()
       if (!name) fail('主机的显示名不能为空')
-      if (!target) fail('请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串')
-      if (db.hosts.some((h) => h.ssh_target === target)) fail('已经有一台主机用这个 ssh 目标')
+      if (!target)
+        fail(
+          '请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串',
+        )
+      if (db.hosts.some((h) => h.ssh_target === target))
+        fail('已经有一台主机用这个 ssh 目标')
       const host: Host = {
         id: mockNewId('host'),
         display_name: name,
@@ -739,7 +825,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const input = (args?.input ?? {}) as HostInput
       const host = db.hosts.find((h) => h.id === id)
       if (!host) fail(`主机不存在: ${id}`)
-      host.display_name = String(input.display_name ?? '').trim() || host.display_name
+      host.display_name =
+        String(input.display_name ?? '').trim() || host.display_name
       // 本机 does not go over ssh; a form must not be able to make it one.
       if (!host.builtin) host.ssh_target = String(input.ssh_target ?? '').trim()
       host.registry = input.registry ?? null
@@ -779,7 +866,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         data_dir: settled.dir,
         data_dir_problem: settled.problem,
         data_dir_exists: settled.dir !== null,
-        node: { path: '/home/linuxbrew/.linuxbrew/bin/node', version: 'v26.0.0' },
+        node: {
+          path: '/home/linuxbrew/.linuxbrew/bin/node',
+          version: 'v26.0.0',
+        },
         pnpm: { path: '/home/demo/.local/share/pnpm/pnpm', version: '11.1.2' },
       }
       mockHostStatuses[id] = { state: 'reachable', message: null }
@@ -794,7 +884,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'list_ssh_aliases':
       return [
-        { alias: 'zjq_aliyun', host_name: '47.98.1.2', user: 'root', port: 2222 },
+        {
+          alias: 'zjq_aliyun',
+          host_name: '47.98.1.2',
+          user: 'root',
+          port: 2222,
+        },
         { alias: 'lab-gpu', host_name: '10.0.0.7', user: 'deploy', port: null },
       ] as T
 
@@ -805,7 +900,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // cannot reach still has its list here; the one thing only that machine
       // can answer — whether it has a `~/.dsh` of its own — is skipped rather
       // than guessed at.
-      const answers = (mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable'
+      const answers =
+        (mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable'
       // Its own `~/.dsh` joins the list the first time it is asked — the
       // question 本机's load-time sweep asks about this Mac (ADR-0006).
       if (!host.builtin && answers) {
@@ -823,7 +919,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           saveDb(db)
         }
       }
-      return db.homes.filter((h) => (h.host_id ?? LOCAL_HOST_ID) === host.id) as T
+      return db.homes.filter(
+        (h) => (h.host_id ?? LOCAL_HOST_ID) === host.id,
+      ) as T
     }
     case 'default_dedicated_home_path': {
       const name = String(args?.name ?? 'instance')
@@ -855,12 +953,14 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'remove_home': {
       const id = String(args?.id)
       const hostId = hostIdArg(cmd, args)
-      if (db.instances.some((i) => i.home_id === id)) fail('该 DSH_HOME 仍被实例引用，无法删除')
+      if (db.instances.some((i) => i.home_id === id))
+        fail('该 DSH_HOME 仍被实例引用，无法删除')
       // The record must belong to the host the caller names: the same path on
       // another machine is a different HOME, and a deletion that did nothing
       // must not be reported as one.
       const home = db.homes.find((h) => h.id === id)
-      if (!home || (home.host_id ?? LOCAL_HOST_ID) !== hostId) fail('该主机下没有这个 DSH_HOME')
+      if (!home || (home.host_id ?? LOCAL_HOST_ID) !== hostId)
+        fail('该主机下没有这个 DSH_HOME')
       db.homes = db.homes.filter((h) => h.id !== id)
       saveDb(db)
       return undefined as T
@@ -882,13 +982,29 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (host.registry) {
         refuseUnreachable(host)
         return [
-          { version: '0.1.0-rc.6', released_at: '2026-08-01T12:00:00Z', source: 'npm' },
-          { version: '0.0.9-mirror.2', released_at: '2026-05-20T08:00:00Z', source: 'npm' },
-          { version: '0.1.2-alpha.1', released_at: '2026-10-01T08:00:00Z', source: 'github' },
+          {
+            version: '0.1.0-rc.6',
+            released_at: '2026-08-01T12:00:00Z',
+            source: 'npm',
+          },
+          {
+            version: '0.0.9-mirror.2',
+            released_at: '2026-05-20T08:00:00Z',
+            source: 'npm',
+          },
+          {
+            version: '0.1.2-alpha.1',
+            released_at: '2026-10-01T08:00:00Z',
+            source: 'github',
+          },
         ] as T
       }
       return [
-        { version: '0.1.2-alpha.1', released_at: '2026-10-01T08:00:00Z', source: 'github' },
+        {
+          version: '0.1.2-alpha.1',
+          released_at: '2026-10-01T08:00:00Z',
+          source: 'github',
+        },
         { version: '0.1.0-rc.6', released_at: '2026-08-01T12:00:00Z' },
         { version: '0.1.0-rc.5', released_at: '2026-07-15T09:30:00Z' },
         { version: '0.1.0-rc.4', released_at: '2026-07-01T10:00:00Z' },
@@ -913,16 +1029,26 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const version = String(args?.version ?? '').trim()
       const dedicated = Boolean(args?.dedicated)
       const homeIdArg = args?.home_id as string | null
-      const host = hostOf(db, String(args?.host_id ?? '').trim() || LOCAL_HOST_ID)
+      const host = hostOf(
+        db,
+        String(args?.host_id ?? '').trim() || LOCAL_HOST_ID,
+      )
       refuseUnreachable(host)
       if (!name) fail('实例名称不能为空')
       if (!version) fail('版本号不能为空')
-      if (db.instances.some((i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === host.id)) {
+      if (
+        db.instances.some(
+          (i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === host.id,
+        )
+      ) {
         fail('同名实例已存在')
       }
       if (
         [...mockTasks.values()].some(
-          (t) => t.state === 'running' && t.instance_name === name && t.host_id === host.id,
+          (t) =>
+            t.state === 'running' &&
+            t.instance_name === name &&
+            t.host_id === host.id,
         )
       ) {
         fail('同名实例的下载任务已在进行中')
@@ -951,7 +1077,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         const safe = name.replace(/[^\w一-龥.-]+/g, '_')
         dedicatedPath = `${hostDir}${sep}homes${sep}${safe}`
       }
-      if (!dedicated && (!homeIdArg || !db.homes.some((h) => h.id === homeIdArg))) {
+      if (
+        !dedicated &&
+        (!homeIdArg || !db.homes.some((h) => h.id === homeIdArg))
+      ) {
         fail('请选择 DSH_HOME')
       }
 
@@ -972,7 +1101,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         logs: [],
       }
       mockTasks.set(task.id, task)
-      emitTaskProgress({ id: task.id, state: 'running', percent: 0, message: null, instance_id: null })
+      emitTaskProgress({
+        id: task.id,
+        state: 'running',
+        percent: 0,
+        message: null,
+        instance_id: null,
+      })
 
       // Simulate npm --loglevel=http download + install + instance creation.
       const fakeLogs = [
@@ -993,7 +1128,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           t.logs.push(line)
           t.percent = Math.min(95, t.percent + 20)
           emitTaskLog({ id: task.id, line })
-          emitTaskProgress({ id: task.id, state: 'running', percent: t.percent, message: null, instance_id: null })
+          emitTaskProgress({
+            id: task.id,
+            state: 'running',
+            percent: t.percent,
+            message: null,
+            instance_id: null,
+          })
           step += 1
           return
         }
@@ -1004,25 +1145,36 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
         if (dedicated && dedicatedPath) {
           const same = (a: string, b: string) =>
             host.id === LOCAL_HOST_ID
-              ? a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+              ? a.replace(/\\/g, '/').toLowerCase() ===
+                b.replace(/\\/g, '/').toLowerCase()
               : a === b
           const existing = cur.homes.find((h) => same(h.path, dedicatedPath!))
           if (existing) {
             resolvedHomeId = existing.id
           } else {
-            const home: DshHome = { id: mockNewId('h'), name, path: dedicatedPath!, host_id: host.id }
+            const home: DshHome = {
+              id: mockNewId('h'),
+              name,
+              path: dedicatedPath!,
+              host_id: host.id,
+            }
             cur.homes.push(home)
             resolvedHomeId = home.id
           }
         }
         // Install version record if missing — on that host.
-        let ver = cur.versions.find((v) => v.version === version && (v.host_id ?? LOCAL_HOST_ID) === host.id)
+        let ver = cur.versions.find(
+          (v) =>
+            v.version === version && (v.host_id ?? LOCAL_HOST_ID) === host.id,
+        )
         if (!ver) {
           ver = {
             id: mockNewId('v'),
             version,
             dir: `${hostDir}${sepOf(hostDir)}versions${sepOf(hostDir)}${version}`,
-            dedicated_home: dedicatedPath ?? `${hostDir}${sepOf(hostDir)}homes${sepOf(hostDir)}${version}`,
+            dedicated_home:
+              dedicatedPath ??
+              `${hostDir}${sepOf(hostDir)}homes${sepOf(hostDir)}${version}`,
             bin_ready: true,
             host_id: host.id,
           }
@@ -1046,7 +1198,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           doneTask.percent = 100
           doneTask.instance_id = inst.id
         }
-        emitTaskProgress({ id: task.id, state: 'done', percent: 100, message: null, instance_id: inst.id })
+        emitTaskProgress({
+          id: task.id,
+          state: 'done',
+          percent: 100,
+          message: null,
+          instance_id: inst.id,
+        })
       }, 600)
 
       return task.id as T
@@ -1064,7 +1222,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       return mockRuntimeStatus(hostId) as T
     }
     case 'list_tasks': {
-      return [...mockTasks.values()].sort((a, b) => b.created_at - a.created_at) as T
+      return [...mockTasks.values()].sort(
+        (a, b) => b.created_at - a.created_at,
+      ) as T
     }
     case 'remove_task': {
       const id = String(args?.id)
@@ -1080,15 +1240,24 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (!t) fail('任务不存在')
       t.state = 'cancelled'
       t.message = '已取消'
-      emitTaskProgress({ id, state: 'cancelled', percent: t.percent, message: '已取消', instance_id: null })
+      emitTaskProgress({
+        id,
+        state: 'cancelled',
+        percent: t.percent,
+        message: '已取消',
+        instance_id: null,
+      })
       return undefined as T
     }
     case 'remove_version': {
       const id = String(args?.id)
       const host = hostOf(db, hostIdArg(cmd, args))
       refuseUnreachable(host)
-      if (db.instances.some((i) => i.version_id === id)) fail('该版本仍被实例引用，无法删除')
-      const removed = db.versions.find((v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id)
+      if (db.instances.some((i) => i.version_id === id))
+        fail('该版本仍被实例引用，无法删除')
+      const removed = db.versions.find(
+        (v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id,
+      )
       db.versions = db.versions.filter((v) => v.id !== id)
       // The version's dedicated DSH_HOME record goes with it, by the same path
       // rule the backend deletes the directory with — and only that host's
@@ -1096,10 +1265,15 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (removed) {
         const same = (a: string, b: string) =>
           host.id === LOCAL_HOST_ID
-            ? a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+            ? a.replace(/\\/g, '/').toLowerCase() ===
+              b.replace(/\\/g, '/').toLowerCase()
             : a === b
         db.homes = db.homes.filter(
-          (h) => !((h.host_id ?? LOCAL_HOST_ID) === host.id && same(h.path, removed.dedicated_home)),
+          (h) =>
+            !(
+              (h.host_id ?? LOCAL_HOST_ID) === host.id &&
+              same(h.path, removed.dedicated_home)
+            ),
         )
       }
       saveDb(db)
@@ -1109,7 +1283,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // The board's 全部 view is an explicit request; silence still means 本机.
       if (args?.allHosts) return db.instances as T
       const hostId = hostIdArg(cmd, args)
-      return db.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId) as T
+      return db.instances.filter(
+        (i) => (i.host_id ?? LOCAL_HOST_ID) === hostId,
+      ) as T
     }
     case 'create_instance': {
       const name = String(args?.name ?? '').trim()
@@ -1120,15 +1296,21 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // Names are unique per host: two machines may each have an instance
       // called 「web」, and the row, the tray and the plugin link tell them
       // apart by host.
-      if (db.instances.some((i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === hostId)) {
+      if (
+        db.instances.some(
+          (i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === hostId,
+        )
+      ) {
         fail('同名实例已存在')
       }
       const version = db.versions.find((v) => v.id === versionId)
       if (!version) fail('DSH 版本不存在')
-      if ((version.host_id ?? LOCAL_HOST_ID) !== hostId) fail('DSH 版本不属于该主机')
+      if ((version.host_id ?? LOCAL_HOST_ID) !== hostId)
+        fail('DSH 版本不属于该主机')
       const home = db.homes.find((h) => h.id === homeId)
       if (!home) fail('DSH_HOME 不存在')
-      if ((home.host_id ?? LOCAL_HOST_ID) !== hostId) fail('DSH_HOME 不属于该主机')
+      if ((home.host_id ?? LOCAL_HOST_ID) !== hostId)
+        fail('DSH_HOME 不属于该主机')
       const inst: DshInstance = {
         id: mockNewId('i'),
         name,
@@ -1147,10 +1329,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const id = String(args?.id)
       const hostId = hostIdArg(cmd, args)
       const inst = db.instances.find((i) => i.id === id)
-      if (!inst || (inst.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
+      if (!inst || (inst.host_id ?? LOCAL_HOST_ID) !== hostId)
+        fail('实例不存在')
       db.instances = db.instances.filter((i) => i.id !== id)
       delete db.running[id]
-      if (db.settings.last_instance_id === id) db.settings.last_instance_id = null
+      if (db.settings.last_instance_id === id)
+        db.settings.last_instance_id = null
       saveDb(db)
       return undefined as T
     }
@@ -1158,13 +1342,15 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const input = args?.input as DshInstance
       const hostId = hostIdArg(cmd, args)
       const existing = db.instances.find((i) => i.id === input.id)
-      if (!existing || (existing.host_id ?? LOCAL_HOST_ID) !== hostId) fail('实例不存在')
+      if (!existing || (existing.host_id ?? LOCAL_HOST_ID) !== hostId)
+        fail('实例不存在')
       if (
         db.instances.some(
           (i) =>
             i.name === input.name &&
             i.id !== input.id &&
-            (i.host_id ?? LOCAL_HOST_ID) === (existing.host_id ?? LOCAL_HOST_ID),
+            (i.host_id ?? LOCAL_HOST_ID) ===
+              (existing.host_id ?? LOCAL_HOST_ID),
         )
       ) {
         fail('同名实例已存在')
@@ -1190,11 +1376,18 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       // Profiles are data on the machine that owns the DSH_HOME: a host the
       // preview cannot reach has no list to show.
-      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
+      refuseUnreachable(
+        hostOf(
+          db,
+          db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID,
+        ),
+      )
       const home = db.homes.find((h) => h.id === homeId)
       if (!home) fail('DSH_HOME 不存在')
       // Mock: combine the default set with previously created profiles.
-      const base: string[] = home.path.endsWith('.dsh') ? ['web', 'demo', 'pack'] : ['web']
+      const base: string[] = home.path.endsWith('.dsh')
+        ? ['web', 'demo', 'pack']
+        : ['web']
       const extras = mockProfiles[homeId] ?? []
       return [...base, ...extras] as T
     }
@@ -1202,16 +1395,25 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       // Profiles are data on the machine that owns the DSH_HOME: a host the
       // preview cannot reach has no list to show.
-      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
+      refuseUnreachable(
+        hostOf(
+          db,
+          db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID,
+        ),
+      )
       const name = String(args?.name ?? '').trim()
       if (!name) fail('Profile 名称不能为空')
-      if (name === '__temp__' || name === 'node_modules') fail(`「${name}」为保留名称，不能使用`)
-      if (!/^[A-Za-z0-9._-]+$/.test(name)) fail('Profile 名称只能包含字母、数字、-、_、.')
+      if (name === '__temp__' || name === 'node_modules')
+        fail(`「${name}」为保留名称，不能使用`)
+      if (!/^[A-Za-z0-9._-]+$/.test(name))
+        fail('Profile 名称只能包含字母、数字、-、_、.')
       const base: string[] = []
       const home = db.homes.find((h) => h.id === homeId)
-      if (home && home.path.endsWith('.dsh')) base.push(...['web', 'demo', 'pack'])
+      if (home && home.path.endsWith('.dsh'))
+        base.push(...['web', 'demo', 'pack'])
       mockProfiles[homeId] = mockProfiles[homeId] ?? []
-      if (base.includes(name) || mockProfiles[homeId].includes(name)) fail(`Profile「${name}」已存在`)
+      if (base.includes(name) || mockProfiles[homeId].includes(name))
+        fail(`Profile「${name}」已存在`)
       mockProfiles[homeId].push(name)
       return name as T
     }
@@ -1219,17 +1421,26 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       // Profiles are data on the machine that owns the DSH_HOME: a host the
       // preview cannot reach has no list to show.
-      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
+      refuseUnreachable(
+        hostOf(
+          db,
+          db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID,
+        ),
+      )
       const source = String(args?.source ?? '')
       const name = String(args?.name ?? '').trim()
       if (!name) fail('Profile 名称不能为空')
-      if (name === '__temp__' || name === 'node_modules') fail(`「${name}」为保留名称，不能使用`)
-      if (!/^[A-Za-z0-9._-]+$/.test(name)) fail('Profile 名称只能包含字母、数字、-、_、.')
+      if (name === '__temp__' || name === 'node_modules')
+        fail(`「${name}」为保留名称，不能使用`)
+      if (!/^[A-Za-z0-9._-]+$/.test(name))
+        fail('Profile 名称只能包含字母、数字、-、_、.')
       const home = db.homes.find((h) => h.id === homeId)
       const base: string[] = []
-      if (home && home.path.endsWith('.dsh')) base.push(...['web', 'demo', 'pack'])
+      if (home && home.path.endsWith('.dsh'))
+        base.push(...['web', 'demo', 'pack'])
       mockProfiles[homeId] = mockProfiles[homeId] ?? []
-      const exists = (n: string) => base.includes(n) || mockProfiles[homeId].includes(n)
+      const exists = (n: string) =>
+        base.includes(n) || mockProfiles[homeId].includes(n)
       if (!exists(source)) fail(`Profile「${source}」不存在`)
       if (exists(name)) fail(`Profile「${name}」已存在`)
       mockProfiles[homeId].push(name)
@@ -1239,17 +1450,26 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       // Profiles are data on the machine that owns the DSH_HOME: a host the
       // preview cannot reach has no list to show.
-      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
+      refuseUnreachable(
+        hostOf(
+          db,
+          db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID,
+        ),
+      )
       const oldName = String(args?.old_name ?? '')
       const newName = String(args?.new_name ?? '').trim()
       if (!newName) fail('Profile 名称不能为空')
-      if (newName === '__temp__' || newName === 'node_modules') fail(`「${newName}」为保留名称，不能使用`)
-      if (!/^[A-Za-z0-9._-]+$/.test(newName)) fail('Profile 名称只能包含字母、数字、-、_、.')
+      if (newName === '__temp__' || newName === 'node_modules')
+        fail(`「${newName}」为保留名称，不能使用`)
+      if (!/^[A-Za-z0-9._-]+$/.test(newName))
+        fail('Profile 名称只能包含字母、数字、-、_、.')
       const home = db.homes.find((h) => h.id === homeId)
       const base: string[] = []
-      if (home && home.path.endsWith('.dsh')) base.push(...['web', 'demo', 'pack'])
+      if (home && home.path.endsWith('.dsh'))
+        base.push(...['web', 'demo', 'pack'])
       mockProfiles[homeId] = mockProfiles[homeId] ?? []
-      const exists = (n: string) => base.includes(n) || mockProfiles[homeId].includes(n)
+      const exists = (n: string) =>
+        base.includes(n) || mockProfiles[homeId].includes(n)
       if (!exists(oldName)) fail(`Profile「${oldName}」不存在`)
       if (exists(newName)) fail(`Profile「${newName}」已存在`)
       const idx = mockProfiles[homeId].indexOf(oldName)
@@ -1268,14 +1488,22 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const homeId = String(args?.home_id)
       // Profiles are data on the machine that owns the DSH_HOME: a host the
       // preview cannot reach has no list to show.
-      refuseUnreachable(hostOf(db, db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID))
+      refuseUnreachable(
+        hostOf(
+          db,
+          db.homes.find((h) => h.id === homeId)?.host_id ?? LOCAL_HOST_ID,
+        ),
+      )
       const name = String(args?.name ?? '')
-      if (name === '__temp__' || name === 'node_modules') fail(`「${name}」为保留名称，不能删除`)
+      if (name === '__temp__' || name === 'node_modules')
+        fail(`「${name}」为保留名称，不能删除`)
       const home = db.homes.find((h) => h.id === homeId)
       const base: string[] = []
-      if (home && home.path.endsWith('.dsh')) base.push(...['web', 'demo', 'pack'])
+      if (home && home.path.endsWith('.dsh'))
+        base.push(...['web', 'demo', 'pack'])
       mockProfiles[homeId] = mockProfiles[homeId] ?? []
-      const exists = (n: string) => base.includes(n) || mockProfiles[homeId].includes(n)
+      const exists = (n: string) =>
+        base.includes(n) || mockProfiles[homeId].includes(n)
       if (!exists(name)) fail(`Profile「${name}」不存在`)
       mockProfiles[homeId] = mockProfiles[homeId].filter((n) => n !== name)
       for (const inst of db.instances) {
@@ -1290,11 +1518,21 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'start_instance': {
       const id = String(args?.id)
       const profile = String(args?.profile)
-      if (db.running[id]?.state === 'running' || db.running[id]?.state === 'starting') fail('实例已在运行')
+      if (
+        db.running[id]?.state === 'running' ||
+        db.running[id]?.state === 'starting'
+      )
+        fail('实例已在运行')
       const inst = db.instances.find((i) => i.id === id)
       if (!inst) fail('实例不存在')
       inst.last_profile = profile
-      const starting: InstanceStatus = { id, state: 'starting', url: null, profile, exit_code: null }
+      const starting: InstanceStatus = {
+        id,
+        state: 'starting',
+        url: null,
+        profile,
+        exit_code: null,
+      }
       db.running[id] = starting
       saveDb(db)
       emitStatus(starting)
@@ -1311,7 +1549,9 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
           url: remote
             ? 'http://127.0.0.1:41080/?token=demo-token-remote-instance'
             : `http://127.0.0.1:${30000 + Math.floor(Math.random() * 20000)}`,
-          remote_url: remote ? 'http://127.0.0.1:3080/?token=demo-token-remote-instance' : null,
+          remote_url: remote
+            ? 'http://127.0.0.1:3080/?token=demo-token-remote-instance'
+            : null,
           profile,
           exit_code: null,
         }
@@ -1323,7 +1563,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'stop_instance': {
       const id = String(args?.id)
-      const stopped: InstanceStatus = { id, state: 'stopped', url: null, profile: null, exit_code: 0 }
+      const stopped: InstanceStatus = {
+        id,
+        state: 'stopped',
+        url: null,
+        profile: null,
+        exit_code: 0,
+      }
       delete db.running[id]
       saveDb(db)
       emitStatus(stopped)
@@ -1335,7 +1581,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       const id = String(args?.id)
       const entry = db.running[id]
       if (!entry) fail('实例未在运行')
-      const stopped: InstanceStatus = { id, state: 'stopped', url: null, profile: null, exit_code: 0 }
+      const stopped: InstanceStatus = {
+        id,
+        state: 'stopped',
+        url: null,
+        profile: null,
+        exit_code: 0,
+      }
       delete db.running[id]
       saveDb(db)
       emitStatus(stopped)
@@ -1368,7 +1620,13 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       if (entry) {
         emitStatus(entry)
       } else {
-        emitStatus({ id, state: 'stopped', url: null, profile: null, exit_code: null })
+        emitStatus({
+          id,
+          state: 'stopped',
+          url: null,
+          profile: null,
+          exit_code: null,
+        })
       }
       return undefined as T
     }
@@ -1394,7 +1652,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'open_instance_directory': {
       const inst = db.instances.find((i) => i.id === String(args?.instanceId))
       const home = db.homes.find((h) => h.id === inst?.home_id)
-      refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
+      refuseRemotePathTouches(
+        hostOf(db, home?.host_id ?? LOCAL_HOST_ID),
+        'DSH_HOME 目录',
+      )
       return LOCAL_DATA_DIR as T
     }
     case 'instance_remote_location': {
@@ -1413,7 +1674,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     }
     case 'open_home_directory': {
       const home = db.homes.find((h) => h.id === String(args?.homeId))
-      refuseRemotePathTouches(hostOf(db, home?.host_id ?? LOCAL_HOST_ID), 'DSH_HOME 目录')
+      refuseRemotePathTouches(
+        hostOf(db, home?.host_id ?? LOCAL_HOST_ID),
+        'DSH_HOME 目录',
+      )
       return LOCAL_DATA_DIR as T
     }
     case 'get_launcher_directory':
@@ -1437,7 +1701,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       for (const inst of db.instances) {
         if (rows.some((r) => r.id === inst.id)) continue
         const host = hostOf(db, inst.host_id ?? LOCAL_HOST_ID)
-        if ((mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable') continue
+        if ((mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable')
+          continue
         rows.push({
           id: inst.id,
           state: 'unreachable',
@@ -1459,7 +1724,10 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
     case 'get_settings':
       return db.settings as T
     case 'update_settings': {
-      db.settings = { ...db.settings, ...(args?.settings as Partial<LauncherSettings>) }
+      db.settings = {
+        ...db.settings,
+        ...(args?.settings as Partial<LauncherSettings>),
+      }
       saveDb(db)
       return db.settings as T
     }
@@ -1500,7 +1768,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // the same one the backend's write path returns: 不可达 is not 已停止.
       const unreachable = hostOutOfReach(db, homeId)
       if (unreachable) fail(hostUnreachableReason(unreachable))
-      const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
+      const instanceId = resolveRunningInstance(
+        db,
+        homeId,
+        profile,
+        input.instanceId,
+      )
       // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
       const view = nativeViewFor(db, homeId, profile, instanceId)
@@ -1511,7 +1784,8 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // A missing package's files cannot be read, so the layer cannot mount.
       // `removable:false` does NOT block this toggle — it only forbids deletion
       // (the delete rule is a separate concern).
-      if (bundle.availability === 'missing') return refusal('unknown-plugin') as T
+      if (bundle.availability === 'missing')
+        return refusal('unknown-plugin') as T
       bundle.enabled = input.enabled
       return {
         changed: true,
@@ -1531,7 +1805,12 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
       // the same one the backend's write path returns: 不可达 is not 已停止.
       const unreachable = hostOutOfReach(db, homeId)
       if (unreachable) fail(hostUnreachableReason(unreachable))
-      const instanceId = resolveRunningInstance(db, homeId, profile, input.instanceId)
+      const instanceId = resolveRunningInstance(
+        db,
+        homeId,
+        profile,
+        input.instanceId,
+      )
       // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
       const view = nativeViewFor(db, homeId, profile, instanceId)
@@ -1561,17 +1840,20 @@ export async function mockCall<T>(cmd: string, args?: Record<string, unknown>): 
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Mock event seam (mirrors the Tauri event bridge in tauri.ts)
 // ---------------------------------------------------------------------------
 
-export function subscribeMockInstanceStatus(cb: Listener<InstanceStatus>): () => void {
+export function subscribeMockInstanceStatus(
+  cb: Listener<InstanceStatus>,
+): () => void {
   statusListeners.add(cb)
   return () => statusListeners.delete(cb)
 }
 
-export function subscribeMockTaskProgress(cb: Listener<TaskProgress>): () => void {
+export function subscribeMockTaskProgress(
+  cb: Listener<TaskProgress>,
+): () => void {
   taskProgressListeners.add(cb)
   return () => taskProgressListeners.delete(cb)
 }

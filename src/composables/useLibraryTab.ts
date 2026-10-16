@@ -17,7 +17,9 @@ export function useLibraryTab() {
   const current = computed<LibraryTab>(() => {
     const raw = route.query.tab
     const value = typeof raw === 'string' ? raw : ''
-    return (VALID as string[]).includes(value) ? (value as LibraryTab) : 'versions'
+    return (VALID as string[]).includes(value)
+      ? (value as LibraryTab)
+      : 'versions'
   })
 
   function select(tab: LibraryTab) {

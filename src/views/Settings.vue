@@ -57,11 +57,16 @@ const UPDATE_CHANNEL_OPTIONS = computed(() => [
 ])
 
 const shortcutRows = computed(() =>
-  SHORTCUT_DOCS.map((d) => ({ label: t(d.labelKey), keys: d.keys, native: d.native ?? false })),
+  SHORTCUT_DOCS.map((d) => ({
+    label: t(d.labelKey),
+    keys: d.keys,
+    native: d.native ?? false,
+  })),
 )
 
 const saveAction = useAction(
-  (patch: Parameters<typeof api.updateSettings>[0]) => api.updateSettings(patch),
+  (patch: Parameters<typeof api.updateSettings>[0]) =>
+    api.updateSettings(patch),
   { success: () => t('settings.saved') },
 )
 
@@ -91,7 +96,8 @@ const envRuntime = ref<RuntimeStatus | null>(
 const envError = ref('')
 
 const envOk = computed(
-  () => !!envRuntime.value?.node?.installed && !!envRuntime.value?.pnpm?.installed,
+  () =>
+    !!envRuntime.value?.node?.installed && !!envRuntime.value?.pnpm?.installed,
 )
 
 async function loadEnv() {
@@ -154,7 +160,13 @@ interface HostForm {
 }
 
 function emptyHostForm(): HostForm {
-  return { display_name: '', ssh_target: '', registry: '', data_dir: '', extra_env: '' }
+  return {
+    display_name: '',
+    ssh_target: '',
+    registry: '',
+    data_dir: '',
+    extra_env: '',
+  }
 }
 
 const hostSheet = ref(false)
@@ -162,7 +174,8 @@ const hostEditingId = ref('')
 const hostForm = ref<HostForm>(emptyHostForm())
 
 const saveHostAction = useAction(
-  (id: string, input: HostInput) => (id ? api.updateHost(id, input) : api.createHost(input)),
+  (id: string, input: HostInput) =>
+    id ? api.updateHost(id, input) : api.createHost(input),
   { success: () => t('settings.hosts.saved') },
 )
 
@@ -296,14 +309,18 @@ function hostName(hostId: string): string {
 }
 
 /** The result when the machine answered — the facts below only exist then. */
-const passedTest = computed(() => (testResult.value?.test.ok ? testResult.value.test : null))
+const passedTest = computed(() =>
+  testResult.value?.test.ok ? testResult.value.test : null,
+)
 
 /** The data directory the test found: the settled answer, the reason the typed
  *  value could not be settled on that machine, or the fact it is not there yet. */
 function dataDirLine(test: ConnectionTest): string {
   if (test.data_dir_problem) return test.data_dir_problem
   const dir = test.data_dir ?? '—'
-  return test.data_dir_exists ? dir : `${dir} · ${t('settings.hosts.dataDirMissing')}`
+  return test.data_dir_exists
+    ? dir
+    : `${dir} · ${t('settings.hosts.dataDirMissing')}`
 }
 
 /** One row per fact the connection test reports: label + mono value. */
@@ -344,7 +361,9 @@ const hostRunsOnDelete = computed(() => {
     .filter((inst) => (inst.host_id ?? LOCAL_HOST_ID) === host.id)
     .filter((inst) => {
       const state = store.statusOf(inst.id).state
-      return state === 'running' || state === 'starting' || state === 'unreachable'
+      return (
+        state === 'running' || state === 'starting' || state === 'unreachable'
+      )
     })
     .map((inst) => inst.name)
 })
@@ -406,7 +425,9 @@ onMounted(async () => {
   await loadEnv()
 })
 
-const checkUpdateAction = useAction(() => api.checkLauncherUpdate(updateChannel.value))
+const checkUpdateAction = useAction(() =>
+  api.checkLauncherUpdate(updateChannel.value),
+)
 
 async function onCheckUpdate() {
   const res = await checkUpdateAction.run()
@@ -422,7 +443,12 @@ const proxyPort = ref(store.settings.proxy_port ?? 7890)
 const noProxy = ref(store.settings.no_proxy ?? '')
 
 watch(
-  () => [store.settings.proxy_url, store.settings.proxy_port, store.settings.no_proxy] as const,
+  () =>
+    [
+      store.settings.proxy_url,
+      store.settings.proxy_port,
+      store.settings.no_proxy,
+    ] as const,
   ([url, port, np]) => {
     const u = String(url ?? '')
     if (u !== proxyUrl.value) proxyUrl.value = u
@@ -437,7 +463,8 @@ async function saveProxyFields() {
   const patch: Parameters<typeof api.updateSettings>[0] = {}
   const url = proxyUrl.value.trim()
   if (url && url !== store.settings.proxy_url) patch.proxy_url = url
-  if (proxyPort.value && proxyPort.value !== store.settings.proxy_port) patch.proxy_port = proxyPort.value
+  if (proxyPort.value && proxyPort.value !== store.settings.proxy_port)
+    patch.proxy_port = proxyPort.value
   const np = noProxy.value.trim()
   if (np !== (store.settings.no_proxy ?? '')) patch.no_proxy = np
   if (Object.keys(patch).length > 0) await patchSettings(patch)
@@ -490,7 +517,10 @@ function scrollTo(key: string) {
 // the viewport is actually in. The scroller lives in App.vue (`.dl-content`),
 // so it is resolved from a section element once mounted.
 function scroller(): HTMLElement | null {
-  return (sectionEls.value.general?.closest('.dl-content') as HTMLElement | null) ?? null
+  return (
+    (sectionEls.value.general?.closest('.dl-content') as HTMLElement | null) ??
+    null
+  )
 }
 
 function trackActiveSection() {
@@ -503,7 +533,8 @@ function trackActiveSection() {
   // room before its heading gets there. At the bottom, the bottom section is
   // what the reader is looking at.
   if (box.scrollTop + box.clientHeight >= box.scrollHeight - 4) {
-    activeSection.value = sections.value[sections.value.length - 1]?.key ?? activeSection.value
+    activeSection.value =
+      sections.value[sections.value.length - 1]?.key ?? activeSection.value
     return
   }
 
@@ -538,7 +569,9 @@ onUnmounted(() => {
         <p class="dl-head-sub">{{ t('settings.subtitle') }}</p>
       </div>
       <div class="dl-head-actions">
-        <span class="dl-chip">DSH Launcher {{ launcherVersion ? `v${launcherVersion}` : '' }}</span>
+        <span class="dl-chip"
+          >DSH Launcher {{ launcherVersion ? `v${launcherVersion}` : '' }}</span
+        >
       </div>
     </header>
 
@@ -569,7 +602,12 @@ onUnmounted(() => {
                 size="small"
                 @change="(v) => patchSettings({ locale: String(v) })"
               >
-                <a-option v-for="l in SUPPORTED_LOCALES" :key="l.value" :value="l.value">{{ l.label }}</a-option>
+                <a-option
+                  v-for="l in SUPPORTED_LOCALES"
+                  :key="l.value"
+                  :value="l.value"
+                  >{{ l.label }}</a-option
+                >
               </a-select>
             </div>
             <div class="dl-row">
@@ -578,13 +616,22 @@ onUnmounted(() => {
                 :model-value="store.settings.theme"
                 style="width: 190px"
                 size="small"
-                @change="(v) => patchSettings({ theme: String(v) as ThemeMode })"
+                @change="
+                  (v) => patchSettings({ theme: String(v) as ThemeMode })
+                "
               >
-                <a-option v-for="o in THEME_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+                <a-option
+                  v-for="o in THEME_OPTIONS"
+                  :key="o.value"
+                  :value="o.value"
+                  >{{ o.label }}</a-option
+                >
               </a-select>
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.minimizeToTray') }}</span>
+              <span class="dl-row-label">{{
+                t('settings.minimizeToTray')
+              }}</span>
               <a-switch
                 :model-value="store.settings.minimize_to_tray"
                 size="small"
@@ -601,22 +648,37 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.logLevel.label') }}</span>
-                <span class="dl-row-desc">{{ t('settings.logLevel.hint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.logLevel.label')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('settings.logLevel.hint')
+                }}</span>
               </div>
               <a-select
                 :model-value="store.settings.log_level"
                 style="width: 190px"
                 size="small"
-                @change="(v) => patchSettings({ log_level: String(v) as LogLevel })"
+                @change="
+                  (v) => patchSettings({ log_level: String(v) as LogLevel })
+                "
               >
-                <a-option v-for="o in LOG_LEVEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+                <a-option
+                  v-for="o in LOG_LEVEL_OPTIONS"
+                  :key="o.value"
+                  :value="o.value"
+                  >{{ o.label }}</a-option
+                >
               </a-select>
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.terminal.label') }}</span>
-                <span class="dl-row-desc">{{ t('settings.terminal.hint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.terminal.label')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('settings.terminal.hint')
+                }}</span>
               </div>
               <a-select
                 :model-value="store.settings.terminal"
@@ -624,7 +686,12 @@ onUnmounted(() => {
                 size="small"
                 @change="(v) => patchSettings({ terminal: String(v) })"
               >
-                <a-option v-for="o in TERMINAL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+                <a-option
+                  v-for="o in TERMINAL_OPTIONS"
+                  :key="o.value"
+                  :value="o.value"
+                  >{{ o.label }}</a-option
+                >
               </a-select>
             </div>
           </div>
@@ -643,13 +710,20 @@ onUnmounted(() => {
               <div class="dl-row-info">
                 <span class="dl-row-label">
                   {{ h.display_name }}
-                  <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{ t('settings.hosts.builtin') }}</span>
+                  <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{
+                    t('settings.hosts.builtin')
+                  }}</span>
                   <span v-else class="dl-tag" :class="statusTone(h.status)">
                     {{ statusLabel(h.status) }}
                   </span>
                 </span>
-                <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{ h.ssh_target }}</span>
-                <span v-if="h.status?.state === 'unreachable' && h.status.message" class="dl-row-desc">
+                <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{
+                  h.ssh_target
+                }}</span>
+                <span
+                  v-if="h.status?.state === 'unreachable' && h.status.message"
+                  class="dl-row-desc"
+                >
                   {{ h.status.message }}
                 </span>
               </div>
@@ -668,7 +742,10 @@ onUnmounted(() => {
                 <button class="dl-btn dl-btn--quiet" @click="startEditHost(h)">
                   {{ t('settings.hosts.edit') }}
                 </button>
-                <button class="dl-btn dl-btn--ghost" @click="hostPendingDelete = h">
+                <button
+                  class="dl-btn dl-btn--ghost"
+                  @click="hostPendingDelete = h"
+                >
                   {{ t('settings.hosts.remove') }}
                 </button>
               </div>
@@ -679,10 +756,16 @@ onUnmounted(() => {
             <div v-if="testResult" class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">
-                  {{ t('settings.hosts.testTitle', { name: hostName(testResult.hostId) }) }}
+                  {{
+                    t('settings.hosts.testTitle', {
+                      name: hostName(testResult.hostId),
+                    })
+                  }}
                   <span
                     class="dl-tag"
-                    :class="testResult.test.ok ? 'dl-tag--run' : 'dl-tag--danger'"
+                    :class="
+                      testResult.test.ok ? 'dl-tag--run' : 'dl-tag--danger'
+                    "
                   >
                     {{
                       testResult.test.ok
@@ -691,12 +774,16 @@ onUnmounted(() => {
                     }}
                   </span>
                 </span>
-                <span v-if="testResult.test.message" class="dl-row-desc">{{ testResult.test.message }}</span>
+                <span v-if="testResult.test.message" class="dl-row-desc">{{
+                  testResult.test.message
+                }}</span>
               </div>
             </div>
             <div v-for="fact in testFacts" :key="fact.label" class="dl-row">
               <span class="dl-row-label">{{ fact.label }}</span>
-              <span class="row-path dl-mono" :title="fact.value">{{ fact.value }}</span>
+              <span class="row-path dl-mono" :title="fact.value">{{
+                fact.value
+              }}</span>
             </div>
 
             <div class="dl-row">
@@ -712,25 +799,35 @@ onUnmounted(() => {
         </section>
 
         <!-- Environment: a compact readout that links to the full check page. -->
-        <section :ref="(el) => setSectionRef('environment', el)" class="dl-section">
+        <section
+          :ref="(el) => setSectionRef('environment', el)"
+          class="dl-section"
+        >
           <div class="dl-section-label">
             {{ t('settings.environment.title') }}
             <span class="dl-section-count">
-              <span class="dl-tag" :class="envOk ? 'dl-tag--run' : 'dl-tag--danger'">
+              <span
+                class="dl-tag"
+                :class="envOk ? 'dl-tag--run' : 'dl-tag--danger'"
+              >
                 {{ envOk ? t('nav.envReady') : t('nav.envMissing') }}
               </span>
             </span>
           </div>
           <div class="dl-surface">
             <div v-if="hosts.length > 1" class="dl-row">
-              <span class="dl-row-label">{{ t('settings.environment.host') }}</span>
+              <span class="dl-row-label">{{
+                t('settings.environment.host')
+              }}</span>
               <a-select
                 :model-value="envHostId"
                 style="width: 190px"
                 size="small"
                 @change="(v) => (envHostId = String(v))"
               >
-                <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
+                <a-option v-for="h in hosts" :key="h.id" :value="h.id">{{
+                  h.display_name
+                }}</a-option>
               </a-select>
             </div>
             <!-- A machine that did not answer has no paths to report: the row
@@ -740,21 +837,40 @@ onUnmounted(() => {
             </div>
             <div v-if="!envError" class="dl-row">
               <span class="dl-row-label">Node.js</span>
-              <span class="row-path dl-mono" :title="envRuntime?.node?.path ?? ''">
-                {{ envRuntime?.node?.path ?? t('settings.environment.notFound') }}
+              <span
+                class="row-path dl-mono"
+                :title="envRuntime?.node?.path ?? ''"
+              >
+                {{
+                  envRuntime?.node?.path ?? t('settings.environment.notFound')
+                }}
               </span>
-              <span class="dl-chip">{{ envRuntime?.node?.version ?? t('settings.environment.missing') }}</span>
+              <span class="dl-chip">{{
+                envRuntime?.node?.version ?? t('settings.environment.missing')
+              }}</span>
             </div>
             <div v-if="!envError" class="dl-row">
               <span class="dl-row-label">pnpm</span>
-              <span class="row-path dl-mono" :title="envRuntime?.pnpm?.path ?? ''">
-                {{ envRuntime?.pnpm?.path ?? t('settings.environment.notFound') }}
+              <span
+                class="row-path dl-mono"
+                :title="envRuntime?.pnpm?.path ?? ''"
+              >
+                {{
+                  envRuntime?.pnpm?.path ?? t('settings.environment.notFound')
+                }}
               </span>
-              <span class="dl-chip">{{ envRuntime?.pnpm?.version ?? t('settings.environment.missing') }}</span>
+              <span class="dl-chip">{{
+                envRuntime?.pnpm?.version ?? t('settings.environment.missing')
+              }}</span>
             </div>
             <div class="dl-row">
-              <span class="dl-row-desc">{{ t('settings.environment.desc') }}</span>
-              <button class="dl-btn dl-btn--quiet" @click="router.push({ name: 'setup' })">
+              <span class="dl-row-desc">{{
+                t('settings.environment.desc')
+              }}</span>
+              <button
+                class="dl-btn dl-btn--quiet"
+                @click="router.push({ name: 'setup' })"
+              >
                 {{ t('settings.environment.openGuide') }}
               </button>
             </div>
@@ -767,8 +883,12 @@ onUnmounted(() => {
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.proxy.enabled') }}</span>
-                <span class="dl-row-desc">{{ t('settings.proxy.enabledHint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.proxy.enabled')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('settings.proxy.enabledHint')
+                }}</span>
               </div>
               <a-switch
                 :model-value="store.settings.proxy_enabled"
@@ -804,8 +924,12 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.proxy.noProxy') }}</span>
-                <span class="dl-row-desc">{{ t('settings.proxy.noProxyHint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.proxy.noProxy')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('settings.proxy.noProxyHint')
+                }}</span>
               </div>
               <input
                 v-model="noProxy"
@@ -819,8 +943,12 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.proxy.applyDsh') }}</span>
-                <span class="dl-row-desc">{{ t('settings.proxy.applyDshHint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.proxy.applyDsh')
+                }}</span>
+                <span class="dl-row-desc">{{
+                  t('settings.proxy.applyDshHint')
+                }}</span>
               </div>
               <a-switch
                 :model-value="store.settings.proxy_apply_dsh"
@@ -838,25 +966,48 @@ onUnmounted(() => {
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.update.channelHint') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.update.channelHint')
+                }}</span>
               </div>
               <div class="row-actions">
                 <a-select
                   :model-value="updateChannel"
                   style="width: 150px"
                   size="small"
-                  @change="(v) => { updateChannel = String(v) === 'release' ? 'release' : 'dev'; updateInfo = null }"
+                  @change="
+                    (v) => {
+                      updateChannel =
+                        String(v) === 'release' ? 'release' : 'dev'
+                      updateInfo = null
+                    }
+                  "
                 >
-                  <a-option v-for="o in UPDATE_CHANNEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</a-option>
+                  <a-option
+                    v-for="o in UPDATE_CHANNEL_OPTIONS"
+                    :key="o.value"
+                    :value="o.value"
+                    >{{ o.label }}</a-option
+                  >
                 </a-select>
-                <button class="dl-btn dl-btn--quiet" :disabled="checkUpdateAction.busy['*']" @click="onCheckUpdate">
+                <button
+                  class="dl-btn dl-btn--quiet"
+                  :disabled="checkUpdateAction.busy['*']"
+                  @click="onCheckUpdate"
+                >
                   {{ t('settings.update.check') }}
                 </button>
               </div>
             </div>
             <div v-if="updateInfo && !updateInfo.up_to_date" class="dl-row">
-              <span class="dl-row-label">{{ t('settings.update.available', { version: updateInfo.latest }) }}</span>
-              <button v-if="updateInfo.url" class="dl-btn dl-btn--primary" @click="api.openExternal(updateInfo.url!)">
+              <span class="dl-row-label">{{
+                t('settings.update.available', { version: updateInfo.latest })
+              }}</span>
+              <button
+                v-if="updateInfo.url"
+                class="dl-btn dl-btn--primary"
+                @click="api.openExternal(updateInfo.url!)"
+              >
                 {{ t('settings.update.viewRelease') }}
               </button>
             </div>
@@ -869,7 +1020,9 @@ onUnmounted(() => {
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('settings.dataDir.pathLabel') }}</span>
+                <span class="dl-row-label">{{
+                  t('settings.dataDir.pathLabel')
+                }}</span>
                 <span class="row-desc dl-mono">{{ dataDir || '—' }}</span>
               </div>
               <div class="row-actions">
@@ -877,7 +1030,10 @@ onUnmounted(() => {
                   <DlIcon name="folder" :size="13" />
                   {{ t('settings.dataDir.open') }}
                 </button>
-                <button class="dl-btn dl-btn--quiet" @click="openLogAction.run()">
+                <button
+                  class="dl-btn dl-btn--quiet"
+                  @click="openLogAction.run()"
+                >
                   <DlIcon name="log" :size="13" />
                   {{ t('settings.dataDir.viewLog') }}
                 </button>
@@ -890,16 +1046,25 @@ onUnmounted(() => {
         </section>
 
         <!-- Shortcuts -->
-        <section :ref="(el) => setSectionRef('shortcuts', el)" class="dl-section">
-          <div class="dl-section-label">{{ t('settings.shortcuts.title') }}</div>
+        <section
+          :ref="(el) => setSectionRef('shortcuts', el)"
+          class="dl-section"
+        >
+          <div class="dl-section-label">
+            {{ t('settings.shortcuts.title') }}
+          </div>
           <div class="dl-surface">
             <div v-for="row in shortcutRows" :key="row.label" class="dl-row">
               <span class="dl-row-label">
                 {{ row.label }}
-                <span v-if="row.native" class="dl-tag dl-tag--muted">{{ t('settings.shortcuts.nativeTag') }}</span>
+                <span v-if="row.native" class="dl-tag dl-tag--muted">{{
+                  t('settings.shortcuts.nativeTag')
+                }}</span>
               </span>
               <span class="kbd-row">
-                <span v-for="k in row.keys" :key="k" class="dl-kbd">{{ k }}</span>
+                <span v-for="k in row.keys" :key="k" class="dl-kbd">{{
+                  k
+                }}</span>
               </span>
             </div>
           </div>
@@ -912,7 +1077,11 @@ onUnmounted(() => {
          bookmark, and 「测试连接」 is what talks to the machine. -->
     <a-modal
       :visible="hostSheet"
-      :title="hostEditingId ? t('settings.hosts.editTitle') : t('settings.hosts.addTitle')"
+      :title="
+        hostEditingId
+          ? t('settings.hosts.editTitle')
+          : t('settings.hosts.addTitle')
+      "
       :ok-text="t('settings.hosts.save')"
       :cancel-text="t('common.cancel')"
       :ok-loading="saveHostAction.busy['*']"
@@ -922,7 +1091,10 @@ onUnmounted(() => {
     >
       <div class="dl-field">
         <span class="dl-field-label">{{ t('settings.hosts.name') }}</span>
-        <a-input v-model="hostForm.display_name" :placeholder="t('settings.hosts.namePlaceholder')" />
+        <a-input
+          v-model="hostForm.display_name"
+          :placeholder="t('settings.hosts.namePlaceholder')"
+        />
       </div>
       <div class="dl-field">
         <span class="dl-field-label">{{ t('settings.hosts.target') }}</span>
@@ -936,7 +1108,9 @@ onUnmounted(() => {
         >
           <a-option v-for="a in sshAliases" :key="a.alias" :value="a.alias">
             {{ a.alias }}
-            <span v-if="aliasTarget(a)" class="alias-target">{{ aliasTarget(a) }}</span>
+            <span v-if="aliasTarget(a)" class="alias-target">{{
+              aliasTarget(a)
+            }}</span>
           </a-option>
         </a-select>
         <a-input
@@ -951,8 +1125,13 @@ onUnmounted(() => {
       </div>
       <div class="dl-field">
         <span class="dl-field-label">{{ t('settings.hosts.registry') }}</span>
-        <a-input v-model="hostForm.registry" :placeholder="t('settings.hosts.registryPlaceholder')" />
-        <span class="dl-field-hint">{{ t('settings.hosts.registryHint') }}</span>
+        <a-input
+          v-model="hostForm.registry"
+          :placeholder="t('settings.hosts.registryPlaceholder')"
+        />
+        <span class="dl-field-hint">{{
+          t('settings.hosts.registryHint')
+        }}</span>
       </div>
       <div class="dl-field">
         <span class="dl-field-label">{{ t('settings.hosts.extraEnv') }}</span>
@@ -961,7 +1140,9 @@ onUnmounted(() => {
           :placeholder="t('settings.hosts.extraEnvPlaceholder')"
           :auto-size="{ minRows: 2, maxRows: 5 }"
         />
-        <span class="dl-field-hint">{{ t('settings.hosts.extraEnvHint') }}</span>
+        <span class="dl-field-hint">{{
+          t('settings.hosts.extraEnvHint')
+        }}</span>
       </div>
       <div class="dl-field">
         <span class="dl-field-label">{{ t('settings.hosts.dataDir') }}</span>
@@ -979,7 +1160,11 @@ onUnmounted(() => {
          user can run there themselves (ADR-0006 §5). -->
     <a-modal
       :visible="!!hostPendingDelete"
-      :title="t('settings.hosts.deleteTitle', { name: hostPendingDelete?.display_name ?? '' })"
+      :title="
+        t('settings.hosts.deleteTitle', {
+          name: hostPendingDelete?.display_name ?? '',
+        })
+      "
       :ok-text="t('settings.hosts.remove')"
       :cancel-text="t('common.cancel')"
       :ok-loading="removeHostAction.busy['*']"
@@ -996,7 +1181,12 @@ onUnmounted(() => {
         <code class="dl-mono">{{ inspectCommand(hostPendingDelete) }}</code>
         <button
           class="dl-btn dl-btn--quiet"
-          @click="copy(inspectCommand(hostPendingDelete), 'settings.hosts.deleteInspectCopied')"
+          @click="
+            copy(
+              inspectCommand(hostPendingDelete),
+              'settings.hosts.deleteInspectCopied',
+            )
+          "
         >
           {{ t('common.copy') }}
         </button>

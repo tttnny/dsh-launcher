@@ -1,0 +1,20 @@
+# What Prettier leaves alone. Build output and dependencies are not listed
+# here because Prettier reads .gitignore too (node_modules/, dist/, tmp/,
+# worktrees/ are already out of reach).
+
+# Rust is rustfmt's authority — `cargo fmt --check` is the gate for those
+# files, and the JSON under it (tauri.conf.json, capabilities/default.json)
+# is Tauri's own configuration rather than frontend source.
+src-tauri/
+
+# Prose. Prettier reflows markdown paragraphs, so the ADRs, README, GLOSSARY
+# and AGENTS.md would churn paragraph by paragraph without changing anything
+# a reader sees differently. Their line wrapping carries meaning here: the
+# ADRs and AGENTS.md wrap where the sentence breaks, not at a column.
+*.md
+
+# YAML is CI and package-manager plumbing: the workflows, the pnpm workspace
+# and the lockfile. pnpm writes pnpm-lock.yaml, and the workflows are read by
+# GitHub — reformatting either is a diff nobody asked for.
+*.yml
+*.yaml

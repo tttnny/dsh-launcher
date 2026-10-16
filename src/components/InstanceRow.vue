@@ -35,8 +35,13 @@ const router = useRouter()
 const { t } = useI18n()
 const { copy } = useCopy()
 const store = useLauncherStore()
-const { profilesByHome, selectionByInstance, loadingByHome, ensureSelection, invalidateHome } =
-  useProfiles()
+const {
+  profilesByHome,
+  selectionByInstance,
+  loadingByHome,
+  ensureSelection,
+  invalidateHome,
+} = useProfiles()
 const { canManagePlugins, openPlugins } = usePluginLink()
 
 // --- Derived facts ------------------------------------------------------------
@@ -103,7 +108,8 @@ const starting = computed(() => status.value.state === 'starting')
  */
 const unreachable = computed(() => status.value.state === 'unreachable')
 const versionName = computed(
-  () => store.versionById(props.inst.version_id)?.version ?? props.inst.version_id,
+  () =>
+    store.versionById(props.inst.version_id)?.version ?? props.inst.version_id,
 )
 /**
  * Installing a version names its instance after that version, so the common
@@ -111,7 +117,9 @@ const versionName = computed(
  * the row's title; the chip is only worth showing when it adds something.
  */
 const showVersionChip = computed(() => versionName.value !== props.inst.name)
-const homeName = computed(() => store.homeById(props.inst.home_id)?.name ?? props.inst.home_id)
+const homeName = computed(
+  () => store.homeById(props.inst.home_id)?.name ?? props.inst.home_id,
+)
 const sharedHome = computed(() => store.isHomeShared(props.inst.home_id))
 const version = computed(() => store.versionById(props.inst.version_id))
 const home = computed(() => store.homeById(props.inst.home_id))
@@ -122,7 +130,9 @@ const host = computed(() => store.hostById(props.inst.host_id))
  * machine is on screen (the board's 全部 view). Under a single-host filter every
  * row would otherwise repeat the same name the filter already states.
  */
-const showHost = computed(() => store.allHosts && !!host.value && !host.value.builtin)
+const showHost = computed(
+  () => store.allHosts && !!host.value && !host.value.builtin,
+)
 /**
  * On another machine, so its DSH_HOME is a directory there. The three machine
  * actions still apply — a terminal connects to it, its log is copied home — but
@@ -138,7 +148,9 @@ const statusHint = computed(() => {
   if (!unreachable.value) return undefined
   return host.value?.status?.message || t('home.retryHint')
 })
-const envEntries = computed(() => Object.entries(props.inst.env_overrides ?? {}))
+const envEntries = computed(() =>
+  Object.entries(props.inst.env_overrides ?? {}),
+)
 const portLabel = computed(() =>
   props.inst.port ? String(props.inst.port) : t('instances.portRandom'),
 )
@@ -187,7 +199,8 @@ async function refreshProfiles() {
 // --- Lifecycle ----------------------------------------------------------------
 
 const startAction = useAction(
-  (args: { id: string; profile: string }) => api.startInstance(args.id, args.profile),
+  (args: { id: string; profile: string }) =>
+    api.startInstance(args.id, args.profile),
   { key: (args) => args.id, success: () => t('home.started') },
 )
 const stopAction = useAction((id: string) => api.stopInstance(id), {
@@ -198,7 +211,9 @@ const restartAction = useAction((id: string) => api.restartInstance(id), {
   key: (id) => id,
   success: () => t('home.started'),
 })
-const openAction = useAction((id: string) => api.openInstanceWindow(id), { key: (id) => id })
+const openAction = useAction((id: string) => api.openInstanceWindow(id), {
+  key: (id) => id,
+})
 /**
  * Ask that machine once more. The answer arrives as a status event (and the
  * host's own message is re-read so the row can say *why* it was unreachable),
@@ -285,9 +300,12 @@ const dirAction = useAction(() => api.openInstanceDirectory(props.inst.id), {
 const logAction = useAction(() => api.openInstanceLog(props.inst.id), {
   success: (path) => t('instanceEdit.logOpened', { path }),
 })
-const terminalAction = useAction(() => api.openInstanceTerminal(props.inst.id), {
-  success: (label) => t('home.terminalOpened', { label }),
-})
+const terminalAction = useAction(
+  () => api.openInstanceTerminal(props.inst.id),
+  {
+    success: (label) => t('home.terminalOpened', { label }),
+  },
+)
 
 // An instance on another machine has a DSH_HOME that is a directory *there*:
 // this Mac can neither open it nor hold it, so the machine line hands over what
@@ -301,7 +319,9 @@ const remoteCopyAction = useAction(async (what: 'path' | 'command') => {
 })
 
 function openDetail() {
-  void router.push({ name: 'instance-detail', params: { id: props.inst.id } }).catch(() => undefined)
+  void router
+    .push({ name: 'instance-detail', params: { id: props.inst.id } })
+    .catch(() => undefined)
 }
 
 onMounted(() => {
@@ -332,240 +352,289 @@ onMounted(() => {
       @click="onRowClick"
       @keydown.enter.space="onRowKeydown"
     >
+      <InstanceAvatar :id="inst.id" :icon="inst.icon" :size="36" />
 
-    <InstanceAvatar :id="inst.id" :icon="inst.icon" :size="36" />
+      <div class="inst-main">
+        <div class="inst-title-line">
+          <button
+            class="inst-name"
+            :title="inst.name"
+            :aria-expanded="expanded"
+            @click.stop="toggleExpanded"
+          >
+            {{ inst.name }}
+          </button>
+          <span v-if="sharedHome" class="dl-tag dl-tag--warn">{{
+            t('home.sharedHome')
+          }}</span>
+        </div>
+        <div class="inst-meta">
+          <template v-if="showHost">
+            <span
+              class="dl-chip"
+              :title="host?.ssh_target || host?.display_name"
+            >
+              {{ host?.display_name }}
+            </span>
+            <span class="inst-meta-sep">·</span>
+          </template>
+          <template v-if="showVersionChip">
+            <span class="dl-chip" :title="versionName">{{ versionName }}</span>
+            <span class="inst-meta-sep">·</span>
+          </template>
+          <span class="inst-meta-home" :title="homeName">{{ homeName }}</span>
+        </div>
 
-    <div class="inst-main">
-      <div class="inst-title-line">
-        <button
-          class="inst-name"
-          :title="inst.name"
-          :aria-expanded="expanded"
-          @click.stop="toggleExpanded"
-        >
-          {{ inst.name }}
-        </button>
-        <span v-if="sharedHome" class="dl-tag dl-tag--warn">{{ t('home.sharedHome') }}</span>
-      </div>
-      <div class="inst-meta">
-        <template v-if="showHost">
-          <span class="dl-chip" :title="host?.ssh_target || host?.display_name">
-            {{ host?.display_name }}
-          </span>
-          <span class="inst-meta-sep">·</span>
-        </template>
-        <template v-if="showVersionChip">
-          <span class="dl-chip" :title="versionName">{{ versionName }}</span>
-          <span class="inst-meta-sep">·</span>
-        </template>
-        <span class="inst-meta-home" :title="homeName">{{ homeName }}</span>
-      </div>
-
-      <!-- The live URL is the only thing on the row that gets the run colour:
+        <!-- The live URL is the only thing on the row that gets the run colour:
            it is what "running" actually means and what the user clicks. A
            remote instance's address here is the forwarded one, so the row says
            which address it is showing and the card states both. -->
-      <div v-if="running && status.url" class="inst-url">
-        <span v-if="remoteUrl" class="inst-url-label">{{ t('instances.localAddress') }}</span>
-        <button class="inst-url-link" @click="onOpen">
-          <DlIcon name="link" :size="12" />
-          <span class="dl-mono">{{ status.url }}</span>
-        </button>
-        <button class="dl-icon-btn inst-url-copy" :title="t('common.copy')" @click="copy(status.url!)">
-          <DlIcon name="copy" :size="12" />
-        </button>
+        <div v-if="running && status.url" class="inst-url">
+          <span v-if="remoteUrl" class="inst-url-label">{{
+            t('instances.localAddress')
+          }}</span>
+          <button class="inst-url-link" @click="onOpen">
+            <DlIcon name="link" :size="12" />
+            <span class="dl-mono">{{ status.url }}</span>
+          </button>
+          <button
+            class="dl-icon-btn inst-url-copy"
+            :title="t('common.copy')"
+            @click="copy(status.url!)"
+          >
+            <DlIcon name="copy" :size="12" />
+          </button>
+        </div>
       </div>
-    </div>
 
-    <!-- The row's controls, stacked: what the instance is running on top, and —
+      <!-- The row's controls, stacked: what the instance is running on top, and —
          only while there is a process to drive — that process's own controls
          underneath, where they are one click away instead of one click and an
          expansion away. -->
-    <div class="inst-tail">
-      <div class="inst-tail-line">
-        <div class="inst-profile">
-          <a-select
-            v-if="!running && !starting"
-            v-model="selectedProfile"
-            :placeholder="t('home.selectProfile')"
-            :loading="profilesLoading"
-            size="small"
-            :allow-clear="false"
-            style="width: 132px"
-            @change="touchLastUsed"
-          >
-            <a-option v-for="p in profiles" :key="p" :value="p">{{ p }}</a-option>
-          </a-select>
-          <span v-else class="dl-chip" :title="status.profile ?? selectedProfile">
-            {{ status.profile ?? selectedProfile ?? t('home.selectProfile') }}
-          </span>
-        </div>
+      <div class="inst-tail">
+        <div class="inst-tail-line">
+          <div class="inst-profile">
+            <a-select
+              v-if="!running && !starting"
+              v-model="selectedProfile"
+              :placeholder="t('home.selectProfile')"
+              :loading="profilesLoading"
+              size="small"
+              :allow-clear="false"
+              style="width: 132px"
+              @change="touchLastUsed"
+            >
+              <a-option v-for="p in profiles" :key="p" :value="p">{{
+                p
+              }}</a-option>
+            </a-select>
+            <span
+              v-else
+              class="dl-chip"
+              :title="status.profile ?? selectedProfile"
+            >
+              {{ status.profile ?? selectedProfile ?? t('home.selectProfile') }}
+            </span>
+          </div>
 
-        <span class="dl-status inst-status" :class="`is-${status.state}`" :title="statusHint">
-          {{ t(`home.status.${status.state}`) }}
-        </span>
-
-        <div class="inst-actions">
-          <button
-            v-if="running"
-            class="dl-btn dl-btn--live inst-primary"
-            :disabled="!!openAction.busy[inst.id]"
-            @click="onOpen"
-          >
-            <DlIcon name="external" :size="13" />
-            {{ t('home.openBrowser') }}
-          </button>
-          <button
-            v-else-if="starting"
-            class="dl-btn dl-btn--quiet inst-primary"
-            disabled
-          >
-            <span class="dl-spinner" />
-            {{ t('home.status.starting') }}
-          </button>
-          <!-- Unknown is not stopped: the only useful move is to ask again, and
-               a 启动 here is exactly the click that creates a second DSH. -->
-          <button
-            v-else-if="unreachable"
-            class="dl-btn dl-btn--quiet inst-primary"
+          <span
+            class="dl-status inst-status"
+            :class="`is-${status.state}`"
             :title="statusHint"
-            :disabled="retryAction.busy[inst.id]"
-            @click="onRetry"
           >
-            <DlIcon name="refresh" :size="13" />
-            {{ t('home.retryCheck') }}
+            {{ t(`home.status.${status.state}`) }}
+          </span>
+
+          <div class="inst-actions">
+            <button
+              v-if="running"
+              class="dl-btn dl-btn--live inst-primary"
+              :disabled="!!openAction.busy[inst.id]"
+              @click="onOpen"
+            >
+              <DlIcon name="external" :size="13" />
+              {{ t('home.openBrowser') }}
+            </button>
+            <button
+              v-else-if="starting"
+              class="dl-btn dl-btn--quiet inst-primary"
+              disabled
+            >
+              <span class="dl-spinner" />
+              {{ t('home.status.starting') }}
+            </button>
+            <!-- Unknown is not stopped: the only useful move is to ask again, and
+               a 启动 here is exactly the click that creates a second DSH. -->
+            <button
+              v-else-if="unreachable"
+              class="dl-btn dl-btn--quiet inst-primary"
+              :title="statusHint"
+              :disabled="retryAction.busy[inst.id]"
+              @click="onRetry"
+            >
+              <DlIcon name="refresh" :size="13" />
+              {{ t('home.retryCheck') }}
+            </button>
+            <button
+              v-else
+              class="dl-btn dl-btn--primary inst-primary"
+              :disabled="
+                !selectedProfile || busy || !store.versionById(inst.version_id)
+              "
+              @click="onStart"
+            >
+              <DlIcon name="play" :size="13" />
+              {{ t('home.start') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Acts on the process, so it only exists while there is one. -->
+        <div v-if="running || starting" class="inst-tail-line inst-proc">
+          <button
+            class="dl-btn dl-btn--quiet"
+            :disabled="busy"
+            @click="onRestart"
+          >
+            <DlIcon name="restart" :size="13" />
+            {{ t('home.restart') }}
           </button>
           <button
-            v-else
-            class="dl-btn dl-btn--primary inst-primary"
-            :disabled="!selectedProfile || busy || !store.versionById(inst.version_id)"
-            @click="onStart"
+            class="dl-btn dl-btn--quiet inst-stop"
+            :disabled="busy"
+            @click="onStop"
           >
-            <DlIcon name="play" :size="13" />
-            {{ t('home.start') }}
+            <DlIcon name="stop" :size="13" />
+            {{ t('home.stop') }}
+          </button>
+          <button
+            v-if="canManagePlugins(inst.id)"
+            class="dl-btn dl-btn--quiet"
+            @click="openPlugins(inst.id, 'instances')"
+          >
+            <DlIcon name="plugin" :size="13" />
+            {{ t('profiles.managePlugins') }}
           </button>
         </div>
       </div>
 
-      <!-- Acts on the process, so it only exists while there is one. -->
-      <div v-if="running || starting" class="inst-tail-line inst-proc">
-        <button class="dl-btn dl-btn--quiet" :disabled="busy" @click="onRestart">
-          <DlIcon name="restart" :size="13" />
-          {{ t('home.restart') }}
-        </button>
-        <button class="dl-btn dl-btn--quiet inst-stop" :disabled="busy" @click="onStop">
-          <DlIcon name="stop" :size="13" />
-          {{ t('home.stop') }}
-        </button>
-        <button
-          v-if="canManagePlugins(inst.id)"
-          class="dl-btn dl-btn--quiet"
-          @click="openPlugins(inst.id, 'instances')"
-        >
-          <DlIcon name="plugin" :size="13" />
-          {{ t('profiles.managePlugins') }}
-        </button>
-      </div>
-    </div>
-
-    <!-- The disclosure mark, at the far edge where it reads as "this row opens"
+      <!-- The disclosure mark, at the far edge where it reads as "this row opens"
          rather than as another button next to the name. -->
-    <DlIcon name="chevron-down" :size="15" class="inst-chev" :class="{ 'is-open': expanded }" />
+      <DlIcon
+        name="chevron-down"
+        :size="15"
+        class="inst-chev"
+        :class="{ 'is-open': expanded }"
+      />
     </div>
 
     <!-- Expanded: the facts that otherwise cost a trip to the settings page,
          and the actions that have no business being in a hover menu. -->
     <div v-if="expanded" class="inst-facts">
       <div class="facts-grid">
-      <div class="fact">
-        <span class="fact-label">{{ t('instanceEdit.version') }}</span>
-        <span class="fact-value dl-mono" :title="version?.dir">{{ versionName }}</span>
-      </div>
-      <div class="fact">
-        <span class="fact-label">{{ t('instanceEdit.home') }}</span>
-        <span class="fact-value" :title="home?.path">
-          {{ homeName }}
-          <span class="fact-sub dl-mono">{{ home?.path }}</span>
-        </span>
-      </div>
-      <div class="fact">
-        <span class="fact-label">{{ t('instanceEdit.defaultProfile') }}</span>
-        <span class="fact-value">{{ inst.default_profile || t('home.profileUnset') }}</span>
-      </div>
-      <div class="fact">
-        <span class="fact-label">{{ t('instanceEdit.port') }}</span>
-        <span class="fact-value dl-mono">{{ portLabel }}</span>
-      </div>
-      <!-- The two addresses of a remote instance, stated apart: where it really
+        <div class="fact">
+          <span class="fact-label">{{ t('instanceEdit.version') }}</span>
+          <span class="fact-value dl-mono" :title="version?.dir">{{
+            versionName
+          }}</span>
+        </div>
+        <div class="fact">
+          <span class="fact-label">{{ t('instanceEdit.home') }}</span>
+          <span class="fact-value" :title="home?.path">
+            {{ homeName }}
+            <span class="fact-sub dl-mono">{{ home?.path }}</span>
+          </span>
+        </div>
+        <div class="fact">
+          <span class="fact-label">{{ t('instanceEdit.defaultProfile') }}</span>
+          <span class="fact-value">{{
+            inst.default_profile || t('home.profileUnset')
+          }}</span>
+        </div>
+        <div class="fact">
+          <span class="fact-label">{{ t('instanceEdit.port') }}</span>
+          <span class="fact-value dl-mono">{{ portLabel }}</span>
+        </div>
+        <!-- The two addresses of a remote instance, stated apart: where it really
            is, and where it is reachable from here. They are the same address
            only when the remote port was free on this Mac. -->
-      <div v-if="remoteUrl" class="fact">
-        <span class="fact-label">{{ t('instances.remoteAddress') }}</span>
-        <span class="fact-value fact-chips">
-          <span class="fact-chip dl-mono" :title="remoteUrl">{{ remoteUrl }}</span>
-          <button
-            class="dl-icon-btn"
-            :title="t('common.copy')"
-            @click="copy(remoteUrl!)"
-          >
-            <DlIcon name="copy" :size="12" />
-          </button>
-        </span>
-      </div>
-      <div v-if="remoteUrl && status.url" class="fact">
-        <span class="fact-label">{{ t('instances.localAddress') }}</span>
-        <span class="fact-value fact-chips">
-          <span class="fact-chip dl-mono" :title="status.url">{{ status.url }}</span>
-          <button
-            class="dl-icon-btn"
-            :title="t('common.copy')"
-            @click="copy(status.url!)"
-          >
-            <DlIcon name="copy" :size="12" />
-          </button>
-        </span>
-      </div>
-      <div class="fact">
-        <span class="fact-label">
-          {{ t('instanceEdit.env') }}
-          <span v-if="envEntries.length" class="fact-count">{{ envEntries.length }}</span>
-        </span>
-        <span class="fact-value fact-chips">
-          <template v-if="envEntries.length">
-            <span
-              v-for="[key, value] in envEntries"
-              :key="key"
-              class="fact-chip dl-mono"
-              :title="`${key}=${value}`"
+        <div v-if="remoteUrl" class="fact">
+          <span class="fact-label">{{ t('instances.remoteAddress') }}</span>
+          <span class="fact-value fact-chips">
+            <span class="fact-chip dl-mono" :title="remoteUrl">{{
+              remoteUrl
+            }}</span>
+            <button
+              class="dl-icon-btn"
+              :title="t('common.copy')"
+              @click="copy(remoteUrl!)"
             >
-              {{ key }}
+              <DlIcon name="copy" :size="12" />
+            </button>
+          </span>
+        </div>
+        <div v-if="remoteUrl && status.url" class="fact">
+          <span class="fact-label">{{ t('instances.localAddress') }}</span>
+          <span class="fact-value fact-chips">
+            <span class="fact-chip dl-mono" :title="status.url">{{
+              status.url
+            }}</span>
+            <button
+              class="dl-icon-btn"
+              :title="t('common.copy')"
+              @click="copy(status.url!)"
+            >
+              <DlIcon name="copy" :size="12" />
+            </button>
+          </span>
+        </div>
+        <div class="fact">
+          <span class="fact-label">
+            {{ t('instanceEdit.env') }}
+            <span v-if="envEntries.length" class="fact-count">{{
+              envEntries.length
+            }}</span>
+          </span>
+          <span class="fact-value fact-chips">
+            <template v-if="envEntries.length">
+              <span
+                v-for="[key, value] in envEntries"
+                :key="key"
+                class="fact-chip dl-mono"
+                :title="`${key}=${value}`"
+              >
+                {{ key }}
+              </span>
+            </template>
+            <span v-else class="fact-sub">{{ t('instances.envNone') }}</span>
+          </span>
+        </div>
+        <div class="fact">
+          <span class="fact-label">{{ t('home.healthLogs') }}</span>
+          <span class="fact-value">
+            <span v-if="health.errors > 0" class="fact-bad">
+              {{ t('instances.healthErrors', { count: health.errors }) }}
             </span>
-          </template>
-          <span v-else class="fact-sub">{{ t('instances.envNone') }}</span>
-        </span>
-      </div>
-      <div class="fact">
-        <span class="fact-label">{{ t('home.healthLogs') }}</span>
-        <span class="fact-value">
-          <span v-if="health.errors > 0" class="fact-bad">
-            {{ t('instances.healthErrors', { count: health.errors }) }}
-          </span>
-          <span v-else-if="health.warns > 0" class="fact-warn">
-            {{ t('instances.healthWarns', { count: health.warns }) }}
-          </span>
-          <!-- The dependency tree of a remote instance is on that machine, and
+            <span v-else-if="health.warns > 0" class="fact-warn">
+              {{ t('instances.healthWarns', { count: health.warns }) }}
+            </span>
+            <!-- The dependency tree of a remote instance is on that machine, and
                the launcher does not read it: 「没有发现问题」 would be a claim it
                never checked. -->
-          <span v-else-if="remote" class="fact-sub">{{ t('instances.healthNotChecked') }}</span>
-          <span v-else class="fact-sub">{{ t('instances.healthOk') }}</span>
-        </span>
-      </div>
+            <span v-else-if="remote" class="fact-sub">{{
+              t('instances.healthNotChecked')
+            }}</span>
+            <span v-else class="fact-sub">{{ t('instances.healthOk') }}</span>
+          </span>
+        </div>
       </div>
 
       <!-- What the two addresses above mean, in one line: the row is the
            control surface, and this is the sentence that keeps a remote
            instance from reading as if DSH were bound on this Mac. -->
-      <p v-if="remoteUrl" class="facts-note">{{ t('instances.addressHint') }}</p>
+      <p v-if="remoteUrl" class="facts-note">
+        {{ t('instances.addressHint') }}
+      </p>
 
       <!-- The action bar is grouped by what an action acts on, and the groups
            are laid out on their own lines: the machine first, then the binding.
@@ -582,11 +651,17 @@ onMounted(() => {
                machine, so that machine's DSH_HOME is handed over as what it
                is: a path to paste, and one command that reaches it. -->
           <template v-if="remote">
-            <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('path')">
+            <button
+              class="dl-btn dl-btn--quiet"
+              @click="remoteCopyAction.run('path')"
+            >
               <DlIcon name="copy" :size="13" />
               {{ t('instances.copyPath') }}
             </button>
-            <button class="dl-btn dl-btn--quiet" @click="remoteCopyAction.run('command')">
+            <button
+              class="dl-btn dl-btn--quiet"
+              @click="remoteCopyAction.run('command')"
+            >
               <DlIcon name="copy" :size="13" />
               {{ t('instances.copyCommand') }}
             </button>
@@ -611,7 +686,10 @@ onMounted(() => {
             <DlIcon name="settings" :size="13" />
             {{ t('instanceEdit.titleEdit') }}
           </button>
-          <button class="dl-btn dl-btn--quiet" @click="emit('duplicate', inst.id)">
+          <button
+            class="dl-btn dl-btn--quiet"
+            @click="emit('duplicate', inst.id)"
+          >
             <DlIcon name="copy" :size="13" />
             {{ t('instances.duplicate') }}
           </button>
@@ -675,7 +753,11 @@ onMounted(() => {
     background: linear-gradient(90deg, var(--dl-run-soft), transparent 46%);
 
     &:hover {
-      background: linear-gradient(90deg, var(--dl-run-soft), var(--dl-surface-2) 46%);
+      background: linear-gradient(
+        90deg,
+        var(--dl-run-soft),
+        var(--dl-surface-2) 46%
+      );
     }
 
     .inst-rail {
@@ -870,7 +952,6 @@ onMounted(() => {
   color: var(--dl-warn);
 }
 
-
 .inst-meta {
   display: flex;
   align-items: center;
@@ -1002,5 +1083,4 @@ onMounted(() => {
     transform: rotate(360deg);
   }
 }
-
 </style>

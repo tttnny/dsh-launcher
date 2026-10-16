@@ -25,11 +25,15 @@ onMounted(() => {
 
 const collator = new Intl.Collator('en', { numeric: true })
 const sortedDesc = computed(() =>
-  [...store.remoteVersions].sort((a, b) => collator.compare(b.version, a.version)),
+  [...store.remoteVersions].sort((a, b) =>
+    collator.compare(b.version, a.version),
+  ),
 )
 const isPrerelease = (v: string) => v.includes('-')
 
-const installedSet = computed(() => new Set(store.versions.map((v) => v.version)))
+const installedSet = computed(
+  () => new Set(store.versions.map((v) => v.version)),
+)
 const installedVersions = computed(() =>
   [...store.versions].sort((a, b) => collator.compare(b.version, a.version)),
 )
@@ -37,11 +41,15 @@ const installedVersions = computed(() =>
 /** The machine an install goes onto: the Library's current host. */
 const hostLabel = computed(() => {
   const host = store.currentHost
-  return host?.builtin ? t('versions.hostLocal') : (host?.display_name ?? store.currentHostId)
+  return host?.builtin
+    ? t('versions.hostLocal')
+    : (host?.display_name ?? store.currentHostId)
 })
 
 // Remote versions split into what can be installed and what already is.
-const installable = computed(() => sortedDesc.value.filter((v) => !installedSet.value.has(v.version)))
+const installable = computed(() =>
+  sortedDesc.value.filter((v) => !installedSet.value.has(v.version)),
+)
 
 type Channel = 'all' | 'stable' | 'prerelease'
 const channel = ref<Channel>('all')
@@ -59,7 +67,9 @@ const visibleInstallable = computed(() => {
         return installable.value
     }
   })()
-  return q ? inChannel.filter((v) => v.version.toLowerCase().includes(q)) : inChannel
+  return q
+    ? inChannel.filter((v) => v.version.toLowerCase().includes(q))
+    : inChannel
 })
 
 /** The search box is only worth its chrome once the list stops fitting. */
@@ -92,7 +102,8 @@ const installAction = useAction(
   },
   {
     key: (version) => version,
-    success: ({ version, host }) => t('versions.installTaskStarted', { version, host }),
+    success: ({ version, host }) =>
+      t('versions.installTaskStarted', { version, host }),
   },
 )
 
@@ -100,10 +111,13 @@ const installAction = useAction(
  *  this page is showing**. Two machines can install the same version at once:
  *  each of them has its own row here. */
 function installOf(version: string): TaskInfo | null {
-  return store.installingVersions[installKey(store.currentHostId, version)] ?? null
+  return (
+    store.installingVersions[installKey(store.currentHostId, version)] ?? null
+  )
 }
 
-const isInstalling = (version: string) => installOf(version)?.state === 'running'
+const isInstalling = (version: string) =>
+  installOf(version)?.state === 'running'
 
 /** The tail of an install's log: the progress bar says how far along it is,
  *  these lines say what it is doing. */
@@ -121,8 +135,14 @@ function onInstall(row: RemoteVersion) {
   Modal.confirm({
     title: t('versions.confirmInstallTitle', { host: hostLabel.value }),
     content: isSourceBuild
-      ? t('versions.confirmInstallSourceContent', { version: row.version, host: hostLabel.value })
-      : t('versions.confirmInstallContent', { version: row.version, host: hostLabel.value }),
+      ? t('versions.confirmInstallSourceContent', {
+          version: row.version,
+          host: hostLabel.value,
+        })
+      : t('versions.confirmInstallContent', {
+          version: row.version,
+          host: hostLabel.value,
+        }),
     okText: t('versions.installNow'),
     cancelText: t('common.cancel'),
     modalClass: 'dl-sheet',
@@ -134,7 +154,9 @@ function onInstall(row: RemoteVersion) {
   })
 }
 
-const cancelAction = useAction((id: string) => api.cancelTask(id), { key: (id) => id })
+const cancelAction = useAction((id: string) => api.cancelTask(id), {
+  key: (id) => id,
+})
 
 async function onCancelInstall(taskId: string) {
   await cancelAction.run(taskId)
@@ -151,10 +173,14 @@ const removeAction = useAction(
     await store.refreshHomes()
     return version
   },
-  { key: (id) => id, success: (version) => t('versions.versionDeleted', { version }) },
+  {
+    key: (id) => id,
+    success: (version) => t('versions.versionDeleted', { version }),
+  },
 )
 
-const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).length
+const usedByCount = (versionId: string) =>
+  store.instancesOfVersion(versionId).length
 </script>
 
 <template>
@@ -190,22 +216,38 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
         <div class="ver-main">
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
-            <span v-if="v.bin_ready" class="dl-tag dl-tag--run">{{ t('versions.installedTag') }}</span>
-            <span v-else class="dl-tag dl-tag--warn" :title="t('versions.binMissingHint')">
+            <span v-if="v.bin_ready" class="dl-tag dl-tag--run">{{
+              t('versions.installedTag')
+            }}</span>
+            <span
+              v-else
+              class="dl-tag dl-tag--warn"
+              :title="t('versions.binMissingHint')"
+            >
               {{ t('versions.binMissing') }}
             </span>
           </div>
           <span class="ver-path dl-mono" :title="v.dir">{{ v.dir }}</span>
         </div>
-        <span class="ver-used dl-tnum">{{ t('versions.usedBy', { count: usedByCount(v.id) }) }}</span>
+        <span class="ver-used dl-tnum">{{
+          t('versions.usedBy', { count: usedByCount(v.id) })
+        }}</span>
         <a-popconfirm
-          :content="t('versions.confirmDeleteVersion', { version: v.version, path: v.dedicated_home })"
+          :content="
+            t('versions.confirmDeleteVersion', {
+              version: v.version,
+              path: v.dedicated_home,
+            })
+          "
           :ok-text="t('versions.deleteVersion')"
           :cancel-text="t('common.cancel')"
           modal-class="dl-sheet"
           @ok="removeAction.run(v.id, v.version)"
         >
-          <button class="dl-btn dl-btn--danger" :disabled="!!removeAction.busy[v.id]">
+          <button
+            class="dl-btn dl-btn--danger"
+            :disabled="!!removeAction.busy[v.id]"
+          >
             <DlIcon name="trash" :size="13" />
             {{ t('versions.deleteVersion') }}
           </button>
@@ -223,19 +265,36 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
       <span class="ver-label-spacer" />
       <div v-if="searchable" class="dl-input dl-search ver-search">
         <DlIcon name="search" :size="13" />
-        <input v-model="search" class="dl-search-input" :placeholder="t('versions.searchPlaceholder')" />
-        <button v-if="search" class="dl-icon-btn dl-search-clear" @click="search = ''">
+        <input
+          v-model="search"
+          class="dl-search-input"
+          :placeholder="t('versions.searchPlaceholder')"
+        />
+        <button
+          v-if="search"
+          class="dl-icon-btn dl-search-clear"
+          @click="search = ''"
+        >
           <DlIcon name="close" :size="11" />
         </button>
       </div>
       <div class="dl-segmented ver-channels">
-        <button :class="{ 'is-active': channel === 'all' }" @click="channel = 'all'">
+        <button
+          :class="{ 'is-active': channel === 'all' }"
+          @click="channel = 'all'"
+        >
           {{ t('versions.channelAll') }}
         </button>
-        <button :class="{ 'is-active': channel === 'stable' }" @click="channel = 'stable'">
+        <button
+          :class="{ 'is-active': channel === 'stable' }"
+          @click="channel = 'stable'"
+        >
           {{ t('versions.stable') }}
         </button>
-        <button :class="{ 'is-active': channel === 'prerelease' }" @click="channel = 'prerelease'">
+        <button
+          :class="{ 'is-active': channel === 'prerelease' }"
+          @click="channel = 'prerelease'"
+        >
           {{ t('versions.prerelease') }}
         </button>
       </div>
@@ -250,7 +309,9 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
     <div class="dl-surface">
       <!-- A failed query shows what the machine said, never the previous list:
            the installable set is a fact about that host's registry. -->
-      <div v-if="store.remoteError" class="dl-row-none">{{ store.remoteError }}</div>
+      <div v-if="store.remoteError" class="dl-row-none">
+        {{ store.remoteError }}
+      </div>
 
       <div v-else-if="visibleInstallable.length === 0" class="dl-row-none">
         {{
@@ -265,7 +326,9 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
       <!-- The list is that host's, and an install runs **there**: the button
            installs onto the machine this page is showing. -->
       <div v-for="v in visibleInstallable" :key="v.version" class="ver-row">
-        <span class="ver-mark is-idle"><DlIcon name="download" :size="14" /></span>
+        <span class="ver-mark is-idle"
+          ><DlIcon name="download" :size="14"
+        /></span>
         <div class="ver-main">
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
@@ -299,10 +362,16 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
                 {{ t('versions.cancelInstall') }}
               </button>
             </div>
-            <p v-else-if="installOf(v.version)?.state === 'error'" class="ver-failed">
+            <p
+              v-else-if="installOf(v.version)?.state === 'error'"
+              class="ver-failed"
+            >
               {{ installOf(v.version)?.message }}
             </p>
-            <p v-else-if="installOf(v.version)?.state === 'cancelled'" class="ver-cancelled">
+            <p
+              v-else-if="installOf(v.version)?.state === 'cancelled'"
+              class="ver-cancelled"
+            >
               {{ t('versions.installCancelled') }}
             </p>
             <div v-if="installOf(v.version)?.logs.length" class="ver-log">
@@ -322,7 +391,13 @@ const usedByCount = (versionId: string) => store.instancesOfVersion(versionId).l
           :disabled="!!installAction.busy[v.version]"
           @click="onInstall(v)"
         >
-          {{ t(installOf(v.version)?.state === 'error' ? 'versions.retryInstall' : 'versions.installNow') }}
+          {{
+            t(
+              installOf(v.version)?.state === 'error'
+                ? 'versions.retryInstall'
+                : 'versions.installNow',
+            )
+          }}
         </button>
         <span v-else class="dl-tag dl-tag--signal ver-installing">
           {{ t('versions.installing') }}

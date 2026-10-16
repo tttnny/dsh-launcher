@@ -87,11 +87,17 @@ const pnpmOk = computed(() => statusOf('pnpm')?.installed ?? false)
 // Node is what DSH needs to boot; pnpm is needed to install a version and to
 // manage plugins, and the launcher no longer installs one itself.
 const allOk = computed(() => nodeOk.value && pnpmOk.value)
-const belowRecommended = computed(() => runtime.value?.node_below_recommended ?? false)
+const belowRecommended = computed(
+  () => runtime.value?.node_below_recommended ?? false,
+)
 
 const requirements = computed(() => runtime.value?.requirements)
-const nodeCommand = computed(() => requirements.value?.node_install_command ?? '')
-const pnpmCommand = computed(() => requirements.value?.pnpm_install_command ?? '')
+const nodeCommand = computed(
+  () => requirements.value?.node_install_command ?? '',
+)
+const pnpmCommand = computed(
+  () => requirements.value?.pnpm_install_command ?? '',
+)
 // The commands the backend hands out are already the ones for the selected
 // machine (on a remote host each is prefixed with `ssh <host>`), so the copy
 // only has to say where they are run.
@@ -107,7 +113,9 @@ const pnpmCommandDesc = computed(() =>
 // The candidates the probe passed over on its way to a conclusion: on a remote
 // host an old Node is passed over rather than warned about, and the user is
 // owed the reason (ADR-0005 追加).
-const skipped = computed<SkippedCandidate[]>(() => runtime.value?.skipped_candidates ?? [])
+const skipped = computed<SkippedCandidate[]>(
+  () => runtime.value?.skipped_candidates ?? [],
+)
 
 function skippedReason(candidate: SkippedCandidate): string {
   if (candidate.reason === 'below-minimum') {
@@ -118,7 +126,10 @@ function skippedReason(candidate: SkippedCandidate): string {
     })
   }
   if (candidate.reason === 'unparsable') {
-    return t('setup.skippedUnparsable', { path: candidate.path, version: candidate.version ?? '' })
+    return t('setup.skippedUnparsable', {
+      path: candidate.path,
+      version: candidate.version ?? '',
+    })
   }
   return t('setup.skippedUnusable', { path: candidate.path })
 }
@@ -137,7 +148,9 @@ const overrideBroken = (id: ToolId) => {
 // path and must be able to see, change and clear it — including a pick that has
 // gone stale while the tool itself is back in the system PATH.
 const manualTools = computed(() =>
-  tools.value.filter((tool) => !tool.ok || tool.source !== 'system' || !!overridePath(tool.id)),
+  tools.value.filter(
+    (tool) => !tool.ok || tool.source !== 'system' || !!overridePath(tool.id),
+  ),
 )
 
 function sourceLabel(tool: ToolRow): string {
@@ -217,7 +230,9 @@ async function applyOverride(id: ToolId, path: string | null) {
     if (answer.host_id === LOCAL_HOST_ID) store.runtime = answer
     manualInput.value[id] = ''
     Message.success(
-      t(path ? 'setup.overrideApplied' : 'setup.overrideCleared', { tool: TOOL_LABELS[id] }),
+      t(path ? 'setup.overrideApplied' : 'setup.overrideCleared', {
+        tool: TOOL_LABELS[id],
+      }),
     )
   } catch (e) {
     Message.error(String(e))
@@ -277,13 +292,23 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
           style="width: 190px"
           size="small"
         >
-          <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">{{ h.display_name }}</a-option>
+          <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">{{
+            h.display_name
+          }}</a-option>
         </a-select>
-        <button class="dl-btn dl-btn--quiet" :disabled="checking" @click="recheck">
+        <button
+          class="dl-btn dl-btn--quiet"
+          :disabled="checking"
+          @click="recheck"
+        >
           <DlIcon name="refresh" :size="13" />
           {{ t('setup.recheck') }}
         </button>
-        <button v-if="allOk" class="dl-btn dl-btn--primary" @click="router.push({ name: 'instances' })">
+        <button
+          v-if="allOk"
+          class="dl-btn dl-btn--primary"
+          @click="router.push({ name: 'instances' })"
+        >
           {{ t('setup.enterApp') }}
         </button>
       </div>
@@ -296,13 +321,18 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       <div class="dl-section-label">
         {{ t('settings.environment.title') }}
         <span class="dl-section-count">
-          <span class="dl-tag" :class="allOk ? 'dl-tag--run' : 'dl-tag--danger'">
+          <span
+            class="dl-tag"
+            :class="allOk ? 'dl-tag--run' : 'dl-tag--danger'"
+          >
             {{ allOk ? t('setup.allReady') : t('nav.envMissing') }}
           </span>
         </span>
       </div>
 
-      <p v-if="loadError" class="setup-note setup-note--quiet">{{ loadError }}</p>
+      <p v-if="loadError" class="setup-note setup-note--quiet">
+        {{ loadError }}
+      </p>
 
       <div v-if="!loadError" class="dl-surface">
         <div v-for="tool in tools" :key="tool.name" class="dl-row">
@@ -311,10 +341,14 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
           </span>
           <div class="tool-info">
             <span class="tool-name">{{ tool.name }}</span>
-            <span v-if="tool.ok && tool.path" class="tool-path dl-mono">{{ tool.path }}</span>
+            <span v-if="tool.ok && tool.path" class="tool-path dl-mono">{{
+              tool.path
+            }}</span>
             <span class="tool-source">{{ sourceLabel(tool) }}</span>
           </div>
-          <span class="dl-chip">{{ tool.ok ? tool.version : t('setup.missing') }}</span>
+          <span class="dl-chip">{{
+            tool.ok ? tool.version : t('setup.missing')
+          }}</span>
         </div>
       </div>
 
@@ -324,14 +358,22 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
 
       <p v-if="nodeOk && belowRecommended" class="setup-note">
         <DlIcon name="alert" :size="13" />
-        {{ t('setup.nodeBelowRecommended', { v: requirements?.recommended_node_major }) }}
+        {{
+          t('setup.nodeBelowRecommended', {
+            v: requirements?.recommended_node_major,
+          })
+        }}
       </p>
 
       <!-- On a remote host an old candidate is passed over instead of warned
            about, so the page has to say which ones it walked past and why. -->
       <div v-if="skipped.length" class="dl-surface skipped">
         <div class="skipped-head">{{ t('setup.skippedTitle') }}</div>
-        <div v-for="candidate in skipped" :key="candidate.tool + candidate.path" class="skipped-row">
+        <div
+          v-for="candidate in skipped"
+          :key="candidate.tool + candidate.path"
+          class="skipped-row"
+        >
           <span class="dl-chip">{{ candidate.tool }}</span>
           <span class="skipped-why">{{ skippedReason(candidate) }}</span>
         </div>
@@ -347,8 +389,12 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
 
       <div v-for="tool in manualTools" :key="tool.id" class="dl-surface pick">
         <div class="pick-head">
-          <span class="pick-title">{{ t('setup.manualToolTitle', { tool: tool.name }) }}</span>
-          <span class="pick-desc">{{ t('setup.manualDesc', { tool: tool.name }) }}</span>
+          <span class="pick-title">{{
+            t('setup.manualToolTitle', { tool: tool.name })
+          }}</span>
+          <span class="pick-desc">{{
+            t('setup.manualDesc', { tool: tool.name })
+          }}</span>
           <span v-if="overridePath(tool.id)" class="pick-path dl-mono">
             {{ overridePath(tool.id) }}
           </span>
@@ -373,7 +419,12 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
               {{ t('setup.remoteManualApply') }}
             </button>
           </template>
-          <button v-else class="dl-btn dl-btn--quiet" :disabled="picking === tool.id" @click="pickFile(tool.id)">
+          <button
+            v-else
+            class="dl-btn dl-btn--quiet"
+            :disabled="picking === tool.id"
+            @click="pickFile(tool.id)"
+          >
             <DlIcon name="folder" :size="13" />
             {{ t('setup.pickFile') }}
           </button>
@@ -399,7 +450,10 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
         </div>
         <div class="cmd-row">
           <code class="cmd-text">{{ nodeCommand }}</code>
-          <button class="dl-btn dl-btn--quiet" @click="copyCommand(nodeCommand, 'node')">
+          <button
+            class="dl-btn dl-btn--quiet"
+            @click="copyCommand(nodeCommand, 'node')"
+          >
             <DlIcon name="copy" :size="13" />
             {{ copied === 'node' ? t('common.copied') : t('common.copy') }}
           </button>
@@ -413,7 +467,10 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
         </div>
         <div class="cmd-row">
           <code class="cmd-text">{{ pnpmCommand }}</code>
-          <button class="dl-btn dl-btn--quiet" @click="copyCommand(pnpmCommand, 'pnpm')">
+          <button
+            class="dl-btn dl-btn--quiet"
+            @click="copyCommand(pnpmCommand, 'pnpm')"
+          >
             <DlIcon name="copy" :size="13" />
             {{ copied === 'pnpm' ? t('common.copied') : t('common.copy') }}
           </button>

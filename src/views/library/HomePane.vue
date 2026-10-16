@@ -38,7 +38,9 @@ const remote = computed(() => store.currentHost?.builtin === false)
  * asks that machine for the `~/.dsh` it already has — and an unreachable machine
  * answers nothing, so 「暂无 DSH_HOME」 would be half the story.
  */
-const hostUnreachable = computed(() => store.currentHost?.status?.state === 'unreachable')
+const hostUnreachable = computed(
+  () => store.currentHost?.status?.state === 'unreachable',
+)
 
 const usedBy = computed(() => (id: string) => store.instancesOfHome(id).length)
 
@@ -59,7 +61,8 @@ async function pickDir() {
 // Both actions name the host the pane is showing: a DSH_HOME belongs to one
 // machine, and the record must never be filed under another (ADR-0006).
 const addAction = useAction(
-  (name: string, path: string) => api.createHome(name, path, store.currentHostId),
+  (name: string, path: string) =>
+    api.createHome(name, path, store.currentHostId),
   { success: () => t('settings.saved') },
 )
 
@@ -106,11 +109,19 @@ function viewProfiles(homeId: string) {
          page's subject and the new entry joins it in place. -->
     <div class="dl-surface home-add">
       <DlIcon name="folder" :size="15" class="home-add-glyph" />
-      <input v-model="newName" class="dl-input" :placeholder="t('homes.homeNamePlaceholder')" />
+      <input
+        v-model="newName"
+        class="dl-input"
+        :placeholder="t('homes.homeNamePlaceholder')"
+      />
       <input
         v-model="newPath"
         class="dl-input dl-input--mono home-path-input"
-        :placeholder="remote ? t('homes.remotePathPlaceholder') : t('homes.homePathPlaceholder')"
+        :placeholder="
+          remote
+            ? t('homes.remotePathPlaceholder')
+            : t('homes.homePathPlaceholder')
+        "
       />
       <button v-if="!remote" class="dl-btn dl-btn--quiet" @click="pickDir">
         {{ t('homes.pickDir') }}
@@ -135,9 +146,20 @@ function viewProfiles(homeId: string) {
     </div>
 
     <div v-else class="dl-surface home-list">
-      <DlEmpty v-if="store.homes.length === 0" icon="tray" :description="t('homes.homesEmpty')" />
-      <p v-if="store.homes.length === 0 && remote && hostUnreachable" class="dl-field-hint">
-        {{ t('homes.homesEmptyUnreachable', { host: store.currentHost?.display_name ?? '' }) }}
+      <DlEmpty
+        v-if="store.homes.length === 0"
+        icon="tray"
+        :description="t('homes.homesEmpty')"
+      />
+      <p
+        v-if="store.homes.length === 0 && remote && hostUnreachable"
+        class="dl-field-hint"
+      >
+        {{
+          t('homes.homesEmptyUnreachable', {
+            host: store.currentHost?.display_name ?? '',
+          })
+        }}
       </p>
 
       <div v-for="h in store.homes" :key="h.id" class="home-row">
@@ -152,7 +174,11 @@ function viewProfiles(homeId: string) {
         </div>
 
         <span class="home-used dl-tnum">
-          {{ usedBy(h.id) === 0 ? t('homes.unused') : t('homes.homeUsedByCount', { count: usedBy(h.id) }) }}
+          {{
+            usedBy(h.id) === 0
+              ? t('homes.unused')
+              : t('homes.homeUsedByCount', { count: usedBy(h.id) })
+          }}
         </span>
 
         <div class="home-actions">

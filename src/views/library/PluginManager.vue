@@ -29,13 +29,19 @@ const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
 
-const homeId = computed(() => (typeof route.query.homeId === 'string' ? route.query.homeId : ''))
-const profile = computed(() => (typeof route.query.profile === 'string' ? route.query.profile : ''))
+const homeId = computed(() =>
+  typeof route.query.homeId === 'string' ? route.query.homeId : '',
+)
+const profile = computed(() =>
+  typeof route.query.profile === 'string' ? route.query.profile : '',
+)
 const instanceId = computed(() =>
   typeof route.query.instanceId === 'string' ? route.query.instanceId : '',
 )
 const home = computed(() => store.homeById(homeId.value))
-const instance = computed(() => (instanceId.value ? store.instanceById(instanceId.value) : undefined))
+const instance = computed(() =>
+  instanceId.value ? store.instanceById(instanceId.value) : undefined,
+)
 
 /**
  * A read-only page whose instance is known has exactly one way out — start it,
@@ -52,10 +58,15 @@ const instanceState = computed(() =>
   instanceId.value ? store.statusOf(instanceId.value).state : 'stopped',
 )
 const unreachable = computed(() => instanceState.value === 'unreachable')
-const canFix = computed(() => !!instance.value && !!profile.value && instanceState.value !== 'starting')
+const canFix = computed(
+  () =>
+    !!instance.value && !!profile.value && instanceState.value !== 'starting',
+)
 const fixLabel = computed(() => {
   if (unreachable.value) return t('home.retryCheck')
-  return instanceState.value === 'running' ? t('plugins.instanceRestart') : t('plugins.instanceStart')
+  return instanceState.value === 'running'
+    ? t('plugins.instanceRestart')
+    : t('plugins.instanceStart')
 })
 
 const fixAction = useAction(async () => {
@@ -87,15 +98,24 @@ async function fixInstance() {
  */
 function goBack() {
   if (instanceId.value) {
-    if (route.query[PLUGIN_ORIGIN_QUERY] === 'instance-detail' && instance.value) {
-      void router.push({ name: 'instance-detail', params: { id: instanceId.value } })
+    if (
+      route.query[PLUGIN_ORIGIN_QUERY] === 'instance-detail' &&
+      instance.value
+    ) {
+      void router.push({
+        name: 'instance-detail',
+        params: { id: instanceId.value },
+      })
       return
     }
     // The board focuses the row the user came from: same instance, same place.
     void router.push({ name: 'instances', query: { focus: instanceId.value } })
     return
   }
-  void router.push({ name: 'library', query: { tab: 'profiles', homeId: homeId.value } })
+  void router.push({
+    name: 'library',
+    query: { tab: 'profiles', homeId: homeId.value },
+  })
 }
 
 // --- The view snapshot --------------------------------------------------------
@@ -115,7 +135,9 @@ const unreadable = computed(() => mode.value === 'unreachable')
  * in the URL: the two differ whenever the row's instance is no longer running
  * that profile and another instance of the same HOME took over.
  */
-const scopeInstanceId = computed(() => view.value?.instanceId ?? instanceId.value)
+const scopeInstanceId = computed(
+  () => view.value?.instanceId ?? instanceId.value,
+)
 const scopeInstance = computed(() =>
   scopeInstanceId.value ? store.instanceById(scopeInstanceId.value) : undefined,
 )
@@ -127,7 +149,11 @@ async function load() {
   try {
     // The instance decides which process answers when two of them run this
     // HOME + profile at once, so the page hands over the one it was opened from.
-    view.value = await api.listPlugins(homeId.value, profile.value, instanceId.value || undefined)
+    view.value = await api.listPlugins(
+      homeId.value,
+      profile.value,
+      instanceId.value || undefined,
+    )
   } catch (e) {
     Message.error(String(e))
   } finally {
@@ -142,7 +168,10 @@ watch([homeId, profile], () => void load())
 
 type Tone = 'success' | 'warning' | 'info'
 
-function applicationOutcome(application: string): { tone: Tone; label: string } {
+function applicationOutcome(application: string): {
+  tone: Tone
+  label: string
+} {
   switch (application) {
     case 'applied':
       return { tone: 'success', label: t('plugins.outcomeApplied') }
@@ -155,7 +184,10 @@ function applicationOutcome(application: string): { tone: Tone; label: string } 
     case 'cancelled':
       return { tone: 'info', label: t('plugins.outcomeCancelled') }
     default:
-      return { tone: 'warning', label: t('plugins.outcomeUnknown', { application }) }
+      return {
+        tone: 'warning',
+        label: t('plugins.outcomeUnknown', { application }),
+      }
   }
 }
 
@@ -175,11 +207,14 @@ function renderOutcome(
     const why = o.diagnostic?.trim()
     return {
       tone: 'warning',
-      message: why ? t('plugins.outcomeRefused', { reason: why }) : t('plugins.outcomeNoReason'),
+      message: why
+        ? t('plugins.outcomeRefused', { reason: why })
+        : t('plugins.outcomeNoReason'),
     }
   }
   const { tone, label } = applicationOutcome(o.application)
-  if (o.application === 'applied' && success) return { tone, message: success.applied }
+  if (o.application === 'applied' && success)
+    return { tone, message: success.applied }
   if (o.application === 'restart-required' && success) {
     return { tone, message: success.restartRequired }
   }
@@ -207,7 +242,8 @@ function reportOutcome(
   outcome: ChangeOutcome,
   success?: { applied: string; restartRequired: string },
 ) {
-  if (outcome.changed && outcome.application === 'restart-required') restartNeeded.value = true
+  if (outcome.changed && outcome.application === 'restart-required')
+    restartNeeded.value = true
   showOutcome(renderOutcome(outcome, success))
 }
 
@@ -258,12 +294,19 @@ watch(liveTick, (now, before) => {
  */
 const ownLayers = computed(() => bundles.value.filter((b) => b.removable))
 const shippedLayers = computed(() => bundles.value.filter((b) => !b.removable))
-const mountedCount = computed(() => bundles.value.filter((b) => b.enabled).length)
+const mountedCount = computed(
+  () => bundles.value.filter((b) => b.enabled).length,
+)
 
 const groups = computed(() =>
   (
     [
-      { key: 'mine', tone: 'own' as const, label: t('plugins.bundlesMineGroup'), items: ownLayers.value },
+      {
+        key: 'mine',
+        tone: 'own' as const,
+        label: t('plugins.bundlesMineGroup'),
+        items: ownLayers.value,
+      },
       {
         key: 'shipped',
         tone: 'shipped' as const,
@@ -275,9 +318,15 @@ const groups = computed(() =>
 )
 
 // Only the layers you added are open: they are the ones you came in to edit.
-const expandedGroups = ref<Record<string, boolean>>({ mine: true, shipped: false })
+const expandedGroups = ref<Record<string, boolean>>({
+  mine: true,
+  shipped: false,
+})
 function toggleGroup(key: string) {
-  expandedGroups.value = { ...expandedGroups.value, [key]: !expandedGroups.value[key] }
+  expandedGroups.value = {
+    ...expandedGroups.value,
+    [key]: !expandedGroups.value[key],
+  }
 }
 
 const bundlePending = ref<Record<string, boolean>>({})
@@ -301,7 +350,9 @@ async function toggleBundle(b: BundleItem, enabled: boolean) {
     })
     reportOutcome(outcome, {
       applied: t('plugins.bundleApplied', { name: bundleName(b) }),
-      restartRequired: t('plugins.bundleAppliedRestart', { name: bundleName(b) }),
+      restartRequired: t('plugins.bundleAppliedRestart', {
+        name: bundleName(b),
+      }),
     })
     await load()
   } catch (e) {
@@ -330,7 +381,9 @@ async function removeBundle(b: BundleItem) {
     })
     reportOutcome(outcome, {
       applied: t('plugins.bundleRemoved', { name: bundleName(b) }),
-      restartRequired: t('plugins.bundleRemovedRestart', { name: bundleName(b) }),
+      restartRequired: t('plugins.bundleRemovedRestart', {
+        name: bundleName(b),
+      }),
     })
     await load()
   } catch (e) {
@@ -350,7 +403,11 @@ async function removeBundle(b: BundleItem) {
       <div class="dl-head-text">
         <h1>{{ t('plugins.pageTitle') }}</h1>
         <p class="dl-head-sub plugin-scope">
-          <span v-if="scopeInstance" class="dl-chip" :title="scopeInstance.name">
+          <span
+            v-if="scopeInstance"
+            class="dl-chip"
+            :title="scopeInstance.name"
+          >
             {{ scopeInstance.name }}
           </span>
           <span v-if="scopeInstance" class="plugin-scope-sep">/</span>
@@ -362,7 +419,9 @@ async function removeBundle(b: BundleItem) {
       <div class="dl-head-actions">
         <button class="dl-btn dl-btn--quiet" @click="goBack">
           <DlIcon name="back" :size="13" />
-          {{ instance ? t('plugins.backToInstance') : t('plugins.backToProfiles') }}
+          {{
+            instance ? t('plugins.backToInstance') : t('plugins.backToProfiles')
+          }}
         </button>
       </div>
     </header>
@@ -405,7 +464,11 @@ async function removeBundle(b: BundleItem) {
           <DlIcon name="restart" :size="13" />
           {{ t('plugins.instanceRestart') }}
         </button>
-        <button class="dl-icon-btn" :title="t('common.close')" @click="restartNeeded = false">
+        <button
+          class="dl-icon-btn"
+          :title="t('common.close')"
+          @click="restartNeeded = false"
+        >
           <DlIcon name="close" :size="12" />
         </button>
       </div>
@@ -417,7 +480,12 @@ async function removeBundle(b: BundleItem) {
         <div class="dl-section-label">
           {{ t('plugins.bundlesTitle') }}
           <span class="dl-section-count">
-            {{ t('plugins.bundlesMountedOf', { mounted: mountedCount, total: bundles.length }) }}
+            {{
+              t('plugins.bundlesMountedOf', {
+                mounted: mountedCount,
+                total: bundles.length,
+              })
+            }}
           </span>
         </div>
 
@@ -428,9 +496,17 @@ async function removeBundle(b: BundleItem) {
 
           <template v-else>
             <section v-for="g in groups" :key="g.key" class="bundle-group">
-              <button class="group-head" type="button" @click="toggleGroup(g.key)">
-                <DlIcon name="chevron-down" :size="13" class="group-chev"
-                  :class="{ 'is-open': expandedGroups[g.key] }" />
+              <button
+                class="group-head"
+                type="button"
+                @click="toggleGroup(g.key)"
+              >
+                <DlIcon
+                  name="chevron-down"
+                  :size="13"
+                  class="group-chev"
+                  :class="{ 'is-open': expandedGroups[g.key] }"
+                />
                 {{ g.label }}
                 <span class="group-count dl-tnum">{{ g.items.length }}</span>
               </button>
@@ -438,9 +514,17 @@ async function removeBundle(b: BundleItem) {
                 <div v-if="g.items.length === 0" class="dl-row-none">
                   {{ t('plugins.bundlesNoneMine') }}
                 </div>
-                <BundleRow v-for="b in g.items" :key="b.name" :tone="g.tone" :bundle="b"
-                  :pending="!!bundlePending[b.name]" :managed="managed" :locked="locked"
-                  @toggle="(on) => toggleBundle(b, on)" @remove="removeBundle(b)" />
+                <BundleRow
+                  v-for="b in g.items"
+                  :key="b.name"
+                  :tone="g.tone"
+                  :bundle="b"
+                  :pending="!!bundlePending[b.name]"
+                  :managed="managed"
+                  :locked="locked"
+                  @toggle="(on) => toggleBundle(b, on)"
+                  @remove="removeBundle(b)"
+                />
               </template>
             </section>
           </template>
@@ -456,17 +540,35 @@ async function removeBundle(b: BundleItem) {
         <div class="dl-section-label">
           {{ t('plugins.offlineTitle') }}
           <span v-if="bundles.length" class="dl-section-count">
-            {{ t('plugins.bundlesMountedOf', { mounted: mountedCount, total: bundles.length }) }}
+            {{
+              t('plugins.bundlesMountedOf', {
+                mounted: mountedCount,
+                total: bundles.length,
+              })
+            }}
           </span>
         </div>
 
         <div class="dl-surface bundle-list">
           <div v-if="bundles.length === 0" class="dl-row-none">
-            {{ loading ? t('common.loading') : unreadable ? t('plugins.offlineUnreadable') : t('plugins.offlineEmpty') }}
+            {{
+              loading
+                ? t('common.loading')
+                : unreadable
+                  ? t('plugins.offlineUnreadable')
+                  : t('plugins.offlineEmpty')
+            }}
           </div>
           <template v-else>
-            <BundleRow v-for="b in bundles" :key="b.name" tone="own" :bundle="b"
-              :pending="false" :managed="false" :locked="false" />
+            <BundleRow
+              v-for="b in bundles"
+              :key="b.name"
+              tone="own"
+              :bundle="b"
+              :pending="false"
+              :managed="false"
+              :locked="false"
+            />
           </template>
         </div>
 
@@ -475,7 +577,9 @@ async function removeBundle(b: BundleItem) {
              and the instance is not 「没在跑」 — so the note's 「启动实例后」 is the
              one action this state must not offer. The banner above says what
              happened and how to leave it. -->
-        <p v-if="!unreadable" class="bundle-hint">{{ t('plugins.offlineNote') }}</p>
+        <p v-if="!unreadable" class="bundle-hint">
+          {{ t('plugins.offlineNote') }}
+        </p>
       </section>
     </template>
   </div>

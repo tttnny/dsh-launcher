@@ -6,8 +6,13 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 
 const version = process.argv[2]
-if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(version)) {
-  console.error(`usage: node ci/set-version.mjs <semver> (got "${version ?? ''}")`)
+if (
+  !version ||
+  !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(version)
+) {
+  console.error(
+    `usage: node ci/set-version.mjs <semver> (got "${version ?? ''}")`,
+  )
   process.exit(1)
 }
 
@@ -42,7 +47,9 @@ if (!pkgName) {
 }
 const lockPath = 'src-tauri/Cargo.lock'
 const lock = readFileSync(lockPath, 'utf8')
-const blockRe = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${pkgName}"\\r?\\nversion = ")[^"]+"`)
+const blockRe = new RegExp(
+  `(\\[\\[package\\]\\]\\r?\\nname = "${pkgName}"\\r?\\nversion = ")[^"]+"`,
+)
 if (!blockRe.test(lock)) {
   console.error(`${lockPath}: workspace package entry not found`)
   process.exit(1)

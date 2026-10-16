@@ -17,7 +17,8 @@ const props = withDefaults(
 const SPIN_MS = 700
 // Reduced-motion users get no spin, so holding the button for a full turn would
 // read as a dead click rather than feedback: settle as soon as the work does.
-const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+const reduceMotion =
+  window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 const running = ref(false)
 
 async function onClick() {
