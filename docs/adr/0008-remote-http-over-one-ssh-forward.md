@@ -13,8 +13,9 @@ HTTP + `?token=`，向实例自己的插件管理接口发 JSON-RPC，鉴权 coo
 **每个远程主机一条 ssh 端口转发，本机浏览器与插件客户端都从这条转发走。**
 
 1. 按主机合并成一条转发进程：多个实例共用一条 ssh（复用连接），每个运行中的实例一条
-   `-L 127.0.0.1:<本地端口>:<远端 URL 的 host:port>`。本地侧一律只绑回环地址。
-   转发目标就是运行记录里那个 URL 的 `host:port`，远端侧原样照搬——不猜 DSH 绑在哪。
+   `-L 127.0.0.1:<本地端口>:<远端 URL 的 host:port>`。本地侧一律只绑回环地址——把
+   `127.0.0.1:` 显式写进 `-L`，不靠对端的 `GatewayPorts` 配置。转发目标就是运行记录里
+   那个 URL 的 `host:port`，远端侧原样照搬——不猜 DSH 绑在哪。
 2. 本地端口默认取**与远端相同的端口号**：这样界面上的地址就是那台机器上真实存在的地址，
    浏览器地址跨次稳定。该端口在本机被占、或低于 1024（用户态绑不了，而实例的端口由它 profile
    的 lan-bind 决定，钉在 80 也合法）时改用一个本机空闲端口——**一致不是技术必需**：
@@ -44,6 +45,23 @@ HTTP + `?token=`，向实例自己的插件管理接口发 JSON-RPC，鉴权 coo
   运行表是两个东西，别把它们当成同一份）。
 - 隧道断开（网络断、待机、服务器重启）与「DSH 拒绝了这个操作」必须给出不同的原因，否则
   用户会被引去重装插件。
+- 启动器自己那条 ssh 连接的控制 socket 有 86 字节的预算。ssh 不直接绑 `ControlPath`：它先绑
+  `<ControlPath>.<16 个随机字符>`，再硬链接到那个名字，所以 104 字节的 Unix socket 地址里留
+  给启动器的只有 86（macOS 默认数据目录算出来是 89 字节，ssh 直接拒绝；实测 86 可以、87 报
+  `too long for Unix domain socket`）。因此 `ssh::socket_path` 能放进数据目录就放，放不下就退
+  到 `$HOME/.dsh-launcher-ssh/`，名字里带上数据目录与 ssh 目标两样东西的哈希——一个 socket
+  就是一条 ssh 连接，两份配置不能共用一条。`$TMPDIR` 不行（`/var/folders/…` 一样长），`/tmp`
+  不行（别人可以先在那个位置上建 socket）。
+- `ssh -O forward` 是发给 master 的请求、不会自己建连接，所以 `SshTransport::open_forward` 先把
+  连接带起来。退出时 `tunnel::close_all_blocking` 给每条转发 `-O cancel`、每台主机再 `-O exit`：
+  撤掉的只是启动器自己那条连接，用户自己的连接在别的 socket 上，一个字节都不碰。
+- 远端实例的运行表条目里 `url` 存本机可达的地址、`RemoteRun.remote_url` 存远端原始位置；写这两样
+  的地方只有两处（实例就绪的 `follow_remote_instance` 与认领的 `adopt_remote_process`），都走
+  `process::local_address_for`（转发建不起来时它给 `None`：代价是地址，不是实例）。把远端原始
+  地址直接填进 `url`，会让本机同端口的别的服务拿到 token，也会让「打开」与托盘以为实例没就绪。
+- 「打开」、托盘与插件页取地址都走 `process::reachable_url_for`：它把那条转发重新确认一遍
+  （master 被 `ControlPersist` 收走时转发跟着消失，Mac 睡一觉就够）再返回本机可达的地址，
+  本机实例则原样返回自己的 URL。
 
 ## 备选方案
 

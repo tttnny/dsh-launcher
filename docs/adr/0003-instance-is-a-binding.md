@@ -20,7 +20,9 @@
 **实例是「版本 × DSH_HOME × Profile」的一条绑定记录，可以单独创建、单独删除。**
 
 - `create_instance(name, version_id, home_id)`：只绑定已安装的版本；不安装、不建目录、
-  不碰任何 DSH_HOME 的内容。同名拒绝。
+  不碰任何 DSH_HOME 的内容。同一台主机上同名拒绝——名字只在自己那台机器上需要不重名
+  （`create_instance`、`update_instance` 与装版本的 `start_create_instance_task` 三处
+  同一条规则），两台机器可以各有一个叫 `web` 的实例，所以行、托盘与插件链接都带上主机。
 - `delete_instance(id)`：先停进程，再删记录，并清掉指向它的 `last_instance_id`。
   版本记录、DSH_HOME 记录与磁盘目录全部保留。
 - 专属图标（`<HOME>/icons/<id>.png`，启动器自己写的那份文件）随实例一起删，
