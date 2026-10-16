@@ -36,20 +36,12 @@ jobs:
           key: macos-quality
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
-      # Advisory only: these sources are hand-formatted (long lines, and
-      # signatures wrapped by hand that rustfmt would re-join), so `--check`
-      # reports diffs across most files. Gating on it would block every
-      # release until a repo-wide reformat lands, and that reformat would
-      # collide with the parallel worktrees this repo is developed in.
-      - name: Format check (advisory)
-        continue-on-error: true
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - name: Clippy (deny warnings)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace --locked
-      - name: Frontend build
-        run: pnpm build
+      # One step, because the gate list lives in ci/verify.sh: fmt, clippy, the
+      # Rust tests, the manifest sync check, every ci/*.test.mjs (found by glob,
+      # so a new suite is picked up without editing anything here) and the
+      # frontend build. A developer runs the same line locally.
+      - name: Verify
+        run: pnpm verify
 
   integration:
     name: Integration checks
@@ -63,25 +55,13 @@ jobs:
           # does not try to locate a pnpm executable.
           package-manager-cache: false
       # This project has no container-backed protocol tests; the isolated
-      # Linux job runs the source-level contract tests and the manifest
-      # synchronization check instead. All of them only read files, so they
-      # run on any platform.
-      - name: Version synchronization
-        run: node ci/check-versions.mjs
-      - name: Release-note classifier tests
-        run: node --test ci/release-notes.test.mjs
-      - name: Bump-version tests
-        run: node --test ci/bump-version.test.mjs
-      - name: API contract tests
-        run: node --test ci/api-contract.test.mjs
-      - name: Setup-page guidance tests
-        run: node --test ci/setup-guidance.test.mjs
-      - name: Bulk-scope tests
-        run: node --test ci/instances-bulk.test.mjs
-      - name: Remote-command tests
-        run: node --test ci/remote-command.test.mjs
-      - name: Store status tests
-        run: node --test ci/store-status.test.mjs
+      # Linux job runs the checks that need no dependencies — the manifest
+      # synchronization check and the source-level contract tests. Which
+      # checks those are lives in ci/verify.sh too, so this job does not keep
+      # a second copy of the list (and a new ci/*.test.mjs is picked up there
+      # by glob).
+      - name: Verify (checks that need no dependencies)
+        run: ./ci/verify.sh --source-only
 
   prepare:
     needs: [quality, integration]
