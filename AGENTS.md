@@ -85,10 +85,13 @@ token）决定，**不要**把 `adopted` 当拒绝理由（它只表示「停止
 
 **「主机不可达」是第五个状态，它不是「已停止」（契约，见 ADR-0007）**：
 `InstanceState::Unreachable` 表示「启动器现在没法知道这台机器上这个实例的状态」。加一个
-状态值要**四处一起改**：`src/api/types.ts` 的联合、`home.status.*` 的 i18n 条目、
-`src/styles/index.scss` 里 `.dl-status` 的 `is-*` 变体、以及 `src/stores/launcher.ts` 的
-`statusOf`——少改一处这个状态就渲染成别的东西，而「主机不可达」渲染成「已停止」会让用户去
-服务器上起第二个 DSH。启动时那一遍扫描还没问到的远端主机记在 `AppState.remote_scan` 里，
+状态值要**三处一起改**：`src/api/types.ts` 的联合、`home.status.*` 的 i18n 条目（中英两份）、
+`src/styles/index.scss` 里 `.dl-status` 的 `is-*` 变体——少改一处这个状态就渲染成别的东西，
+而「主机不可达」渲染成「已停止」会让用户去服务器上起第二个 DSH。**只有「要离开表格」的终态
+才还要动第四处**：`src/stores/launcher.ts` 的 `applyStatus` 只认 `stopped` / `exited` 两个
+（它们要删掉那一行），其余状态一律原样透传，所以新加一个会被推送的状态不必去 store 里找地方
+提它。前三处由 `ci/instance-state.test.mjs` 盯着。启动时那一遍扫描还没问到的远端主机记在
+`AppState.remote_scan` 里，
 `process::list_statuses` 对它报 `starting`，**绝不报 `stopped`**；主机状态
 （`AppState.host_statuses`）一旦是 `unreachable`，它的实例（包括本会话里已经认为在跑的
 那些）就报 `unreachable`，页面给的是「重试」（`api.refreshInstanceStatus`），不是
