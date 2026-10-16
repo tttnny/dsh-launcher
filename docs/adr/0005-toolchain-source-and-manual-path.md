@@ -53,7 +53,7 @@ nvm / fnm / PNPM_HOME / Homebrew / 官方安装脚本的目录布局，逐个跑
 
 ## 追加：远程主机
 
-远程主机沿用同一套模型（用户指定 → 系统环境变量 → 常见安装目录），补四条：
+远程主机沿用同一套模型（用户指定 → 系统环境变量 → 常见安装目录），补五条：
 
 1. 探测经 ssh 在那台主机上跑**交互式登录 shell**（`bash -ilc`，与本机读 PATH 是同一个形状）
    读 `PATH`，输出用分隔标记包住并设超时——Linux 上把 brew、miniconda 这类目录加进 `PATH` 的
@@ -68,6 +68,10 @@ nvm / fnm / PNPM_HOME / Homebrew / 官方安装脚本的目录布局，逐个跑
    `~/.linuxbrew/bin`）、nvm / fnm 的版本目录、pnpm 官方脚本的目录（`~/.local/share/pnpm`）、
    `~/.local/bin`、`/usr/local/bin`。这一条不是可有可无的兜底：在只有交互式 shell 才配 `PATH`
    的机器上，它是唯一还能把工具找回来的地方。
+5. 结论与用户选择都按主机分开：探测结论存在主机记录里（`Host.toolchain`），进程内的
+   `PATH` 缓存与远程探测缓存都按主机 id 分桶——一个槽会让两台机器互相污染。用户指定走
+   `Host.toolchain_overrides`，`set_toolchain_override` 是唯一的写入通道（`SettingsPatch`
+   不给这条路），指定的文件失效时退回自动探测，但如实把它带回页面提示。
 
 第 2 条只对远程生效，本机维持「只告警不阻止」：本机是用户自己的桌面，他有上下文，也有动手
 改的自由；远程是选错就白跑一趟的地方。真实例子：一台远程主机上登录 shell 先撞到 apt 装的

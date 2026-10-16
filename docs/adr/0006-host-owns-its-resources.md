@@ -47,6 +47,24 @@ DSH_HOME / Profile / 实例」的清单要在多台机器上各有一份，而�
 - 只在本地记事的代价：换一台 Mac 打开启动器就看不到这些远程记录。这是明知而受的——
   远端能查的东西（装了哪些版本、有没有进程在跑）都能从远端查回来，留在本地的只有「用户
   给它起了什么名字」这类书签性质的东西。
+- 本机之外的主机，启动器不碰本机的文件系统：`Host::local_paths_only` 是那条规则。要在远端建
+  或删就走传输层（`remote.rs` 里那些脚本）：建 DSH_HOME 由那台机器展开 `~`、按文本 settle
+  `..`、把目录建出来并确认可写，拿回来的绝对路径才写进记录（`remote::ensure_home_path`，
+  一句话一份脚本）；远端 DSH_HOME 的 Profile 读写、问出远端已有的 `~/.dsh` 也全部经那些脚本。
+  `cleanup_orphan_homes` 只判本机：「这个目录不存在」这句话，本机的 `exists()` 只能对这台 Mac
+  说。
+- 一台机器上一个全新的 DSH_HOME 要先**在那台机器上**跑一次 DSH：`profiles/web` 是 DSH 第一次
+  在一个 HOME 里运行时才建出来的，不先跑一次，那个 HOME 下一个 Profile 都选不出来，「启动」点了
+  不会动。本机那份由安装任务补（`tasks::ensure_web_profile_template`），远端由
+  `process::ensure_remote_web_profile_template` 做同一件事：起一次
+  `node bin.js --profile web --host 127.0.0.1 --port 0`、等它打出 URL、按 pid 核对后停掉、把
+  `profiles/web` 复制成 `profiles/__temp__`、再清掉复制件里那次启动钉住的端口。判据是「那个
+  HOME 下一个 Profile 都没有」，不是「这是启动器建的 HOME」——已经有 Profile 的 HOME 一个字节
+  都不碰。
+- 远端安装的进度与日志读的是那台机器上的日志文件，等新输出的那一秒是在远端度过的（一次 ssh 顶
+  一段输出，不是一秒一次）；脱离会话的命令没有 `wait` 可用，退出码由包装脚本写进同一份日志。
+  取消要停那台机器上的**进程组**（`stop_pid` 只停组长，会留下占着 store 锁的子进程），并等
+  那台机器确认进程真的没了才算「已取消」。
 
 ## 备选方案
 
