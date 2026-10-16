@@ -267,10 +267,10 @@ DSH_HOME 打不开，能给的是路径与一条命令；终端与日志两个�
 
 ## 日常开发
 
-- 提交前跑 `pnpm verify`：它聚合 clippy、Rust 测试、版本检查、全部 `ci/*.test.mjs` 与
-  前端构建，与 CI 同一份名单（名单只有这一处，别在这里再抄一遍）。想单独跑一个门禁，
-  用对应的 `pnpm test:*` 脚本或
-  `cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings`。
+- 提交前跑 `pnpm verify`：它聚合 `cargo fmt --check`、clippy、Rust 测试、版本同步、全部
+  `ci/*.test.mjs`（通配符发现）与前端构建，与 CI 同一份名单——名单只有这一处，
+  `ci/gate-list.test.mjs` 会盯住它没被抄成第二份。合并之间想快过一次用 `pnpm verify:quick`
+  （只跑 clippy 与 Rust 测试）；想单独跑一个门禁，用对应的 `pnpm test:*` 脚本。
 - 新增 Tauri 命令要同时改三处，否则 `pnpm test:api-contract` 会失败：
   `src/api/index.ts`（interface）、`src/api/mock.ts`（switch case）、
   `src-tauri/src/lib.rs`（`generate_handler!`）。**参数拼写也是契约**：
