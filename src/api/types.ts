@@ -124,6 +124,12 @@ export interface DshVersion {
    * version anyone can start.
    */
   bin_ready: boolean
+  /**
+   * Whether this Mac's `~/.local/bin/dsh` runs this version. Only 本机 can say
+   * so: the link is on this machine, and a version on a server is not what
+   * magpie here would run.
+   */
+  path_linked: boolean
 }
 
 export interface DshInstance {

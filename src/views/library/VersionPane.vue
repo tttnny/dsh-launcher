@@ -5,7 +5,7 @@ import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { installKey, useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
-import type { RemoteVersion, TaskInfo } from '@/api/types'
+import type { DshVersion, RemoteVersion, TaskInfo } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
 import DlRefreshButton from '@/components/DlRefreshButton.vue'
@@ -181,6 +181,28 @@ const removeAction = useAction(
 
 const usedByCount = (versionId: string) =>
   store.instancesOfVersion(versionId).length
+
+// --- PATH registration ---------------------------------------------------------
+
+/** The link lives on this Mac, so only 本机 has the action. */
+const isLocalHost = computed(() => !!store.currentHost?.builtin)
+
+const pathLinkAction = useAction(
+  async (v: DshVersion) => {
+    const linked = v.path_linked
+    const hostId = store.currentHostId
+    await api.setVersionPathLink(linked ? null : v.id, hostId)
+    await store.refreshVersions(hostId)
+    return { linked, version: v.version }
+  },
+  {
+    key: (v) => v.id,
+    success: ({ linked, version }) =>
+      t(linked ? 'versions.pathLinkRemoved' : 'versions.pathLinkAdded', {
+        version,
+      }),
+  },
+)
 </script>
 
 <template>
@@ -226,12 +248,34 @@ const usedByCount = (versionId: string) =>
             >
               {{ t('versions.binMissing') }}
             </span>
+            <span
+              v-if="v.path_linked"
+              class="dl-tag dl-tag--muted"
+              :title="t('versions.pathLinkHint')"
+            >
+              {{ t('versions.pathLinkTag') }}
+            </span>
           </div>
           <span class="ver-path dl-mono" :title="v.dir">{{ v.dir }}</span>
         </div>
         <span class="ver-used dl-tnum">{{
           t('versions.usedBy', { count: usedByCount(v.id) })
         }}</span>
+        <button
+          v-if="isLocalHost"
+          class="dl-btn dl-btn--quiet"
+          :title="t('versions.pathLinkHint')"
+          :disabled="
+            (!v.path_linked && !v.bin_ready) || !!pathLinkAction.busy[v.id]
+          "
+          @click="pathLinkAction.run(v)"
+        >
+          {{
+            v.path_linked
+              ? t('versions.pathLinkRemove')
+              : t('versions.pathLinkAdd')
+          }}
+        </button>
         <a-popconfirm
           :content="
             t('versions.confirmDeleteVersion', {

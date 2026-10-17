@@ -222,6 +222,12 @@
     "installing": "安装中",
     "retryInstall": "重试",
     "installCancelled": "已取消，那台机器上的安装进程已停止",
+    "pathLinkAdd": "登记 dsh",
+    "pathLinkRemove": "取消登记",
+    "pathLinkTag": "已在 PATH",
+    "pathLinkHint": "在本机的 ~/.local/bin 建立 dsh 命令，让 magpie、终端等按命令名查找 dsh 的程序找到这个版本。同一时间只能登记一个版本。",
+    "pathLinkAdded": "版本 {version} 已登记为 dsh",
+    "pathLinkRemoved": "版本 {version} 的 dsh 登记已取消",
     "hostLocal": "本机"
   },
   "settings": {

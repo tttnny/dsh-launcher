@@ -115,6 +115,14 @@ export const api = {
   removeVersion: (id: string, hostId?: string) =>
     call<void>('remove_version', { id, hostId }),
   /**
+   * Registers one of this Mac's versions as `dsh` on PATH, or with `id` null
+   * removes the launcher's link. The link is `~/.local/bin/dsh`: the folder
+   * magpie adds to its own PATH and a terminal normally has. Only 本机 — a
+   * version on a server is not what magpie here would run.
+   */
+  setVersionPathLink: (id: string | null, hostId?: string) =>
+    call<void>('set_version_path_link', { id, hostId }),
+  /**
    * Downloads & installs a DSH version **on one host**, auto-creates dedicated
    * HOME, and registers the 1:1 instance. `hostId` absent means 本机.
    *

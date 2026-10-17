@@ -568,6 +568,10 @@ pub struct DshVersionView {
     /// version anyone can start — and only the machine that owns the directory
     /// can say which it is ([`crate::launch::version_bin`] is the layout).
     pub bin_ready: bool,
+    /// Whether `~/.local/bin/dsh` on this Mac runs this version. Always false
+    /// for a remote host: the link is this machine's, and a version on a server
+    /// is not what magpie here would run.
+    pub path_linked: bool,
 }
 
 #[tauri::command]
@@ -576,6 +580,56 @@ pub async fn list_versions(
     host_id: Option<String>,
 ) -> Result<Vec<DshVersionView>, String> {
     list_versions_for(&state, host_id.as_deref()).await
+}
+
+/// Puts one version on this Mac's PATH as `dsh`, or with `id` absent takes the
+/// launcher's link out. Only 本机: the link lives in this machine's
+/// `~/.local/bin`, and that is the folder magpie looks in for the command.
+#[tauri::command]
+pub async fn set_version_path_link(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    host_id: Option<String>,
+) -> Result<(), String> {
+    let home = crate::pathlink::home_dir()?;
+    set_version_path_link_at(&state, &home, id, host_id.as_deref())
+}
+
+pub(crate) fn set_version_path_link_at(
+    state: &AppState,
+    home: &std::path::Path,
+    id: Option<String>,
+    host_id: Option<&str>,
+) -> Result<(), String> {
+    let versions = {
+        let cfg = state.config.lock().unwrap();
+        let host = crate::config::resolve_host(&cfg, host_id)?.clone();
+        if !host.builtin {
+            return Err("只能在本机登记 dsh：magpie 和终端都在本机查找这个命令".to_string());
+        }
+        cfg.versions
+            .iter()
+            .filter(|v| v.host_id == host.id)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let dirs: Vec<&std::path::Path> = versions.iter().map(|v| v.dir.as_path()).collect();
+    match id {
+        Some(id) => {
+            let version = versions
+                .iter()
+                .find(|v| v.id == id)
+                .ok_or_else(|| "版本不存在".to_string())?;
+            if !crate::launch::version_bin_ready(&version.dir) {
+                return Err(format!(
+                    "DSH {} 的启动文件不在，先把它装好再登记",
+                    version.version
+                ));
+            }
+            crate::pathlink::register(home, &version.dir, &dirs)
+        }
+        None => crate::pathlink::unregister(home, &dirs),
+    }
 }
 
 /// One host's installed versions.
@@ -588,6 +642,18 @@ pub async fn list_versions(
 pub(crate) async fn list_versions_for(
     state: &AppState,
     host_id: Option<&str>,
+) -> Result<Vec<DshVersionView>, String> {
+    let home = crate::pathlink::home_dir().ok();
+    list_versions_for_at(state, host_id, home.as_deref()).await
+}
+
+/// `home` is where `~/.local/bin` is. A test passes its own; a machine whose
+/// home cannot be read simply reports no registration rather than failing the
+/// whole list.
+pub(crate) async fn list_versions_for_at(
+    state: &AppState,
+    host_id: Option<&str>,
+    home: Option<&std::path::Path>,
 ) -> Result<Vec<DshVersionView>, String> {
     let (host, data_dir, records) = {
         let cfg = state.config.lock().unwrap();
@@ -613,12 +679,23 @@ pub(crate) async fn list_versions_for(
                 .to_string(),
             host_id: v.host_id.clone(),
             bin_ready: false,
+            path_linked: false,
         })
         .collect();
 
     if host.builtin {
         for view in &mut listed {
             view.bin_ready = crate::launch::version_bin_ready(&view.dir);
+        }
+        let linked = home.and_then(|home| {
+            let state = crate::pathlink::inspect(home);
+            let dirs: Vec<&std::path::Path> = listed.iter().map(|v| v.dir.as_path()).collect();
+            crate::pathlink::linked_to(&state, &dirs)
+        });
+        if let Some(linked) = linked {
+            for view in &mut listed {
+                view.path_linked = crate::config::paths_equal(&view.dir, &linked);
+            }
         }
         return Ok(listed);
     }
@@ -895,6 +972,14 @@ pub async fn remove_version(
             Err(e) => crate::log_warn!("无法确定版本 {} 的专属 DSH_HOME：{e}", version.version),
         }
         return Ok(());
+    }
+
+    // The PATH registration is this Mac's; deleting the version withdraws its
+    // own link, never another version's.
+    if let Ok(home) = crate::pathlink::home_dir() {
+        if let Err(e) = crate::pathlink::unlink_version(&home, &version.dir) {
+            crate::log_warn!("删除版本 {} 的 dsh 登记失败，忽略: {e}", version.version);
+        }
     }
 
     // Best-effort removal of the install directory.
@@ -2779,6 +2864,62 @@ mod tests {
             listed[0].dedicated_home,
             dedicated_home_path(data.path(), "0.1.0-rc.6").to_string_lossy()
         );
+    }
+
+    /// The PATH registration is this Mac's: one version at a time, 本机 only,
+    /// and the list names exactly the version `~/.local/bin/dsh` runs.
+    #[test]
+    fn a_local_version_can_be_registered_on_path_and_a_remote_one_cannot() {
+        let data = ScratchDir::new("path-link");
+        let home = data.path().join("home");
+        let ready = data.path().join("versions/0.2.1-rc.1");
+        let bin = crate::launch::version_bin(&ready);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let remote = server_host("host-lab", None);
+
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), remote.clone()],
+            versions: vec![
+                crate::config::DshVersion {
+                    id: "v-local".into(),
+                    version: "0.2.1-rc.1".into(),
+                    dir: ready.clone(),
+                    host_id: crate::config::LOCAL_HOST_ID.into(),
+                },
+                crate::config::DshVersion {
+                    id: "v-remote".into(),
+                    version: "0.2.1-rc.1".into(),
+                    dir: "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.1".into(),
+                    host_id: remote.id.clone(),
+                },
+            ],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+
+        let err =
+            set_version_path_link_at(&state, &home, Some("v-remote".into()), Some(&remote.id))
+                .unwrap_err();
+        assert!(err.contains("只能在本机"), "{err}");
+
+        set_version_path_link_at(&state, &home, Some("v-local".into()), None).unwrap();
+        let listed = block_on(list_versions_for_at(&state, None, Some(&home))).unwrap();
+        assert!(listed[0].path_linked, "登记的版本要标出来");
+        assert!(
+            listed.iter().all(|v| v.id != "v-remote" || !v.path_linked),
+            "别的机器上的版本不会被本机的链接命中"
+        );
+
+        // Unregistering clears the same list entry it just marked.
+        set_version_path_link_at(&state, &home, None, None).unwrap();
+        let listed = block_on(list_versions_for_at(&state, None, Some(&home))).unwrap();
+        assert!(!listed[0].path_linked);
     }
 
     /// The board shows every host's instances by default, and that is an

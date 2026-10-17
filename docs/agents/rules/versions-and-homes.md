@@ -41,6 +41,23 @@ HOME 下一个 Profile 都选不出来，「启动」点了不会动。**判据�
 `installKey(hostId, version)`）：两台机器可以同时装同一个版本，只按版本索引会让它们的
 进度互相覆盖。
 
+## 登记 dsh 到 PATH 只在本机
+
+magpie 这类工具不进版本目录找 CLI，只按命令名在 PATH（以及 `~/.local/bin` 等常见目录）
+里找。所以「登记 dsh」是在 `~/.local/bin/dsh` 建一条指向该版本 CLI 的链接：版本目录
+不在任何 PATH 上，而 `~/.local/bin` 是 magpie 会补进自己 PATH 的目录。规则有三条：
+
+- **只对本机发生**：链接在本机，远程版本的按钮不出现，命令也只接受本机版本。
+- **同一时间只有一个版本**：登记另一个版本会替换掉启动器自己建的链接。`~/.local/bin/dsh`
+  已经是用户自己装的命令时（真文件、指向别处的链接）一律不覆盖、不删除，只把原因
+  返回界面。CLI 自己不可执行时写一个带 `# dsh-launcher path link:` 标记的包装脚本，
+  识别与撤掉都认这个标记。
+- **删版本时只撤自己的链接**：`pathlink::unlink_version` 只在链接指向这个版本目录时
+  删除；别的版本或用户的链接不动。
+
+`list_versions` 的 `path_linked` 由本机读 `~/.local/bin/dsh` 得出，远端恒为 false：
+那台机器上的 `dsh` 不是本机 magpie 会运行的命令。
+
 ## 插件页只管理补丁层
 
 页面做的就是三件事——列层、开关、卸载，都走 DSH 原生方法（`setBundleEnabled` /

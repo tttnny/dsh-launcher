@@ -42,6 +42,8 @@ interface MockDb {
   instances: DshInstance[]
   settings: LauncherSettings
   running: Record<string, InstanceStatus>
+  /** The version `~/.local/bin/dsh` runs here, or null for none. */
+  path_link: string | null
 }
 
 /** The built-in host the browser preview always has. */
@@ -120,6 +122,7 @@ function seedDb(): MockDb {
         dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.6`,
         dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.6`,
         bin_ready: true,
+        path_linked: true,
         host_id: LOCAL_HOST_ID,
       },
       {
@@ -128,6 +131,7 @@ function seedDb(): MockDb {
         dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.5`,
         dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.5`,
         bin_ready: true,
+        path_linked: false,
         host_id: LOCAL_HOST_ID,
       },
       {
@@ -136,6 +140,7 @@ function seedDb(): MockDb {
         dir: '/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6',
         dedicated_home: '/home/demo/.local/share/dsh-launcher/homes/0.1.0-rc.6',
         bin_ready: true,
+        path_linked: false,
         host_id: REMOTE_HOST_ID,
       },
     ],
@@ -186,6 +191,7 @@ function seedDb(): MockDb {
       proxy_apply_dsh: false,
     },
     running: {},
+    path_link: 'v-rc6',
   }
 }
 
@@ -209,7 +215,10 @@ function loadDb(): MockDb {
         // Bin readiness is what the machine answers; a version stored before
         // the field existed was installed by the launcher, so it is ready.
         v.bin_ready = v.bin_ready ?? true
+        // The PATH registration is newer than the stored sample versions.
+        v.path_linked = v.path_linked ?? false
       }
+      db.path_link = db.path_link ?? null
       // Backfill host ownership, which every record gained at once: whatever
       // was stored before the field existed can only belong to 本机.
       // A preview stored before remote hosts existed knows only 本机; it gains
@@ -971,7 +980,11 @@ export async function mockCall<T>(
       refuseUnreachable(host)
       return db.versions
         .filter((v) => (v.host_id ?? LOCAL_HOST_ID) === host.id)
-        .map((v) => ({ ...v, bin_ready: v.bin_ready ?? true })) as T
+        .map((v) => ({
+          ...v,
+          bin_ready: v.bin_ready ?? true,
+          path_linked: host.builtin && db.path_link === v.id,
+        })) as T
     }
     case 'fetch_available_versions': {
       const host = hostOf(db, hostIdArg(cmd, args))
@@ -1175,6 +1188,7 @@ export async function mockCall<T>(
               dedicatedPath ??
               `${hostDir}${sepOf(hostDir)}homes${sepOf(hostDir)}${version}`,
             bin_ready: true,
+            path_linked: false,
             host_id: host.id,
           }
           cur.versions.push(ver)
@@ -1275,6 +1289,27 @@ export async function mockCall<T>(
             ),
         )
       }
+      // The version's PATH registration goes with it.
+      if (db.path_link === id) db.path_link = null
+      saveDb(db)
+      return undefined as T
+    }
+    case 'set_version_path_link': {
+      const host = hostOf(db, hostIdArg(cmd, args))
+      refuseUnreachable(host)
+      if (!host.builtin)
+        fail('只能在本机登记 dsh：magpie 和终端都在本机查找这个命令')
+      const id = args?.id == null ? null : String(args.id)
+      if (id === null) {
+        db.path_link = null
+        saveDb(db)
+        return undefined as T
+      }
+      const version = db.versions.find(
+        (v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id,
+      )
+      if (!version) fail('版本不存在')
+      db.path_link = id
       saveDb(db)
       return undefined as T
     }

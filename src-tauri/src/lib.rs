@@ -6,6 +6,7 @@ mod doctor;
 mod icons;
 mod launch;
 mod native;
+mod pathlink;
 mod plugins;
 mod process;
 mod profile;
@@ -269,6 +270,7 @@ pub fn run() {
             commands::list_versions,
             commands::fetch_available_versions,
             commands::remove_version,
+            commands::set_version_path_link,
             tasks::start_install_version_task,
             tasks::list_tasks,
             tasks::remove_task,
