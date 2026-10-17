@@ -629,7 +629,6 @@ function mockNewId(prefix: string): string {
  */
 const SNAKE_CASE_COMMANDS = new Set([
   'start_install_version_task',
-  'set_instance_port',
   'list_profiles',
   'create_profile',
   'copy_profile',
@@ -1355,22 +1354,19 @@ export async function mockCall<T>(
       ) {
         fail('同名实例已存在')
       }
-      // The binding's host is the record's, not the form's.
-      const updated = { ...input, host_id: existing.host_id }
+      // The binding's host is the record's, not the form's. The port follows
+      // the same rule as the backend: out of range means "random".
+      const port =
+        typeof input.port === 'number' &&
+        Number.isInteger(input.port) &&
+        input.port >= 1 &&
+        input.port <= 65535
+          ? input.port
+          : null
+      const updated = { ...input, port, host_id: existing.host_id }
       db.instances = db.instances.map((i) => (i.id === input.id ? updated : i))
       saveDb(db)
       return updated as T
-    }
-    case 'set_instance_port': {
-      const id = String(args?.instance_id)
-      const raw = args?.port
-      const n = typeof raw === 'number' ? raw : NaN
-      const port = Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
-      const inst = db.instances.find((i) => i.id === id)
-      if (!inst) fail('实例不存在')
-      inst.port = port
-      saveDb(db)
-      return inst as T
     }
     case 'list_profiles': {
       const homeId = String(args?.home_id)

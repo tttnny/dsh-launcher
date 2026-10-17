@@ -279,7 +279,6 @@ pub fn run() {
             commands::create_instance,
             commands::delete_instance,
             commands::update_instance,
-            commands::set_instance_port,
             commands::list_profiles,
             commands::create_profile,
             commands::copy_profile,

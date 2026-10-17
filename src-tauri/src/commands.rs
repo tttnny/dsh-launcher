@@ -1185,37 +1185,15 @@ pub fn update_instance(
     if cfg.instances[pos].host_id != host.id {
         return Err("实例不属于该主机".to_string());
     }
-    // The icon is managed by set/clear_instance_icon, the port by
-    // set_instance_port and the owning host by the host a record was created
-    // on, not by this form payload; preserve whatever is currently stored (the
-    // frontend spreads a possibly stale instance).
+    // The icon is managed by set/clear_instance_icon and the owning host by the
+    // host a record was created on, not by this form payload; preserve whatever
+    // is currently stored (the frontend spreads a possibly stale instance).
     updated.icon = cfg.instances[pos].icon.clone();
-    updated.port = cfg.instances[pos].port;
     updated.host_id = cfg.instances[pos].host_id.clone();
+    // Empty / out-of-range input (0, negative, > 65535, non-integer) means
+    // "random" — stored as `None`, so launch passes `--port 0`.
+    updated.port = updated.port.filter(|p| (1..=65535).contains(p));
     cfg.instances[pos] = updated.clone();
-    save_state(&state, &cfg)?;
-    Ok(updated)
-}
-
-/// Sets an instance's preferred web port (issue #21). Empty / out-of-range
-/// input (0, negative, > 65535, non-integer) means "random" — stored as
-/// `None`, so launch passes `--port 0`.
-#[tauri::command(rename_all = "snake_case")]
-pub fn set_instance_port(
-    state: State<'_, AppState>,
-    instance_id: String,
-    port: Option<i64>,
-) -> Result<crate::config::DshInstance, String> {
-    let port = match port {
-        Some(p) if (1..=65535).contains(&p) => Some(p as u16),
-        _ => None,
-    };
-    let mut cfg = state.config.lock().unwrap();
-    let Some(inst) = cfg.instances.iter_mut().find(|i| i.id == instance_id) else {
-        return Err("实例不存在".to_string());
-    };
-    inst.port = port;
-    let updated = inst.clone();
     save_state(&state, &cfg)?;
     Ok(updated)
 }

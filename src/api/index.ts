@@ -151,9 +151,6 @@ export const api = {
     call<void>('delete_instance', { id, hostId: hostId ?? null }),
   updateInstance: (input: DshInstance, hostId?: string | null) =>
     call<DshInstance>('update_instance', { input, hostId: hostId ?? null }),
-  /** Sets the instance's web port; null or out-of-range = random port. */
-  setInstancePort: (instanceId: string, port: number | null) =>
-    call<DshInstance>('set_instance_port', { instance_id: instanceId, port }),
 
   listProfiles: (homeId: string) =>
     call<string[]>('list_profiles', { home_id: homeId }),

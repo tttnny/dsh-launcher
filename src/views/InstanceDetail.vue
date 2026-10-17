@@ -123,8 +123,8 @@ function retryHost() {
 
 /**
  * The form's identity, used to tell "nothing to save" from "the user changed
- * something". Port is not part of it: the port field has its own apply button
- * and is not written by Save.
+ * something". Everything the Save button writes belongs here — a field missing
+ * from it renders as an edit that cannot be saved.
  */
 function formSnapshot(): string {
   return JSON.stringify([
@@ -132,6 +132,7 @@ function formSnapshot(): string {
     versionId.value ?? '',
     homeId.value ?? '',
     defaultProfile.value ?? '',
+    portInput.value.trim(),
     envRows.value
       .filter((r) => r.key.trim() || r.value)
       .map((r) => [r.key.trim(), r.value])
@@ -178,11 +179,26 @@ function onHomePicked() {
 
 // --- Save ---------------------------------------------------------------------
 
+/** Empty means "random port"; anything else must be a real port number. */
+function parsePort(raw: string): number | null {
+  const text = raw.trim()
+  if (!text) return null
+  const n = Number(text)
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
+}
+
+const portError = computed(() =>
+  portInput.value.trim() && parsePort(portInput.value) === null
+    ? t('instanceEdit.portInvalid')
+    : '',
+)
+
 const formValid = computed(
   () =>
     name.value.trim().length > 0 &&
     !!versionId.value &&
     !!homeId.value &&
+    !portError.value &&
     envValid.value,
 )
 
@@ -200,6 +216,7 @@ const saveAction = useAction(
       home_id: homeId.value!,
       env_overrides: envOverrides,
       default_profile: defaultProfile.value ?? null,
+      port: parsePort(portInput.value),
     }
     return api.updateInstance(updated, inst.host_id)
   },
@@ -227,32 +244,6 @@ function onCancel() {
   if (!inst) return
   fillForm(inst)
   void nextTick(() => (baseline.value = formSnapshot()))
-}
-
-// --- Port ---------------------------------------------------------------------
-
-function parsePort(raw: string): number | null {
-  const text = raw.trim()
-  if (!text) return null
-  const n = Number(text)
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
-}
-
-const portAction = useAction(
-  () => api.setInstancePort(id.value, parsePort(portInput.value)),
-  {
-    success: (updated) =>
-      updated.port
-        ? t('instanceEdit.portSaved', { port: updated.port })
-        : t('instanceEdit.portSavedRandom'),
-  },
-)
-
-async function applyPort() {
-  const updated = await portAction.run()
-  if (!updated) return
-  portInput.value = updated.port ? String(updated.port) : ''
-  await store.refreshInstances()
 }
 
 // --- Icon ---------------------------------------------------------------------
@@ -583,16 +574,12 @@ function removeEnvRow(idx: number) {
                 <input
                   v-model="portInput"
                   class="dl-input dl-input--mono detail-port"
+                  :class="{ 'dl-input--error': !!portError }"
                   :placeholder="t('instanceEdit.portPlaceholder')"
-                  @keydown.enter="applyPort"
                 />
-                <button
-                  class="dl-btn dl-btn--quiet"
-                  :disabled="portAction.busy['*']"
-                  @click="applyPort"
-                >
-                  {{ t('instanceEdit.portApply') }}
-                </button>
+                <span v-if="portError" class="dl-error-text">{{
+                  portError
+                }}</span>
               </div>
             </div>
           </div>
