@@ -780,13 +780,21 @@ pub(crate) async fn list_versions_for_at(
     }
 
     // A remote host states its own data directory; without one there is no
-    // versions directory to ask about, and guessing is not an option.
+    // versions directory to ask about, and guessing is not an option. The
+    // directories the launcher's records name go along: a link into one of them
+    // is the launcher's to replace, whichever machine it sits on.
     let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
     let versions_dir = data_dir.join("versions");
+    let known: Vec<String> = listed
+        .iter()
+        .map(|v| v.dir.to_string_lossy().to_string())
+        .collect();
+    let known: Vec<&str> = known.iter().map(String::as_str).collect();
     let on_machine = crate::remote::installed_versions(
         &*state.host_transport,
         &target,
         &versions_dir.to_string_lossy(),
+        &known,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -801,18 +809,21 @@ pub(crate) async fn list_versions_for_at(
     }
 
     // The registration is that machine's: `~/.local/bin/dsh` there, under the
-    // same rule as here. The link names the CLI inside the version directory,
-    // so what a row asks is whether the link lives **inside** that version —
-    // the same relation `pathlink::linked_to` reads on this Mac.
-    if !on_machine.link.target.is_empty() {
-        let linked = std::path::PathBuf::from(&on_machine.link.target);
-        for view in &mut listed {
-            view.path_linked = host.paths_equal(&view.dir, &linked)
+    // same rule as here. What a row asks is whether the link is the launcher's
+    // **and** lives inside that version — the relation
+    // `pathlink::linked_to` reads on this Mac.
+    let linked = match on_machine.link.state.as_str() {
+        "symlink" | "script" => Some(std::path::PathBuf::from(&on_machine.link.target)),
+        _ => None,
+    };
+    for view in &mut listed {
+        view.path_linked = linked.as_ref().is_some_and(|linked| {
+            host.paths_equal(&view.dir, linked)
                 || linked
                     .strip_prefix(&view.dir)
                     .map(|rest| !rest.as_os_str().is_empty())
-                    .unwrap_or(false);
-        }
+                    .unwrap_or(false)
+        });
     }
     Ok(listed)
 }
@@ -3085,7 +3096,7 @@ mod tests {
             "登记的是那个版本目录：{script}"
         );
         assert!(
-            script.contains("$HOME/.local/bin/dsh"),
+            script.contains("${HOME:-}/.local/bin/dsh"),
             "链接落在那台机器的 ~/.local/bin：{script}"
         );
     }

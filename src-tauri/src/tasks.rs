@@ -1287,10 +1287,11 @@ async fn install_remote_from_source<R: tauri::Runtime>(
     }
 
     // 4. Verify: the same two layouts the local flow checks, read on the
-    //    machine that produced them.
+    //    machine that produced them. No known-version list is needed here: this
+    //    call only asks whether the bin landed, not what `dsh` points at.
     let versions_dir = layout.versions_dir.to_string_lossy().to_string();
     let installed =
-        crate::remote::installed_versions(&*state.host_transport, target, &versions_dir)
+        crate::remote::installed_versions(&*state.host_transport, target, &versions_dir, &[])
             .await
             .map_err(|e| e.to_string())?;
     if !installed

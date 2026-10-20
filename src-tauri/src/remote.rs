@@ -264,15 +264,22 @@ pub struct NpmListings {
 
 /// The versions installed under `versions_dir`, as the machine describes them,
 /// with the `dsh` command that machine has on PATH.
+///
+/// `known` is every version directory the launcher's records claim for that
+/// host — the same list `crate::pathlink` consults here, so a link pointing into
+/// one of them is the launcher's on both machines. A caller that only wants the
+/// versions may pass none: the link state is then still reported, just never as
+/// the launcher's own.
 pub async fn installed_versions(
     transport: &dyn HostTransport,
     host: &RemoteHost,
     versions_dir: &str,
+    known: &[&str],
 ) -> Result<RemoteVersions, HostError> {
     let out = transport
         .run(
             host,
-            RemoteCall::new(installed_versions_script(versions_dir)),
+            RemoteCall::new(installed_versions_script(versions_dir, known)),
         )
         .await?;
     decode_remote_versions(&out)
@@ -861,6 +868,77 @@ dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s",%s,"data_di
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
 
+/// What `dsh` on one machine's PATH currently is, as that machine can see it —
+/// the remote half of [`crate::pathlink::inspect`], and the one place the two
+/// remote scripts get it from.
+///
+/// The marker travels **quoted into a variable** (`dsh_marker=%%MARKER%%` would
+/// be a shell comment: everything after `#` is discarded, and `set -u` then
+/// rejects the unset variable). A wrapper script is recognised only by a line
+/// that starts with the marker and ends with a version directory, so a marker
+/// a user happened to paste into their own script is not taken for ours.
+///
+/// The caller sets `dsh_versions` first (newline-separated version directories)
+/// and passes it through `%%VERSIONS%%`. Sets `dsh_state` (`absent` / `symlink`
+/// / `script` / `foreign`), `dsh_target` (the version directory a symlink leads
+/// into, or the directory a wrapper names) and `dsh_ours` (true when
+/// `dsh_target` is one of those directories).
+const LINK_STATE: &str = r#"dsh_marker=%%MARKER%%
+dsh_link="${HOME:-}/.local/bin/dsh"
+
+# A directory this link names is one of the launcher's versions.
+dsh_is_version() {
+  [ -n "$1" ] || return 1
+  dsh_old_ifs=$IFS
+  IFS='
+'
+  for dsh_dir in $dsh_versions; do
+    [ "$dsh_dir" = "$1" ] && { IFS=$dsh_old_ifs; return 0; }
+  done
+  IFS=$dsh_old_ifs
+  return 1
+}
+
+dsh_symlink_into() {
+  dsh_old_ifs=$IFS
+  IFS='
+'
+  for dsh_dir in $dsh_versions; do
+    case "$1" in
+      "$dsh_dir"|"$dsh_dir"/*) { IFS=$dsh_old_ifs; return 0; } ;;
+    esac
+  done
+  IFS=$dsh_old_ifs
+  return 1
+}
+
+dsh_state=absent
+dsh_target=
+if [ -L "$dsh_link" ]; then
+  dsh_state=symlink
+  dsh_raw=$(readlink "$dsh_link" 2>/dev/null || true)
+  case "$dsh_raw" in
+    /*) dsh_target="$dsh_raw" ;;
+    *) dsh_target="$(dirname "$dsh_link")/$dsh_raw" ;;
+  esac
+elif [ -e "$dsh_link" ]; then
+  dsh_state=foreign
+  if [ -f "$dsh_link" ]; then
+    dsh_written=$(head -n 3 "$dsh_link" 2>/dev/null | sed -n "s|^$dsh_marker[[:space:]]*\(.*\)$|\1|p" | head -n 1 | tr -d '\r')
+    if [ -n "$dsh_written" ] && dsh_is_version "$dsh_written"; then
+      dsh_state=script
+      dsh_target="$dsh_written"
+    fi
+  fi
+fi
+
+dsh_ours=false
+case "$dsh_state" in
+  symlink) dsh_symlink_into "$dsh_target" && dsh_ours=true ;;
+  script) dsh_ours=true ;;
+esac
+"#;
+
 /// The versions installed under one directory, with whether each one's bin is
 /// ready.
 ///
@@ -877,7 +955,8 @@ printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 const INSTALLED_VERSIONS: &str = r#"set -u
 %%ESCAPER%%
 dsh_dir=%%PATH%%
-dsh_marker=%%MARKER%%
+dsh_versions=%%VERSIONS%%
+%%LINK%%
 dsh_rows=
 dsh_sep=
 for dsh_entry in "$dsh_dir"/*; do
@@ -891,30 +970,6 @@ for dsh_entry in "$dsh_dir"/*; do
   dsh_rows="$dsh_rows$dsh_sep{\"name\":\"$(dsh_esc "${dsh_entry##*/}")\",\"dir\":\"$(dsh_esc "$dsh_entry")\",\"bin_ready\":$dsh_ready}"
   dsh_sep=,
 done
-
-# What the PATH registration is: a link the launcher made (a symlink into a
-# version directory, or a wrapper script carrying the marker), nothing, or
-# something of the user's that is never replaced.
-dsh_state=absent
-dsh_target=
-dsh_link="${HOME:-}/.local/bin/dsh"
-if [ -n "${HOME:-}" ] && [ -L "$dsh_link" ]; then
-  dsh_state=symlink
-  dsh_raw=$(readlink "$dsh_link" 2>/dev/null || true)
-  case "$dsh_raw" in
-    /*) dsh_target="$dsh_raw" ;;
-    *) dsh_target="$(dirname "$dsh_link")/$dsh_raw" ;;
-  esac
-elif [ -n "${HOME:-}" ] && [ -e "$dsh_link" ]; then
-  dsh_state=foreign
-  if [ -f "$dsh_link" ]; then
-    dsh_written=$(head -n 3 "$dsh_link" 2>/dev/null | sed -n "s|^$dsh_marker||p" | head -n 1 | tr -d '\r')
-    if [ -n "$dsh_written" ]; then
-      dsh_state=script
-      dsh_target="$dsh_written"
-    fi
-  fi
-fi
 
 printf '<<<DSH-JSON>>>{"versions":[%s],"link":{"state":"%s","target":"%s"}}<<<DSH-END>>>' \
   "$dsh_rows" "$dsh_state" "$(dsh_esc "$dsh_target")"
@@ -944,19 +999,32 @@ dsh_json=$(printf '{"versions":"%s","time":"%s"}' "$(dsh_esc "$dsh_versions")" "
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
 
+/// The link-state prologue both remote scripts start with, with the marker
+/// filled in quoted. The version directories come from the caller's own
+/// `dsh_versions`, so one list serves both the link check and the script's work.
+fn link_state() -> String {
+    fill(
+        LINK_STATE,
+        &[(
+            "%%MARKER%%",
+            quote(&format!("{} ", crate::pathlink::MARKER.trim())),
+        )],
+    )
+}
+
 /// The installed-versions script for one host's `versions` directory (that
 /// host's data directory plus `/versions`, which the caller resolves).
-pub fn installed_versions_script(versions_dir: &str) -> String {
+pub fn installed_versions_script(versions_dir: &str, versions: &[&str]) -> String {
     fill(
         INSTALLED_VERSIONS,
         &[
             ("%%ESCAPER%%", ESCAPER.to_string()),
             ("%%PATH%%", quote(versions_dir)),
-            ("%%MARKER%%", crate::pathlink::MARKER.to_string()),
+            ("%%VERSIONS%%", quote(&versions.join("\n"))),
+            ("%%LINK%%", link_state()),
         ],
     )
 }
-
 /// The versions-query script for one registry.
 pub fn available_versions_script(registry: &str) -> String {
     fill(
@@ -1352,18 +1420,26 @@ printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 /// template machinery is the launcher's (issue #5). `%%USER_DEFAULT%%` says
 /// whether this HOME is that one.
 const CREATE_PROFILE: &str = r#"set -u
+%%ESCAPER%%
 dsh_profiles=%%PROFILES%%
 dsh_name=%%NAME%%
 dsh_user_default=%%USER_DEFAULT%%
 dsh_homes_root=%%HOMES%%
 
+# A refusal names its reason in the same acknowledgement shape a success uses:
+# `decode_ack` then hands the caller `Profile「x」已存在` instead of a script that
+# answered nothing. `ok` stays the field every caller reads.
+dsh_refuse() {
+  printf '<<<DSH-JSON>>>{"ok":false,"error":"%s"}<<<DSH-END>>>' "$(dsh_esc "$1")"
+  exit 3
+}
+
 if [ ! -d "$dsh_profiles" ]; then
-  mkdir -p "$dsh_profiles" || { printf '创建 profiles 目录失败：%s\n' "$dsh_profiles" >&2; exit 2; }
+  mkdir -p "$dsh_profiles" || dsh_refuse "创建 profiles 目录失败：$dsh_profiles"
 fi
 dsh_target="$dsh_profiles/$dsh_name"
 if [ -e "$dsh_target" ]; then
-  printf 'Profile「%s」已存在\n' "$dsh_name" >&2
-  exit 3
+  dsh_refuse "Profile「$dsh_name」已存在"
 fi
 
 # The webserver port a copied template carries: DSH honors the patch over the
@@ -1392,7 +1468,7 @@ if [ "$dsh_user_default" != true ] && [ -d "$dsh_profiles/__temp__" ]; then
   dsh_template="$dsh_profiles/__temp__"
 elif [ "$dsh_user_default" != true ] && [ -d "$dsh_profiles/web" ]; then
   dsh_template="$dsh_profiles/__temp__"
-  cp -R "$dsh_profiles/web" "$dsh_template" || { printf '初始化模板失败\n' >&2; exit 4; }
+  cp -R "$dsh_profiles/web" "$dsh_template" || dsh_refuse '初始化模板失败'
   dsh_scrub_port "$dsh_template"
 else
   for dsh_candidate in "$dsh_homes_root"/*/profiles/__temp__; do
@@ -1401,12 +1477,11 @@ else
     break
   done
   if [ -z "$dsh_template" ]; then
-    printf '未找到可用的 Profile __temp__ 模板，请先安装至少一个 DSH 版本\n' >&2
-    exit 5
+    dsh_refuse '未找到可用的 Profile __temp__ 模板，请先安装至少一个 DSH 版本'
   fi
 fi
 
-cp -R "$dsh_template" "$dsh_target" || { printf '创建 Profile 失败\n' >&2; exit 6; }
+cp -R "$dsh_template" "$dsh_target" || dsh_refuse '创建 Profile 失败'
 printf '<<<DSH-JSON>>>{"ok":true,"name":"%s"}<<<DSH-END>>>' "$(printf '%s' "$dsh_name" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 "#;
 
@@ -1424,13 +1499,11 @@ printf '<<<DSH-JSON>>>{"ok":true,"name":"%s"}<<<DSH-END>>>' "$(printf '%s' "$dsh
 /// ([`crate::pathlink::MARKER`]) instead.
 ///
 /// `%%ACTION%%` is `register`, `unregister` or `unlink`. `register` takes
-/// `%%VERSION%%` (the version directory) and `%%VERSIONS%%` (every version the
-/// launcher knows there, newline-separated); `unlink` takes `%%VERSION%%`;
-/// `unregister` takes `%%VERSIONS%%`.
+/// `%%VERSION%%` (the version directory); `unlink` takes `%%VERSION%%` and is
+/// the withdrawal a version deletion performs; `unregister` takes neither. Both
+/// get `%%VERSIONS%%` — every version the launcher knows on that machine.
 const PATH_LINK: &str = r#"set -u
-%%ESCAPER%%
 dsh_action=%%ACTION%%
-dsh_marker=%%MARKER%%
 dsh_version=%%VERSION%%
 dsh_versions=%%VERSIONS%%
 
@@ -1438,60 +1511,7 @@ if [ -z "${HOME:-}" ]; then
   printf '读不到那台机器的 HOME，无法定位 ~/.local/bin\n' >&2
   exit 2
 fi
-dsh_link="$HOME/.local/bin/dsh"
-
-# What is there now: absent, symlink/script (the launcher's own, naming the
-# version directory as $dsh_target), or foreign (the user's).
-dsh_state=absent
-dsh_target=
-if [ -L "$dsh_link" ]; then
-  dsh_state=symlink
-  dsh_raw=$(readlink "$dsh_link" 2>/dev/null || true)
-  case "$dsh_raw" in
-    /*) dsh_target="$dsh_raw" ;;
-    *) dsh_target="$(dirname "$dsh_link")/$dsh_raw" ;;
-  esac
-elif [ -e "$dsh_link" ]; then
-  dsh_state=foreign
-  if [ -f "$dsh_link" ]; then
-    dsh_written=$(head -n 3 "$dsh_link" 2>/dev/null | sed -n "s|^$dsh_marker||p" | head -n 1 | tr -d '\r')
-    if [ -n "$dsh_written" ]; then
-      dsh_state=script
-      dsh_target="$dsh_written"
-    fi
-  fi
-fi
-
-# Whether a directory this link names is one of the launcher's versions.
-dsh_is_version() {
-  dsh_want=$1
-  [ -n "$dsh_want" ] || return 1
-  dsh_old_ifs=$IFS
-  IFS='
-'
-  for dsh_dir in $dsh_versions; do
-    [ "$dsh_dir" = "$dsh_want" ] && { IFS=$dsh_old_ifs; return 0; }
-  done
-  IFS=$dsh_old_ifs
-  return 1
-}
-
-dsh_ours=false
-case "$dsh_state" in
-  symlink)
-    dsh_old_ifs=$IFS
-    IFS='
-'
-    for dsh_dir in $dsh_versions; do
-      case "$dsh_target" in
-        "$dsh_dir"|"$dsh_dir"/*) dsh_ours=true ;;
-      esac
-      [ "$dsh_ours" = true ] && break
-    done
-    IFS=$dsh_old_ifs
-    ;;
-  script) dsh_is_version "$dsh_target" && dsh_ours=true ;;
-esac
+%%LINK%%
 
 dsh_remove_link() {
   [ -e "$dsh_link" ] || [ -L "$dsh_link" ] || return 0
@@ -1502,38 +1522,42 @@ dsh_finish() {
   printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 }
 
+# Says why a link that is not the launcher's is being left alone. The wording is
+# the local one's (`crate::pathlink`), so both machines answer the same way.
+dsh_refuse() {
+  case "$dsh_state" in
+    symlink) printf '~/.local/bin/dsh 指向 %s，不是启动器登记的版本，没有改动它\n' "$dsh_target" >&2 ;;
+    *) printf '~/.local/bin/dsh 不是启动器登记的，没有改动它\n' >&2 ;;
+  esac
+  exit 3
+}
+
 case "$dsh_action" in
   unregister)
-    case "$dsh_state" in
-      absent) dsh_finish ;;
-      symlink)
-        if [ "$dsh_ours" = true ]; then dsh_remove_link; dsh_finish
-        else printf '~/.local/bin/dsh 指向 %s，不是启动器登记的版本，没有改动它\n' "$dsh_target" >&2; exit 3
-        fi ;;
-      *) printf '~/.local/bin/dsh 已经存在，而且不是启动器登记的；没有改动它\n' >&2; exit 3 ;;
-    esac
+    if [ "$dsh_state" = absent ]; then dsh_finish; fi
+    if [ "$dsh_ours" != true ]; then dsh_refuse; fi
+    dsh_remove_link
+    dsh_finish
     ;;
   unlink)
     # Deleting a version withdraws its own link only: what it names has to be
-    # this version's directory.
-    case "$dsh_state" in
-      symlink|script)
-        case "$dsh_target" in
-          "$dsh_version"|"$dsh_version"/*) dsh_remove_link ;;
-        esac ;;
-    esac
+    # inside this version's directory. An empty version (a caller that named
+    # none) matches nothing — the pattern would otherwise be `"" | "/*"`.
+    if [ -n "$dsh_version" ] && [ "$dsh_ours" = true ]; then
+      case "$dsh_target" in
+        "$dsh_version"|"$dsh_version"/*) dsh_remove_link ;;
+      esac
+    fi
     dsh_finish
     ;;
   register)
-    case "$dsh_state" in
-      absent|script) ;;
-      symlink)
-        if [ "$dsh_ours" != true ]; then
-          printf '~/.local/bin/dsh 已经指向 %s，不是启动器安装的版本；先把它移走再登记\n' "$dsh_target" >&2
-          exit 4
-        fi ;;
-      *) printf '~/.local/bin/dsh 已经存在，而且不是启动器登记的；先把它移走再登记\n' >&2; exit 4 ;;
-    esac
+    if [ "$dsh_state" != absent ] && [ "$dsh_ours" != true ]; then
+      case "$dsh_state" in
+        symlink) printf '~/.local/bin/dsh 已经指向 %s，不是启动器安装的版本；先把它移走再登记\n' "$dsh_target" >&2 ;;
+        *) printf '~/.local/bin/dsh 已经存在，而且不是启动器登记的；先把它移走再登记\n' >&2 ;;
+      esac
+      exit 4
+    fi
 
     dsh_entry="$dsh_version/node_modules/.bin/dsh"
     dsh_bin="$dsh_version/node_modules/@deepseek-ai/dsh/lib/bin.js"
@@ -1635,11 +1659,10 @@ pub fn path_link_script(action: &str, version: Option<&str>, versions: &[&str]) 
     fill(
         PATH_LINK,
         &[
-            ("%%ESCAPER%%", ESCAPER.to_string()),
-            ("%%MARKER%%", crate::pathlink::MARKER.to_string()),
             ("%%ACTION%%", action.to_string()),
             ("%%VERSION%%", version.map(quote).unwrap_or_default()),
             ("%%VERSIONS%%", quote(&versions.join("\n"))),
+            ("%%LINK%%", link_state()),
         ],
     )
 }
@@ -2488,6 +2511,10 @@ struct Pid {
 #[derive(Deserialize)]
 struct Ack {
     ok: bool,
+    /// Why the script refused, when it says. A script that only answers `ok:
+    /// false` still reads as the generic refusal below.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2525,11 +2552,15 @@ pub fn decode_pid(out: &RemoteOutput) -> Result<i32, HostError> {
 }
 
 pub fn decode_ack(out: &RemoteOutput) -> Result<(), HostError> {
-    if parse_marked::<Ack>(out)?.ok {
-        Ok(())
-    } else {
-        Err(HostError::remote_command("远端拒绝了这次写入"))
+    let ack = parse_marked::<Ack>(out)?;
+    if ack.ok {
+        return Ok(());
     }
+    Err(HostError::remote_command(
+        ack.error
+            .filter(|why| !why.trim().is_empty())
+            .unwrap_or_else(|| "远端拒绝了这次写入".to_string()),
+    ))
 }
 
 /// The profile names one machine listed, in the same order the local one sorts
@@ -3418,7 +3449,7 @@ mod tests {
         // ...and an install that stopped before its bin existed.
         std::fs::create_dir_all(versions.join("0.1.0-rc.4")).unwrap();
 
-        let out = local_shell(&installed_versions_script(&versions.to_string_lossy()));
+        let out = local_shell(&installed_versions_script(&versions.to_string_lossy(), &[]));
         let answer = decode_remote_versions(&out).expect("真实 shell 跑出来的答案要能解析");
         let found = answer.versions;
 
@@ -3438,7 +3469,7 @@ mod tests {
     /// calls ready has to be one the launcher could start there.
     #[test]
     fn the_remote_bin_check_uses_the_local_launchers_two_layouts() {
-        let script = installed_versions_script("/opt/dsh/versions");
+        let script = installed_versions_script("/opt/dsh/versions", &[]);
         let scratch = std::env::temp_dir().join(format!("dsh-layout-{}", uuid::Uuid::new_v4()));
 
         let npm_tree = scratch.join("versions/1.0.0");
@@ -3508,7 +3539,7 @@ mod tests {
 
         // The list names the version the link runs.
         let listed = local_shell_as(
-            &installed_versions_script(&versions.to_string_lossy()),
+            &installed_versions_script(&versions.to_string_lossy(), &dirs),
             &home,
         );
         let answer = decode_remote_versions(&listed).unwrap();
@@ -3642,6 +3673,159 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// A CLI that is not executable gets a wrapper carrying the marker, and
+    /// that wrapper reads back as the launcher's own link — the branch the
+    /// marker-as-comment bug used to break. It also has to survive being
+    /// replaced by another version, being reported by the version list, and
+    /// being withdrawn when its version is deleted.
+    #[test]
+    fn the_path_link_script_wraps_a_cli_without_an_executable_bit() {
+        let home = scratch("dsh-path-link-wrap-home");
+        let versions = scratch("dsh-path-link-wrap-versions");
+        let version = versions.join("0.2.1-rc.1");
+        let bin = crate::launch::version_bin(&version);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let version_text = version.to_string_lossy().to_string();
+        let dirs = [version_text.clone()];
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let link = home.join(".local/bin/dsh");
+
+        let out = local_shell_as(
+            &path_link_script("register", Some(&version_text), &dirs),
+            &home,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+
+        let body = std::fs::read_to_string(&link).unwrap();
+        assert!(
+            body.starts_with("#!/bin/sh\n"),
+            "包装脚本的第一行必须是 shebang：{body}"
+        );
+        assert!(
+            body.contains(crate::pathlink::MARKER.trim()),
+            "包装脚本要带标记，否则以后撤不掉：{body}"
+        );
+        assert!(
+            body.contains(&version_text),
+            "包装脚本要写明它跑的是哪个版本目录：{body}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&link).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "包装脚本必须可执行");
+        }
+
+        // The list reads it back as the launcher's own link, naming its version.
+        let listed = local_shell_as(
+            &installed_versions_script(&versions.to_string_lossy(), &dirs),
+            &home,
+        );
+        let answer = decode_remote_versions(&listed).unwrap();
+        assert_eq!(answer.link.state, "script", "{}", listed.stdout);
+        assert_eq!(answer.link.target, version_text);
+
+        // Cancel registration removes it: a wrapper is the launcher's to take out.
+        let out = local_shell_as(&path_link_script("unregister", None, &dirs), &home);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!link.exists(), "取消登记要撤掉启动器自己的包装脚本");
+    }
+
+    /// Withdrawing for a deleted version is the `unlink` action: it takes out a
+    /// wrapper naming that version, leaves another version's wrapper alone, and
+    /// never touches a link that is not inside the version it was told about.
+    #[test]
+    fn the_path_link_script_withdraws_only_the_deleted_versions_wrapper() {
+        let home = scratch("dsh-path-link-unlink-home");
+        let versions = scratch("dsh-path-link-unlink-versions");
+        let first = versions.join("0.2.1-rc.1");
+        let second = versions.join("0.2.2-rc.1");
+        for dir in [&first, &second] {
+            let bin = crate::launch::version_bin(dir);
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        }
+        let first_text = first.to_string_lossy().to_string();
+        let second_text = second.to_string_lossy().to_string();
+        let dirs = [first_text.clone(), second_text.clone()];
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let link = home.join(".local/bin/dsh");
+
+        let out = local_shell_as(
+            &path_link_script("register", Some(&second_text), &dirs),
+            &home,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+
+        // Deleting the first version leaves the second's wrapper in place.
+        let out = local_shell_as(&path_link_script("unlink", Some(&first_text), &dirs), &home);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(link.exists(), "别的版本的登记不动");
+
+        let out = local_shell_as(
+            &path_link_script("unlink", Some(&second_text), &dirs),
+            &home,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!link.exists(), "删掉的那个版本自己的登记要撤掉");
+
+        // A link naming no version at all must not match an absolute path:
+        // the pattern would otherwise degenerate to `"" | "/*"`.
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
+        let out = local_shell_as(&path_link_script("unlink", None, &dirs), &home);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(link.exists(), "没指定版本时不能删掉别人的链接");
+    }
+
+    /// A file carrying the marker but naming a directory the launcher does not
+    /// know is the user's, not the launcher's: it is never overwritten and never
+    /// removed, on either action.
+    #[test]
+    fn the_path_link_script_treats_an_unknown_marker_as_the_users_own() {
+        let home = scratch("dsh-path-link-stray-home");
+        let versions = scratch("dsh-path-link-stray-versions");
+        let version = versions.join("0.2.1-rc.1");
+        let bin = crate::launch::version_bin(&version);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        let version_text = version.to_string_lossy().to_string();
+        let dirs = [version_text.clone()];
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let link = home.join(".local/bin/dsh");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let stray = format!(
+            "#!/bin/sh\n{} /opt/somewhere/else\n",
+            crate::pathlink::MARKER.trim()
+        );
+        std::fs::write(&link, &stray).unwrap();
+
+        let out = local_shell_as(
+            &path_link_script("register", Some(&version_text), &dirs),
+            &home,
+        );
+        assert_ne!(out.status, 0, "指着未知目录的标记不是启动器的，不能覆盖");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), stray);
+
+        let out = local_shell_as(&path_link_script("unregister", None, &dirs), &home);
+        assert_ne!(out.status, 0, "不是启动器的，不能删");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), stray);
+
+        // And the list does not claim it either.
+        let listed = local_shell_as(
+            &installed_versions_script(&versions.to_string_lossy(), &dirs),
+            &home,
+        );
+        let answer = decode_remote_versions(&listed).unwrap();
+        assert_eq!(answer.link.state, "foreign", "{}", listed.stdout);
+    }
+
     /// The registry a host record names is a fact about *that* machine's npm:
     /// it has to reach the script as one quoted word.
     #[test]
@@ -3684,7 +3868,12 @@ mod tests {
             let fake = FakeTransport::new().answering(answer);
             let transport: &dyn HostTransport = &*fake;
 
-            let versions = block_on(installed_versions(transport, &host(), "/opt/dsh/versions"));
+            let versions = block_on(installed_versions(
+                transport,
+                &host(),
+                "/opt/dsh/versions",
+                &[],
+            ));
             let available = block_on(available_versions(
                 transport,
                 &host(),
