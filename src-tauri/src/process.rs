@@ -126,6 +126,7 @@ pub struct Adopted {
 struct PortOwner {
     pid: i32,
     command: String,
+    args: String,
 }
 
 /// Find the process listening on `port`. `None` = port free (or probe
@@ -155,16 +156,17 @@ async fn probe_port_owner(port: u16) -> Option<PortOwner> {
         }
     }
     let pid = pid?;
-    let command = process_name(pid).await.unwrap_or_default();
-    Some(PortOwner { pid, command })
+    let command = process_field(pid, "comm").await.unwrap_or_default();
+    let args = process_field(pid, "args").await.unwrap_or_default();
+    Some(PortOwner { pid, command, args })
 }
 
-/// The short command name (first argv element) of `pid`, best-effort.
-async fn process_name(pid: i32) -> Option<String> {
+/// One `ps -o <field>=` value of `pid`, trimmed. Best-effort.
+async fn process_field(pid: i32, field: &str) -> Option<String> {
     let mut cmd = Command::new("ps");
     hide_console(&mut cmd);
     let out = cmd
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .args(["-p", &pid.to_string(), "-o", &format!("{field}=")])
         .output()
         .await
         .ok()?;
@@ -176,10 +178,16 @@ async fn process_name(pid: i32) -> Option<String> {
 
 /// Whether a port owner looks like a DSH web server: the launcher spawns
 /// `node <…>/dsh/…/bin.js`, so the listener process is node/DSH's packaged
-/// binary. We match loosely so a packaged executable is recognized too.
-fn looks_like_dsh(command: &str) -> bool {
-    let c = command.to_ascii_lowercase();
-    c.contains("node") || c.contains("dsh")
+/// binary. We match loosely so a packaged executable is recognized too — and
+/// against the **command line** as well as the name, because a DSH shipped as a
+/// single-file executable (a Python-packaged build is one) runs under a name of
+/// its own (`MainThread`) and says `…/dsh/lib/bin.js` only in its argv.
+fn looks_like_dsh(command: &str, args: &str) -> bool {
+    let looks = |text: &str| {
+        let c = text.to_ascii_lowercase();
+        c.contains("node") || c.contains("dsh")
+    };
+    looks(command) || looks(args)
 }
 
 /// Verify the adopted pid still exists (cheap `kill -0` poll).
@@ -378,7 +386,7 @@ pub async fn adopt_surviving_instances(app: &AppHandle) {
         let Some(owner) = probe_port_owner(c.port).await else {
             continue;
         };
-        if !looks_like_dsh(&owner.command) {
+        if !looks_like_dsh(&owner.command, &owner.args) {
             continue;
         }
         if !c.pinned {
@@ -1849,7 +1857,7 @@ pub(crate) async fn check_remote_instance(
             RemoteVerdict::Stopped
         };
     };
-    if !looks_like_dsh(&owner.command) {
+    if !looks_like_dsh(&owner.command, &owner.args) {
         return if inst.port.is_some() {
             RemoteVerdict::Occupied {
                 pid: Some(pid),
@@ -2379,7 +2387,7 @@ pub async fn start_instance_process(
     }
     if let Some((host, port)) = pinned_port.clone() {
         if let Some(owner) = probe_port_owner(port).await {
-            if looks_like_dsh(&owner.command) {
+            if looks_like_dsh(&owner.command, &owner.args) {
                 adopt_external_process(app, state, instance_id, profile, port, &host, owner.pid)
                     .await;
                 return Ok(());
@@ -2554,7 +2562,7 @@ pub async fn start_instance_process(
                     for attempt in 0..10 {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         if let Some(owner) = probe_port_owner(port).await {
-                            if looks_like_dsh(&owner.command) {
+                            if looks_like_dsh(&owner.command, &owner.args) {
                                 adopt_external_process(
                                     &waiter_app,
                                     &state,
@@ -3109,13 +3117,28 @@ mod tests {
 
     #[test]
     fn looks_like_dsh_matches_node_and_dsh_processes() {
-        assert!(looks_like_dsh("node"));
-        assert!(looks_like_dsh("Node.js"));
-        assert!(looks_like_dsh("dsh"));
-        assert!(looks_like_dsh("/path/to/dsh-bin"));
-        assert!(!looks_like_dsh("Python"));
-        assert!(!looks_like_dsh("Google Chrome"));
-        assert!(!looks_like_dsh(""));
+        assert!(looks_like_dsh("node", ""));
+        assert!(looks_like_dsh("Node.js", ""));
+        assert!(looks_like_dsh("dsh", ""));
+        assert!(looks_like_dsh("/path/to/dsh-bin", ""));
+        assert!(!looks_like_dsh("Python", ""));
+        assert!(!looks_like_dsh("Google Chrome", ""));
+        assert!(!looks_like_dsh("", ""));
+    }
+
+    /// A DSH shipped as a single-file executable carries a name of its own, and
+    /// only its command line says what it is. Judged by the name alone it reads
+    /// as 「别的进程占着端口」, which is the page's 「已停止」 for an instance that
+    /// is up.
+    #[test]
+    fn looks_like_dsh_reads_the_command_line_too() {
+        let args = "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.2/\
+                    node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 3099 --no-open";
+        assert!(looks_like_dsh("MainThread", args));
+        assert!(
+            !looks_like_dsh("MainThread", "/usr/bin/python3 -m http.server 3099"),
+            "命令行里既没有 node 也没有 dsh 就不算"
+        );
     }
 
     #[tokio::test]
@@ -4041,7 +4064,15 @@ mod tests {
 
     fn occupied_answer(pid: u32, command: &str) -> FakeAnswer {
         FakeAnswer::stdout(marked(&format!(
-            r#"{{"occupied":true,"pid":{pid},"command":"{command}"}}"#
+            r#"{{"occupied":true,"pid":{pid},"command":"{command}","args":""}}"#
+        )))
+    }
+
+    /// The same answer from a machine where DSH runs as a single-file
+    /// executable: the name says nothing, the command line says everything.
+    fn occupied_answer_with_args(pid: u32, command: &str, args: &str) -> FakeAnswer {
+        FakeAnswer::stdout(marked(&format!(
+            r#"{{"occupied":true,"pid":{pid},"command":"{command}","args":"{args}"}}"#
         )))
     }
 
@@ -4158,6 +4189,32 @@ mod tests {
                 assert_eq!(url, None, "钉死端口不要求有 token");
             }
             other => panic!("钉死的端口上有 DSH 样的进程就该认领：{other:?}"),
+        }
+    }
+
+    /// The same rule on a machine whose DSH runs as a single-file executable:
+    /// the process name is its own (`MainThread`), so only the command line can
+    /// say this listener is DSH. Judged by the name alone, an instance that is
+    /// up reads as 「已停止」 and the next start refuses the port.
+    #[tokio::test]
+    async fn a_pinned_port_with_a_single_file_dsh_is_adopted_too() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(occupied_answer_with_args(
+                4242,
+                "MainThread",
+                "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.2/\
+                 node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 3099 --no-open",
+            ))
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+
+        let verdict = check_remote_instance(&state, &inst, &host).await;
+
+        match verdict {
+            RemoteVerdict::Running { pid, .. } => assert_eq!(pid, 4242),
+            other => panic!("命令行说明它是 DSH 就该认领：{other:?}"),
         }
     }
 

@@ -381,12 +381,13 @@ pub async fn alive(
 }
 
 /// One listener on a port **on that machine**: its pid when `ss` could name it,
-/// and the command `ps` reports. A listener belonging to another user comes
-/// back without a pid and with an empty command — 「被占着，但说不出是谁」.
+/// the command `ps` reports and its command line. A listener belonging to another
+/// user comes back without a pid and with both empty — 「被占着，但说不出是谁」.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePortOwner {
     pub pid: Option<i32>,
     pub command: String,
+    pub args: String,
 }
 
 /// Who holds `port` on that machine. `None` = nothing is listening there.
@@ -403,6 +404,8 @@ pub async fn port_owner(
         occupied: bool,
         pid: Option<i32>,
         command: String,
+        #[serde(default)]
+        args: String,
     }
     let out = transport
         .run(host, RemoteCall::new(port_owner_script(port)))
@@ -411,6 +414,7 @@ pub async fn port_owner(
     Ok(answer.occupied.then_some(RemotePortOwner {
         pid: answer.pid,
         command: answer.command,
+        args: answer.args,
     }))
 }
 
@@ -1974,27 +1978,37 @@ fi
 "#;
 
 /// Who holds one TCP port on that machine, as `ss` names it: the pid of the
-/// listening process, and the short command name `ps` reports for that pid.
+/// listening process, the short command name `ps` reports for that pid, and its
+/// full command line.
 ///
 /// `ss` is where a port's occupant is visible — and unlike a probe done from
 /// here, it answers about **that** machine's listeners (ADR-0006). The number
 /// alone is not enough to move the occupant out of the way, so the name is read
 /// too; a listener this user does not own comes back without a pid, which is
 /// still the answer "occupied, by somebody else".
+///
+/// The command line is read as well because the name alone cannot say what the
+/// process is: a DSH installed from npm runs as this machine's `node`, but the
+/// same DSH packaged as a Python single-file executable runs as `MainThread` and
+/// names itself `…/dsh/lib/bin.js` only in its argv. Judging by the name alone
+/// calls that one 「不是 DSH」, which reads on the page as 已停止 — the misreading
+/// ADR-0007 exists to prevent.
 const PORT_OWNER: &str = r#"set -u
 dsh_port=%%PORT%%
 dsh_row=$(ss -ltnp 2>/dev/null | grep -E ":${dsh_port}[[:space:]]" | head -n 1)
 if [ -z "$dsh_row" ]; then
-  printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":""}<<<DSH-END>>>'
+  printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":"","args":""}<<<DSH-END>>>'
   exit 0
 fi
 dsh_pid=$(printf '%s' "$dsh_row" | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2)
 if [ -z "$dsh_pid" ]; then
-  printf '<<<DSH-JSON>>>{"occupied":true,"pid":null,"command":""}<<<DSH-END>>>'
+  printf '<<<DSH-JSON>>>{"occupied":true,"pid":null,"command":"","args":""}<<<DSH-END>>>'
   exit 0
 fi
 dsh_name=$(ps -p "$dsh_pid" -o comm= 2>/dev/null | head -n 1 | tr -d '\r\n"\\')
-printf '<<<DSH-JSON>>>{"occupied":true,"pid":%s,"command":"%s"}<<<DSH-END>>>' "$dsh_pid" "$dsh_name"
+dsh_args=$(ps -p "$dsh_pid" -o args= 2>/dev/null | head -n 1 | tr -d '\r\n"\\')
+printf '<<<DSH-JSON>>>{"occupied":true,"pid":%s,"command":"%s","args":"%s"}<<<DSH-END>>>' \
+  "$dsh_pid" "$dsh_name" "$dsh_args"
 "#;
 
 /// Waits **on that machine** until one process tree is gone, or the budget runs
