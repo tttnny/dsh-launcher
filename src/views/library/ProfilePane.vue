@@ -5,7 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { LOCAL_HOST_ID } from '@/api/types'
-import type { DshInstance } from '@/api/types'
+import type { DshInstance, DshVersion } from '@/api/types'
 import { useAction } from '@/composables/useAction'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
@@ -74,11 +74,48 @@ const profiles = ref<string[]>([])
 const profilesLoading = ref(false)
 const profilesError = ref('')
 const newName = ref('')
+const newVersionId = ref<string | undefined>(undefined)
 const adding = ref(false)
 const renaming = ref<string | null>(null)
 const renameValue = ref('')
 const copying = ref<string | null>(null)
 const copyValue = ref('')
+
+/**
+ * The versions a Profile can be created from: the machine the pane is showing.
+ * A Profile lives in a DSH_HOME, and every installed version already owns one
+ * (`<数据目录>/homes/<版本名>`, ADR-0002) — so the version is the one choice
+ * creating a Profile needs. It is not tied to an instance: instances only pick
+ * a Profile when they launch.
+ */
+const hostId = computed(
+  () => selectedHome.value?.host_id ?? store.currentHostId,
+)
+const versions = computed(() => store.versionsByHost[hostId.value] ?? [])
+
+function startAdding() {
+  newVersionId.value ??= versions.value[0]?.id
+  if (!versions.value.some((v) => v.id === newVersionId.value))
+    newVersionId.value = versions.value[0]?.id
+  adding.value = true
+}
+
+/** A version's own DSH_HOME record, made on first use if this is somehow the
+ *  first time the launcher hears about it. */
+async function dedicatedHomeOf(version: DshVersion): Promise<string> {
+  const versionHost = version.host_id ?? LOCAL_HOST_ID
+  const known = (store.homesByHost[versionHost] ?? []).find(
+    (h) => h.path === version.dedicated_home,
+  )
+  if (known) return known.id
+  const created = await api.createHome(
+    version.version,
+    version.dedicated_home,
+    versionHost,
+  )
+  await store.refreshHomes(versionHost)
+  return created.id
+}
 
 async function load() {
   profiles.value = []
@@ -100,20 +137,29 @@ async function load() {
 watch(selectedHomeId, () => void load(), { immediate: true })
 
 const createAction = useAction(
-  (homeId: string, name: string) => api.createProfile(homeId, name),
+  async (version: DshVersion, name: string) => {
+    // The Profile is created in the version's own DSH_HOME, on the machine the
+    // version is installed on: that is the whole of 「选一个版本」.
+    const homeId = await dedicatedHomeOf(version)
+    const created = await api.createProfile(homeId, name)
+    return { name: created, homeId }
+  },
   {
-    success: (name) => t('profiles.profileCreated', { name }),
+    success: ({ name }) => t('profiles.profileCreated', { name }),
   },
 )
 
 async function onCreate() {
   const name = newName.value.trim()
-  if (!selectedHomeId.value || !name) return
-  const created = await createAction.run(selectedHomeId.value, name)
-  if (created === undefined) return
+  const version = versions.value.find((v) => v.id === newVersionId.value)
+  if (!version || !name) return
+  const res = await createAction.run(version, name)
+  if (!res) return
   newName.value = ''
   adding.value = false
-  await load()
+  // Show the HOME that just received it, so the new row is on screen.
+  if (res.homeId !== selectedHomeId.value) onSelectHome(res.homeId)
+  else await load()
 }
 
 const renameAction = useAction(
@@ -241,7 +287,7 @@ const busy = (name: string) =>
         <button
           v-if="!adding && !remoteHome"
           class="dl-btn dl-btn--quiet"
-          @click="adding = true"
+          @click="startAdding"
         >
           <DlIcon name="plus" :size="13" />
           {{ t('profiles.profileAdd') }}
@@ -256,7 +302,18 @@ const busy = (name: string) =>
       </p>
 
       <div class="dl-surface profile-list">
+        <!-- Creating asks for the version, not for the DSH_HOME: every version
+             already owns one, and a Profile is not tied to an instance. -->
         <div v-if="adding" class="profile-row is-editing">
+          <a-select
+            v-model="newVersionId"
+            style="width: 150px; flex-shrink: 0"
+            :placeholder="t('profiles.profileCreateVersion')"
+          >
+            <a-option v-for="v in versions" :key="v.id" :value="v.id">
+              {{ v.version }}
+            </a-option>
+          </a-select>
           <input
             v-model="newName"
             class="dl-input"
@@ -265,7 +322,7 @@ const busy = (name: string) =>
           />
           <button
             class="dl-btn dl-btn--primary"
-            :disabled="createAction.busy['*']"
+            :disabled="!newVersionId || createAction.busy['*']"
             @click="onCreate"
           >
             {{ t('profiles.profileCreate') }}
@@ -274,6 +331,9 @@ const busy = (name: string) =>
             {{ t('common.cancel') }}
           </button>
         </div>
+        <p v-if="adding && versions.length === 0" class="profile-create-hint">
+          {{ t('profiles.profileCreateNoVersions') }}
+        </p>
 
         <DlEmpty
           v-if="
@@ -458,6 +518,15 @@ const busy = (name: string) =>
 
 .profile-list {
   overflow: hidden;
+}
+
+// The version first: it is what decides where the Profile is created, and the
+// name is the only thing left to type.
+.profile-create-hint {
+  margin: 0;
+  padding: 0 16px 12px;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-4);
 }
 
 .profile-row {

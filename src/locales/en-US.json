@@ -150,7 +150,9 @@
     "managePlugins": "Plugins",
     "noHomeSelected": "No DSH_HOME yet — add one on the DSH_HOME tab",
     "pluginsLiveOnInstances": "Patch layers belong to a running instance: expand its card on the board, or open its settings, and press Plugins.",
-    "profileAddRemoteNote": "A profile is created on “{host}”: copy the one you want to a new name under <DSH_HOME>/profiles there, then use “Reload profiles”."
+    "profileAddRemoteNote": "A profile is created on “{host}”: copy the one you want to a new name under <DSH_HOME>/profiles there, then use “Reload profiles”.",
+    "profileCreateVersion": "DSH version",
+    "profileCreateNoVersions": "This host has no DSH version installed: install one on the “DSH versions” tab first — the profile is created in that version's own DSH_HOME."
   },
   "plugins": {
     "pageTitle": "Plugin management",

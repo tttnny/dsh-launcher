@@ -21,6 +21,15 @@
 HOME 下一个 Profile 都选不出来，「启动」点了不会动。**判据是「那个 HOME 下一个 Profile
 都没有」**，不是「这是启动器建的 HOME」：已经有 Profile 的 HOME 一个字节都不碰。
 
+## 新建 Profile 只选版本，不选实例、也不选 HOME
+
+Profile 不是实例的一部分：实例启动时才挑一个 Profile，Profile 自己只住在某个 DSH_HOME
+里。所以资源库 Profile 页的「新建」只让用户选**一个已安装的版本**——每个版本在
+`<那台主机的数据目录>/homes/<版本名>` 已经有一份专属 DSH_HOME（ADR-0002），Profile 就建
+在那里；那份 HOME 的记录万一是缺的，先用 `create_home` 按同一个路径补出来。不要再把
+「新建 Profile」做成实例的附属步骤，也不要让它先挑一个任意 DSH_HOME 才能开始。远端主机
+上仍然不能新建 Profile（`create_profile` 只在本机复制模板），页面给的是那条说明。
+
 ## 删版本要连专属 DSH_HOME 的记录一起删
 
 `remove_version` 用同一条路径规则（`<数据目录>/homes/<版本名>`）删两样东西——目录与配置

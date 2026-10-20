@@ -150,7 +150,9 @@
     "managePlugins": "管理插件",
     "noHomeSelected": "还没有 DSH_HOME，先在 DSH_HOME 标签页里添加一个",
     "pluginsLiveOnInstances": "补丁层属于运行中的实例：在实例页展开实例卡片，或进实例设置，点「管理插件」。",
-    "profileAddRemoteNote": "Profile 是在「{host}」上建的：在那台机器的 <DSH_HOME>/profiles 里把要用的那一个复制成新名字，再点「重新读取 Profile」。"
+    "profileAddRemoteNote": "Profile 是在「{host}」上建的：在那台机器的 <DSH_HOME>/profiles 里把要用的那一个复制成新名字，再点「重新读取 Profile」。",
+    "profileCreateVersion": "DSH 版本",
+    "profileCreateNoVersions": "这台主机还没有安装任何 DSH 版本：先在「DSH 版本」标签页安装一个，Profile 会建在它的专属 DSH_HOME 里。"
   },
   "plugins": {
     "pageTitle": "插件管理",

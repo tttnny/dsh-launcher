@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { Message } from '@arco-design/web-vue'
+import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore, type HealthLogItem } from '@/stores/launcher'
 import type { DshInstance } from '@/api/types'
@@ -322,6 +322,37 @@ function openDetail() {
   void router
     .push({ name: 'instance-detail', params: { id: props.inst.id } })
     .catch(() => undefined)
+}
+
+// Removing the binding, from the board: the same command the settings page's
+// danger zone runs, so the version and the DSH_HOME stay exactly as they are.
+const deleteAction = useAction(
+  async (id: string) => {
+    await api.deleteInstance(id, props.inst.host_id)
+    return true
+  },
+  { key: (id) => id },
+)
+
+function confirmDelete() {
+  Modal.confirm({
+    title: t('instances.deleteTitle', { name: props.inst.name }),
+    content: t('instances.deleteContent', {
+      name: props.inst.name,
+      home: homeName.value,
+    }),
+    okText: t('instances.table.delete'),
+    cancelText: t('common.cancel'),
+    okButtonProps: { status: 'danger' },
+    modalClass: 'dl-sheet',
+    onOk: async () => {
+      const ok = await deleteAction.run(props.inst.id)
+      if (ok !== true) return
+      await store.refreshInstances()
+      Message.success(t('instances.deleted', { name: props.inst.name }))
+      emit('changed')
+    },
+  })
 }
 
 onMounted(() => {
@@ -701,6 +732,17 @@ onMounted(() => {
           >
             <DlIcon name="refresh" :size="13" />
             {{ t('home.reloadProfiles') }}
+          </button>
+          <!-- Removing the binding, next to the other actions that act on the
+               binding itself. Only the record goes; the version and the
+               DSH_HOME are shared resources (ADR-0003). -->
+          <button
+            class="dl-btn dl-btn--danger"
+            :disabled="!!deleteAction.busy[inst.id]"
+            @click="confirmDelete"
+          >
+            <DlIcon name="trash" :size="13" />
+            {{ t('instances.table.delete') }}
           </button>
         </div>
       </div>
