@@ -20,7 +20,8 @@
 //! than re-deriving it (ADR-0005 追加).
 
 use crate::ssh::{
-    HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput, DEFAULT_TIMEOUT,
+    HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput, Shell,
+    DEFAULT_TIMEOUT,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -77,16 +78,23 @@ fn failed(out: &RemoteOutput, note: &str) -> HostError {
     HostError::remote_command(message)
 }
 
-/// Runs one script and reads its marked JSON answer.
+/// Runs one script and reads its marked JSON answer. The shell is the caller's
+/// choice: a script that resolves a tool by name needs the login shell; one that
+/// only touches files does not, and pays a second for it on a machine whose
+/// `~/.bashrc` loads conda.
 pub async fn json<T: DeserializeOwned>(
     transport: &dyn HostTransport,
     host: &RemoteHost,
     script: String,
     timeout: Duration,
+    shell: Shell,
 ) -> Result<T, HostError> {
-    let out = transport
-        .run(host, RemoteCall::within(script, timeout))
-        .await?;
+    let call = RemoteCall::within(script, timeout);
+    let call = match shell {
+        Shell::Plain => call,
+        Shell::Login => call.with_login_shell(),
+    };
+    let out = transport.run(host, call).await?;
     parse_marked(&out)
 }
 
@@ -210,7 +218,8 @@ pub async fn connection_test(
     data_dir: Option<&str>,
 ) -> ConnectionTest {
     let script = connection_test_script(data_dir);
-    match json::<Facts>(transport, host, script, DEFAULT_TIMEOUT).await {
+    // Resolves `node` / `pnpm` by name in that machine's own shell: login.
+    match json::<Facts>(transport, host, script, DEFAULT_TIMEOUT, Shell::Login).await {
         Ok(facts) => ConnectionTest::answered(facts),
         Err(err) => ConnectionTest::refused(err),
     }
@@ -297,6 +306,7 @@ pub async fn available_versions(
         host,
         available_versions_script(registry),
         NPM_VIEW_TIMEOUT,
+        Shell::Login,
     )
     .await
 }
@@ -416,27 +426,6 @@ pub async fn port_owner(
         command: answer.command,
         args: answer.args,
     }))
-}
-
-/// Whether the process tree one detached spawn started is gone, waiting up to
-/// `wait_secs` **on that machine** for it to go.
-pub async fn wait_gone(
-    transport: &dyn HostTransport,
-    host: &RemoteHost,
-    pid: i32,
-    wait_secs: u64,
-) -> Result<bool, HostError> {
-    #[derive(Deserialize)]
-    struct Answer {
-        gone: bool,
-    }
-    let out = transport
-        .run(
-            host,
-            RemoteCall::within(wait_gone_script(pid, wait_secs), budget_for(wait_secs)),
-        )
-        .await?;
-    Ok(parse_marked::<Answer>(&out)?.gone)
 }
 
 /// What one attempt to spend an instance URL's launch token left behind.
@@ -590,10 +579,11 @@ pub async fn npm_has_version(
     struct Answer {
         exists: bool,
     }
+    // `npm view`: the name is resolved in that machine's own shell, so login.
     let out = transport
         .run(
             host,
-            RemoteCall::new(npm_has_version_script(package, registry)),
+            RemoteCall::new(npm_has_version_script(package, registry)).with_login_shell(),
         )
         .await?;
     Ok(parse_marked::<Answer>(&out)?.exists)
@@ -667,7 +657,7 @@ pub async fn environment(
     manual_pnpm: Option<&str>,
 ) -> Result<RemoteEnvironment, HostError> {
     let script = environment_script(manual_node, manual_pnpm);
-    json::<RemoteEnvironment>(transport, host, script, ENVIRONMENT_TIMEOUT).await
+    json::<RemoteEnvironment>(transport, host, script, ENVIRONMENT_TIMEOUT, Shell::Login).await
 }
 
 /// How long the environment probe may take. Longer than one command's budget:
@@ -694,8 +684,14 @@ pub async fn probe_manual_tool(
     host: &RemoteHost,
     path: &str,
 ) -> Result<ManualProbe, HostError> {
-    let facts: ManualFacts =
-        json(transport, host, manual_tool_script(path), DEFAULT_TIMEOUT).await?;
+    let facts: ManualFacts = json(
+        transport,
+        host,
+        manual_tool_script(path),
+        DEFAULT_TIMEOUT,
+        Shell::Plain,
+    )
+    .await?;
     Ok(match (facts.exists, facts.version) {
         (_, Some(version)) => ManualProbe::Version(version),
         (true, None) => ManualProbe::Unusable,
@@ -1800,7 +1796,14 @@ pub async fn ensure_home_path(
     host: &RemoteHost,
     path: &str,
 ) -> Result<String, HostError> {
-    let answer: HomePath = json(transport, host, home_path_script(path), DEFAULT_TIMEOUT).await?;
+    let answer: HomePath = json(
+        transport,
+        host,
+        home_path_script(path),
+        DEFAULT_TIMEOUT,
+        Shell::Plain,
+    )
+    .await?;
     Ok(answer.path)
 }
 
@@ -1816,7 +1819,14 @@ pub async fn user_home(
     transport: &dyn HostTransport,
     host: &RemoteHost,
 ) -> Result<RemoteUserHome, HostError> {
-    json(transport, host, user_home_script(), DEFAULT_TIMEOUT).await
+    json(
+        transport,
+        host,
+        user_home_script(),
+        DEFAULT_TIMEOUT,
+        Shell::Plain,
+    )
+    .await
 }
 
 /// The profile directories under one DSH_HOME on that machine.
@@ -1876,6 +1886,80 @@ pub async fn delete_profile(
 pub struct RemoteProfilePackages {
     pub manifest: Option<Vec<u8>>,
     pub installed: std::collections::BTreeMap<String, String>,
+}
+
+/// Reads several files in **one** call: each one's bytes base64-encoded, or
+/// `null` when it is not there. The paths travel as a quoted list, so a path with
+/// a space or a quote in it survives.
+///
+/// This exists for the remote start's preflight, which asks about the version's
+/// `bin.js`, the profile's manifest, the version's bundle and three profile
+/// documents before it may spawn anything. One question per file is honest and
+/// costs a round trip each; on a machine whose login shell takes a second that is
+/// a second per file, so they are asked together. Everything about layout stays
+/// the caller's: this only reads what it is told.
+const READ_FILES: &str = r#"set -u
+%%ESCAPER%%
+dsh_paths="%%PATHS%%"
+dsh_rows=
+dsh_sep=
+dsh_old_ifs=$IFS
+IFS='
+'
+for dsh_path in $dsh_paths; do
+  if [ -f "$dsh_path" ]; then
+    dsh_value="\"$(base64 < "$dsh_path" | tr -d '\n')\""
+  else
+    dsh_value=null
+  fi
+  dsh_rows="$dsh_rows$dsh_sep$dsh_value"
+  dsh_sep=,
+done
+IFS=$dsh_old_ifs
+printf '<<<DSH-JSON>>>{"files":[%s]}<<<DSH-END>>>' "$dsh_rows"
+"#;
+
+/// Reads the files at `paths` in one round trip. `None` is 「那台机器上没有这个
+/// 文件」; the order is the order of `paths`.
+pub async fn read_files(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    paths: &[String],
+) -> Result<Vec<Option<Vec<u8>>>, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        files: Vec<Option<String>>,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(read_files_script(paths)))
+        .await?;
+    let answer: Answer = parse_marked(&out)?;
+    answer
+        .files
+        .into_iter()
+        .map(|value| match value {
+            None => Ok(None),
+            Some(encoded) => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .map(Some)
+                    .map_err(|e| {
+                        HostError::remote_command(format!("那台机器上的文件内容不是 base64：{e}"))
+                    })
+            }
+        })
+        .collect()
+}
+
+pub fn read_files_script(paths: &[String]) -> String {
+    fill(
+        READ_FILES,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PATHS%%", paths.join("\n")),
+        ],
+    )
 }
 
 /// Reads one profile's own files on the machine that owns it, in one call.
@@ -2011,32 +2095,153 @@ printf '<<<DSH-JSON>>>{"occupied":true,"pid":%s,"command":"%s","args":"%s"}<<<DS
   "$dsh_pid" "$dsh_name" "$dsh_args"
 "#;
 
-/// Waits **on that machine** until one process tree is gone, or the budget runs
-/// out. The same predicate [`ALIVE`] reports with, so 「信号发出去了」 and 「真的
-/// 没了」 cannot disagree.
+/// Stops one instance's process tree **in one call**: checks the pid is still
+/// the process the launcher started, signals the group, and waits there for it
+/// to go.
 ///
-/// The wait belongs over there for the same reason [`TAIL`]'s does: confirming a
-/// stop by polling from here would open one ssh per second, when the only fact
-/// needed is when that machine stops seeing the process.
-const WAIT_GONE: &str = r#"set -u
+/// The three steps belong together, and not only for speed. Split across three
+/// round trips, every answer describes a moment that has already passed by the
+/// time the next call is made — the identity check in particular is about the
+/// process *the signal is aimed at*, and asking it a second before in another
+/// session leaves room for the pid to be reused in between. Here the check, the
+/// signal and the confirmation happen in one shell, and a machine whose
+/// `~/.bashrc` loads conda pays that second once instead of three times.
+///
+/// `%%STARTED%%` is the start time recorded when the launcher spawned it; null
+/// means that machine could not be read at spawn time, which is answered as
+/// 「没能确认」 rather than guessed at. `%%WAIT%%` is how long the far side may
+/// wait for the tree to go.
+const STOP_RUN: &str = r#"set -u
 dsh_pid=%%PID%%
+dsh_started=%%STARTED%%
 dsh_wait=%%WAIT%%
 
 dsh_alive() {
   kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null
 }
 
+dsh_now() {
+  dsh_stat=$(cat "/proc/$dsh_pid/stat" 2>/dev/null || true)
+  dsh_rest=${dsh_stat##*') '}
+  dsh_value=$(printf '%s' "$dsh_rest" | awk '{print $20}' 2>/dev/null || true)
+  case "$dsh_value" in
+    ''|*[!0-9]*) printf 'null' ;;
+    *) printf '%s' "$dsh_value" ;;
+  esac
+}
+
+dsh_answer() {
+  printf '<<<DSH-JSON>>>{"outcome":"%s","started_at":%s}<<<DSH-END>>>' "$1" "$(dsh_now)"
+}
+
+dsh_current=$(dsh_now)
+if [ "$dsh_current" = null ]; then
+  # The pid has no /proc entry: either it is gone, or this user cannot read it.
+  if dsh_alive; then dsh_answer unreadable; else dsh_answer gone; fi
+  exit 0
+fi
+if [ "$dsh_started" = null ]; then dsh_answer unprepared; exit 0; fi
+if [ "$dsh_current" != "$dsh_started" ]; then dsh_answer reused; exit 0; fi
+
+# The whole group: a detached spawn runs under `setsid`, so its pid leads the
+# group and the signal reaches what the instance started too.
+if ! { kill -TERM -- "-$dsh_pid" 2>/dev/null || kill -TERM "$dsh_pid" 2>/dev/null; }; then
+  if dsh_alive; then dsh_answer refused; else dsh_answer gone; fi
+  exit 0
+fi
+
+// Polls in tenths of a second: a DSH that answers SIGTERM is usually gone
+// within one, and rounding that up to a whole second is the difference the
+// user sees between a snappy 停止 and a sluggish one.
+dsh_ticks=$((dsh_wait * 10))
 dsh_i=0
-while [ "$dsh_i" -lt "$dsh_wait" ] && dsh_alive; do
-  sleep 1
+while [ "$dsh_i" -lt "$dsh_ticks" ] && dsh_alive; do
+  sleep 0.1
   dsh_i=$((dsh_i + 1))
 done
-if dsh_alive; then
-  printf '<<<DSH-JSON>>>{"gone":false}<<<DSH-END>>>'
-else
-  printf '<<<DSH-JSON>>>{"gone":true}<<<DSH-END>>>'
-fi
+if dsh_alive; then dsh_answer lingering; else dsh_answer stopped; fi
 "#;
+
+/// What one [`stop_run`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// The signal reached the process tree and that machine stopped seeing it.
+    Stopped,
+    /// Already gone: stopping twice is not an error.
+    Gone,
+    /// The recorded pid now belongs to a different process (the kernel reused
+    /// the number), so the one the launcher started has exited.
+    Reused {
+        now: Option<u64>,
+        recorded: Option<u64>,
+    },
+    /// The pid is there but its start time could not be read at all.
+    Unreadable,
+    /// The start time was never recorded, so identity cannot be checked.
+    Unprepared,
+    /// The signal could not be delivered, and the process is still there.
+    Refused,
+    /// Signalled, and still there when the wait ran out.
+    Lingering,
+}
+
+/// Stops one instance's process tree on that machine, in one round trip.
+pub async fn stop_run(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    pid: i32,
+    started_at: Option<u64>,
+    wait_secs: u64,
+) -> Result<StopOutcome, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        outcome: String,
+        started_at: Option<u64>,
+    }
+    let out = transport
+        .run(
+            host,
+            RemoteCall::within(
+                stop_run_script(pid, started_at, wait_secs),
+                budget_for(wait_secs),
+            ),
+        )
+        .await?;
+    let answer: Answer = parse_marked(&out)?;
+    Ok(match answer.outcome.as_str() {
+        "stopped" => StopOutcome::Stopped,
+        "gone" => StopOutcome::Gone,
+        "reused" => StopOutcome::Reused {
+            now: answer.started_at,
+            recorded: started_at,
+        },
+        "unreadable" => StopOutcome::Unreadable,
+        "unprepared" => StopOutcome::Unprepared,
+        "refused" => StopOutcome::Refused,
+        "lingering" => StopOutcome::Lingering,
+        other => {
+            return Err(HostError::remote_command(format!(
+                "那台机器给的停止结果是未知的：{other}"
+            )))
+        }
+    })
+}
+
+pub fn stop_run_script(pid: i32, started_at: Option<u64>, wait_secs: u64) -> String {
+    fill(
+        STOP_RUN,
+        &[
+            ("%%PID%%", pid.to_string()),
+            (
+                "%%STARTED%%",
+                started_at
+                    .map(|at| at.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+            ),
+            ("%%WAIT%%", wait_secs.to_string()),
+        ],
+    )
+}
 
 /// Exchanges one instance URL's launch token for its session cookie **on that
 /// machine**, and reports what came back: the HTTP status and the raw
@@ -2293,17 +2498,6 @@ pub fn start_time_script(pid: i32) -> String {
 /// The occupancy probe for one port on that machine.
 pub fn port_owner_script(port: u16) -> String {
     fill(PORT_OWNER, &[("%%PORT%%", port.to_string())])
-}
-
-/// The remote-side wait for one process tree to go.
-pub fn wait_gone_script(pid: i32, wait_secs: u64) -> String {
-    fill(
-        WAIT_GONE,
-        &[
-            ("%%PID%%", pid.to_string()),
-            ("%%WAIT%%", wait_secs.to_string()),
-        ],
-    )
 }
 
 /// The token exchange for one instance URL, made on that machine.
@@ -2822,6 +3016,25 @@ pub(crate) mod testing {
         marked(&format!("{{\"data\":\"{data}\"}}"))
     }
 
+    /// The stdout one multi-file read answers with, in the order the paths were
+    /// asked for: a file's bytes or `null` for 「那台机器上没有」 (the shape
+    /// [`READ_FILES`] prints).
+    pub(crate) fn files_stdout(files: &[Option<&[u8]>]) -> String {
+        use base64::Engine as _;
+        let rows = files
+            .iter()
+            .map(|file| match file {
+                Some(contents) => format!(
+                    "\"{}\"",
+                    base64::engine::general_purpose::STANDARD.encode(contents)
+                ),
+                None => "null".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        marked(&format!("{{\"files\":[{rows}]}}"))
+    }
+
     /// The stdout one tail read answers with: the log's size now, the bytes that
     /// appeared since the previous offset (base64), and whether the process tree
     /// is still there.
@@ -2882,17 +3095,13 @@ pub(crate) mod testing {
             FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
             // 7. 它起来了并打印了 URL —— `profiles/web` 现在在那台机器上。
             FakeAnswer::stdout(tail_stdout(&format!("dsh web: {ready_url}\n"), 320)),
-            // 8. 停之前核对 pid：启动时间对得上。
-            FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
-            // 9. 给它所在的进程组发终止信号。
-            FakeAnswer::Done,
-            // 10. 那台机器确认它走了。
-            FakeAnswer::stdout(marked(r#"{"gone":true}"#)),
-            // 11. web → __temp__。
+            // 8. 一次调用里核对 pid、发信号、等它走（`stop_run`）。
+            FakeAnswer::stdout(marked(r#"{"outcome":"stopped","started_at":117384720}"#)),
+            // 9. web → __temp__。
             FakeAnswer::stdout(marked(r#"{"ok":true}"#)),
-            // 12. 模板的补丁文档：这次启动把端口钉在了里面。
+            // 10. 模板的补丁文档：这次启动把端口钉在了里面。
             FakeAnswer::stdout(file_stdout(b"- id: webserver\n  port: 20017\n")),
-            // 13. 把那一行改回 0。
+            // 11. 把那一行改回 0。
             FakeAnswer::Done,
         ]
     }
@@ -3982,7 +4191,8 @@ mod tests {
 
     /// The real transport is the one that builds the ssh command line, and the
     /// script it carries is the script from this module — nothing here is a
-    /// stub.
+    /// stub. The connection test resolves `node` / `pnpm` by name, so it is one
+    /// of the calls that keep the login shell.
     #[test]
     fn the_real_transport_would_dial_with_the_script_built_here() {
         let host = host();
@@ -3990,7 +4200,7 @@ mod tests {
         let argv = crate::ssh::ssh_argv(
             &host.target,
             &host.socket,
-            &crate::ssh::script_command(&script),
+            &crate::ssh::script_command(&script, Shell::Login),
         );
         assert_eq!(argv.last().unwrap(), &quote(&script));
         assert_eq!(argv[argv.len() - 3], crate::ssh::REMOTE_SHELL);

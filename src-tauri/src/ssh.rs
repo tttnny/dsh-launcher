@@ -143,12 +143,36 @@ impl std::fmt::Display for HostError {
 // The transport
 // ---------------------------------------------------------------------------
 
-/// One ready-made remote invocation: a script built by [`crate::remote`], and
-/// how long it may take. Call sites never assemble `script` themselves.
+/// Which shell a script needs on that machine.
+///
+/// An **interactive login** shell reads `~/.bashrc` / `/etc/profile.d`, which is
+/// where Linux users put the directories of conda, nvm, Linuxbrew and the like.
+/// Every script that has to *find a tool* therefore needs it, and nothing else
+/// does: a script that names absolute paths or runs busybox-class commands
+/// (`cat`, `wc`, `ps`, `ss`, `kill`) gets the same answer either way.
+///
+/// The distinction is not cosmetic. On a machine whose `~/.bashrc` runs
+/// `conda activate`, nvm and shell completion, starting one costs about a
+/// second — and the launcher sends a dozen of these for one start, so every
+/// call that does not need the environment was paying that second for nothing.
+/// [`Shell::Login`] is the deliberate choice; [`Shell::Plain`] is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shell {
+    /// `bash -c`: no rc files. The default, and what every path-only script uses.
+    #[default]
+    Plain,
+    /// `bash -ilc`: the shell the user's terminal is (ADR-0005 追加).
+    Login,
+}
+
+/// One ready-made remote invocation: a script built by [`crate::remote`], the
+/// shell it needs there, and how long it may take. Call sites never assemble
+/// `script` themselves.
 #[derive(Clone, Debug)]
 pub struct RemoteCall {
     pub script: String,
     pub timeout: Duration,
+    pub shell: Shell,
 }
 
 impl RemoteCall {
@@ -156,13 +180,22 @@ impl RemoteCall {
         Self {
             script: script.into(),
             timeout: DEFAULT_TIMEOUT,
+            shell: Shell::Plain,
         }
+    }
+
+    /// The same call, made in the shell that reads that machine's rc files —
+    /// for a script that has to resolve `node` / `pnpm` / `npm` by name.
+    pub fn with_login_shell(mut self) -> Self {
+        self.shell = Shell::Login;
+        self
     }
 
     pub fn within(script: impl Into<String>, timeout: Duration) -> Self {
         Self {
             script: script.into(),
             timeout,
+            shell: Shell::Plain,
         }
     }
 }
@@ -404,7 +437,7 @@ impl SshTransport {
     }
 
     async fn script(&self, host: &RemoteHost, call: RemoteCall) -> Result<RemoteOutput, HostError> {
-        let command = script_command(&call.script);
+        let command = script_command(&call.script, call.shell);
         self.dial(host, &command, call.timeout).await
     }
 
@@ -598,14 +631,18 @@ pub fn ssh_argv(target: &str, socket: &Path, command: &[String]) -> Vec<String> 
     argv
 }
 
-/// The remote command words for one script. The script must reach the remote
-/// shell as **one** word: ssh joins the command words with spaces and the
-/// remote shell splits them again, so the quoting has to survive that second
-/// shell (see [`crate::remote::quote`]).
-pub fn script_command(script: &str) -> Vec<String> {
+/// The remote command words for one script, in the shell it asked for. The
+/// script must reach the remote shell as **one** word: ssh joins the command
+/// words with spaces and the remote shell splits them again, so the quoting has
+/// to survive that second shell (see [`crate::remote::quote`]).
+pub fn script_command(script: &str, shell: Shell) -> Vec<String> {
     vec![
         REMOTE_SHELL.to_string(),
-        "-ilc".to_string(),
+        match shell {
+            Shell::Plain => "-c",
+            Shell::Login => "-ilc",
+        }
+        .to_string(),
         crate::remote::quote(script),
     ]
 }
@@ -964,7 +1001,11 @@ mod tests {
         // — the case the `-o` quoting exists for.
         let dir = Path::new("/Users/me/Library/Application Support/dsh");
         let host = RemoteHost::of(&remote_host("zjq_aliyun"), dir).unwrap();
-        let argv = ssh_argv(&host.target, &host.socket, &script_command("echo hi"));
+        let argv = ssh_argv(
+            &host.target,
+            &host.socket,
+            &script_command("echo hi", Shell::Plain),
+        );
 
         assert!(
             argv.contains(&"BatchMode=yes".to_string()),
@@ -1169,7 +1210,11 @@ mod tests {
     fn ssh_parses_the_argument_list_the_launcher_builds() {
         let dir = Path::new("/Users/me/Library/Application Support/in.dsh-plug.dsh-launcher");
         let host = RemoteHost::of(&remote_host("zjq_aliyun"), dir).unwrap();
-        let argv = ssh_argv(&host.target, &host.socket, &script_command("echo hi"));
+        let argv = ssh_argv(
+            &host.target,
+            &host.socket,
+            &script_command("echo hi", Shell::Plain),
+        );
 
         let out = std::process::Command::new(SSH_BIN)
             .arg("-G")
@@ -1198,7 +1243,7 @@ mod tests {
     #[test]
     fn the_script_reaches_the_remote_shell_as_one_word() {
         let script = "printf 'a b' \"$HOME\"";
-        let command = script_command(script);
+        let command = script_command(script, Shell::Login);
         assert_eq!(command[0], REMOTE_SHELL);
         assert_eq!(command[1], "-ilc");
         assert_eq!(command.len(), 3);
@@ -1211,6 +1256,25 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&echoed.stdout), script);
+    }
+
+    /// A platform script's shell is chosen, not inherited: the cheap one by
+    /// default, the rc-reading one only where a tool has to be resolved by name.
+    /// The difference is a second per call on a machine whose `~/.bashrc` loads
+    /// conda.
+    #[test]
+    fn only_a_call_that_needs_the_environment_gets_the_login_shell() {
+        assert_eq!(script_command("true", Shell::Plain)[1], "-c");
+        assert_eq!(
+            script_command("true", RemoteCall::new("true").shell)[1],
+            "-c",
+            "默认是轻的：不给登录环境"
+        );
+        assert_eq!(
+            script_command("true", RemoteCall::new("true").with_login_shell().shell)[1],
+            "-ilc",
+            "要按名字找工具的那几条才起交互式登录 shell"
+        );
     }
 
     /// A forward's local end is bound to loopback **by spelling it out**:
@@ -1263,7 +1327,11 @@ mod tests {
     fn a_free_target_keeps_its_own_arguments() {
         let dir = Path::new("/tmp/launcher");
         let host = RemoteHost::of(&remote_host("user@example.com -p 2222"), dir).unwrap();
-        let argv = ssh_argv(&host.target, &host.socket, &script_command("echo hi"));
+        let argv = ssh_argv(
+            &host.target,
+            &host.socket,
+            &script_command("echo hi", Shell::Plain),
+        );
 
         let target_at = argv.iter().position(|a| a == "user@example.com").unwrap();
         let shell_at = argv.iter().position(|a| a == REMOTE_SHELL).unwrap();

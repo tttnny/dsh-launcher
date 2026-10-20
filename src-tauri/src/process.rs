@@ -719,57 +719,6 @@ enum ProfileNature {
     Unmaterialized,
 }
 
-/// The same question asked of the machine that owns the profile: the document
-/// travels, the rule does not.
-///
-/// 「没有这份文档」 is not the same answer as 「这份文档没写 web」: the first is a
-/// profile the start is about to create, and [`ProfileNature`] keeps the two
-/// apart so the caller can send the port it means instead of letting DSH fall
-/// back to its own default (see [`spawn_remote_instance`]).
-async fn profile_nature_remote(
-    state: &AppState,
-    run_host: &crate::ssh::RemoteHost,
-    home_path: &Path,
-    profile: &str,
-) -> ProfileNature {
-    let pkg = profile_package_json(home_path, profile);
-    match crate::remote::read_file_optional(
-        &*state.host_transport,
-        run_host,
-        &pkg.to_string_lossy(),
-    )
-    .await
-    {
-        Ok(Some(bytes)) => {
-            if web_profile_document(&String::from_utf8_lossy(&bytes)) {
-                ProfileNature::Web
-            } else {
-                ProfileNature::NotWeb
-            }
-        }
-        Ok(None) => ProfileNature::Unmaterialized,
-        // The machine did not answer. Nothing is guessed from that: the spawn
-        // that follows will say what is wrong, and it says it better.
-        Err(_) => ProfileNature::NotWeb,
-    }
-}
-
-async fn supports_no_open_remote(
-    state: &AppState,
-    run_host: &crate::ssh::RemoteHost,
-    version_dir: &Path,
-) -> bool {
-    let startup = crate::launch::web_app_startup_script(version_dir);
-    match state
-        .host_transport
-        .read_file(run_host, &startup.to_string_lossy())
-        .await
-    {
-        Ok(bytes) => crate::launch::supports_no_open(&String::from_utf8_lossy(&bytes)),
-        Err(_) => false,
-    }
-}
-
 /// Re-asserts the launcher's per-instance port in the profile's managed lan-bind
 /// block, **on the machine that owns the profile**: that block outranks the CLI
 /// `--port` and the plugin only re-asserts it at boot, so without this nudge the
@@ -778,23 +727,26 @@ async fn supports_no_open_remote(
 ///
 /// A failure only costs the next start's port, so it is logged rather than
 /// raised — the same weight the local one carries.
+///
+/// `document` is the patch file as the caller already read it, so a start that
+/// has just fetched everything in one round trip does not fetch this again.
 async fn assert_remote_lan_bind_port(
     state: &AppState,
     run_host: &crate::ssh::RemoteHost,
     home_path: &Path,
     profile: &str,
     port: u16,
+    document: Option<Vec<u8>>,
 ) {
     let Some(patch) = crate::profile::lan_bind_patch_path(home_path, profile) else {
         return;
     };
-    let path = patch.to_string_lossy().to_string();
-    let raw = match crate::remote::read_file_optional(&*state.host_transport, run_host, &path).await
-    {
-        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
-        // Absent file or absent block: nothing to nudge.
-        Ok(None) | Err(_) => return,
+    let Some(bytes) = document else {
+        // Absent file: nothing to nudge.
+        return;
     };
+    let path = patch.to_string_lossy().to_string();
+    let raw = String::from_utf8_lossy(&bytes).to_string();
     let updated = crate::profile::set_lan_bind_port(&raw, port);
     if updated == raw {
         return;
@@ -815,73 +767,65 @@ async fn assert_remote_lan_bind_port(
 /// settings, or every add/remove there fails with ERR_PNPM_UNEXPECTED_STORE.
 /// See [`crate::plugins::ensure_profile_store_pin`] / `ensure_profile_npmrc` for
 /// the local twins and why each setting exists. Best effort, like theirs.
+///
+/// The three documents arrive as the caller read them, for the same reason
+/// [`assert_remote_lan_bind_port`] takes its patch: one start, one round trip.
+/// The three profile documents one start reads from the machine that owns the
+/// profile, already in hand: the caller fetched them in the same round trip as
+/// everything else (`crate::remote::read_files`), so nothing here asks again.
+struct ProfileDocuments {
+    modules: Option<Vec<u8>>,
+    workspace: Option<Vec<u8>>,
+    npmrc: Option<Vec<u8>>,
+}
+
 async fn pin_remote_profile_store(
     state: &AppState,
     run_host: &crate::ssh::RemoteHost,
     home_path: &Path,
     profile: &str,
     data_dir: &Path,
+    documents: ProfileDocuments,
 ) {
     let Ok(dir) = crate::profile::profile_dir(home_path, profile) else {
         return;
     };
-    let read = |file: PathBuf| async move {
-        let path = file.to_string_lossy().to_string();
-        match crate::remote::read_file_optional(&*state.host_transport, run_host, &path).await {
-            Ok(Some(bytes)) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
-    };
+    let text = |bytes: Option<Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(&b).to_string());
 
     // The store the profile is already linked from, so a profile a user
     // installed against their own store keeps working.
-    let modules = dir.join("node_modules").join(".modules.yaml");
-    let linked = match read(modules).await {
-        Ok(Some(raw)) => crate::plugins::linked_store_document(&raw),
-        _ => None,
-    };
+    let linked = text(documents.modules)
+        .as_deref()
+        .and_then(crate::plugins::linked_store_document);
     let store = crate::plugins::store_target_from(
         linked.as_deref(),
         &crate::toolchain::store_dir(data_dir),
     );
 
-    let workspace = dir.join("pnpm-workspace.yaml");
-    match read(workspace.clone()).await {
-        Ok(raw) => {
-            if let Some(out) = crate::plugins::store_pin_document(raw.as_deref(), &store) {
-                let path = workspace.to_string_lossy().to_string();
-                if let Err(e) = state
-                    .host_transport
-                    .write_file(run_host, &path, out.into_bytes())
-                    .await
-                {
-                    crate::log_warn!("固定那台机器上 profile 的 pnpm store 失败（{path}）: {e}");
-                }
-            }
+    let workspace_path = dir.join("pnpm-workspace.yaml");
+    let workspace_raw = text(documents.workspace);
+    if let Some(out) = crate::plugins::store_pin_document(workspace_raw.as_deref(), &store) {
+        let path = workspace_path.to_string_lossy().to_string();
+        if let Err(e) = state
+            .host_transport
+            .write_file(run_host, &path, out.into_bytes())
+            .await
+        {
+            crate::log_warn!("固定那台机器上 profile 的 pnpm store 失败（{path}）: {e}");
         }
-        Err(e) => crate::log_warn!(
-            "读取那台机器上的 pnpm-workspace.yaml 失败（{}）: {e}",
-            workspace.display()
-        ),
     }
 
-    let npmrc = dir.join(".npmrc");
-    match read(npmrc.clone()).await {
-        Ok(raw) => {
-            let raw = raw.unwrap_or_default();
-            if let Some(out) = crate::plugins::npmrc_document(&raw) {
-                let path = npmrc.to_string_lossy().to_string();
-                if let Err(e) = state
-                    .host_transport
-                    .write_file(run_host, &path, out.into_bytes())
-                    .await
-                {
-                    crate::log_warn!("固定那台机器上 profile 的 peer 策略失败（{path}）: {e}");
-                }
-            }
+    let npmrc_path = dir.join(".npmrc");
+    let npmrc_raw = text(documents.npmrc).unwrap_or_default();
+    if let Some(out) = crate::plugins::npmrc_document(&npmrc_raw) {
+        let path = npmrc_path.to_string_lossy().to_string();
+        if let Err(e) = state
+            .host_transport
+            .write_file(run_host, &path, out.into_bytes())
+            .await
+        {
+            crate::log_warn!("固定那台机器上 profile 的 peer 策略失败（{path}）: {e}");
         }
-        Err(e) => crate::log_warn!("读取那台机器上的 .npmrc 失败（{}）: {e}", npmrc.display()),
     }
 }
 
@@ -928,15 +872,67 @@ pub(crate) async fn spawn_remote_instance(
     let run_host = crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
     let data_dir = host.data_dir(&state.data_dir)?;
 
-    // The version's own `bin.js`, asked of the machine that has the version
-    // directory: `version_bin_ready` is a local `exists()`, which at a remote
-    // path answers about this Mac.
+    // Everything this start has to know about that machine's files, asked in
+    // **one** round trip: the version's `bin.js`, the profile's manifest, the
+    // version's web-app bundle, and the three profile documents the writes below
+    // may touch. One question per file would be honest and slow — on a machine
+    // whose login shell takes a second to start, a second per file — and the
+    // answers all feed one decision: what argv to spawn.
     let bin = crate::launch::version_bin(&version.dir);
-    let ready =
-        crate::remote::file_ready(&*state.host_transport, &run_host, &bin.to_string_lossy())
-            .await
-            .map_err(|e| format!("无法确认那台机器上的 {}：{e}", bin.display()))?;
-    if !ready {
+    let home_path = cfg
+        .homes
+        .iter()
+        .find(|h| h.id == inst.home_id)
+        .map(|h| h.path.clone());
+    let profile_pkg = home_path
+        .as_deref()
+        .map(|home| profile_package_json(home, profile));
+    let startup = crate::launch::web_app_startup_script(&version.dir);
+    let patch = home_path
+        .as_deref()
+        .and_then(|home| crate::profile::lan_bind_patch_path(home, profile));
+    let profile_dir = home_path
+        .as_deref()
+        .and_then(|home| crate::profile::profile_dir(home, profile).ok());
+
+    // One path per question, built up front: a slot that was never asked for
+    // stays `None`, and its absence means the same thing as 「没有这份文档」.
+    let modules_path = profile_dir
+        .as_ref()
+        .map(|d| d.join("node_modules/.modules.yaml"));
+    let workspace_path = profile_dir.as_ref().map(|d| d.join("pnpm-workspace.yaml"));
+    let npmrc_path = profile_dir.as_ref().map(|d| d.join(".npmrc"));
+
+    let mut paths: Vec<String> = vec![bin.to_string_lossy().to_string()];
+    let optional: [Option<&Path>; 6] = [
+        profile_pkg.as_deref(),
+        Some(startup.as_path()),
+        patch.as_deref(),
+        modules_path.as_deref(),
+        workspace_path.as_deref(),
+        npmrc_path.as_deref(),
+    ];
+    for path in optional.iter().flatten() {
+        paths.push(path.to_string_lossy().to_string());
+    }
+    let mut answers = crate::remote::read_files(&*state.host_transport, &run_host, &paths)
+        .await
+        .map_err(|e| format!("无法读取「{}」上的文件：{e}", host.display_name))?
+        .into_iter();
+    let bin_bytes = answers.next().flatten();
+    // Slots line up with `optional`: a file that was not asked for reads as
+    // 「没有这份文档」, which is exactly what its absence means below.
+    let mut next = |asked: bool| -> Option<Vec<u8>> {
+        if asked {
+            answers.next().flatten()
+        } else {
+            None
+        }
+    };
+
+    // The version's own `bin.js`: `version_bin_ready` is a local `exists()`,
+    // which at a remote path answers about this Mac.
+    if bin_bytes.as_deref().map(<[u8]>::is_empty).unwrap_or(true) {
         return Err(format!(
             "版本 {} 安装不完整（缺少 {}），请重新安装",
             version.version,
@@ -957,15 +953,17 @@ pub(crate) async fn spawn_remote_instance(
     // policy. So an unmaterialized profile gets the intended port like any web
     // profile does (`0` = that machine's kernel picks a free one; a pinned port
     // was preflighted, and its occupant was named before anything was started).
-    let home_path = cfg
-        .homes
-        .iter()
-        .find(|h| h.id == inst.home_id)
-        .map(|h| h.path.clone());
-    let nature = match home_path.as_deref() {
-        Some(home) => profile_nature_remote(state, &run_host, home, profile).await,
+    let nature = match (home_path.as_deref(), next(profile_pkg.is_some())) {
+        (Some(_), Some(bytes)) => {
+            if web_profile_document(&String::from_utf8_lossy(&bytes)) {
+                ProfileNature::Web
+            } else {
+                ProfileNature::NotWeb
+            }
+        }
+        (Some(_), None) if profile_pkg.is_some() => ProfileNature::Unmaterialized,
         // No HOME record to ask about: the profile's own name is all there is.
-        None => {
+        _ => {
             if profile == "web" {
                 ProfileNature::Web
             } else {
@@ -973,22 +971,52 @@ pub(crate) async fn spawn_remote_instance(
             }
         }
     };
+    let startup_doc = next(true);
+    let patch_doc = next(patch.is_some());
+    let has_profile_dir = profile_dir.is_some();
+    let modules_doc = next(has_profile_dir);
+    let workspace_doc = next(has_profile_dir);
+    let npmrc_doc = next(has_profile_dir);
+
     let is_web = nature != ProfileNature::NotWeb;
     let web_port = is_web.then(|| inst.port.unwrap_or(0));
 
     if let (true, Some(home)) = (is_web, home_path.as_deref()) {
-        assert_remote_lan_bind_port(state, &run_host, home, profile, inst.port.unwrap_or(0)).await;
+        assert_remote_lan_bind_port(
+            state,
+            &run_host,
+            home,
+            profile,
+            inst.port.unwrap_or(0),
+            patch_doc,
+        )
+        .await;
     }
     if let Some(home) = home_path.as_deref() {
-        pin_remote_profile_store(state, &run_host, home, profile, &data_dir).await;
+        pin_remote_profile_store(
+            state,
+            &run_host,
+            home,
+            profile,
+            &data_dir,
+            ProfileDocuments {
+                modules: modules_doc,
+                workspace: workspace_doc,
+                npmrc: npmrc_doc,
+            },
+        )
+        .await;
     }
 
     // The interpreter is that machine's resolved binding (ADR-0005 追加), and
     // the flags are the launcher's policy — `--host` deliberately never among
     // them, `--no-open` only when that machine's bundle understands it.
     let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
-    let no_open =
-        web_port.is_some() && supports_no_open_remote(state, &run_host, &version.dir).await;
+    let no_open = web_port.is_some()
+        && startup_doc
+            .as_deref()
+            .map(|bytes| crate::launch::supports_no_open(&String::from_utf8_lossy(bytes)))
+            .unwrap_or(false);
     let instance_argv =
         crate::launch::instance_argv(&node, &version.dir, profile, web_port, no_open);
 
@@ -1686,77 +1714,60 @@ pub(crate) enum RemoteStop {
 
 /// The remote half of a stop, from the identity check to the confirmation. The
 /// caller owns the projections (the status event, the tray, the record).
+///
+/// The three steps are **one** call ([`crate::remote::stop_run`]): the identity
+/// check is about the process the signal is aimed at, so it has to happen in the
+/// same shell as the signal, and a machine whose login shell is slow pays for it
+/// once rather than three times.
 pub(crate) async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> RemoteStop {
-    let transport = &*state.host_transport;
     let target = run.host.target.clone();
-
-    // 1. Is the pid still the process the launcher started? The kernel reuses
-    //    pid numbers, and the number alone would be enough to kill somebody
-    //    else's process.
-    let current = match crate::remote::process_start_time(transport, &run.host, run.pid).await {
-        Ok(current) => current,
+    let outcome = crate::remote::stop_run(
+        &*state.host_transport,
+        &run.host,
+        run.pid,
+        run.started_at,
+        REMOTE_STOP_WAIT_SECS,
+    )
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
         Err(e) => {
+            crate::log_warn!("停止远端实例失败（{target}，pid {}）：{e}", run.pid);
             return RemoteStop::Unreachable(format!(
-                "停止前核对 pid {} 失败（{target}）：{e}",
+                "在「{target}」上停止 pid {} 失败：{e}",
                 run.pid
-            ))
+            ));
         }
     };
-    match (current, run.started_at) {
-        (None, _) => match crate::remote::alive(transport, &run.host, run.pid).await {
-            // Not there at all: nothing to stop, and nothing to report as a
-            // failure either (the second click on 停止 is not an error).
-            Ok(false) => return RemoteStop::Stopped,
-            Ok(true) => {
-                return RemoteStop::NotSignalled(format!(
-                    "「{target}」上读不到 pid {} 的启动时间（/proc/<pid>/stat 打不开），没法确认它还是启动时那个进程：没有发信号。请在那台机器上核对后自行停止：ssh {target} 'kill -TERM -- -{}'",
-                    run.pid, run.pid
-                ))
-            }
-            Err(e) => {
-                return RemoteStop::Unreachable(format!(
-                    "确认 pid {} 是否还在失败（{target}）：{e}",
-                    run.pid
-                ))
-            }
-        },
-        (Some(now), Some(stored)) if now == stored => {}
-        (Some(now), Some(stored)) => {
-            return RemoteStop::Reused(format!(
-                "pid {} 在「{target}」上已被系统复用（现在的启动时间 {now}，启动时记下的是 {stored}）：没有发信号",
-                run.pid
-            ))
-        }
+    match outcome {
+        // Not there at all: nothing to stop, and nothing to report as a failure
+        // either (the second click on 停止 is not an error).
+        StopOutcome::Stopped | StopOutcome::Gone => RemoteStop::Stopped,
+        StopOutcome::Reused { now, recorded } => RemoteStop::Reused(format!(
+            "pid {} 在「{target}」上已被系统复用（现在的启动时间 {}，启动时记下的是 {}）：没有发信号",
+            run.pid,
+            now.map(|n| n.to_string()).unwrap_or_else(|| "读不到".to_string()),
+            recorded
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "没记下".to_string())
+        )),
+        StopOutcome::Unreadable => RemoteStop::NotSignalled(format!(
+            "「{target}」上读不到 pid {} 的启动时间（/proc/<pid>/stat 打不开），没法确认它还是启动时那个进程：没有发信号。请在那台机器上核对后自行停止：ssh {target} 'kill -TERM -- -{}'",
+            run.pid, run.pid
+        )),
         // The start time was never recorded (that machine could not be read at
         // spawn time). Saying so is the honest half of "check before you signal";
         // 重试 (which re-establishes the instance) is what fills the record in.
-        (Some(_), None) => {
-            return RemoteStop::NotSignalled(format!(
-                "启动时没能记下 pid {} 的启动时间，现在无法确认它还是那个进程：没有发信号。刷新一次可以重新核对这个 pid；也可以在那台机器上停：ssh {target} 'kill -TERM -- -{}'",
-                run.pid, run.pid
-            ))
-        }
-    }
-
-    // 2. The whole group. A detached spawn runs under `setsid`, so its pid leads
-    //    the group and the signal reaches what the instance started too.
-    if let Err(e) = transport.stop_group(&run.host, run.pid).await {
-        crate::log_warn!("停止远端实例失败（{target}，pid {}）：{e}", run.pid);
-        return RemoteStop::Unreachable(format!(
-            "在「{target}」上给 pid {} 发终止信号失败：{e}",
-            run.pid
-        ));
-    }
-
-    // 3. Only 「那台机器上看不到它了」 counts as stopped.
-    match crate::remote::wait_gone(transport, &run.host, run.pid, REMOTE_STOP_WAIT_SECS).await {
-        Ok(true) => RemoteStop::Stopped,
-        Ok(false) => RemoteStop::StillRunning(format!(
-            "远端进程（{target}，pid {}）在 {REMOTE_STOP_WAIT_SECS} 秒内没有响应终止信号",
+        StopOutcome::Unprepared => RemoteStop::NotSignalled(format!(
+            "启动时没能记下 pid {} 的启动时间，现在无法确认它还是那个进程：没有发信号。刷新一次可以重新核对这个 pid；也可以在那台机器上停：ssh {target} 'kill -TERM -- -{}'",
+            run.pid, run.pid
+        )),
+        StopOutcome::Refused => RemoteStop::NotSignalled(format!(
+            "「{target}」上给 pid {} 发终止信号被拒绝（权限不足？），进程还在",
             run.pid
         )),
-        Err(e) => RemoteStop::Unreachable(format!(
-            "确认 pid {} 是否已停止失败（{target}）：{e}",
+        StopOutcome::Lingering => RemoteStop::StillRunning(format!(
+            "远端进程（{target}，pid {}）在 {REMOTE_STOP_WAIT_SECS} 秒内没有响应终止信号",
             run.pid
         )),
     }
@@ -2276,6 +2287,7 @@ pub fn hide_console(cmd: &mut Command) -> &mut Command {
 /// Version layout + every DSH invocation shape lives in `crate::launch`.
 pub use crate::launch::instance_env as build_env;
 use crate::launch::{version_bin, version_bin_ready};
+use crate::remote::StopOutcome;
 
 /// Whether a profile is a DSH web application: its package.json
 /// `dsh.profile.bundles` includes `@deepseek-ai/dsh-web-app`. Such profiles
@@ -3318,44 +3330,44 @@ mod tests {
         br#"{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#.to_vec()
     }
 
-    /// A start's answers, in the order the launcher asks them: the two profile
-    /// documents it reads from that machine, the port nudge (no patch document
-    /// yet), the profile's own store and peer pins, that machine's toolchain,
-    /// the `--no-open` feature check, the log size, the spawn, the pid's start
-    /// time, and the empty running record it completes.
-    fn remote_start_answers(node: &str) -> Vec<FakeAnswer> {
+    /// A start's answers, in the order the launcher asks them: **one** multi-file
+    /// read of that machine's version and profile documents, the profile's store
+    /// and peer pins, that machine's toolchain, the log size, the spawn, the
+    /// pid's start time, and the empty running record it completes.
+    ///
+    /// `profile_doc` is the profile's `package.json` on that machine; `None` is a
+    /// profile this start materializes.
+    fn remote_start_answers(node: &str, profile_doc: Option<&[u8]>) -> Vec<FakeAnswer> {
+        const BIN: &[u8] = b"#!/usr/bin/env node\n";
+        const STARTUP: &[u8] = b"const p = new Command().option('--no-open', 'x')";
         vec![
-            // 1. 版本目录里的 bin.js 在不在（那台机器自己回答）。
-            FakeAnswer::stdout(marked(r#"{"ready":true}"#)),
-            // 2. 那个 profile 的 package.json：是不是 web 应用。
-            FakeAnswer::stdout(crate::remote::testing::file_stdout(
-                &web_profile_document_fixture(),
-            )),
-            // 3. profile 的 lan-bind 文档：还没有，没有要改的行。
-            FakeAnswer::failed(2, "远端没有这个文件：cordis.patch.yml"),
-            // 4.-6. profile 自己那份 pnpm store：先看它已链接到哪个 store，
-            //       再把 store 写进 pnpm-workspace.yaml。
-            FakeAnswer::failed(2, "远端没有这个文件：node_modules/.modules.yaml"),
-            FakeAnswer::failed(2, "远端没有这个文件：pnpm-workspace.yaml"),
+            // 1. 版本与 profile 的那几个文件，一次问完：bin.js、package.json、
+            //    版本自己的 bundle、profile 的三个文档。
+            FakeAnswer::stdout(crate::remote::testing::files_stdout(&[
+                Some(BIN),
+                profile_doc,
+                Some(STARTUP),
+                None,
+                None,
+                None,
+                None,
+            ])),
+            // 2.-3. profile 自己那份 pnpm store 与 peer 策略：各写一次。
             FakeAnswer::Done,
-            // 7.-8. 同一份 profile 的 peer 策略。
-            FakeAnswer::failed(2, "远端没有这个文件：.npmrc"),
             FakeAnswer::Done,
-            // 9. 那台机器自己的绝对 Node。
+            // 4. 那台机器自己的绝对 Node。
             FakeAnswer::stdout(crate::remote::testing::environment_stdout(
                 crate::remote::testing::remote_tool(node, "v26.0.0", "system"),
                 crate::remote::testing::remote_tool_missing(vec![]),
                 &[],
             )),
-            // 10. 那台机器的 bundle 认不认 --no-open。
-            FakeAnswer::Bytes(b"const p = new Command().option('--no-open', 'x')".to_vec()),
-            // 11. 日志现在有多少字节（起进程之前问的）。
+            // 5. 日志现在有多少字节（起进程之前问的）。
             FakeAnswer::stdout(marked(r#"{"offset":0}"#)),
-            // 12. 脱离会话地起进程。
+            // 6. 脱离会话地起进程。
             FakeAnswer::Pid(4242),
-            // 13. 这个 pid 自己的启动时间。
+            // 7. 这个 pid 自己的启动时间。
             FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
-            // 14.-15. 那台机器上的运行记录：还没有，写一条。
+            // 8.-9. 那台机器上的运行记录：还没有，写一条。
             FakeAnswer::failed(2, "远端没有这个文件：running.json"),
             FakeAnswer::Done,
         ]
@@ -3514,9 +3526,8 @@ mod tests {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let node = "/usr/bin/node";
         let fake = FakeTransport::new();
-        let mut answers = remote_start_answers(node);
         // 那个 profile 在那台机器上还没有自己的 package.json。
-        answers[1] = FakeAnswer::failed(2, "远端没有这个文件：profiles/web/package.json");
+        let answers = remote_start_answers(node, None);
         for answer in answers {
             fake.answering(answer);
         }
@@ -3559,7 +3570,7 @@ mod tests {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let node = "/home/linuxbrew/.linuxbrew/bin/node";
         let fake = FakeTransport::new();
-        for answer in remote_start_answers(node) {
+        for answer in remote_start_answers(node, Some(&web_profile_document_fixture())) {
             fake.answering(answer);
         }
         let state = remote_app_state(
@@ -3647,7 +3658,7 @@ mod tests {
     async fn the_remote_run_record_names_the_pid_its_start_time_and_the_profile() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let fake = FakeTransport::new();
-        for answer in remote_start_answers("/usr/bin/node") {
+        for answer in remote_start_answers("/usr/bin/node", Some(&web_profile_document_fixture())) {
             fake.answering(answer);
         }
         let state = remote_app_state(
@@ -4099,20 +4110,23 @@ mod tests {
     /// 不到它了」 is the only thing that counts as stopped.
     #[tokio::test]
     async fn a_remote_stop_signals_the_group_and_confirms_before_reporting_stopped() {
-        let fake = FakeTransport::new()
-            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)))
-            .answering(FakeAnswer::Done)
-            .answering(FakeAnswer::stdout(marked(r#"{"gone":true}"#)));
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            r#"{"outcome":"stopped","started_at":117384720}"#,
+        )));
         let state = transport_state(&fake);
 
         let outcome = stop_remote_run(&state, &remote_run()).await;
 
         assert_eq!(outcome, RemoteStop::Stopped);
-        assert!(
-            fake.calls().contains(&FakeCall::StopGroup(4242)),
-            "要停的是那个进程组，不是单个进程：{:?}",
-            fake.calls()
-        );
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1, "核对、发信号、等它走是同一趟：{calls:?}");
+        match &calls[0] {
+            FakeCall::Run(script) => {
+                assert!(script.contains("kill -TERM -- \"-$dsh_pid\""), "{script}");
+                assert!(script.contains("dsh_started=117384720"), "{script}");
+            }
+            other => panic!("停止要发的是那一段脚本：{other:?}"),
+        }
     }
 
     /// A pid number is not an identity. When the start time on that machine is
@@ -4120,8 +4134,9 @@ mod tests {
     /// nothing may be signalled.
     #[tokio::test]
     async fn a_pid_whose_start_time_does_not_match_is_never_signalled() {
-        let fake =
-            FakeTransport::new().answering(FakeAnswer::stdout(marked(r#"{"started_at":999}"#)));
+        let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
+            r#"{"outcome":"reused","started_at":999}"#,
+        )));
         let state = transport_state(&fake);
 
         let outcome = stop_remote_run(&state, &remote_run()).await;
@@ -4130,14 +4145,15 @@ mod tests {
             RemoteStop::Reused(reason) => assert!(reason.contains("复用"), "{reason}"),
             other => panic!("一个被复用的 pid 不能当成我们的进程：{other:?}"),
         }
-        assert!(
-            !fake
-                .calls()
-                .iter()
-                .any(|call| matches!(call, FakeCall::StopGroup(_) | FakeCall::StopPid(_))),
-            "核对不过就不能发信号：{:?}",
-            fake.calls()
-        );
+        // 「不发信号」 is the machine's own decision, made in the same shell that
+        // would have signalled: the script compares the start times first.
+        let script = match &fake.calls()[0] {
+            FakeCall::Run(script) => script.clone(),
+            other => panic!("{other:?}"),
+        };
+        let check = script.find("dsh_current\" != \"$dsh_started\"").unwrap();
+        let signal = script.find("kill -TERM").unwrap();
+        assert!(check < signal, "核对要在发信号之前：{script}");
     }
 
     /// A machine that cannot be asked is not a stopped instance. Saying 「已停止」
