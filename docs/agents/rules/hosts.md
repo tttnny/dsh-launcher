@@ -77,6 +77,23 @@ socket）。ssh 那两句原始报错（`ControlPath too long`、`too long for U
 里，就是上面那条「启动 token 跨会话记住」在远端的落点。`kill_all`（退出启动器）跳过远端
 实例：它们在别人机器上跑，本来就该活过这一次退出。
 
+## 地址丢了要回到那台机器上找，别改读文件名的习惯
+
+远端实例的地址只存在于两处：那台机器的 `running.json`，和进程自己打印过的那一行
+`dsh web: <url>`。**DSH 会在原地把自己换掉**——新进程接着占那个端口，输出却写到它自己的
+启动者给的文件里（实测是 `/tmp/dsh-market-restart-*.out.log`），于是启动器一直在跟的
+`logs/<实例 id>.log` 不再有新行，而旧进程消失时 `unregister_running` 已经按规则删掉了
+`running.json`。这两件事合起来就是「卡片说运行中、点打开说未就绪」。
+
+所以缺地址时去问**那个进程自己**：`remote::stdout_tail` 读 `/proc/<pid>/fd/1` 的指向，
+`process::find_remote_address` 从中（并带上那份日志）取最新的地址，逐条在**那台机器的回环**
+上花掉 token（`mint_headers` + `cookie_pair_matches`），只接受被接受的那一个，然后
+`repair_remote_address` 把地址写回那台机器的 `running.json` 与运行表。**不要**改成「先读
+日志文件、文件里没有就算了」：文件是启动器记得的名字，进程的输出位置才是事实，而两者在
+DSH 自我重启之后正是不同的。找不到时给的是「在运行但不知道地址」这句话
+（`process::ADDRESS_UNKNOWN`），不是「未在运行」——后者会把人引去在服务器上起第二个 DSH。
+这条路「打开」与「重试」（`settle_remote_instance`）共用。
+
 ## 远端实例的停止与认领都发生在那一台主机上
 
 `process::adopt_surviving_remote_instances` 按主机各起一遍，`settle_remote_instance` 是它

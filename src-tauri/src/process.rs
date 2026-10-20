@@ -489,6 +489,182 @@ pub(crate) fn manageable_url(entry: &RunningEntry) -> Option<&str> {
     entry.url.as_deref().filter(|u| u.contains("token="))
 }
 
+/// Why 「打开」 has nothing to open, when that is the whole answer: the instance
+/// is not in the running table at all.
+const NOT_RUNNING: &str = "实例未在运行或尚未就绪";
+
+/// Why 「打开」 has nothing to open, when the instance **is** running on that
+/// machine and the launcher does not know its address.
+///
+/// These are two different states and they lead to two different actions, so
+/// they are two different sentences: the first is answered by starting the
+/// instance, the second (DSH replaced itself and the address it printed went to
+/// a file the launcher was not following) by retrying or restarting it.
+const ADDRESS_UNKNOWN: &str = "实例在那台机器上运行，但启动器不知道它的地址（DSH 自己重启后启动 token 没能找回来）。点「重试」再找一次；还找不到就从启动器重启这个实例。";
+
+/// How much of a process's own output the launcher reads when it has to find the
+/// address such an instance printed. Bounded on purpose: the line being looked
+/// for is the newest one, and a long-lived instance's log can be gigabytes.
+const ADDRESS_SEARCH_BYTES: usize = 64 * 1024;
+
+/// How many of those addresses may be spent asking that machine before the
+/// answer is 「不知道」. One restart prints a handful; a long-lived instance that
+/// restarted a dozen times does not deserve a dozen ssh round trips.
+const ADDRESS_CANDIDATES: usize = 8;
+
+/// Every `dsh web:` address in one stretch of output, oldest first.
+fn urls_in(text: &str) -> Vec<String> {
+    text.lines().filter_map(url_in).collect()
+}
+
+/// The address one running remote instance printed, found by asking **that
+/// machine** where the process's output goes and reading the newest address its
+/// own loopback still accepts.
+///
+/// This is the state DSH's in-place restart leaves behind: the process keeps its
+/// pid, so the launcher keeps believing it is the instance it started, while the
+/// replacement writes its output — the `dsh web: <url>` line with the launch
+/// token — to a file of its own making. The log the launcher has been following
+/// then says nothing more, and the address is nowhere in the running record
+/// either, because the exit path dropped it when the old pid went.
+///
+/// The token is spent **there** (`mint_headers`): the address belongs to that
+/// machine's loopback, and a candidate carrying a token nothing accepts is not
+/// this instance (ADR-0006). That is why nothing is returned unless one was
+/// accepted — recovering an address is exactly the situation where a plausible
+/// guess would be worse than saying 「不知道」.
+async fn find_remote_address(state: &AppState, run: &RemoteRun) -> Option<String> {
+    let transport = &*state.host_transport;
+    // Each read hands back its own stretch oldest-first. Where the process
+    // writes now is the most current place there is, so its addresses are looked
+    // at before the log the launcher remembered — and within each one, newest
+    // first, because an instance that replaced itself printed its address last.
+    let mut sources: Vec<Vec<String>> = Vec::new();
+    match crate::remote::stdout_tail(transport, &run.host, run.pid, ADDRESS_SEARCH_BYTES).await {
+        Ok(tail) => sources.push(urls_in(&tail.text)),
+        Err(e) => crate::log_warn!(
+            "实例 pid {}（{}）的输出位置读不到：{e}",
+            run.pid,
+            run.host.target
+        ),
+    }
+    match crate::remote::log_tail(transport, &run.host, &run.log_path, ADDRESS_SEARCH_BYTES).await {
+        Ok(tail) if tail.exists => sources.push(urls_in(&tail.text)),
+        Ok(_) => {}
+        Err(e) => crate::log_warn!("实例 pid {} 的远端日志读不到：{e}", run.pid),
+    }
+    // Only addresses that carry a token are worth an ssh round trip, and the
+    // same address seen in both places is asked about once.
+    let candidates = sources.into_iter().flat_map(|urls| urls.into_iter().rev());
+    let mut tried: Vec<String> = Vec::new();
+    for url in candidates {
+        if token_of(&url).is_none() || tried.contains(&url) {
+            continue;
+        }
+        if tried.len() >= ADDRESS_CANDIDATES {
+            break;
+        }
+        tried.push(url.clone());
+        match crate::remote::mint_headers(transport, &run.host, &url).await {
+            Ok(mint) => {
+                let accepted = mint
+                    .cookie
+                    .as_deref()
+                    .map(|pair| crate::native::cookie_pair_matches(&url, pair))
+                    .unwrap_or(false);
+                if accepted {
+                    return Some(url);
+                }
+                crate::log_debug!(
+                    "实例 pid {} 曾经打印的地址 {url} 没有被那台机器接受（HTTP {}）",
+                    run.pid,
+                    mint.status
+                );
+            }
+            Err(e) => crate::log_warn!("在那台机器上确认 {url} 失败：{e}"),
+        }
+    }
+    None
+}
+
+/// Re-establishes the address of a remote instance the launcher is holding
+/// without one, and says which address that is on that machine — `None` when
+/// nothing could be found and therefore nothing was changed.
+///
+/// What it records is the same thing the ready path records: the address that
+/// machine printed, written into **that machine's** own running record so a
+/// later session does not have to search again (ADR-0007 §3), and the forwarded
+/// address in the running table, which is what 「打开」 hands over (ADR-0008).
+/// A forward that will not come up costs the address, not the instance — the
+/// caller retries it with the address it now has.
+async fn repair_remote_address(
+    state: &AppState,
+    instance_id: &str,
+    profile: &str,
+    run: &RemoteRun,
+) -> Option<String> {
+    let remote_url = find_remote_address(state, run).await?;
+    crate::log_info!(
+        "实例 {instance_id} 在「{}」上运行的 pid {} 找回了地址：{remote_url}",
+        run.host.target,
+        run.pid
+    );
+    let record = RemoteRunRecord {
+        url: Some(remote_url.clone()),
+        token: token_of(&remote_url),
+        profile: profile.to_string(),
+        pid: run.pid,
+        started_at: run.started_at,
+    };
+    if let Err(e) = remember_remote_run(state, instance_id, &record, run).await {
+        // The address works for this session either way; losing the record only
+        // costs the next session another search.
+        crate::log_warn!("实例 {instance_id} 的远端运行记录没写上（{e}）");
+    }
+    let local_url = local_address_for(state, instance_id, &run.host, &remote_url).await;
+    {
+        let mut running = state.running.lock().await;
+        if let Some(entry) = running.get_mut(instance_id) {
+            // A start may have replaced the entry while the search ran: only
+            // the run this search was about gets the address.
+            if let Some(current) = entry.remote.as_mut() {
+                if current.pid == run.pid {
+                    current.remote_url = Some(remote_url.clone());
+                    entry.url = local_url;
+                }
+            }
+        }
+    }
+    Some(remote_url)
+}
+
+/// Emits the status of an instance whose address was just re-established: the
+/// row states two addresses and only one of them was missing, so this is what
+/// turns 「运行中」 into 「运行中，可打开」 without waiting for the next page load.
+async fn emit_address_found(app: &AppHandle, state: &AppState, instance_id: &str, profile: &str) {
+    let (url, remote_url) = {
+        let running = state.running.lock().await;
+        match running.get(instance_id) {
+            Some(entry) => (
+                entry.url.clone(),
+                entry.remote.as_ref().and_then(|r| r.remote_url.clone()),
+            ),
+            None => (None, None),
+        }
+    };
+    emit_status(
+        app,
+        &InstanceStatus {
+            id: instance_id.to_string(),
+            state: InstanceState::Running,
+            url,
+            remote_url,
+            profile: Some(profile.to_string()),
+            exit_code: None,
+        },
+    );
+}
+
 /// Puts one remote instance's address on this Mac, for an instance whose own
 /// machine has just been found running it (ADR-0008).
 ///
@@ -523,27 +699,35 @@ pub(crate) async fn local_address_for(
 /// not taken from the entry as it stands: a forward lives only as long as the
 /// ssh connection under it, so the entry's copy can be an address that died
 /// while the Mac slept, and this is where that is noticed and repaired.
+///
+/// A remote entry with no address at all — DSH replaced itself and its new
+/// output file was never followed — is searched for on that machine first
+/// ([`repair_remote_address`]), and only then answered 「不知道」.
 pub(crate) async fn reachable_url_for(
     state: &AppState,
     instance_id: &str,
 ) -> Result<String, String> {
-    let entry = state.running.lock().await;
-    let Some(entry) = entry.get(instance_id) else {
-        return Err("实例未在运行或尚未就绪".to_string());
+    let (url, remote, profile) = {
+        let entry = state.running.lock().await;
+        let Some(entry) = entry.get(instance_id) else {
+            return Err(NOT_RUNNING.to_string());
+        };
+        (
+            entry.url.clone(),
+            entry.remote.clone(),
+            entry.profile.clone(),
+        )
     };
-    match &entry.remote {
-        None => entry
-            .url
-            .clone()
-            .ok_or_else(|| "实例未在运行或尚未就绪".to_string()),
-        Some(run) => {
-            let remote_url = run
-                .remote_url
-                .as_deref()
-                .ok_or_else(|| "实例未在运行或尚未就绪".to_string())?;
-            crate::tunnel::reachable_url(state, &run.host, remote_url).await
-        }
-    }
+    let Some(run) = remote else {
+        return url.ok_or_else(|| NOT_RUNNING.to_string());
+    };
+    let remote_url = match run.remote_url.clone() {
+        Some(remote_url) => remote_url,
+        None => repair_remote_address(state, instance_id, &profile, &run)
+            .await
+            .ok_or_else(|| ADDRESS_UNKNOWN.to_string())?,
+    };
+    crate::tunnel::reachable_url(state, &run.host, &remote_url).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,26 +2291,38 @@ pub(crate) async fn settle_remote_instance(
     inst: &DshInstance,
     host: &Host,
 ) -> InstanceState {
-    // Already running as far as this session is concerned. The one thing worth
-    // re-reading is the process start time: a stop refuses without it, and this
-    // is how a record that missed it gets repaired.
-    let existing = state
-        .running
-        .lock()
-        .await
-        .get(&inst.id)
-        .and_then(|entry| entry.remote.clone());
-    if let Some(run) = existing {
-        if run.started_at.is_none() {
-            if let Ok(Some(at)) =
-                crate::remote::process_start_time(&*state.host_transport, &run.host, run.pid).await
-            {
-                let mut running = state.running.lock().await;
-                if let Some(entry) = running.get_mut(&inst.id) {
-                    if let Some(remote) = entry.remote.as_mut() {
-                        remote.started_at = Some(at);
+    // Already running as far as this session is concerned. Two things are worth
+    // re-reading here, and both are 重试's answer: the process start time (a stop
+    // refuses without it, and this is how a record that missed it gets repaired)
+    // and the address (DSH can replace itself in place, leaving this session
+    // holding a live pid whose launch token went with the process it replaced).
+    let existing = {
+        let running = state.running.lock().await;
+        running
+            .get(&inst.id)
+            .map(|entry| (entry.remote.clone(), entry.profile.clone()))
+    };
+    if let Some((existing_run, profile)) = existing {
+        if let Some(run) = existing_run {
+            if run.started_at.is_none() {
+                if let Ok(Some(at)) =
+                    crate::remote::process_start_time(&*state.host_transport, &run.host, run.pid)
+                        .await
+                {
+                    let mut running = state.running.lock().await;
+                    if let Some(entry) = running.get_mut(&inst.id) {
+                        if let Some(remote) = entry.remote.as_mut() {
+                            remote.started_at = Some(at);
+                        }
                     }
                 }
+            }
+            if run.remote_url.is_none()
+                && repair_remote_address(state, &inst.id, &profile, &run)
+                    .await
+                    .is_some()
+            {
+                emit_address_found(app, state, &inst.id, &profile).await;
             }
         }
         finish_remote_scan(state, &host.id);
@@ -2149,15 +2345,20 @@ pub(crate) async fn settle_remote_instance(
             profile,
         } => {
             state.set_host_status(&host.id, HostStatus::reachable());
-            adopt_remote_process(
-                app,
-                state,
-                &inst.id,
-                &profile,
-                RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at),
-                url,
-            )
-            .await;
+            let run = RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at);
+            adopt_remote_process(app, state, &inst.id, &profile, run.clone(), url.clone()).await;
+            // Adopted without an address: the record that machine keeps had
+            // none (DSH replaced itself and the exit path dropped it), so the
+            // card would be 「运行中」 with a 打开 that cannot say where. The
+            // address is still in that process's own output — look for it now,
+            // at the one moment nobody is waiting on a click.
+            if url.is_none()
+                && repair_remote_address(state, &inst.id, &profile, &run)
+                    .await
+                    .is_some()
+            {
+                emit_address_found(app, state, &inst.id, &profile).await;
+            }
             InstanceState::Running
         }
         // A port held by something that is not DSH means this instance is not
@@ -3233,6 +3434,12 @@ mod tests {
 
     use crate::remote::testing::{marked, FakeAnswer, FakeCall, FakeTransport};
 
+    /// The base64 one remote script's base64 field carries.
+    fn base64_of(text: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+    }
+
     const REMOTE_DATA: &str = "/home/demo/.local/share/dsh-launcher";
     const REMOTE_HOME: &str = "/home/demo/.dsh";
 
@@ -3975,6 +4182,180 @@ mod tests {
         let status = statuses.iter().find(|s| s.id == "i-remote").unwrap();
         assert_eq!(status.url.as_deref(), Some(local_url.as_str()));
         assert_eq!(status.remote_url.as_deref(), Some(remote_url.as_str()));
+    }
+
+    /// DSH replacing itself in place keeps the pid the launcher watches but
+    /// moves its output to a file of its own making, so the log the launcher was
+    /// following says nothing more and the running record has no address. 「打开」
+    /// then has to find the address where it actually is: that machine's own
+    /// file descriptors, with the token checked there before it is believed.
+    #[tokio::test]
+    async fn an_open_instance_without_an_address_finds_it_in_the_process_own_output() {
+        // 3080 is the authority `REMOTE_COOKIE` was computed for, so the check
+        // here is the same one the real machine makes: the cookie names the host
+        // and port the request was made to.
+        let printed = format!("dsh web: {READY_URL}\n");
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"path":"/tmp/dsh-market-restart.out.log","data":"{}"}}"#,
+                base64_of(&printed)
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"exists":false,"data":"{}"}}"#,
+                base64_of("")
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"status":303,"cookie":"{REMOTE_COOKIE}"}}"#
+            ))))
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        state.running.lock().await.insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: Some(remote_run()),
+            },
+        );
+
+        let opened = reachable_url_for(&state, "i-remote").await.unwrap();
+
+        assert_eq!(
+            opened.split('/').nth(3),
+            READY_URL.split('/').nth(3),
+            "打开的是那台机器上真正在听的那个地址"
+        );
+        assert!(opened.contains(&format!("token={READY_TOKEN}")), "{opened}");
+        // The fake's forward binds nothing, so the tunnel re-opens it on the way
+        // out; what matters is that every forward it asked for aims at the
+        // address the search found, never at anything else.
+        let targets = forwarded(&fake);
+        assert!(!targets.is_empty(), "打开之前要建转发");
+        assert!(
+            targets
+                .iter()
+                .all(|target| target == &("127.0.0.1".to_string(), 3080)),
+            "转发目标就是找回的地址：{targets:?}"
+        );
+        let written = fake
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                FakeCall::WriteFile(path, bytes) => Some((path, bytes)),
+                _ => None,
+            })
+            .expect("找回的地址要写进那台机器的运行记录");
+        assert_eq!(written.0, format!("{REMOTE_DATA}/running.json"));
+        let record = String::from_utf8(written.1).unwrap();
+        assert!(
+            record.contains(READY_TOKEN),
+            "记录里要带上启动 token：{record}"
+        );
+        assert!(
+            record.contains("\"pid\": 4242"),
+            "记录要指向这个进程：{record}"
+        );
+    }
+
+    /// The page's 重试 asks that machine again — and for an instance this session
+    /// already holds, the thing worth asking again is the address it is missing.
+    /// A retry that returned 「运行中」 while 「打开」 still refused would be the
+    /// button that does nothing.
+    #[tokio::test]
+    async fn an_instance_without_an_address_is_repaired_in_place() {
+        let printed = format!("dsh web: {READY_URL}\n");
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"path":"/tmp/dsh-market-restart.out.log","data":"{}"}}"#,
+                base64_of(&printed)
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"exists":false,"data":"{}"}}"#,
+                base64_of("")
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"status":303,"cookie":"{REMOTE_COOKIE}"}}"#
+            ))))
+            .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
+            .answering(FakeAnswer::Done)
+            .answering(FakeAnswer::Done);
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        let run = remote_run();
+        state.running.lock().await.insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: Some(run.clone()),
+            },
+        );
+
+        let found = repair_remote_address(&state, "i-remote", "web", &run).await;
+
+        assert_eq!(found.as_deref(), Some(READY_URL), "地址补回来了");
+        let entry = state.running.lock().await;
+        let entry = entry.get("i-remote").unwrap();
+        assert_eq!(
+            entry.remote.as_ref().and_then(|r| r.remote_url.as_deref()),
+            Some(READY_URL),
+            "那条运行记录也带上了地址"
+        );
+        assert!(
+            entry
+                .url
+                .as_deref()
+                .map(|u| u.contains(&format!("token={READY_TOKEN}")))
+                .unwrap_or(false),
+            "本机可达的地址也补回来了：{:?}",
+            entry.url
+        );
+    }
+
+    /// Nothing to search, or nothing the instance accepts: the honest answer is
+    /// 「不知道地址」, not 「没在运行」 — the second sentence would send the user to
+    /// start a second DSH on a machine that is running one.
+    #[tokio::test]
+    async fn an_instance_whose_address_cannot_be_found_says_so_instead_of_not_running() {
+        let fake = FakeTransport::new()
+            .answering(FakeAnswer::stdout(marked(r#"{"path":null,"data":""}"#)))
+            .answering(FakeAnswer::stdout(marked(r#"{"exists":false,"data":""}"#)));
+        let state = AppState {
+            host_transport: fake.clone(),
+            ..app_state(Vec::new(), Vec::new())
+        };
+        state.running.lock().await.insert(
+            "i-remote".into(),
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: "web".into(),
+                url: None,
+                adopted: None,
+                remote: Some(remote_run()),
+            },
+        );
+
+        let err = reachable_url_for(&state, "i-remote").await.unwrap_err();
+
+        assert!(err.contains("不知道它的地址"), "{err}");
+        assert!(!err.contains("未在运行"), "它明明在跑：{err}");
+        assert!(
+            forwarded(&fake).is_empty(),
+            "没有地址就没有转发：{:?}",
+            fake.calls()
+        );
     }
 
     /// ⌘Q stops this Mac's instances and nothing else (ADR-0007 §1-2): a remote

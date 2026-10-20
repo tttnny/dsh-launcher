@@ -2297,6 +2297,69 @@ if [ -s %%PATH%% ]; then dsh_ready=true; else dsh_ready=false; fi
 printf '<<<DSH-JSON>>>{"ready":%s}<<<DSH-END>>>' "$dsh_ready"
 "#;
 
+/// Where one process's standard output goes **now**, and the last stretch of
+/// that file.
+///
+/// A DSH that replaces itself keeps the pid the launcher is watching but not the
+/// file it was started with: the replacement writes to whatever its own starter
+/// gave it (DSH's restart helper hands it a fresh file under `/tmp`), so the
+/// log the launcher has been following falls silent while the instance prints
+/// its new launch address somewhere else. `/proc/<pid>/fd/1` is that fact asked
+/// of the process itself, so the launcher can follow the address instead of the
+/// filename it remembered.
+///
+/// A target that is not a regular file (a pipe, a terminal) has no bytes to
+/// read: `path` is then null and `data` empty, which is a fact and not a
+/// failure.
+const STDOUT_TAIL: &str = r#"set -u
+%%ESCAPER%%
+dsh_pid=%%PID%%
+dsh_bytes=%%BYTES%%
+dsh_target=$(readlink "/proc/$dsh_pid/fd/1" 2>/dev/null || true)
+if [ -z "$dsh_target" ] || [ ! -f "$dsh_target" ]; then
+  printf '<<<DSH-JSON>>>{"path":null,"data":""}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_data=$(tail -c "$dsh_bytes" "$dsh_target" 2>/dev/null | base64 | tr -d '\n')
+dsh_quoted=$(dsh_esc "$dsh_target")
+printf '<<<DSH-JSON>>>{"path":"%s","data":"%s"}<<<DSH-END>>>' "$dsh_quoted" "$dsh_data"
+"#;
+
+/// The tail of one process's current output file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StdoutTail {
+    /// The file that output goes to, as that machine spells it. `None` when the
+    /// process writes to something that is not a file.
+    pub path: Option<String>,
+    /// The last bytes of that file, as text.
+    pub text: String,
+}
+
+pub async fn stdout_tail(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    pid: i32,
+    max_bytes: usize,
+) -> Result<StdoutTail, HostError> {
+    #[derive(Deserialize)]
+    struct Answer {
+        path: Option<String>,
+        data: String,
+    }
+    let out = transport
+        .run(host, RemoteCall::new(stdout_tail_script(pid, max_bytes)))
+        .await?;
+    let answer: Answer = parse_marked(&out)?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(answer.data.as_bytes())
+        .map_err(|e| HostError::remote_command(format!("远端输出无法解码：{e}")))?;
+    Ok(StdoutTail {
+        path: answer.path,
+        text: String::from_utf8_lossy(&bytes).to_string(),
+    })
+}
+
 /// When one pid started, in clock ticks since boot: field 22 of
 /// `/proc/<pid>/stat`, which puts a pid number back together with the process it
 /// names.
@@ -2493,6 +2556,18 @@ pub fn file_ready_script(path: &str) -> String {
 /// The start-time read for one pid.
 pub fn start_time_script(pid: i32) -> String {
     fill(START_TIME, &[("%%PID%%", pid.to_string())])
+}
+
+/// The read of where one pid's output goes, and its last `max_bytes`.
+pub fn stdout_tail_script(pid: i32, max_bytes: usize) -> String {
+    fill(
+        STDOUT_TAIL,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%PID%%", pid.to_string()),
+            ("%%BYTES%%", max_bytes.to_string()),
+        ],
+    )
 }
 
 /// The occupancy probe for one port on that machine.
