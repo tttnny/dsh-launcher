@@ -886,14 +886,17 @@ printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 const LINK_STATE: &str = r#"dsh_marker=%%MARKER%%
 dsh_link="${HOME:-}/.local/bin/dsh"
 
-# A directory this link names is one of the launcher's versions.
+# A directory this link names is one of the launcher's versions. The loop
+# variable is `dsh_known`, not one of the caller's: this block is spliced into
+# scripts that keep the directory they are asking about in their own variables,
+# and a shared name would let it overwrite one.
 dsh_is_version() {
   [ -n "$1" ] || return 1
   dsh_old_ifs=$IFS
   IFS='
 '
-  for dsh_dir in $dsh_versions; do
-    [ "$dsh_dir" = "$1" ] && { IFS=$dsh_old_ifs; return 0; }
+  for dsh_known in $dsh_versions; do
+    [ "$dsh_known" = "$1" ] && { IFS=$dsh_old_ifs; return 0; }
   done
   IFS=$dsh_old_ifs
   return 1
@@ -903,9 +906,9 @@ dsh_symlink_into() {
   dsh_old_ifs=$IFS
   IFS='
 '
-  for dsh_dir in $dsh_versions; do
+  for dsh_known in $dsh_versions; do
     case "$1" in
-      "$dsh_dir"|"$dsh_dir"/*) { IFS=$dsh_old_ifs; return 0; } ;;
+      "$dsh_known"|"$dsh_known"/*) { IFS=$dsh_old_ifs; return 0; } ;;
     esac
   done
   IFS=$dsh_old_ifs
@@ -954,12 +957,12 @@ esac
 /// machine two things at two moments.
 const INSTALLED_VERSIONS: &str = r#"set -u
 %%ESCAPER%%
-dsh_dir=%%PATH%%
+dsh_versions_dir=%%PATH%%
 dsh_versions=%%VERSIONS%%
 %%LINK%%
 dsh_rows=
 dsh_sep=
-for dsh_entry in "$dsh_dir"/*; do
+for dsh_entry in "$dsh_versions_dir"/*; do
   [ -d "$dsh_entry" ] || continue
   if [ -f "$dsh_entry/apps/cli/package.json" ]; then
     dsh_bin="$dsh_entry/apps/cli/lib/bin.js"
@@ -3429,8 +3432,13 @@ mod tests {
     /// needs it: one row per version, with its directory and whether the bin is
     /// ready. A half-installed version is not something anyone can start, and
     /// the machine that owns the directory is the only one that can say so.
+    ///
+    /// The registered version goes along in `known` with a link pointing into
+    /// it, which is the shape the Library asks in: the link block and the
+    /// listing share one script, so the listing has to survive the block.
     #[test]
     fn the_installed_versions_script_answers_each_versions_path_and_bin_readiness() {
+        let home = scratch("dsh-versions-home");
         let scratch = std::env::temp_dir().join(format!("dsh-versions-{}", uuid::Uuid::new_v4()));
         let versions = scratch.join("versions");
         // An npm tree, the layout an installed release has...
@@ -3448,8 +3456,17 @@ mod tests {
         std::fs::write(checkout.join("apps/cli/lib/bin.js"), "// dsh\n").unwrap();
         // ...and an install that stopped before its bin existed.
         std::fs::create_dir_all(versions.join("0.1.0-rc.4")).unwrap();
+        // A `dsh` on that machine's PATH, pointing into the version that counts.
+        let link = home.join(".local/bin/dsh");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(npm_tree.join("node_modules/.bin/dsh"), &link).unwrap();
 
-        let out = local_shell(&installed_versions_script(&versions.to_string_lossy(), &[]));
+        let known = [npm_tree.to_string_lossy().to_string()];
+        let known: Vec<&str> = known.iter().map(String::as_str).collect();
+        let out = local_shell_as(
+            &installed_versions_script(&versions.to_string_lossy(), &known),
+            &home,
+        );
         let answer = decode_remote_versions(&out).expect("真实 shell 跑出来的答案要能解析");
         let found = answer.versions;
 
@@ -3460,8 +3477,14 @@ mod tests {
         assert_eq!(by_name("0.1.0-rc.5").dir, checkout.to_string_lossy());
         assert!(by_name("0.1.0-rc.5").bin_ready, "repo checkout 也是就绪");
         assert!(!by_name("0.1.0-rc.4").bin_ready, "bin 没写出来就不是就绪");
+        assert_eq!(answer.link.state, "symlink");
+        assert_eq!(
+            answer.link.target,
+            npm_tree.join("node_modules/.bin/dsh").to_string_lossy()
+        );
 
         std::fs::remove_dir_all(&scratch).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The remote bin check is the local launcher's rule applied on that

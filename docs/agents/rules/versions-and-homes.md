@@ -80,6 +80,13 @@ magpie 这类工具不进版本目录找 CLI，只按命令名在 PATH（以及 
 `register` / `unregister` / `unlink` 三个动作都按它给的 `dsh_state` 与 `dsh_ours` 分支，
 不要再各自写一份判断。
 
+**共用前导只用自己的变量名**：它被拼进 `PATH_LINK` 与 `INSTALLED_VERSIONS` 两种脚本，
+而这几种脚本都在调用者自己的变量里放「这一趟要问的目录」。前导借用同名变量（如
+`dsh_dir`）就会在运行中把它改成别的东西，脚本随后算出的清单与那个目录无关，而失败是
+静悄悄的——只是列表少了几行、`bin_ready` 全为 false。所以前导的循环变量叫
+`dsh_known`，各脚本的目录变量各叫各自的（`dsh_versions_dir`、`dsh_dir` 只在单脚本内
+使用），拼装处的东西一律带足前缀。
+
 版本列表的 `path_linked` 由链接所在的那台机器回答：
 本机读自己的 `~/.local/bin/dsh`，远端跟着版本列表的同一趟 ssh 一起读回链接状态
 （`installed_versions` 的答案里带 `link`），不要为它多发一次往返。

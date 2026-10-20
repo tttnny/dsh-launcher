@@ -3957,7 +3957,7 @@ mod tests {
 
         let script = transport.last_script();
         assert!(
-            script.contains("dsh_dir='/home/demo/dsh/versions'"),
+            script.contains("dsh_versions_dir='/home/demo/dsh/versions'"),
             "后面的脚本拿到的是 settle 过的绝对路径：{script}"
         );
         assert!(!script.contains('~'), "literal 波浪号不能进脚本：{script}");
