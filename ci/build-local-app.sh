@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 本机构建 + 安装自测用的 .app。
 #
-# 与发版构建的唯一区别是签名方式：这里用钥匙串里的 Apple Development 证书签名，
-# 发版 dmg 仍是未签名的原始产物。
+# 与 `pnpm tauri build` 的区别是签名方式：这里用钥匙串里的 Apple Development 证书签名，
+# 那条命令打出的 dmg 是未签名的原始产物。
 #
 # 为什么必须用证书签名：ad-hoc 签名的 designated requirement 就是 cdhash，
 # App 内容一变 cdhash 就变，macOS 存的 TCC 授权（如「完全磁盘访问」）随之失配，

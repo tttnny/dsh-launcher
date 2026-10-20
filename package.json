@@ -14,7 +14,6 @@
     "format": "prettier --write .",
     "verify": "bash ci/verify.sh",
     "verify:quick": "bash ci/verify.sh --quick",
-    "test:release-notes": "node --test ci/release-notes.test.mjs",
     "test:gate-list": "node --test ci/gate-list.test.mjs",
     "test:api-contract": "node --test ci/api-contract.test.mjs",
     "test:setup-guidance": "node --test ci/setup-guidance.test.mjs",

@@ -72,11 +72,12 @@ Web GUI 交给你，并在退出时收拾干净。
 
 ## 安装
 
-从 [Releases](https://github.com/tttnny/dsh-launcher/releases) 下载最新的
-`dsh-launcher_<版本>_aarch64.dmg`，打开后把应用拖进「应用程序」。
+自己构建：装好依赖后 `pnpm tauri build`，把
+`src-tauri/target/release/bundle/dmg/` 里的 `.dmg` 打开，应用拖进「应用程序」。
 
-> 发布用的 dmg 未签名、未公证，首次打开需在「系统设置 → 隐私与安全性」中放行，
-> 或右键应用选择「打开」。
+> 打出来的 dmg 未签名、未公证，首次打开需在「系统设置 → 隐私与安全性」中放行，
+> 或右键应用选择「打开」。想免掉这一步，用 `pnpm app:local` 在这台机器上构建并安装
+> 证书签名的副本（需要钥匙串里有 Apple Development 证书）。
 
 ## 开发
 
@@ -154,17 +155,17 @@ pnpm dev            # 仅浏览器预览：localStorage mock，无 Rust 后端
 `AGENTS.md` 是入口：开发命令的速查表与规则文档的索引，规则本身按主题放在
 `docs/agents/rules/` 里（例如「打开实例 = 用系统浏览器打开实例 URL」）。
 
-## 发版
+## 打包
 
-推 tag 即触发 CI 构建与发布：
+CI 只跑门禁，不出 tag、不发 Release。产物由自己在这台 Mac 上打：
 
 ```bash
-git tag v<version> && git push origin v<version>
+pnpm tauri build     # .dmg，未签名未公证
+pnpm app:local       # 证书签名并装到 /Applications 的自测副本
 ```
 
-tag 必须与 `package.json` 的 version 一致（`ci/check-versions.mjs` 校验三处 manifest），
-推 tag 发正式版，推 `main` 发预发布 `v<版本>-dev.<工作流序号>`。抬高版本用
-`node ci/bump-version.mjs v<已发布的 tag>`。
+版本号三处（`package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`）要一起改，
+`ci/check-versions.mjs` 会盯着它们是否一致。
 
 ## License
 

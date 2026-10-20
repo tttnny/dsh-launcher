@@ -1,6 +1,6 @@
-# 开发、验证与发版
+# 开发、验证与打包
 
-管每天要跑的那几件事：门禁、测试怎么写、排版、真机验证、自测 App 与发版。真机验证的
+管每天要跑的那几件事：门禁、测试怎么写、排版、真机验证、自测 App 与打包。真机验证的
 完整说明在 `docs/testing-on-a-real-host.md`（那台机器是什么、`#[ignore]`d 的测试怎么跑、
 无窗口 harness 长什么样、在别人机器上不能留下什么），这一份只讲与它接壤的那几句。
 
@@ -63,15 +63,9 @@ bundle id（`in.dsh-plug.dsh-launcher`）和安装路径别改，证书换发后
 一律用无窗口 harness + 临时数据目录（手工点击验证是用户自己的事），细节见
 `docs/testing-on-a-real-host.md`。
 
-## 发版
+## 打包
 
-推 tag 即发版（`git tag v<version> && git push origin v<version>`，tag 必须等于
-`package.json` 的 version）。推 main 发预发布 `v<版本>-dev.<工作流序号>`，不动 Latest，
-也不抬版本号。
-
-- Release notes 手写（中英双语）；改 `ci/release-notes-*.mjs` 后跑
-  `pnpm test:release-notes`。
-- 发版 dmg 未签名未公证（只有本机自测副本走证书签名）；要改需 Developer ID 证书（付费）
-  并配到 CI。
-- CI 挂掉时手工补发：`pnpm tauri build --bundles dmg`，再
-  `gh release create v<版本> <dmg路径> --title v<版本> --notes-file <notes>`。
+仓库不出 tag、不发 Release：CI 只在 `main` 与 PR 上跑门禁，产物由自己在这台 Mac 上打。
+`pnpm tauri build` 出 `.dmg`（未签名、未公证），`pnpm app:local` 出装到 `/Applications`
+的自测副本（证书签名，见上一节）。版本号三处（`package.json`、`src-tauri/Cargo.toml`、
+`src-tauri/tauri.conf.json`）由 `node ci/check-versions.mjs` 盯着保持一致，改就三处一起改。

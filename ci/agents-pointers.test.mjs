@@ -16,7 +16,7 @@
 //
 // - 号到文件只按「文件名以这个号开头」配对，不写死文件名：ADR 换一个更准的 slug 是它
 //   该有的自由，这条检查不该拦着。
-// - 带 `*` 的提法（`ci/*.test.mjs`、`ci/release-notes-*.mjs`、`pnpm test:*`）说的是
+// - 带 `*` 的提法（`ci/*.test.mjs`、`pnpm test:*`）说的是
 //   「这一类」，所以只要求至少匹配到一个，而不是要求盘上真有一个名字里带星号的文件。
 // - `pnpm` 后面第一个词才是脚本名，后面跟着的是传给它的参数：`pnpm tauri build
 //   --bundles dmg` 跑的是 package.json 里的 `tauri`。
@@ -120,7 +120,7 @@ function nearbyNames(pattern) {
 /**
  * 某一份文档里以 `prefix` 开头的路径提法：文档、行号、原文、是不是通配符。
  *
- * 路径都写在反引号里（`` `docs/adr/` ``、`` `ci/release-notes-*.mjs` ``）——反引号是
+ * 路径都写在反引号里（`` `docs/adr/` ``、`` `ci/*.test.mjs` ``）——反引号是
  * 这份文件区分「一个路径」与「一句散文」的方式，也是这条检查读得准的方式。
  */
 function pathMentions(rel, prefix) {
