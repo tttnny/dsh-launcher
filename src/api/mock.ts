@@ -42,8 +42,9 @@ interface MockDb {
   instances: DshInstance[]
   settings: LauncherSettings
   running: Record<string, InstanceStatus>
-  /** The version `~/.local/bin/dsh` runs here, or null for none. */
-  path_link: string | null
+  /** The version `~/.local/bin/dsh` runs on each machine, by host id; a host
+   *  with no entry has nothing registered there. */
+  path_link: Record<string, string | null>
 }
 
 /** The built-in host the browser preview always has. */
@@ -191,7 +192,7 @@ function seedDb(): MockDb {
       proxy_apply_dsh: false,
     },
     running: {},
-    path_link: 'v-rc6',
+    path_link: { [LOCAL_HOST_ID]: 'v-rc6' },
   }
 }
 
@@ -218,7 +219,11 @@ function loadDb(): MockDb {
         // The PATH registration is newer than the stored sample versions.
         v.path_linked = v.path_linked ?? false
       }
-      db.path_link = db.path_link ?? null
+      // The PATH registration is newer than the stored sample versions, and it
+      // is per machine: an older preview stored one string for 本机 only.
+      if (typeof db.path_link === 'string' || db.path_link == null) {
+        db.path_link = { [LOCAL_HOST_ID]: db.path_link ?? null }
+      }
       // Backfill host ownership, which every record gained at once: whatever
       // was stored before the field existed can only belong to 本机.
       // A preview stored before remote hosts existed knows only 本机; it gains
@@ -983,7 +988,7 @@ export async function mockCall<T>(
         .map((v) => ({
           ...v,
           bin_ready: v.bin_ready ?? true,
-          path_linked: host.builtin && db.path_link === v.id,
+          path_linked: (db.path_link[host.id] ?? null) === v.id,
         })) as T
     }
     case 'fetch_available_versions': {
@@ -1289,19 +1294,17 @@ export async function mockCall<T>(
             ),
         )
       }
-      // The version's PATH registration goes with it.
-      if (db.path_link === id) db.path_link = null
+      // The version's PATH registration goes with it — on that machine only.
+      if (db.path_link[host.id] === id) db.path_link[host.id] = null
       saveDb(db)
       return undefined as T
     }
     case 'set_version_path_link': {
       const host = hostOf(db, hostIdArg(cmd, args))
       refuseUnreachable(host)
-      if (!host.builtin)
-        fail('只能在本机登记 dsh：magpie 和终端都在本机查找这个命令')
       const id = args?.id == null ? null : String(args.id)
       if (id === null) {
-        db.path_link = null
+        db.path_link[host.id] = null
         saveDb(db)
         return undefined as T
       }
@@ -1309,7 +1312,7 @@ export async function mockCall<T>(
         (v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id,
       )
       if (!version) fail('版本不存在')
-      db.path_link = id
+      db.path_link[host.id] = id
       saveDb(db)
       return undefined as T
     }

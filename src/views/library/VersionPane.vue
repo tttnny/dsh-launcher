@@ -184,9 +184,8 @@ const usedByCount = (versionId: string) =>
 
 // --- PATH registration ---------------------------------------------------------
 
-/** The link lives on this Mac, so only 本机 has the action. */
-const isLocalHost = computed(() => !!store.currentHost?.builtin)
-
+/** The link is `~/.local/bin/dsh` on the machine this page is showing — 本机
+ *  or a server — and the backend writes it wherever that is. */
 const pathLinkAction = useAction(
   async (v: DshVersion) => {
     const linked = v.path_linked
@@ -262,7 +261,6 @@ const pathLinkAction = useAction(
           t('versions.usedBy', { count: usedByCount(v.id) })
         }}</span>
         <button
-          v-if="isLocalHost"
           class="dl-btn dl-btn--quiet"
           :title="t('versions.pathLinkHint')"
           :disabled="

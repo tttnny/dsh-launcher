@@ -232,6 +232,27 @@ pub struct RemoteInstalledVersion {
     pub bin_ready: bool,
 }
 
+/// Named `dsh` on one machine: what the command there is and, when it is one of
+/// the launcher's links, the version directory it runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct RemotePathLink {
+    /// `absent`, `symlink`, `script` (a wrapper the launcher wrote) or `foreign`
+    /// (something the user installed).
+    #[serde(default)]
+    pub state: String,
+    /// The version directory a link runs; empty when there is no link.
+    #[serde(default)]
+    pub target: String,
+}
+
+/// One machine's versions directory and its PATH registration, from the one
+/// answer [`installed_versions`] reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteVersions {
+    pub versions: Vec<RemoteInstalledVersion>,
+    pub link: RemotePathLink,
+}
+
 /// What one machine's `npm view` said about `@deepseek-ai/dsh`: the version
 /// list and the publish times, both **as text** — the same two strings the
 /// local `npm view` hands over, so one conversion serves both sources.
@@ -241,19 +262,20 @@ pub struct NpmListings {
     pub time: String,
 }
 
-/// The versions installed under `versions_dir`, as the machine describes them.
+/// The versions installed under `versions_dir`, as the machine describes them,
+/// with the `dsh` command that machine has on PATH.
 pub async fn installed_versions(
     transport: &dyn HostTransport,
     host: &RemoteHost,
     versions_dir: &str,
-) -> Result<Vec<RemoteInstalledVersion>, HostError> {
+) -> Result<RemoteVersions, HostError> {
     let out = transport
         .run(
             host,
             RemoteCall::new(installed_versions_script(versions_dir)),
         )
         .await?;
-    decode_installed_versions(&out)
+    decode_remote_versions(&out)
 }
 
 /// What `@deepseek-ai/dsh` can be installed from on one machine, asked of that
@@ -847,9 +869,15 @@ printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 /// `node_modules/@deepseek-ai/dsh/lib/bin.js`, and a version whose install
 /// stopped early has neither. A versions directory that is not there yet is an
 /// empty list — a machine with nothing installed is a machine, not an error.
+///
+/// The same answer carries what `dsh` on that machine's PATH is
+/// ([`crate::pathlink`] applied there), because the page shows the registration
+/// on the very rows it gets from this call and a second ssh would ask one
+/// machine two things at two moments.
 const INSTALLED_VERSIONS: &str = r#"set -u
 %%ESCAPER%%
 dsh_dir=%%PATH%%
+dsh_marker=%%MARKER%%
 dsh_rows=
 dsh_sep=
 for dsh_entry in "$dsh_dir"/*; do
@@ -863,7 +891,33 @@ for dsh_entry in "$dsh_dir"/*; do
   dsh_rows="$dsh_rows$dsh_sep{\"name\":\"$(dsh_esc "${dsh_entry##*/}")\",\"dir\":\"$(dsh_esc "$dsh_entry")\",\"bin_ready\":$dsh_ready}"
   dsh_sep=,
 done
-printf '<<<DSH-JSON>>>{"versions":[%s]}<<<DSH-END>>>' "$dsh_rows"
+
+# What the PATH registration is: a link the launcher made (a symlink into a
+# version directory, or a wrapper script carrying the marker), nothing, or
+# something of the user's that is never replaced.
+dsh_state=absent
+dsh_target=
+dsh_link="${HOME:-}/.local/bin/dsh"
+if [ -n "${HOME:-}" ] && [ -L "$dsh_link" ]; then
+  dsh_state=symlink
+  dsh_raw=$(readlink "$dsh_link" 2>/dev/null || true)
+  case "$dsh_raw" in
+    /*) dsh_target="$dsh_raw" ;;
+    *) dsh_target="$(dirname "$dsh_link")/$dsh_raw" ;;
+  esac
+elif [ -n "${HOME:-}" ] && [ -e "$dsh_link" ]; then
+  dsh_state=foreign
+  if [ -f "$dsh_link" ]; then
+    dsh_written=$(head -n 3 "$dsh_link" 2>/dev/null | sed -n "s|^$dsh_marker||p" | head -n 1 | tr -d '\r')
+    if [ -n "$dsh_written" ]; then
+      dsh_state=script
+      dsh_target="$dsh_written"
+    fi
+  fi
+fi
+
+printf '<<<DSH-JSON>>>{"versions":[%s],"link":{"state":"%s","target":"%s"}}<<<DSH-END>>>' \
+  "$dsh_rows" "$dsh_state" "$(dsh_esc "$dsh_target")"
 "#;
 
 /// `@deepseek-ai/dsh` as **that machine's** npm sees it, against the registry
@@ -898,6 +952,7 @@ pub fn installed_versions_script(versions_dir: &str) -> String {
         &[
             ("%%ESCAPER%%", ESCAPER.to_string()),
             ("%%PATH%%", quote(versions_dir)),
+            ("%%MARKER%%", crate::pathlink::MARKER.to_string()),
         ],
     )
 }
@@ -1284,6 +1339,237 @@ fi
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
+/// Makes a new profile on that machine by copying a `__temp__` template, the
+/// same three-step choice [`crate::commands::create_profile`] makes here:
+///
+/// 1. this HOME already has `profiles/__temp__` — copy it;
+/// 2. it has a `profiles/web` — copy that to `__temp__` (and scrub the port pin
+///    in the copy, [`crate::profile::scrub_port_pin`]'s rule), then copy it on;
+/// 3. neither — take a `__temp__` from another HOME under that machine's own
+///    data directory, which is where the installer leaves one.
+///
+/// Never builds a `__temp__` in `~/.dsh`: that HOME is the user's, and the
+/// template machinery is the launcher's (issue #5). `%%USER_DEFAULT%%` says
+/// whether this HOME is that one.
+const CREATE_PROFILE: &str = r#"set -u
+dsh_profiles=%%PROFILES%%
+dsh_name=%%NAME%%
+dsh_user_default=%%USER_DEFAULT%%
+dsh_homes_root=%%HOMES%%
+
+if [ ! -d "$dsh_profiles" ]; then
+  mkdir -p "$dsh_profiles" || { printf '创建 profiles 目录失败：%s\n' "$dsh_profiles" >&2; exit 2; }
+fi
+dsh_target="$dsh_profiles/$dsh_name"
+if [ -e "$dsh_target" ]; then
+  printf 'Profile「%s」已存在\n' "$dsh_name" >&2
+  exit 3
+fi
+
+# The webserver port a copied template carries: DSH honors the patch over the
+# CLI --port, so a copy that keeps it binds a port another instance may own.
+dsh_scrub_port() {
+  dsh_patch="$1/cordis.patch.yml"
+  [ -f "$dsh_patch" ] || return 0
+  dsh_new=$(awk '
+    /^- id:/ { in_block = ($0 ~ /^- id: webserver/) ; print ; next }
+    in_block && /^[[:space:]]*port:/ {
+      match($0, /^[[:space:]]*/) ; indent = substr($0, 1, RLENGTH)
+      print indent "port: 0" ; next
+    }
+    { print }
+  ' "$dsh_patch")
+  [ -n "$dsh_new" ] && printf '%s\n' "$dsh_new" > "$dsh_patch"
+}
+
+dsh_template=
+# The user's own `~/.dsh` is not the launcher's to put a template in, on any
+# machine: the path says so directly, whichever record named this HOME.
+if [ "$dsh_profiles" = "${HOME:-}/.dsh/profiles" ]; then
+  dsh_user_default=true
+fi
+if [ "$dsh_user_default" != true ] && [ -d "$dsh_profiles/__temp__" ]; then
+  dsh_template="$dsh_profiles/__temp__"
+elif [ "$dsh_user_default" != true ] && [ -d "$dsh_profiles/web" ]; then
+  dsh_template="$dsh_profiles/__temp__"
+  cp -R "$dsh_profiles/web" "$dsh_template" || { printf '初始化模板失败\n' >&2; exit 4; }
+  dsh_scrub_port "$dsh_template"
+else
+  for dsh_candidate in "$dsh_homes_root"/*/profiles/__temp__; do
+    [ -d "$dsh_candidate" ] || continue
+    dsh_template="$dsh_candidate"
+    break
+  done
+  if [ -z "$dsh_template" ]; then
+    printf '未找到可用的 Profile __temp__ 模板，请先安装至少一个 DSH 版本\n' >&2
+    exit 5
+  fi
+fi
+
+cp -R "$dsh_template" "$dsh_target" || { printf '创建 Profile 失败\n' >&2; exit 6; }
+printf '<<<DSH-JSON>>>{"ok":true,"name":"%s"}<<<DSH-END>>>' "$(printf '%s' "$dsh_name" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+"#;
+
+/// The `dsh` command on that machine's PATH: one link at `~/.local/bin/dsh`
+/// that runs one version's CLI, the same rule [`crate::pathlink`] applies on
+/// this Mac.
+///
+/// It has to be a script run **there** because the three facts it needs live on
+/// that machine and nowhere else: what the link currently is, whether the
+/// version's own entry file is executable, and what `~` means in that shell.
+/// The rules are the local ones exactly — an entry that is a real file or a link
+/// belonging to someone else is refused, never overwritten and never removed;
+/// one version at a time, so registering another replaces the launcher's own
+/// link; a CLI that is not executable gets a wrapper script carrying the marker
+/// ([`crate::pathlink::MARKER`]) instead.
+///
+/// `%%ACTION%%` is `register`, `unregister` or `unlink`. `register` takes
+/// `%%VERSION%%` (the version directory) and `%%VERSIONS%%` (every version the
+/// launcher knows there, newline-separated); `unlink` takes `%%VERSION%%`;
+/// `unregister` takes `%%VERSIONS%%`.
+const PATH_LINK: &str = r#"set -u
+%%ESCAPER%%
+dsh_action=%%ACTION%%
+dsh_marker=%%MARKER%%
+dsh_version=%%VERSION%%
+dsh_versions=%%VERSIONS%%
+
+if [ -z "${HOME:-}" ]; then
+  printf '读不到那台机器的 HOME，无法定位 ~/.local/bin\n' >&2
+  exit 2
+fi
+dsh_link="$HOME/.local/bin/dsh"
+
+# What is there now: absent, symlink/script (the launcher's own, naming the
+# version directory as $dsh_target), or foreign (the user's).
+dsh_state=absent
+dsh_target=
+if [ -L "$dsh_link" ]; then
+  dsh_state=symlink
+  dsh_raw=$(readlink "$dsh_link" 2>/dev/null || true)
+  case "$dsh_raw" in
+    /*) dsh_target="$dsh_raw" ;;
+    *) dsh_target="$(dirname "$dsh_link")/$dsh_raw" ;;
+  esac
+elif [ -e "$dsh_link" ]; then
+  dsh_state=foreign
+  if [ -f "$dsh_link" ]; then
+    dsh_written=$(head -n 3 "$dsh_link" 2>/dev/null | sed -n "s|^$dsh_marker||p" | head -n 1 | tr -d '\r')
+    if [ -n "$dsh_written" ]; then
+      dsh_state=script
+      dsh_target="$dsh_written"
+    fi
+  fi
+fi
+
+# Whether a directory this link names is one of the launcher's versions.
+dsh_is_version() {
+  dsh_want=$1
+  [ -n "$dsh_want" ] || return 1
+  dsh_old_ifs=$IFS
+  IFS='
+'
+  for dsh_dir in $dsh_versions; do
+    [ "$dsh_dir" = "$dsh_want" ] && { IFS=$dsh_old_ifs; return 0; }
+  done
+  IFS=$dsh_old_ifs
+  return 1
+}
+
+dsh_ours=false
+case "$dsh_state" in
+  symlink)
+    dsh_old_ifs=$IFS
+    IFS='
+'
+    for dsh_dir in $dsh_versions; do
+      case "$dsh_target" in
+        "$dsh_dir"|"$dsh_dir"/*) dsh_ours=true ;;
+      esac
+      [ "$dsh_ours" = true ] && break
+    done
+    IFS=$dsh_old_ifs
+    ;;
+  script) dsh_is_version "$dsh_target" && dsh_ours=true ;;
+esac
+
+dsh_remove_link() {
+  [ -e "$dsh_link" ] || [ -L "$dsh_link" ] || return 0
+  rm -f "$dsh_link" || { printf '删除 %s 失败\n' "$dsh_link" >&2; exit 6; }
+}
+
+dsh_finish() {
+  printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
+}
+
+case "$dsh_action" in
+  unregister)
+    case "$dsh_state" in
+      absent) dsh_finish ;;
+      symlink)
+        if [ "$dsh_ours" = true ]; then dsh_remove_link; dsh_finish
+        else printf '~/.local/bin/dsh 指向 %s，不是启动器登记的版本，没有改动它\n' "$dsh_target" >&2; exit 3
+        fi ;;
+      *) printf '~/.local/bin/dsh 已经存在，而且不是启动器登记的；没有改动它\n' >&2; exit 3 ;;
+    esac
+    ;;
+  unlink)
+    # Deleting a version withdraws its own link only: what it names has to be
+    # this version's directory.
+    case "$dsh_state" in
+      symlink|script)
+        case "$dsh_target" in
+          "$dsh_version"|"$dsh_version"/*) dsh_remove_link ;;
+        esac ;;
+    esac
+    dsh_finish
+    ;;
+  register)
+    case "$dsh_state" in
+      absent|script) ;;
+      symlink)
+        if [ "$dsh_ours" != true ]; then
+          printf '~/.local/bin/dsh 已经指向 %s，不是启动器安装的版本；先把它移走再登记\n' "$dsh_target" >&2
+          exit 4
+        fi ;;
+      *) printf '~/.local/bin/dsh 已经存在，而且不是启动器登记的；先把它移走再登记\n' >&2; exit 4 ;;
+    esac
+
+    dsh_entry="$dsh_version/node_modules/.bin/dsh"
+    dsh_bin="$dsh_version/node_modules/@deepseek-ai/dsh/lib/bin.js"
+    if [ -f "$dsh_version/apps/cli/package.json" ]; then
+      dsh_bin="$dsh_version/apps/cli/lib/bin.js"
+    fi
+    if [ -f "$dsh_entry" ]; then dsh_target="$dsh_entry"; else dsh_target="$dsh_bin"; fi
+    if [ ! -f "$dsh_target" ]; then
+      printf '这个版本没有 dsh 启动文件（%s），先把它装好再登记\n' "$dsh_target" >&2
+      exit 5
+    fi
+
+    mkdir -p "$HOME/.local/bin" || { printf '建立 %s 失败\n' "$HOME/.local/bin" >&2; exit 6; }
+    dsh_remove_link
+
+    if [ -x "$dsh_target" ]; then
+      ln -s "$dsh_target" "$dsh_link" || { printf '在 %s 建立 dsh 命令失败\n' "$dsh_link" >&2; exit 7; }
+    else
+      # The entry is a Node script without its own executable bit: the wrapper
+      # says so and runs it with that machine's own node.
+      {
+        printf '#!/bin/sh\n'
+        printf '%s%s\n' "$dsh_marker" "$dsh_version"
+        printf 'exec node %s "$@"\n' "$(printf "'%s'" "$(printf '%s' "$dsh_target" | sed "s/'/'\\\\''/g")")"
+      } > "$dsh_link" || { printf '在 %s 建立 dsh 命令失败\n' "$dsh_link" >&2; exit 7; }
+      chmod 755 "$dsh_link" || { printf '设置 %s 的可执行权限失败\n' "$dsh_link" >&2; exit 8; }
+    fi
+    dsh_finish
+    ;;
+  *)
+    printf '未知的登记操作：%s\n' "$dsh_action" >&2
+    exit 9
+    ;;
+esac
+"#;
+
 /// One profile's own files on the machine that owns it: the `package.json` the
 /// profile declares its layers and dependencies in, and the version of every
 /// package installed under its `node_modules`.
@@ -1339,6 +1625,90 @@ if [ -d "$dsh_nm" ]; then
 fi
 printf '<<<DSH-JSON>>>{"manifest":%s,"installed":[%s]}<<<DSH-END>>>' "$dsh_manifest" "$dsh_rows"
 "#;
+
+/// The PATH registration on one machine: `register` puts `version` there,
+/// `unregister` takes the launcher's link out, `unlink` withdraws it only while
+/// it runs `version` (a version deletion). `versions` is every version directory
+/// the launcher knows on that machine — a link into one of them is the
+/// launcher's to replace or remove.
+pub fn path_link_script(action: &str, version: Option<&str>, versions: &[&str]) -> String {
+    fill(
+        PATH_LINK,
+        &[
+            ("%%ESCAPER%%", ESCAPER.to_string()),
+            ("%%MARKER%%", crate::pathlink::MARKER.to_string()),
+            ("%%ACTION%%", action.to_string()),
+            ("%%VERSION%%", version.map(quote).unwrap_or_default()),
+            ("%%VERSIONS%%", quote(&versions.join("\n"))),
+        ],
+    )
+}
+
+/// Runs [`path_link_script`] on that machine and reads its answer.
+pub async fn path_link(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    action: &str,
+    version: Option<&str>,
+    versions: &[&str],
+) -> Result<(), HostError> {
+    let out = transport
+        .run(
+            host,
+            RemoteCall::new(path_link_script(action, version, versions)),
+        )
+        .await?;
+    decode_ack(&out)
+}
+
+/// Makes one profile on that machine: `profiles_dir` is the HOME's `profiles/`,
+/// `homes_root` that machine's `<数据目录>/homes` (where a template may be
+/// found), and `user_default` says whether the HOME is the user's own `~/.dsh`.
+pub async fn create_profile(
+    transport: &dyn HostTransport,
+    host: &RemoteHost,
+    profiles_dir: &str,
+    name: &str,
+    homes_root: &str,
+    user_default: bool,
+) -> Result<String, HostError> {
+    let out = transport
+        .run(
+            host,
+            RemoteCall::new(create_profile_script(
+                profiles_dir,
+                name,
+                homes_root,
+                user_default,
+            )),
+        )
+        .await?;
+    #[derive(Deserialize)]
+    struct Created {
+        name: String,
+    }
+    Ok(parse_marked::<Created>(&out)?.name)
+}
+
+pub fn create_profile_script(
+    profiles_dir: &str,
+    name: &str,
+    homes_root: &str,
+    user_default: bool,
+) -> String {
+    fill(
+        CREATE_PROFILE,
+        &[
+            ("%%PROFILES%%", quote(profiles_dir)),
+            ("%%NAME%%", quote(name)),
+            ("%%HOMES%%", quote(homes_root)),
+            (
+                "%%USER_DEFAULT%%",
+                if user_default { "true" } else { "false" }.to_string(),
+            ),
+        ],
+    )
+}
 
 pub fn home_path_script(path: &str) -> String {
     fill(
@@ -2105,6 +2475,9 @@ struct Entries {
 #[derive(Deserialize)]
 struct Installed {
     versions: Vec<RemoteInstalledVersion>,
+    /// Absent when the answer predates the field or the machine gave no link.
+    #[serde(default)]
+    link: RemotePathLink,
 }
 
 #[derive(Deserialize)]
@@ -2139,10 +2512,12 @@ pub fn decode_names(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
     Ok(parse_marked::<Entries>(out)?.entries)
 }
 
-pub fn decode_installed_versions(
-    out: &RemoteOutput,
-) -> Result<Vec<RemoteInstalledVersion>, HostError> {
-    Ok(parse_marked::<Installed>(out)?.versions)
+pub fn decode_remote_versions(out: &RemoteOutput) -> Result<RemoteVersions, HostError> {
+    let answer = parse_marked::<Installed>(out)?;
+    Ok(RemoteVersions {
+        versions: answer.versions,
+        link: answer.link,
+    })
 }
 
 pub fn decode_pid(out: &RemoteOutput) -> Result<i32, HostError> {
@@ -3044,7 +3419,8 @@ mod tests {
         std::fs::create_dir_all(versions.join("0.1.0-rc.4")).unwrap();
 
         let out = local_shell(&installed_versions_script(&versions.to_string_lossy()));
-        let found = decode_installed_versions(&out).expect("真实 shell 跑出来的答案要能解析");
+        let answer = decode_remote_versions(&out).expect("真实 shell 跑出来的答案要能解析");
+        let found = answer.versions;
 
         let by_name = |name: &str| found.iter().find(|v| v.name == name).unwrap().clone();
         assert_eq!(found.len(), 3);
@@ -3090,6 +3466,180 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The PATH registration, run on a machine whose `HOME` is a scratch
+    /// directory: a symlink into the version, replaced by another version, left
+    /// alone when it is the user's own command, and withdrawn only for the
+    /// version it runs.
+    #[test]
+    fn the_path_link_script_registers_replaces_and_withdraws_on_that_machine() {
+        let home = scratch("dsh-path-link-home");
+        let versions = scratch("dsh-path-link-versions");
+        let first = versions.join("0.2.1-rc.1");
+        let second = versions.join("0.2.2-rc.1");
+        for dir in [&first, &second] {
+            let bin = crate::launch::version_bin(dir);
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let dirs = [
+            first.to_string_lossy().to_string(),
+            second.to_string_lossy().to_string(),
+        ];
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let link = home.join(".local/bin/dsh");
+
+        let run = |action: &str, version: Option<&str>| {
+            local_shell_as(&path_link_script(action, version, &dirs), &home)
+        };
+
+        let out = run("register", Some(&first.to_string_lossy()));
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            crate::launch::version_bin(&first)
+        );
+
+        // The list names the version the link runs.
+        let listed = local_shell_as(
+            &installed_versions_script(&versions.to_string_lossy()),
+            &home,
+        );
+        let answer = decode_remote_versions(&listed).unwrap();
+        assert_eq!(answer.link.state, "symlink");
+        assert_eq!(
+            answer.link.target,
+            crate::launch::version_bin(&first).to_string_lossy()
+        );
+
+        // Registering another version replaces the launcher's own link.
+        let out = run("register", Some(&second.to_string_lossy()));
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            crate::launch::version_bin(&second)
+        );
+
+        // Withdrawing for the first version leaves the second's link alone.
+        let out = run("unlink", Some(&first.to_string_lossy()));
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(link.exists(), "别的版本的链接不动");
+
+        let out = run("unlink", Some(&second.to_string_lossy()));
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(!link.exists(), "撤掉自己的链接");
+
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&versions).ok();
+    }
+
+    /// A `dsh` the user installed there is never replaced and never removed:
+    /// the script says why instead.
+    #[test]
+    fn the_path_link_script_leaves_a_users_own_dsh_alone() {
+        let home = scratch("dsh-path-link-foreign");
+        let versions = scratch("dsh-path-link-foreign-versions");
+        let version = versions.join("0.2.1-rc.1");
+        let bin = crate::launch::version_bin(&version);
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/usr/bin/env node\n").unwrap();
+        let link = home.join(".local/bin/dsh");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(&link, "#!/bin/sh\necho system dsh\n").unwrap();
+
+        let dirs = [version.to_string_lossy().to_string()];
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let out = local_shell_as(
+            &path_link_script("register", Some(&version.to_string_lossy()), &dirs),
+            &home,
+        );
+        assert_ne!(out.status, 0, "用户自己的 dsh 不被覆盖");
+        assert_eq!(
+            std::fs::read_to_string(&link).unwrap(),
+            "#!/bin/sh\necho system dsh\n"
+        );
+
+        let out = local_shell_as(&path_link_script("unregister", None, &dirs), &home);
+        assert_ne!(out.status, 0, "用户自己的 dsh 不被删除");
+        assert!(link.exists());
+
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&versions).ok();
+    }
+
+    /// A new profile on that machine: the `__temp__` template of its own HOME
+    /// when there is one, else `web` copied (with the port pin scrubbed), else a
+    /// template from another HOME under the same data directory.
+    #[test]
+    fn the_create_profile_script_picks_the_template_the_way_the_local_flow_does() {
+        let root = scratch("dsh-create-profile");
+        let home = root.join("homes/0.2.1-rc.1");
+        let profiles = home.join("profiles");
+        std::fs::create_dir_all(profiles.join("__temp__")).unwrap();
+        std::fs::write(profiles.join("__temp__/package.json"), "{}").unwrap();
+
+        let out = local_shell_as(
+            &create_profile_script(
+                &profiles.to_string_lossy(),
+                "lab-x",
+                &root.join("homes").to_string_lossy(),
+                false,
+            ),
+            &root,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert_eq!(
+            std::fs::read_to_string(profiles.join("lab-x/package.json")).unwrap(),
+            "{}"
+        );
+
+        // Copying `web` scrubs the webserver port the template pinned.
+        let other = root.join("homes/0.2.2-rc.1/profiles");
+        std::fs::create_dir_all(other.join("web")).unwrap();
+        std::fs::write(
+            other.join("web/cordis.patch.yml"),
+            "- id: webserver\n  port: 8080\n",
+        )
+        .unwrap();
+        let out = local_shell_as(
+            &create_profile_script(
+                &other.to_string_lossy(),
+                "web-copy",
+                &root.join("homes").to_string_lossy(),
+                false,
+            ),
+            &root,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let patch = std::fs::read_to_string(other.join("web-copy/cordis.patch.yml")).unwrap();
+        assert!(
+            patch.contains("port: 0"),
+            "复制件里的端口固定值要清掉：{patch}"
+        );
+
+        // A HOME with no template borrows one from another HOME under the data
+        // directory.
+        let bare = root.join("homes/0.2.3-rc.1/profiles");
+        std::fs::create_dir_all(&bare).unwrap();
+        let out = local_shell_as(
+            &create_profile_script(
+                &bare.to_string_lossy(),
+                "borrowed",
+                &root.join("homes").to_string_lossy(),
+                false,
+            ),
+            &root,
+        );
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        assert!(bare.join("borrowed").is_dir());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// The registry a host record names is a fact about *that* machine's npm:

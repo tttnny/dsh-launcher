@@ -150,7 +150,6 @@
     "managePlugins": "Plugins",
     "noHomeSelected": "No DSH_HOME yet — add one on the DSH_HOME tab",
     "pluginsLiveOnInstances": "Patch layers belong to a running instance: expand its card on the board, or open its settings, and press Plugins.",
-    "profileAddRemoteNote": "A profile is created on “{host}”: copy the one you want to a new name under <DSH_HOME>/profiles there, then use “Reload profiles”.",
     "profileCreateVersion": "DSH version",
     "profileCreateNoVersions": "This host has no DSH version installed: install one on the “DSH versions” tab first — the profile is created in that version's own DSH_HOME."
   },
@@ -227,7 +226,7 @@
     "pathLinkAdd": "Register dsh",
     "pathLinkRemove": "Unregister",
     "pathLinkTag": "On PATH",
-    "pathLinkHint": "Puts dsh at ~/.local/bin on this Mac so programs that look a tool up by name, such as magpie, find this version. Only one version can be registered at a time.",
+    "pathLinkHint": "Puts dsh at ~/.local/bin on the machine that owns this version, so programs that look a tool up by name, such as magpie, find it. One version per machine can be registered at a time.",
     "pathLinkAdded": "Version {version} is now registered as dsh",
     "pathLinkRemoved": "Version {version} is no longer registered as dsh",
     "hostLocal": "this Mac"

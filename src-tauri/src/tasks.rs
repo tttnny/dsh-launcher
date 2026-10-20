@@ -1293,7 +1293,11 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         crate::remote::installed_versions(&*state.host_transport, target, &versions_dir)
             .await
             .map_err(|e| e.to_string())?;
-    if !installed.iter().any(|v| v.name == version && v.bin_ready) {
+    if !installed
+        .versions
+        .iter()
+        .any(|v| v.name == version && v.bin_ready)
+    {
         return Err(format!(
             "构建完成后未找到 CLI 入口 {}/apps/cli/lib/bin.js，请查看任务日志中的构建输出",
             layout.dir.display()

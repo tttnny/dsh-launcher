@@ -23,20 +23,6 @@ const store = useLauncherStore()
 const selectedHomeId = ref<string | undefined>(undefined)
 const selectedHome = computed(() => store.homeById(selectedHomeId.value ?? ''))
 const instancesOfHome = store.instancesOfHome
-/**
- * The machine this DSH_HOME belongs to, and whether it is another one.
- * **Creating** a profile is 本机 only (`create_profile` copies the launcher's own
- * `__temp__` template with this machine's directory copy), so the button is not
- * offered for a remote HOME — the click would come back as a refusal. Renaming,
- * copying and deleting a profile do go over the transport, so they stay.
- */
-const selectedHost = computed(() =>
-  store.hostById(selectedHome.value?.host_id ?? LOCAL_HOST_ID),
-)
-const remoteHome = computed(
-  () => !!selectedHost.value && !selectedHost.value.builtin,
-)
-
 watch(
   [() => route.query.homeId, () => store.homes],
   ([qHomeId]) => {
@@ -285,7 +271,7 @@ const busy = (name: string) =>
         <span class="dl-section-count">{{ profiles.length }}</span>
         <span class="profile-label-spacer" />
         <button
-          v-if="!adding && !remoteHome"
+          v-if="!adding"
           class="dl-btn dl-btn--quiet"
           @click="startAdding"
         >
@@ -293,13 +279,6 @@ const busy = (name: string) =>
           {{ t('profiles.profileAdd') }}
         </button>
       </div>
-      <p v-if="remoteHome" class="dl-field-hint">
-        {{
-          t('profiles.profileAddRemoteNote', {
-            host: selectedHost?.display_name ?? '',
-          })
-        }}
-      </p>
 
       <div class="dl-surface profile-list">
         <!-- Creating asks for the version, not for the DSH_HOME: every version

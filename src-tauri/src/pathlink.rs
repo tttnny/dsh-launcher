@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use crate::launch;
 
 /// The line a wrapper script carries, with the version directory after it. A
-/// script is only written for a CLI that is not executable itself.
-const MARKER: &str = "# dsh-launcher path link: ";
+/// script is only written for a CLI that is not executable itself. The remote
+/// script (`crate::remote`'s `PATH_LINK`) writes and recognises the same line.
+pub const MARKER: &str = "# dsh-launcher path link: ";
 
 /// What `~/.local/bin/dsh` is.
 #[derive(Clone, Debug, PartialEq, Eq)]

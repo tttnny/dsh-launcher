@@ -568,9 +568,10 @@ pub struct DshVersionView {
     /// version anyone can start — and only the machine that owns the directory
     /// can say which it is ([`crate::launch::version_bin`] is the layout).
     pub bin_ready: bool,
-    /// Whether `~/.local/bin/dsh` on this Mac runs this version. Always false
-    /// for a remote host: the link is this machine's, and a version on a server
-    /// is not what magpie here would run.
+    /// Whether the `dsh` command on **this version's own machine** runs it.
+    /// Read wherever the link lives: `~/.local/bin/dsh` on this Mac for 本机,
+    /// and the same path on the server for a remote host (the question
+    /// [`crate::pathlink`] answers, asked of the machine that can answer it).
     pub path_linked: bool,
 }
 
@@ -582,53 +583,130 @@ pub async fn list_versions(
     list_versions_for(&state, host_id.as_deref()).await
 }
 
-/// Puts one version on this Mac's PATH as `dsh`, or with `id` absent takes the
-/// launcher's link out. Only 本机: the link lives in this machine's
-/// `~/.local/bin`, and that is the folder magpie looks in for the command.
+/// Puts one version on a machine's PATH as `dsh`, or with `id` absent takes the
+/// launcher's link out. The link is `~/.local/bin/dsh` **on the machine whose
+/// versions these are**: 本机 writes it here, a remote host writes it there over
+/// the transport, and the rules are the same on both.
 #[tauri::command]
 pub async fn set_version_path_link(
     state: State<'_, AppState>,
     id: Option<String>,
     host_id: Option<String>,
 ) -> Result<(), String> {
-    let home = crate::pathlink::home_dir()?;
-    set_version_path_link_at(&state, &home, id, host_id.as_deref())
+    // Read here rather than inside: only the 本机 branch needs this Mac's home,
+    // and a Mac whose home cannot be read should still be able to register a
+    // version on a server.
+    let home = crate::pathlink::home_dir().ok();
+    set_version_path_link_at(&state, home.as_deref(), id, host_id.as_deref()).await
 }
 
-pub(crate) fn set_version_path_link_at(
+/// `home` is where **本机's** `~/.local/bin` is; a test passes its own scratch
+/// directory. A remote host's link is `~/.local/bin` on that machine, which the
+/// script resolves from that shell's own `HOME`.
+pub(crate) async fn set_version_path_link_at(
     state: &AppState,
-    home: &std::path::Path,
+    home: Option<&std::path::Path>,
     id: Option<String>,
     host_id: Option<&str>,
 ) -> Result<(), String> {
-    let versions = {
+    let (host, versions) = {
         let cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id)?.clone();
-        if !host.builtin {
-            return Err("只能在本机登记 dsh：magpie 和终端都在本机查找这个命令".to_string());
-        }
-        cfg.versions
+        let versions = cfg
+            .versions
             .iter()
             .filter(|v| v.host_id == host.id)
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (host, versions)
     };
-    let dirs: Vec<&std::path::Path> = versions.iter().map(|v| v.dir.as_path()).collect();
-    match id {
-        Some(id) => {
-            let version = versions
+    let dirs: Vec<String> = versions
+        .iter()
+        .map(|v| v.dir.to_string_lossy().to_string())
+        .collect();
+    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+
+    let version = match &id {
+        Some(id) => Some(
+            versions
                 .iter()
-                .find(|v| v.id == id)
-                .ok_or_else(|| "版本不存在".to_string())?;
-            if !crate::launch::version_bin_ready(&version.dir) {
-                return Err(format!(
-                    "DSH {} 的启动文件不在，先把它装好再登记",
-                    version.version
-                ));
-            }
-            crate::pathlink::register(home, &version.dir, &dirs)
+                .find(|v| &v.id == id)
+                .ok_or_else(|| "版本不存在".to_string())?,
+        ),
+        None => None,
+    };
+    // Only this Mac can answer "is the file there" about its own paths; a
+    // remote version's files are checked by the script that registers it, which
+    // refuses a version with no CLI entry on that machine.
+    if let (Some(version), true) = (version, host.builtin) {
+        if !crate::launch::version_bin_ready(&version.dir) {
+            return Err(format!(
+                "DSH {} 的启动文件不在，先把它装好再登记",
+                version.version
+            ));
         }
-        None => crate::pathlink::unregister(home, &dirs),
+    }
+
+    if host.builtin {
+        let home = home.ok_or_else(|| "读不到本机的 HOME，无法定位 ~/.local/bin".to_string())?;
+        let paths: Vec<&std::path::Path> = versions.iter().map(|v| v.dir.as_path()).collect();
+        return match version {
+            Some(version) => crate::pathlink::register(home, &version.dir, &paths),
+            None => crate::pathlink::unregister(home, &paths),
+        };
+    }
+
+    let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+    let dir = version.map(|v| v.dir.to_string_lossy().to_string());
+    crate::remote::path_link(
+        &*state.host_transport,
+        &target,
+        if version.is_some() {
+            "register"
+        } else {
+            "unregister"
+        },
+        dir.as_deref(),
+        &dirs,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Withdraws one version's PATH registration on the machine that owns it, when
+/// the launcher's link there runs that version. Never touches another version's
+/// link, and never one the user made.
+pub(crate) async fn unlink_version_registration(
+    state: &AppState,
+    host: &Host,
+    version_dir: &std::path::Path,
+    versions: &[std::path::PathBuf],
+) {
+    let dir = version_dir.to_string_lossy().to_string();
+    if host.builtin {
+        if let Ok(home) = crate::pathlink::home_dir() {
+            if let Err(e) = crate::pathlink::unlink_version(&home, version_dir) {
+                crate::log_warn!("删除版本 {dir} 的 dsh 登记失败，忽略: {e}");
+            }
+        }
+        return;
+    }
+    let target = match crate::ssh::RemoteHost::of(host, &state.data_dir) {
+        Ok(target) => target,
+        Err(e) => {
+            crate::log_warn!("删除远端版本 {dir} 的 dsh 登记失败：{}", e.message);
+            return;
+        }
+    };
+    let dirs: Vec<String> = versions
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+    if let Err(e) =
+        crate::remote::path_link(&*state.host_transport, &target, "unlink", Some(&dir), &dirs).await
+    {
+        crate::log_warn!("删除远端版本 {dir} 的 dsh 登记失败，忽略: {e}");
     }
 }
 
@@ -647,9 +725,10 @@ pub(crate) async fn list_versions_for(
     list_versions_for_at(state, host_id, home.as_deref()).await
 }
 
-/// `home` is where `~/.local/bin` is. A test passes its own; a machine whose
-/// home cannot be read simply reports no registration rather than failing the
-/// whole list.
+/// `home` is where **本机's** `~/.local/bin` is. A test passes its own; a machine
+/// whose home cannot be read simply reports no registration rather than failing
+/// the whole list. A remote host's link is read on that machine, with the same
+/// one ssh that lists its versions.
 pub(crate) async fn list_versions_for_at(
     state: &AppState,
     host_id: Option<&str>,
@@ -713,11 +792,26 @@ pub(crate) async fn list_versions_for_at(
     .map_err(|e| e.to_string())?;
 
     for view in &mut listed {
-        if let Some(found) = on_machine.iter().find(|f| f.name == view.version) {
+        if let Some(found) = on_machine.versions.iter().find(|f| f.name == view.version) {
             // The machine's own answer about where it is and whether it is
             // usable wins over the record's copy of the path.
             view.dir = std::path::PathBuf::from(&found.dir);
             view.bin_ready = found.bin_ready;
+        }
+    }
+
+    // The registration is that machine's: `~/.local/bin/dsh` there, under the
+    // same rule as here. The link names the CLI inside the version directory,
+    // so what a row asks is whether the link lives **inside** that version —
+    // the same relation `pathlink::linked_to` reads on this Mac.
+    if !on_machine.link.target.is_empty() {
+        let linked = std::path::PathBuf::from(&on_machine.link.target);
+        for view in &mut listed {
+            view.path_linked = host.paths_equal(&view.dir, &linked)
+                || linked
+                    .strip_prefix(&view.dir)
+                    .map(|rest| !rest.as_os_str().is_empty())
+                    .unwrap_or(false);
         }
     }
     Ok(listed)
@@ -964,6 +1058,20 @@ pub async fn remove_version(
     // one — a local `remove_dir_all` aimed at a remote path would delete
     // whatever this Mac happens to have at the same spelling, and the record
     // that named what it destroyed is already gone by now.
+    //
+    // The PATH registration goes with it on either machine: withdrawing its own
+    // link is part of deleting the version, and the other versions are named so
+    // that only a link into this one is removed.
+    let others: Vec<std::path::PathBuf> = {
+        let cfg = state.config.lock().unwrap();
+        cfg.versions
+            .iter()
+            .filter(|v| v.host_id == host.id)
+            .map(|v| v.dir.clone())
+            .collect()
+    };
+    unlink_version_registration(&state, &host, &version.dir, &others).await;
+
     if !host.builtin {
         match host.dedicated_home_path(&state.data_dir, &version.version) {
             Ok(home) => {
@@ -972,14 +1080,6 @@ pub async fn remove_version(
             Err(e) => crate::log_warn!("无法确定版本 {} 的专属 DSH_HOME：{e}", version.version),
         }
         return Ok(());
-    }
-
-    // The PATH registration is this Mac's; deleting the version withdraws its
-    // own link, never another version's.
-    if let Ok(home) = crate::pathlink::home_dir() {
-        if let Err(e) = crate::pathlink::unlink_version(&home, &version.dir) {
-            crate::log_warn!("删除版本 {} 的 dsh 登记失败，忽略: {e}", version.version);
-        }
     }
 
     // Best-effort removal of the install directory.
@@ -1446,25 +1546,31 @@ pub(crate) async fn list_profiles_for(
     HomeOn::of(state, home_id)?.list_profiles().await
 }
 
-/// Creates a new profile by copying the `__temp__` template from dedicated homes.
-/// Never creates or overrides `__temp__` in user default ~/.dsh/profiles (issue #5).
+/// Creates a new profile by copying a `__temp__` template. Never creates or
+/// overwrites `__temp__` in the user's own `~/.dsh/profiles` (issue #5).
 ///
-/// 本机 only. The template hunt walks `<数据目录>/homes/*` and the copy that
-/// makes the new profile is a directory copy on this Mac; a HOME on another
-/// machine keeps both of those **there**, and this path can only read and write
-/// this Mac's filesystem — asked of a remote HOME it would answer with whatever
-/// happens to sit at the same path here. The refusal names the way out, so the
-/// button that cannot work here does not leave the user guessing.
+/// The HOME decides the machine: this Mac's filesystem for 本机, the transport
+/// for a remote host. Both look for the template in the same three places — the
+/// HOME's own `__temp__`, then its `web`, then any other HOME under that
+/// machine's data directory ([`crate::remote`]'s `CREATE_PROFILE` is the remote
+/// twin of the local steps below).
 #[tauri::command(rename_all = "snake_case")]
-pub fn create_profile(
+pub async fn create_profile(
     state: State<'_, AppState>,
     home_id: String,
     name: String,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
     crate::profile::validate_profile_name(&name)?;
+    create_profile_for(&state, &home_id, &name).await
+}
 
-    let (home_path, is_user_default) = {
+pub(crate) async fn create_profile_for(
+    state: &AppState,
+    home_id: &str,
+    name: &str,
+) -> Result<String, String> {
+    let (home_path, is_user_default, host, data_dir) = {
         let cfg = state.config.lock().unwrap();
         let home = cfg
             .homes
@@ -1472,22 +1578,32 @@ pub fn create_profile(
             .find(|h| h.id == home_id)
             .cloned()
             .ok_or_else(|| "DSH_HOME 不存在".to_string())?;
-        let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?;
-        if !host.builtin {
-            return Err(format!(
-                "还不能在「{}」上新建 Profile：请在那台机器的 <DSH_HOME>/profiles 里把一个 Profile 复制成新名字，再点「重新读取 Profile」",
-                host.display_name
-            ));
-        }
-        let is_user_default = home.id == crate::config::USER_DSH_HOME_ID
-            || std::env::var("HOME")
-                .map(|h| home.path == std::path::PathBuf::from(h).join(".dsh"))
-                .unwrap_or(false);
-        (home.path, is_user_default)
+        let host = crate::config::resolve_host(&cfg, Some(&home.host_id))?.clone();
+        let data_dir = host.data_dir(&state.data_dir)?;
+        let is_user_default = home.id == crate::config::user_dsh_home_id(&host)
+            || (host.builtin
+                && std::env::var("HOME")
+                    .map(|h| home.path == std::path::PathBuf::from(h).join(".dsh"))
+                    .unwrap_or(false));
+        (home.path, is_user_default, host, data_dir)
     };
     let profiles_dir = crate::profile::profiles_dir(&home_path);
 
-    let target = profiles_dir.join(&name);
+    if !host.builtin {
+        let target = crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
+        return crate::remote::create_profile(
+            &*state.host_transport,
+            &target,
+            &as_text(&profiles_dir),
+            name,
+            &as_text(&data_dir.join("homes")),
+            is_user_default,
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
+
+    let target = profiles_dir.join(name);
     if target.exists() {
         return Err(format!("Profile「{name}」已存在"));
     }
@@ -1504,7 +1620,7 @@ pub fn create_profile(
         temp_dir
     } else {
         // Look in launcher's dedicated homes (<data_dir>/homes/*/profiles/__temp__):
-        let homes_root = state.data_dir.join("homes");
+        let homes_root = data_dir.join("homes");
         let mut found = None;
         if let Ok(entries) = std::fs::read_dir(&homes_root) {
             for entry in entries.flatten() {
@@ -1526,7 +1642,7 @@ pub fn create_profile(
     }
 
     copy_dir_recursive(&template_path, &target).map_err(|e| format!("创建 Profile 失败: {e}"))?;
-    Ok(name)
+    Ok(name.to_string())
 }
 
 /// Copies an existing profile directory to a new name inside the same HOME.
@@ -2755,7 +2871,8 @@ mod tests {
             crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
                 "{\"versions\":[\
                  {\"name\":\"0.1.0-rc.6\",\"dir\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6\",\"bin_ready\":true},\
-                 {\"name\":\"0.1.0-rc.5\",\"dir\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.5\",\"bin_ready\":false}]}",
+                 {\"name\":\"0.1.0-rc.5\",\"dir\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.5\",\"bin_ready\":false}],\
+                 \"link\":{\"state\":\"symlink\",\"target\":\"/home/demo/.local/share/dsh-launcher/versions/0.1.0-rc.6/node_modules/.bin/dsh\"}}",
             )),
         );
         let state = host_state(&data, cfg, fake.clone());
@@ -2787,6 +2904,11 @@ mod tests {
             "一次 ssh 问那台机器的 versions 目录：{}",
             fake.last_script()
         );
+        assert!(
+            listed[0].path_linked,
+            "那台机器的链接指向这个版本目录里的 CLI，就要标在这个版本上"
+        );
+        assert!(!listed[1].path_linked, "别的版本没有被登记");
     }
 
     /// A machine the launcher cannot reach is an error, never an empty list:
@@ -2866,10 +2988,12 @@ mod tests {
         );
     }
 
-    /// The PATH registration is this Mac's: one version at a time, 本机 only,
-    /// and the list names exactly the version `~/.local/bin/dsh` runs.
+    /// The PATH registration is one version at a time and is written on the
+    /// machine whose versions they are: 本机 touches this Mac's
+    /// `~/.local/bin/dsh`, a remote host writes the same link there over the
+    /// transport, and the list names exactly the version that link runs.
     #[test]
-    fn a_local_version_can_be_registered_on_path_and_a_remote_one_cannot() {
+    fn a_version_is_registered_on_path_on_its_own_machine() {
         let data = ScratchDir::new("path-link");
         let home = data.path().join("home");
         let ready = data.path().join("versions/0.2.1-rc.1");
@@ -2901,25 +3025,69 @@ mod tests {
             ],
             ..Default::default()
         };
-        let state = host_state(&data, cfg, crate::remote::testing::idle());
+        let fake = crate::remote::testing::FakeTransport::new();
+        let state = host_state(&data, cfg, fake.clone());
 
-        let err =
-            set_version_path_link_at(&state, &home, Some("v-remote".into()), Some(&remote.id))
-                .unwrap_err();
-        assert!(err.contains("只能在本机"), "{err}");
-
-        set_version_path_link_at(&state, &home, Some("v-local".into()), None).unwrap();
+        block_on(set_version_path_link_at(
+            &state,
+            Some(&home),
+            Some("v-local".into()),
+            None,
+        ))
+        .unwrap();
         let listed = block_on(list_versions_for_at(&state, None, Some(&home))).unwrap();
         assert!(listed[0].path_linked, "登记的版本要标出来");
-        assert!(
-            listed.iter().all(|v| v.id != "v-remote" || !v.path_linked),
-            "别的机器上的版本不会被本机的链接命中"
-        );
 
         // Unregistering clears the same list entry it just marked.
-        set_version_path_link_at(&state, &home, None, None).unwrap();
+        block_on(set_version_path_link_at(&state, Some(&home), None, None)).unwrap();
         let listed = block_on(list_versions_for_at(&state, None, Some(&home))).unwrap();
         assert!(!listed[0].path_linked);
+    }
+
+    /// Registering on a server writes the link **there**: the call carries the
+    /// version directory and every version that machine has (a link into one of
+    /// them is the launcher's to replace), and the list marks the row the
+    /// machine says the link runs.
+    #[test]
+    fn a_remote_version_registers_on_that_machines_path() {
+        let data = ScratchDir::new("remote-path-link");
+        let remote = server_host("host-lab", None);
+        let remote_dir = "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.1";
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), remote.clone()],
+            versions: vec![crate::config::DshVersion {
+                id: "v-remote".into(),
+                version: "0.2.1-rc.1".into(),
+                dir: remote_dir.into(),
+                host_id: remote.id.clone(),
+            }],
+            ..Default::default()
+        };
+        let fake = crate::remote::testing::FakeTransport::new().answering(
+            crate::remote::testing::FakeAnswer::stdout(crate::remote::testing::marked(
+                "{\"ok\":true}",
+            )),
+        );
+        let state = host_state(&data, cfg, fake.clone());
+
+        block_on(set_version_path_link_at(
+            &state,
+            None,
+            Some("v-remote".into()),
+            Some(&remote.id),
+        ))
+        .unwrap();
+
+        let script = fake.last_script();
+        assert!(script.contains("register"), "{script}");
+        assert!(
+            script.contains(remote_dir),
+            "登记的是那个版本目录：{script}"
+        );
+        assert!(
+            script.contains("$HOME/.local/bin/dsh"),
+            "链接落在那台机器的 ~/.local/bin：{script}"
+        );
     }
 
     /// The board shows every host's instances by default, and that is an
@@ -3052,6 +3220,36 @@ mod tests {
         assert_eq!(first, vec!["web"]);
         assert_eq!(second, vec!["lab", "web"], "第二次读的是那台机器现在的答案");
         assert_eq!(fake.calls().len(), 2);
+    }
+
+    /// Creating a profile on a remote DSH_HOME is one command on that machine:
+    /// the template walk happens there, over that HOME and that host's own
+    /// `homes/` directory — the launcher has no local copy of either.
+    #[test]
+    fn creating_a_remote_profile_runs_the_template_walk_there() {
+        let data = ScratchDir::new("remote-profile-create");
+        let fake = crate::remote::testing::FakeTransport::new()
+            .answering(remote_stdout(r#"{"ok":true,"name":"lab-x"}"#));
+        let state = host_state(
+            &data,
+            remote_home_cfg(&server_host("host-lab", None), "/home/demo/.dsh"),
+            fake.clone(),
+        );
+
+        let name = block_on(create_profile_for(&state, "h-lab", "lab-x")).unwrap();
+
+        assert_eq!(name, "lab-x");
+        assert_eq!(fake.calls().len(), 1, "一次 ssh 做完这次新建");
+        let script = fake.last_script();
+        assert!(
+            script.contains("'/home/demo/.dsh/profiles'")
+                && script.contains("'/home/demo/.local/share/dsh-launcher/homes'"),
+            "模板在那台机器的自己的 HOME 与数据目录里找：{script}"
+        );
+        assert!(
+            script.contains("${HOME:-}/.dsh/profiles"),
+            "那台机器自己的 ~/.dsh 不建模板：{script}"
+        );
     }
 
     /// Copying a profile on a remote DSH_HOME is one command on that machine,
