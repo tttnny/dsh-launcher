@@ -9,22 +9,29 @@
 :root {
   // --- Surfaces (light) -----------------------------------------------------
   --dl-canvas: #f1f1f3; // window background behind the content
+  --dl-sidebar-bg: #e9e9ec; // gray window material behind the navigation
   --dl-surface: #ffffff; // grouped list / card
   --dl-surface-2: #f5f5f7; // inset fill, row hover
   --dl-surface-3: #e9e9ec; // pressed / stronger fill
   --dl-line: rgba(0, 0, 0, 0.07); // inset separator
   --dl-line-strong: rgba(0, 0, 0, 0.14); // control border
 
+  // Sidebar navigation states: translucent neutral washes that composite to
+  // the grouped-list gray, so the current row reads without an accent block.
+  --dl-nav-hover: rgba(255, 255, 255, 0.34);
+  --dl-nav-active: rgba(255, 255, 255, 0.6);
+
   // --- Ink (Apple label hierarchy) -----------------------------------------
   --dl-ink: #1d1d1f; // label
   --dl-ink-2: #48484a; // secondary label
-  --dl-ink-3: #8a8a8e; // tertiary label
-  --dl-ink-4: #b0b0b5; // quaternary / placeholder
+  --dl-ink-3: #68686e; // tertiary label
+  --dl-ink-4: #6c6c71; // placeholder text only
 
   // --- The one accent: system blue ------------------------------------------
   --dl-signal: #007aff;
   --dl-signal-ink: #0063d1;
   --dl-signal-soft: rgba(0, 122, 255, 0.12);
+  --dl-signal-soft-ink: #0058b8; // label on a soft signal fill
   --dl-signal-line: rgba(0, 122, 255, 0.32);
 
   // --- State (system colours) ----------------------------------------------
@@ -92,20 +99,25 @@
 
 body[arco-theme='dark'] {
   --dl-canvas: #1c1c1e;
+  --dl-sidebar-bg: #242426;
   --dl-surface: #2c2c2e;
   --dl-surface-2: #3a3a3c;
   --dl-surface-3: #48484a;
   --dl-line: rgba(255, 255, 255, 0.09);
   --dl-line-strong: rgba(255, 255, 255, 0.16);
 
+  --dl-nav-hover: rgba(255, 255, 255, 0.06);
+  --dl-nav-active: rgba(255, 255, 255, 0.11);
+
   --dl-ink: #f5f5f7;
   --dl-ink-2: #c7c7cc;
-  --dl-ink-3: #8e8e93;
-  --dl-ink-4: #636366;
+  --dl-ink-3: #a1a1a6;
+  --dl-ink-4: #a6a6ac;
 
   --dl-signal: #0a84ff;
   --dl-signal-ink: #409cff;
   --dl-signal-soft: rgba(10, 132, 255, 0.22);
+  --dl-signal-soft-ink: #cfe4ff;
   --dl-signal-line: rgba(10, 132, 255, 0.5);
 
   --dl-run: #30d158;

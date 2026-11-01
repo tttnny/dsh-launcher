@@ -39,7 +39,8 @@ export interface ShortcutDoc {
   native?: boolean
 }
 
-const MOD = '\u2318 / Ctrl'
+/** The one modifier this app ships with: the macOS Command key. */
+const MOD = '\u2318'
 
 export const SHORTCUT_DOCS: ShortcutDoc[] = [
   { label: '前往实例', keys: [MOD, '1'] },

@@ -196,13 +196,13 @@ function rowCount(): string | null {
 // The layer's size: a count, not a list — the rows are DSH's own detail.
 .bundle-rows {
   font-size: var(--dl-text-xs);
-  color: var(--dl-ink-4);
+  color: var(--dl-ink-3);
   font-variant-numeric: tabular-nums;
 }
 
 .bundle-sub {
   font-size: var(--dl-text-xs);
-  color: var(--dl-ink-4);
+  color: var(--dl-ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
 }

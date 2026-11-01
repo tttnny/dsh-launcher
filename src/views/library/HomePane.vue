@@ -26,6 +26,12 @@ const { copy } = useCopy()
 const newName = ref('')
 const newPath = ref('')
 
+/** The machine this pane is showing, for confirmations that must name it. */
+const hostLabel = computed(() => {
+  const host = store.currentHost
+  return host?.builtin ? `本机` : (host?.display_name ?? store.currentHostId)
+})
+
 /** Whether the pane is showing another machine's DSH_HOMEs. */
 const remote = computed(() => store.currentHost?.builtin === false)
 
@@ -94,6 +100,13 @@ const dirAction = useAction((id: string) => api.openHomeDirectory(id), {
 function viewProfiles(homeId: string) {
   void router.push({ name: 'library', query: { tab: 'profiles', homeId } })
 }
+
+/** The remove confirmation names the machine the record belongs to. */
+function removeConfirm(name: string): string {
+  return remote.value
+    ? `在「${hostLabel.value}」上从启动器移除 DSH_HOME「${name}」？只删这条记录，那台机器上的目录一个字节都不动。`
+    : `在「${hostLabel.value}」上从启动器移除 DSH_HOME「${name}」？只删记录，磁盘目录不动。`
+}
 </script>
 
 <template>
@@ -106,18 +119,26 @@ function viewProfiles(homeId: string) {
          page's subject and the new entry joins it in place. -->
     <div class="dl-surface home-add">
       <DlIcon name="folder" :size="15" class="home-add-glyph" />
-      <input
-        v-model="newName"
-        class="dl-input"
-        :placeholder="`名称，例如：默认 DSH_HOME`"
-      />
-      <input
-        v-model="newPath"
-        class="dl-input dl-input--mono home-path-input"
-        :placeholder="
-          remote ? `服务器上的路径，例如 /home/me/.dsh` : `DSH_HOME 目录路径`
-        "
-      />
+      <label class="home-field">
+        <span class="home-field-label">{{ `名称` }}</span>
+        <input
+          v-model="newName"
+          class="dl-input home-name-input"
+          :placeholder="`例如：默认 DSH_HOME`"
+        />
+      </label>
+      <label class="home-field home-field--path">
+        <span class="home-field-label">{{ `目录路径` }}</span>
+        <input
+          v-model="newPath"
+          class="dl-input dl-input--mono home-path-input"
+          :placeholder="
+            remote
+              ? `服务器上的路径，例如 /home/me/.dsh`
+              : `例如：/Users/me/.dsh`
+          "
+        />
+      </label>
       <button v-if="!remote" class="dl-btn dl-btn--quiet" @click="pickDir">
         {{ `选择目录` }}
       </button>
@@ -196,25 +217,18 @@ function viewProfiles(homeId: string) {
             <DlIcon name="profile" :size="13" />
             {{ `查看 Profile` }}
           </button>
+          <span v-if="usedBy(h.id) > 0" class="home-inuse">
+            {{ `使用中，先到实例页调整` }}
+          </span>
           <a-popconfirm
-            :content="
-              remote
-                ? `从启动器移除 DSH_HOME「${h.name}」？只删这条记录：那台机器上的目录一个字节都不动。`
-                : `从启动器移除 DSH_HOME「${h.name}」？只删记录，磁盘目录不动。`
-            "
+            v-else
+            :content="removeConfirm(h.name)"
             :ok-text="`移除`"
             :cancel-text="`取消`"
-            :disabled="usedBy(h.id) > 0"
             modal-class="dl-sheet"
             @ok="onRemove(h.id)"
           >
-            <button
-              class="dl-btn dl-btn--danger"
-              :disabled="usedBy(h.id) > 0"
-              :title="
-                usedBy(h.id) > 0 ? `仍有实例引用该 DSH_HOME，无法移除` : ''
-              "
-            >
+            <button class="dl-btn dl-btn--danger">
               {{ `移除` }}
             </button>
           </a-popconfirm>
@@ -237,13 +251,30 @@ function viewProfiles(homeId: string) {
     color: var(--dl-ink-3);
   }
 
+  .home-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .home-field--path {
+    flex: 1;
+  }
+
+  .home-field-label {
+    font-size: var(--dl-text-sm);
+    color: var(--dl-ink-3);
+    white-space: nowrap;
+  }
+
+  .home-name-input {
+    width: 200px;
+  }
+
   .home-path-input {
     flex: 1;
     min-width: 200px;
-  }
-
-  > .dl-input:first-of-type {
-    width: 180px;
   }
 }
 
@@ -308,5 +339,12 @@ function viewProfiles(homeId: string) {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+.home-inuse {
+  padding: 0 4px;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+  white-space: nowrap;
 }
 </style>

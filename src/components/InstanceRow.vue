@@ -14,14 +14,11 @@ import InstanceAvatar from '@/components/InstanceAvatar.vue'
 
 // One instance on the board.
 //
-// The row answers exactly two questions — what is it, and is it live — and
-// carries the controls that act on those answers: the profile it launches with
-// (the one choice made at launch time), its primary action, and — while there
-// is a process to drive — that process's own controls (restart / stop /
-// plugins). Those three used to live in the card, which meant a click to open
-// before a click to act, on the one row the user is actually driving. Facts
-// still live in the card the row expands into: expanding the row is for
-// reading, not for reaching a control.
+// The row answers two questions — what is it, and is it live — and carries the
+// controls that act on those answers: the profile it launches with, its primary
+// action, and, while a process is live, that process's own restart and stop.
+// Facts and the remaining actions live in the card the row expands into;
+// expanding the row is for reading, not for reaching a control.
 
 const props = defineProps<{
   inst: DshInstance
@@ -113,9 +110,13 @@ const starting = computed(() => status.value.state === 'starting')
  * retry, never a 启动.
  */
 const unreachable = computed(() => status.value.state === 'unreachable')
+/**
+ * A readable name for what the row binds. The store can be missing a resource
+ * when that machine's list could not be read, so the row says what it does not
+ * know in words; the internal id stays on the element's title.
+ */
 const versionName = computed(
-  () =>
-    store.versionById(props.inst.version_id)?.version ?? props.inst.version_id,
+  () => store.versionById(props.inst.version_id)?.version ?? `未知版本`,
 )
 /**
  * Installing a version names its instance after that version, so the common
@@ -124,7 +125,7 @@ const versionName = computed(
  */
 const showVersionChip = computed(() => versionName.value !== props.inst.name)
 const homeName = computed(
-  () => store.homeById(props.inst.home_id)?.name ?? props.inst.home_id,
+  () => store.homeById(props.inst.home_id)?.name ?? `未知 DSH_HOME`,
 )
 const sharedHome = computed(() => store.isHomeShared(props.inst.home_id))
 const version = computed(() => store.versionById(props.inst.version_id))
@@ -153,6 +154,25 @@ const remote = computed(() => !!host.value && !host.value.builtin)
 const statusHint = computed(() => {
   if (!unreachable.value) return undefined
   return host.value?.status?.message || `再向那台机器问一次这个实例的状态。`
+})
+/**
+ * The one-line reason a row shows while its machine is unreachable: the common
+ * failures as everyday words, anything else as the first sentence of what the
+ * machine said. The full message stays on the status chip's title.
+ */
+const failureSummary = computed(() => {
+  const message = host.value?.status?.message || ''
+  if (!message) return `这台机器没有回应`
+  if (/connection refused|econnrefused/i.test(message)) return `连接被拒绝`
+  if (/timed out|timeout|超时/i.test(message)) return `连接超时`
+  if (/permission denied|publickey|authentication|认证/i.test(message))
+    return `认证失败`
+  if (/could not resolve|name or service not known|resolve/i.test(message))
+    return `找不到这台机器`
+  if (/no route to host|network is unreachable|unreachable/i.test(message))
+    return `网络不通`
+  const first = message.split(/[。\n]/)[0].trim()
+  return first.length > 24 ? `${first.slice(0, 24)}…` : first
 })
 const envEntries = computed(() =>
   Object.entries(props.inst.env_overrides ?? {}),
@@ -187,9 +207,12 @@ const selectedProfile = computed<string | undefined>({
 
 // --- Profile selection --------------------------------------------------------
 
+// An unreachable machine cannot answer for its Profile list, so the row does
+// not ask for one: there is no empty select, and no "no Profile" warning fires.
 watch(
-  () => props.inst.home_id,
+  () => [props.inst.home_id, unreachable.value] as const,
   () => {
+    if (unreachable.value) return
     void ensureSelection(props.inst).then((p) => {
       if (p === undefined)
         Message.warning(`该实例的 DSH_HOME 下没有可用 Profile`)
@@ -409,60 +432,55 @@ onMounted(() => {
             <span class="inst-meta-sep" />
           </template>
           <template v-if="showVersionChip">
-            <span class="dl-mono" :title="versionName">{{ versionName }}</span>
+            <span class="dl-mono" :title="version?.dir || inst.version_id">{{
+              versionName
+            }}</span>
             <span class="inst-meta-sep" />
           </template>
-          <span class="inst-meta-home" :title="homeName">{{ homeName }}</span>
-        </div>
-
-        <!-- The live URL is the only thing on the row that gets the run colour:
-           it is what "running" actually means and what the user clicks. A
-           remote instance's address here is the forwarded one, so the row says
-           which address it is showing and the card states both. -->
-        <div v-if="running && status.url" class="inst-url">
-          <span v-if="remoteUrl" class="inst-url-label">{{ `本机可达` }}</span>
-          <button class="inst-url-link" @click="onOpen">
-            <DlIcon name="link" :size="12" />
-            <span class="dl-mono">{{ status.url }}</span>
-          </button>
-          <button
-            class="dl-icon-btn inst-url-copy"
-            :title="`复制`"
-            @click="copy(status.url!)"
-          >
-            <DlIcon name="copy" :size="12" />
-          </button>
+          <span class="inst-meta-home" :title="home?.path || inst.home_id">
+            {{ homeName }}
+          </span>
         </div>
       </div>
 
-      <!-- The row's controls, stacked: what the instance is running on top, and —
-         only while there is a process to drive — that process's own controls
-         underneath, where they are one click away instead of one click and an
-         expansion away. -->
+      <!-- The row's controls: what the instance runs on, its primary action,
+         and — only while the process is live — that process's own controls as
+         icon buttons on the same line, so every state keeps one row height. -->
       <div class="inst-tail">
         <div class="inst-tail-line">
           <div class="inst-profile">
-            <a-select
-              v-if="!running && !starting"
-              v-model="selectedProfile"
-              :placeholder="`选择 Profile`"
-              :loading="profilesLoading"
-              size="small"
-              :allow-clear="false"
-              style="width: 132px"
-              @change="touchLastUsed"
-            >
-              <a-option v-for="p in profiles" :key="p" :value="p">{{
-                p
-              }}</a-option>
-            </a-select>
+            <template v-if="!running && !starting && !unreachable">
+              <span class="inst-profile-label">{{ `Profile` }}</span>
+              <a-select
+                v-model="selectedProfile"
+                :placeholder="`选择 Profile`"
+                :loading="profilesLoading"
+                size="small"
+                :allow-clear="false"
+                style="width: 132px"
+                @change="touchLastUsed"
+              >
+                <a-option v-for="p in profiles" :key="p" :value="p">{{
+                  p
+                }}</a-option>
+              </a-select>
+            </template>
+            <!-- An unreachable machine has no Profile list to offer: the row
+               says why it could not be read instead of opening an empty select. -->
             <span
-              v-else
-              class="dl-chip"
-              :title="status.profile ?? selectedProfile"
+              v-else-if="unreachable"
+              class="inst-failure"
+              :title="statusHint"
             >
-              {{ status.profile ?? selectedProfile ?? `选择 Profile` }}
+              <DlIcon name="alert" :size="12" />
+              {{ failureSummary }}
             </span>
+            <template v-else>
+              <span class="inst-profile-label">{{ `Profile` }}</span>
+              <span class="dl-chip" :title="status.profile ?? selectedProfile">
+                {{ status.profile ?? selectedProfile ?? `选择 Profile` }}
+              </span>
+            </template>
           </div>
 
           <span
@@ -495,7 +513,7 @@ onMounted(() => {
                a 启动 here is exactly the click that creates a second DSH. -->
             <button
               v-else-if="unreachable"
-              class="dl-btn dl-btn--quiet inst-primary"
+              class="dl-btn dl-btn--primary-soft inst-primary"
               :title="statusHint"
               :disabled="retryAction.busy[inst.id]"
               @click="onRetry"
@@ -505,7 +523,7 @@ onMounted(() => {
             </button>
             <button
               v-else
-              class="dl-btn dl-btn--primary inst-primary"
+              class="dl-btn dl-btn--primary-soft inst-primary"
               :disabled="
                 !selectedProfile || busy || !store.versionById(inst.version_id)
               "
@@ -514,35 +532,28 @@ onMounted(() => {
               <DlIcon name="play" :size="13" />
               {{ `启动` }}
             </button>
+            <!-- The process controls, on the primary action's own line. 停止 is
+               offered while starting too, so a launch that hangs is not a dead end. -->
+            <template v-if="running || starting">
+              <button
+                v-if="running"
+                class="dl-icon-btn inst-proc-btn"
+                :title="`重启`"
+                :disabled="busy"
+                @click="onRestart"
+              >
+                <DlIcon name="restart" :size="14" />
+              </button>
+              <button
+                class="dl-icon-btn inst-proc-btn inst-stop"
+                :title="`停止`"
+                :disabled="!!stopAction.busy[inst.id]"
+                @click="onStop"
+              >
+                <DlIcon name="stop" :size="14" />
+              </button>
+            </template>
           </div>
-        </div>
-
-        <!-- Acts on the process, so it only exists while there is one. -->
-        <div v-if="running || starting" class="inst-tail-line inst-proc">
-          <button
-            class="dl-btn dl-btn--quiet"
-            :disabled="busy"
-            @click="onRestart"
-          >
-            <DlIcon name="restart" :size="13" />
-            {{ `重启` }}
-          </button>
-          <button
-            class="dl-btn dl-btn--quiet inst-stop"
-            :disabled="busy"
-            @click="onStop"
-          >
-            <DlIcon name="stop" :size="13" />
-            {{ `停止` }}
-          </button>
-          <button
-            v-if="canManagePlugins(inst.id)"
-            class="dl-btn dl-btn--quiet"
-            @click="openPlugins(inst.id, 'instances')"
-          >
-            <DlIcon name="plugin" :size="13" />
-            {{ `管理插件` }}
-          </button>
         </div>
       </div>
 
@@ -562,13 +573,15 @@ onMounted(() => {
       <div class="facts-grid">
         <div class="fact">
           <span class="fact-label">{{ `DSH 版本` }}</span>
-          <span class="fact-value dl-mono" :title="version?.dir">{{
-            versionName
-          }}</span>
+          <span
+            class="fact-value dl-mono"
+            :title="version?.dir || inst.version_id"
+            >{{ versionName }}</span
+          >
         </div>
         <div class="fact">
           <span class="fact-label">{{ `DSH_HOME` }}</span>
-          <span class="fact-value" :title="home?.path">
+          <span class="fact-value" :title="home?.path || inst.home_id">
             {{ homeName }}
             <span class="fact-sub dl-mono">{{ home?.path }}</span>
           </span>
@@ -581,9 +594,10 @@ onMounted(() => {
           <span class="fact-label">{{ `端口号` }}</span>
           <span class="fact-value dl-mono">{{ portLabel }}</span>
         </div>
-        <!-- The two addresses of a remote instance, stated apart: where it really
-           is, and where it is reachable from here. They are the same address
-           only when the remote port was free on this Mac. -->
+        <!-- The live address belongs with the facts, not on the row: opening and
+           copying it live here, so the row itself keeps one height. A remote
+           instance's address is the forwarded one; 「远端位置」 states where it
+           really runs. -->
         <div v-if="remoteUrl" class="fact">
           <span class="fact-label">{{ `远端位置` }}</span>
           <span class="fact-value fact-chips">
@@ -599,12 +613,16 @@ onMounted(() => {
             </button>
           </span>
         </div>
-        <div v-if="remoteUrl && status.url" class="fact">
-          <span class="fact-label">{{ `本机可达` }}</span>
+        <div v-if="status.url" class="fact">
+          <span class="fact-label">{{ `本机地址` }}</span>
           <span class="fact-value fact-chips">
-            <span class="fact-chip dl-mono" :title="status.url">{{
-              status.url
-            }}</span>
+            <button
+              class="fact-link dl-mono"
+              :title="`在浏览器里打开`"
+              @click="onOpen"
+            >
+              {{ status.url }}
+            </button>
             <button
               class="dl-icon-btn"
               :title="`复制`"
@@ -655,83 +673,98 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- The action bar is grouped by what an action acts on, and the groups
-           are laid out on their own lines: the machine first, then the binding.
-           The process group is not here — a live process is driven from the row
-           above, which is already reporting it. One wrapping row used to strand
-           a single button on a line of its own. -->
+      <!-- The action bar is grouped by what an action acts on: the machine,
+           then this binding. A small title and a divider state the two groups;
+           the delete sits apart at the far end of the binding group. -->
       <div class="facts-actions">
-        <div class="facts-line">
-          <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
-            <DlIcon name="terminal" :size="13" />
-            {{ `打开终端` }}
-          </button>
-          <!-- This Mac's file manager cannot open a directory on another
-               machine, so that machine's DSH_HOME is handed over as what it
-               is: a path to paste, and one command that reaches it. -->
-          <template v-if="remote">
-            <button
-              class="dl-btn dl-btn--quiet"
-              @click="remoteCopyAction.run('path')"
-            >
-              <DlIcon name="copy" :size="13" />
-              {{ `复制路径` }}
+        <div class="facts-group">
+          <span class="facts-group-title">{{ `这台机器` }}</span>
+          <div class="facts-line">
+            <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
+              <DlIcon name="terminal" :size="13" />
+              {{ `打开终端` }}
             </button>
+            <!-- This Mac's file manager cannot open a directory on another
+                 machine, so that machine's DSH_HOME is handed over as what it
+                 is: a path to paste, and one command that reaches it. -->
+            <template v-if="remote">
+              <button
+                class="dl-btn dl-btn--quiet"
+                @click="remoteCopyAction.run('path')"
+              >
+                <DlIcon name="copy" :size="13" />
+                {{ `复制路径` }}
+              </button>
+              <button
+                class="dl-btn dl-btn--quiet"
+                @click="remoteCopyAction.run('command')"
+              >
+                <DlIcon name="copy" :size="13" />
+                {{ `复制命令` }}
+              </button>
+            </template>
             <button
+              v-else
               class="dl-btn dl-btn--quiet"
-              @click="remoteCopyAction.run('command')"
+              @click="dirAction.run()"
             >
-              <DlIcon name="copy" :size="13" />
-              {{ `复制命令` }}
+              <DlIcon name="folder" :size="13" />
+              {{ `打开目录` }}
             </button>
-          </template>
-          <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
-            <DlIcon name="folder" :size="13" />
-            {{ `打开目录` }}
-          </button>
-          <button class="dl-btn dl-btn--quiet" @click="logAction.run()">
-            <DlIcon name="log" :size="13" />
-            {{ `查看日志` }}
-          </button>
+            <button class="dl-btn dl-btn--quiet" @click="logAction.run()">
+              <DlIcon name="log" :size="13" />
+              {{ `查看日志` }}
+            </button>
+          </div>
         </div>
 
-        <!-- The binding group, on its own line: everything here acts on the
-             binding itself, never on this process or this machine. The
-             settings page belongs with them — it is the same three facts,
-             editable. A copy is a new binding of the same version + HOME, so
-             it is the same sheet the New instance button opens, pre-filled. -->
-        <div class="facts-line">
-          <button class="dl-btn dl-btn--quiet" @click="openDetail">
-            <DlIcon name="settings" :size="13" />
-            {{ `实例设置` }}
-          </button>
-          <button
-            class="dl-btn dl-btn--quiet"
-            @click="emit('duplicate', inst.id)"
-          >
-            <DlIcon name="copy" :size="13" />
-            {{ `复制实例` }}
-          </button>
-          <button
-            v-if="!running && !starting"
-            class="dl-btn dl-btn--quiet"
-            :disabled="profilesLoading"
-            @click="refreshProfiles"
-          >
-            <DlIcon name="refresh" :size="13" />
-            {{ `重新读取 Profile 列表` }}
-          </button>
-          <!-- Removing the binding, next to the other actions that act on the
-               binding itself. Only the record goes; the version and the
-               DSH_HOME are shared resources (ADR-0003). -->
-          <button
-            class="dl-btn dl-btn--danger"
-            :disabled="!!deleteAction.busy[inst.id]"
-            @click="confirmDelete"
-          >
-            <DlIcon name="trash" :size="13" />
-            {{ `删除` }}
-          </button>
+        <div class="facts-divider" />
+
+        <!-- Everything here acts on the binding itself, never on this process
+             or this machine. The settings page is the same three facts,
+             editable; a copy is a new binding of the same version + HOME. -->
+        <div class="facts-group">
+          <span class="facts-group-title">{{ `这个实例绑定` }}</span>
+          <div class="facts-line">
+            <button class="dl-btn dl-btn--quiet" @click="openDetail">
+              <DlIcon name="settings" :size="13" />
+              {{ `实例设置` }}
+            </button>
+            <button
+              class="dl-btn dl-btn--quiet"
+              @click="emit('duplicate', inst.id)"
+            >
+              <DlIcon name="copy" :size="13" />
+              {{ `复制实例` }}
+            </button>
+            <button
+              v-if="canManagePlugins(inst.id)"
+              class="dl-btn dl-btn--quiet"
+              @click="openPlugins(inst.id, 'instances')"
+            >
+              <DlIcon name="plugin" :size="13" />
+              {{ `管理插件` }}
+            </button>
+            <button
+              v-if="!running && !starting"
+              class="dl-btn dl-btn--quiet"
+              :disabled="profilesLoading"
+              @click="refreshProfiles"
+            >
+              <DlIcon name="refresh" :size="13" />
+              {{ `重新读取 Profile 列表` }}
+            </button>
+            <!-- Removing the binding, set apart at the far end: only the record
+                 goes; the version and the DSH_HOME are shared resources. -->
+            <button
+              class="dl-btn dl-btn--danger facts-delete"
+              :disabled="!!deleteAction.busy[inst.id]"
+              @click="confirmDelete"
+            >
+              <DlIcon name="trash" :size="13" />
+              {{ `删除` }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -770,6 +803,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 14px;
+  min-height: 62px;
   padding: 13px 16px 13px 18px;
   cursor: pointer;
   transition: background-color var(--dl-fast) var(--dl-ease);
@@ -858,9 +892,28 @@ onMounted(() => {
 .facts-actions {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
+  align-items: stretch;
+  gap: 10px;
   margin-top: 14px;
+}
+
+.facts-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+// A quiet group title, so the machine actions and the binding actions read as
+// two sets rather than one long toolbar.
+.facts-group-title {
+  font-size: var(--dl-text-xs);
+  font-weight: 600;
+  color: var(--dl-ink-3);
+}
+
+.facts-divider {
+  height: 1px;
+  background: var(--dl-line);
 }
 
 // One line per group, each wrapping inside itself: a group never breaks in the
@@ -870,6 +923,12 @@ onMounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
+  width: 100%;
+}
+
+// The destructive action is pushed to the far end of its own group.
+.facts-delete {
+  margin-left: auto;
 }
 
 @keyframes facts-in {
@@ -970,59 +1029,30 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.inst-url {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-top: 3px;
+// An address that opens on click, rendered as a chip in the facts grid.
+.fact-link {
+  padding: 0 6px;
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface);
+  color: var(--dl-run);
+  font-size: var(--dl-text-xs);
+  cursor: pointer;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 
-  // Which address this is: a remote instance is opened at the forwarded one,
-  // and the row says so before the URL rather than after it.
-  .inst-url-label {
-    color: var(--dl-ink-4);
-    font-size: var(--dl-text-xs);
-    white-space: nowrap;
-  }
-
-  .inst-url-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    max-width: 340px;
-    padding: 1px 0;
-    border: none;
-    background: none;
-    color: var(--dl-run);
-    font-size: var(--dl-text-sm);
-    font-weight: 550;
-    cursor: pointer;
-    overflow: hidden;
-
-    span {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    &:hover {
-      text-decoration: underline;
-    }
-  }
-
-  .inst-url-copy {
-    width: 22px;
-    height: 22px;
+  &:hover:not(:disabled) {
+    text-decoration: underline;
   }
 }
 
-// The row's control block: a column, so the process controls can sit on their
-// own line under the primary action without widening the row. Right-aligned on
-// both lines — the row's controls end at one edge, whatever they are.
+// The row's control block: one line, right-aligned, in every state.
 .inst-tail {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
   flex-shrink: 0;
 }
 
@@ -1033,23 +1063,38 @@ onMounted(() => {
   gap: 12px;
 }
 
-// Grouped tighter than the facts beside them: these three act on one thing.
-.inst-proc {
-  gap: 4px;
-}
-
 // Stopping is the one control on the row that takes something away; it says so
 // on hover instead of wearing red all the time.
 .inst-stop:hover:not(:disabled) {
-  border-color: var(--dl-danger);
+  background: var(--dl-danger-soft);
   color: var(--dl-danger);
 }
 
 .inst-profile {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   flex-shrink: 0;
+}
+
+// The dropdown's visible name, so 「web」 is not mistaken for a state or version.
+.inst-profile-label {
+  font-size: var(--dl-text-xs);
+  color: var(--dl-ink-3);
+}
+
+// Why an unreachable machine's row cannot offer a Profile: a short reason in
+// place of the select, with the full message on hover.
+.inst-failure {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  color: var(--dl-warn);
+  font-size: var(--dl-text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inst-status {
@@ -1062,6 +1107,12 @@ onMounted(() => {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+}
+
+// The live process's own controls sit beside the primary action as icon buttons.
+.inst-proc-btn {
+  width: 26px;
+  height: 26px;
 }
 
 .inst-primary {

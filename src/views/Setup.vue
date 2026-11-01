@@ -88,6 +88,17 @@ const allOk = computed(() => nodeOk.value && pnpmOk.value)
 const belowRecommended = computed(
   () => runtime.value?.node_below_recommended ?? false,
 )
+// Until a host answers there is no verdict; 「检测中」 and 「无法检测」 are
+// separate answers from 「未安装」, so the page never reports a missing tool
+// before it has looked, or after the machine refused.
+const detecting = computed(() => !runtime.value && !loadError.value)
+const envState = computed(() => {
+  if (loadError.value) return { label: `无法检测`, tone: 'dl-tag--warn' }
+  if (!runtime.value) return { label: `检测中…`, tone: 'dl-tag--muted' }
+  return allOk.value
+    ? { label: `环境已就绪`, tone: 'dl-tag--run' }
+    : { label: `环境未就绪`, tone: 'dl-tag--danger' }
+})
 
 const requirements = computed(() => runtime.value?.requirements)
 const nodeCommand = computed(
@@ -316,32 +327,51 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       <div class="dl-section-label">
         {{ `环境` }}
         <span class="dl-section-count">
-          <span
-            class="dl-tag"
-            :class="allOk ? 'dl-tag--run' : 'dl-tag--danger'"
-          >
-            {{ allOk ? `环境已就绪` : `环境未就绪` }}
+          <span class="dl-tag" :class="envState.tone">
+            {{ envState.label }}
           </span>
         </span>
       </div>
 
-      <p v-if="loadError" class="setup-note setup-note--quiet">
-        {{ loadError }}
-      </p>
+      <div v-if="loadError" class="setup-state setup-state--warn">
+        <DlIcon name="alert" :size="14" />
+        <div class="setup-state-body">
+          <span class="setup-state-title">{{ `无法检测` }}</span>
+          <span class="setup-state-desc">{{ loadError }}</span>
+        </div>
+        <button
+          class="dl-btn dl-btn--quiet"
+          :disabled="checking"
+          @click="recheck"
+        >
+          <DlIcon name="refresh" :size="13" />
+          {{ `重试` }}
+        </button>
+      </div>
 
       <div v-if="!loadError" class="dl-surface">
         <div v-for="tool in tools" :key="tool.name" class="dl-row">
-          <span class="tool-mark" :class="tool.ok ? 'is-on' : 'is-off'">
-            <DlIcon :name="tool.ok ? 'check' : 'alert'" :size="13" />
+          <span
+            class="tool-mark"
+            :class="detecting ? 'is-pending' : tool.ok ? 'is-on' : 'is-off'"
+          >
+            <DlIcon
+              :name="detecting ? 'refresh' : tool.ok ? 'check' : 'alert'"
+              :size="13"
+            />
           </span>
           <div class="tool-info">
             <span class="tool-name">{{ tool.name }}</span>
             <span v-if="tool.ok && tool.path" class="tool-path dl-mono">{{
               tool.path
             }}</span>
-            <span class="tool-source">{{ sourceLabel(tool) }}</span>
+            <span class="tool-source">{{
+              detecting ? `正在检测…` : sourceLabel(tool)
+            }}</span>
           </div>
-          <span class="dl-chip">{{ tool.ok ? tool.version : `未安装` }}</span>
+          <span class="dl-chip">{{
+            detecting ? `检测中…` : tool.ok ? tool.version : `未安装`
+          }}</span>
         </div>
       </div>
 
@@ -375,7 +405,10 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
          launcher at the file, or fix PATH in a terminal and re-check. Shown for
          every tool the terminal would not find, plus any tool the user already
          picked, so their choice stays visible and revisable. -->
-    <section v-if="!loadError && manualTools.length" class="dl-section">
+    <section
+      v-if="!loadError && !detecting && manualTools.length"
+      class="dl-section"
+    >
       <div class="dl-section-label">{{ `手动指定可执行文件` }}</div>
 
       <div v-for="tool in manualTools" :key="tool.id" class="dl-surface pick">
@@ -429,7 +462,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       </div>
     </section>
 
-    <section v-if="!loadError && !allOk" class="dl-section">
+    <section v-if="!loadError && !detecting && !allOk" class="dl-section">
       <div class="dl-section-label">{{ `怎么装` }}</div>
 
       <div v-if="!nodeOk" class="dl-surface guide">
@@ -477,6 +510,12 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
 
 <style lang="scss" scoped>
 .setup-page {
+  max-width: var(--dl-content);
+}
+
+// The page keeps the shared content width so its title shares the left edge of
+// every other page; only the grouped form narrows so each row stays readable.
+.setup-page > .dl-section {
   max-width: 720px;
 }
 
@@ -497,6 +536,11 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
   &.is-off {
     background: var(--dl-danger-soft);
     color: var(--dl-danger);
+  }
+
+  &.is-pending {
+    background: var(--dl-surface-2);
+    color: var(--dl-ink-3);
   }
 }
 
@@ -539,6 +583,41 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
   &--quiet {
     color: var(--dl-ink-3);
   }
+}
+
+.setup-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--dl-r-card);
+  background: var(--dl-surface);
+  box-shadow: var(--dl-lift-1);
+
+  &--warn {
+    color: var(--dl-warn);
+  }
+}
+
+.setup-state-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-state-title {
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.setup-state-desc {
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+  overflow-wrap: anywhere;
 }
 
 .skipped {

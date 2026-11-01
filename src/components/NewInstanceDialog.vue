@@ -187,6 +187,18 @@ function close() {
     </div>
 
     <div v-else class="new-instance-body">
+      <!-- Read-only, above the form: the instance is created on exactly this
+           machine, and the user checks it before naming anything. -->
+      <div class="new-instance-host">
+        <span class="new-instance-host-label">{{ `主机：` }}</span>
+        <span
+          class="new-instance-host-name"
+          :title="host?.ssh_target || hostId"
+        >
+          {{ host?.display_name || hostId }}
+        </span>
+      </div>
+
       <div class="dl-field">
         <label class="dl-field-label">{{ `实例名称` }}</label>
         <input
@@ -236,6 +248,30 @@ function close() {
 <style lang="scss" scoped>
 .new-instance-body {
   padding-top: 2px;
+}
+
+// The machine this sheet binds on, stated once and quietly above the fields.
+.new-instance-host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border-radius: var(--dl-r-ctl);
+  background: var(--dl-surface-2);
+  font-size: var(--dl-text-sm);
+}
+
+.new-instance-host-label {
+  color: var(--dl-ink-3);
+}
+
+.new-instance-host-name {
+  color: var(--dl-ink);
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sheet-footer {

@@ -505,7 +505,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   flex-direction: column;
   width: var(--dl-sidebar);
   flex-shrink: 0;
-  background: var(--dl-surface);
+  background: var(--dl-sidebar-bg);
   box-shadow: 1px 0 0 var(--dl-line);
   transition: width var(--dl-slow) var(--dl-ease);
 
@@ -549,14 +549,28 @@ async function onHeaderDoubleClick(e: MouseEvent) {
     color var(--dl-fast) var(--dl-ease);
 
   &:hover:not(.is-active) {
-    background: var(--dl-surface-2);
+    background: var(--dl-nav-hover);
     color: var(--dl-ink);
   }
 
-  // macOS source-list selection: a filled accent row with the label in white.
+  // The current destination: a neutral filled row with an accent tick, so the
+  // navigation reads through placement rather than a block of accent colour.
   &.is-active {
-    background: var(--dl-signal);
-    color: #fff;
+    background: var(--dl-nav-active);
+    color: var(--dl-ink);
+    font-weight: 600;
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: -6px;
+      width: 2px;
+      height: 14px;
+      transform: translateY(-50%);
+      border-radius: 1px;
+      background: var(--dl-signal);
+    }
   }
 }
 
@@ -578,11 +592,6 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: center;
-
-  .dl-nav-item.is-active & {
-    background: rgba(255, 255, 255, 0.24);
-    color: #fff;
-  }
 }
 
 .dl-sidebar-foot {
@@ -611,7 +620,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
     color var(--dl-fast) var(--dl-ease);
 
   &:hover {
-    background: var(--dl-surface-2);
+    background: var(--dl-nav-hover);
     color: var(--dl-ink);
   }
 

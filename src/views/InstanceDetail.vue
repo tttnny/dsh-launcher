@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
@@ -29,8 +29,12 @@ const versionId = ref<string | undefined>(undefined)
 const homeId = ref<string | undefined>(undefined)
 const defaultProfile = ref<string | undefined>(undefined)
 const profiles = ref<string[]>([])
+/** Why the selected HOME's profiles could not be read; the page states it once. */
+const profilesError = ref('')
 const portInput = ref('')
 const loaded = ref(false)
+/** Set when the page navigates on its own, after saving or deleting. */
+const departing = ref(false)
 
 interface EnvRow {
   key: string
@@ -97,9 +101,28 @@ const retryAction = useAction(
   },
   { key: (instanceId) => instanceId },
 )
-const homeLabel = computed(
-  () => store.homeById(homeId.value ?? '')?.name ?? '—',
+/** The selected DSH_HOME record, while the launcher still knows it. */
+const homeRecord = computed(() => store.homeById(homeId.value ?? ''))
+/** The selected DSH_HOME's name; an unresolved one reads as 未知 DSH_HOME
+ * instead of its internal id. */
+const homeLabel = computed(() =>
+  homeRecord.value
+    ? homeRecord.value.name
+    : homeId.value
+      ? '未知 DSH_HOME'
+      : '—',
 )
+/** The DSH_HOME's full path, or its internal id when unresolved. Kept for the
+ * option and the tooltip, not for the closed control's text. */
+const homeTitle = computed(() => homeRecord.value?.path ?? homeId.value ?? '')
+/** The selected version's display name; an unresolved one reads as 未知版本
+ * instead of its internal id. */
+const versionLabel = computed(() => {
+  const known = store.versionById(versionId.value ?? '')
+  return known ? known.version : versionId.value ? '未知版本' : '—'
+})
+/** The version's internal id, kept for the option and the tooltip. */
+const versionTitle = computed(() => versionId.value ?? '')
 /**
  * The machine this instance runs on. Its version and its DSH_HOMEs live there —
  * an instance is one binding on one host (ADR-0006 §1) — so the two selects below
@@ -112,19 +135,21 @@ const host = computed(() => store.hostById(hostId.value))
 const remote = computed(() => !!host.value && !host.value.builtin)
 const hostVersions = computed(() => store.versionsByHost[hostId.value] ?? [])
 const hostHomes = computed(() => store.homesByHost[hostId.value] ?? [])
+/** Why that machine's installed versions could not be read. */
+const versionReadError = computed(() => store.versionErrors[hostId.value] ?? '')
+/** Why that machine's DSH_HOMEs could not be read. */
+const homeReadError = computed(() => store.homeErrors[hostId.value] ?? '')
 /**
- * Why that machine's versions and DSH_HOMEs could not be read. Both lists are
- * its own answers, so a failed read leaves nothing to offer — and the last list
- * it gave is not today's answer (`loadHostResources` drops it). The form says
- * what happened instead of listing yesterday's versions.
+ * The one failure this page states: a resource it needs on that machine could
+ * not be read. The form keeps the saved values on screen and says so once.
  */
-const hostError = computed(
-  () =>
-    store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
+const resourceError = computed(
+  () => versionReadError.value || homeReadError.value || profilesError.value,
 )
 
 function retryHost() {
   void store.loadHostResources(hostId.value)
+  void loadProfiles(homeId.value)
 }
 
 /**
@@ -162,22 +187,27 @@ function fillForm(inst: DshInstance) {
 
 // --- Profiles of the selected HOME --------------------------------------------
 
-watch(homeId, async (v) => {
+/** Reads the selected HOME's profiles; a failed read keeps no list and records
+ * why, so the page states it in one place. */
+async function loadProfiles(homeId: string | undefined) {
   profiles.value = []
-  if (!v) return
+  profilesError.value = ''
+  if (!homeId) return
   try {
-    profiles.value = await api.listProfiles(v)
+    profiles.value = await api.listProfiles(homeId)
   } catch (e) {
-    Message.error(String(e))
+    profilesError.value = String(e)
   }
+}
+
+watch(homeId, (v) => {
+  void loadProfiles(v)
 })
 
 /**
- * Switching the HOME invalidates the chosen default profile. This lives on the
- * control, not in the watcher above: a watcher cannot tell "the user picked
- * another HOME" from "the form is loading", and clearing on load wiped the
- * instance's default profile every time the page opened (so saving an untouched
- * form silently dropped it).
+ * Switching the HOME invalidates the chosen default profile. The clear lives on
+ * the control, not in the watcher above: the form's own load must keep the
+ * instance's saved default profile.
  */
 function onHomePicked() {
   defaultProfile.value = undefined
@@ -240,17 +270,45 @@ async function onSave() {
   if (!formValid.value) return
   const ok = await saveAction.run()
   if (!ok) return
-  await store.refreshInstances()
+  // The record is already saved: leaving must not be blocked by the unsaved
+  // guard, nor by a failed list refresh.
+  departing.value = true
+  try {
+    await store.refreshInstances()
+  } catch {
+    // A failed refresh only leaves the board stale; the save itself stands.
+  }
   void router.push({ name: 'instances' })
 }
 
-/** Cancel means "undo my edits", not "go back" — the header already goes back. */
-function onCancel() {
+/** 还原修改 puts every field back to the saved instance and keeps the page open;
+ * going back is the header's job. */
+function restoreChanges() {
   const inst = current.value
   if (!inst) return
   fillForm(inst)
   void nextTick(() => (baseline.value = formSnapshot()))
 }
+
+// A page left by another route must not drop unsaved edits without asking.
+onBeforeRouteLeave((_to, _from, next) => {
+  if (departing.value || !dirty.value) {
+    next()
+    return
+  }
+  Modal.confirm({
+    title: '放弃修改？',
+    content: '这个实例还有没保存的修改，离开后这些修改会丢失。',
+    okText: '放弃修改',
+    cancelText: '继续编辑',
+    modalClass: 'dl-sheet',
+    closable: false,
+    maskClosable: false,
+    escToClose: false,
+    onOk: () => next(),
+    onCancel: () => next(false),
+  })
+})
 
 // --- Icon ---------------------------------------------------------------------
 
@@ -356,8 +414,13 @@ function confirmDelete() {
     onOk: async () => {
       const ok = await deleteAction.run()
       if (ok !== true) return
-      await store.refreshInstances()
+      departing.value = true
       Message.success(`已删除实例「${name.value}」`)
+      try {
+        await store.refreshInstances()
+      } catch {
+        // A failed refresh only leaves the board stale; the delete stands.
+      }
       void router.push({ name: 'instances' })
     },
   })
@@ -391,11 +454,9 @@ function removeEnvRow(idx: number) {
             <span>{{ host.display_name }}</span>
             <span class="detail-dot">·</span>
           </template>
-          <span class="dl-mono">{{
-            store.versionById(versionId ?? '')?.version ?? '—'
-          }}</span>
+          <span class="dl-mono" :title="versionTitle">{{ versionLabel }}</span>
           <span class="detail-dot">·</span>
-          <span>{{ homeLabel }}</span>
+          <span :title="homeTitle">{{ homeLabel }}</span>
         </p>
         <!-- Both addresses of a remote instance, stated apart: where it really
              is, and where it is reachable from here (ADR-0008). The row above
@@ -420,7 +481,7 @@ function removeEnvRow(idx: number) {
              answer, so the one useful move is to ask it again. -->
         <button
           v-if="unreachable"
-          class="dl-btn dl-btn--quiet"
+          class="dl-btn dl-btn--primary"
           :title="hostReason"
           :disabled="retryAction.busy[id]"
           @click="retryAction.run(id)"
@@ -428,43 +489,49 @@ function removeEnvRow(idx: number) {
           <DlIcon name="refresh" :size="13" />
           {{ `重试` }}
         </button>
-        <!-- Only a running instance has a plugin manager to talk to. -->
+        <!-- 打开终端 is the one frequent action; on an unreachable host it steps
+             back because it cannot reach the machine. -->
         <button
-          v-if="canManagePlugins(id)"
-          class="dl-btn dl-btn--quiet"
-          @click="openPlugins(id, 'instance-detail')"
+          class="dl-btn"
+          :class="unreachable ? 'dl-btn--quiet' : 'dl-btn--primary'"
+          @click="terminalAction.run()"
         >
-          <DlIcon name="plugin" :size="13" />
-          {{ `管理插件` }}
-        </button>
-        <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
           <DlIcon name="terminal" :size="13" />
           {{ `打开终端` }}
         </button>
-        <template v-if="remote">
-          <button
-            class="dl-btn dl-btn--quiet"
-            @click="remoteCopyAction.run('path')"
-          >
-            <DlIcon name="copy" :size="13" />
-            {{ `复制路径` }}
+        <a-dropdown trigger="click" position="br">
+          <button class="dl-btn dl-btn--quiet">
+            {{ `更多` }}
+            <DlIcon name="chevron-down" :size="13" />
           </button>
-          <button
-            class="dl-btn dl-btn--quiet"
-            @click="remoteCopyAction.run('command')"
-          >
-            <DlIcon name="copy" :size="13" />
-            {{ `复制命令` }}
-          </button>
-        </template>
-        <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
-          <DlIcon name="folder" :size="13" />
-          {{ `打开目录` }}
-        </button>
-        <button class="dl-btn dl-btn--quiet" @click="logAction.run()">
-          <DlIcon name="log" :size="13" />
-          {{ `查看日志` }}
-        </button>
+          <template #content>
+            <template v-if="remote">
+              <a-doption @click="remoteCopyAction.run('path')">
+                <DlIcon name="copy" :size="13" />
+                {{ `复制路径` }}
+              </a-doption>
+              <a-doption @click="remoteCopyAction.run('command')">
+                <DlIcon name="copy" :size="13" />
+                {{ `复制命令` }}
+              </a-doption>
+            </template>
+            <a-doption v-else @click="dirAction.run()">
+              <DlIcon name="folder" :size="13" />
+              {{ `打开目录` }}
+            </a-doption>
+            <a-doption @click="logAction.run()">
+              <DlIcon name="log" :size="13" />
+              {{ `查看日志` }}
+            </a-doption>
+            <a-doption
+              v-if="canManagePlugins(id)"
+              @click="openPlugins(id, 'instance-detail')"
+            >
+              <DlIcon name="plugin" :size="13" />
+              {{ `管理插件` }}
+            </a-doption>
+          </template>
+        </a-dropdown>
       </div>
     </header>
 
@@ -490,49 +557,78 @@ function removeEnvRow(idx: number) {
               />
             </div>
 
-            <div v-if="hostError" class="dl-surface dl-failure">
-              <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
-              <p class="dl-failure-text">{{ hostError }}</p>
-              <p class="dl-failure-hint">
-                {{ `上面是那台机器回的话。修好之后再试一次。` }}
+            <div v-if="resourceError" class="detail-resource-error">
+              <p class="detail-resource-error-title">
+                {{ `读不到这台主机的资源` }}
               </p>
-              <div style="margin-top: 6px">
-                <button class="dl-btn" @click="retryHost">
+              <p class="detail-resource-error-text">
+                {{ `这台主机没有回应。请确认它能连接，再点「刷新」重试。` }}
+              </p>
+              <div class="detail-resource-error-actions">
+                <button class="dl-btn dl-btn--quiet" @click="retryHost">
                   {{ `刷新` }}
                 </button>
+                <details class="detail-error-details">
+                  <summary>{{ `查看错误详情` }}</summary>
+                  <p class="detail-error-raw">{{ resourceError }}</p>
+                </details>
               </div>
             </div>
 
-            <template v-else>
-              <div class="dl-row">
-                <div class="dl-row-info">
-                  <span class="dl-row-label">{{ `DSH 版本` }}</span>
-                </div>
-                <a-select v-model="versionId" style="width: 230px">
-                  <a-option
-                    v-for="v in hostVersions"
-                    :key="v.id"
-                    :value="v.id"
-                    >{{ v.version }}</a-option
-                  >
-                </a-select>
+            <div class="dl-row">
+              <div class="dl-row-info">
+                <span class="dl-row-label">{{ `DSH 版本` }}</span>
               </div>
-
-              <div class="dl-row">
-                <div class="dl-row-info">
-                  <span class="dl-row-label">{{ `DSH_HOME` }}</span>
-                </div>
-                <a-select
-                  v-model="homeId"
-                  style="width: 230px"
-                  @change="onHomePicked"
+              <a-select
+                v-model="versionId"
+                style="width: 230px"
+                :disabled="!!versionReadError"
+                :title="versionTitle"
+              >
+                <a-option v-for="v in hostVersions" :key="v.id" :value="v.id">{{
+                  v.version
+                }}</a-option>
+                <a-option
+                  v-if="
+                    versionId && !hostVersions.some((v) => v.id === versionId)
+                  "
+                  :value="versionId"
+                  :title="versionTitle"
+                  >{{ versionLabel }}</a-option
                 >
-                  <a-option v-for="h in hostHomes" :key="h.id" :value="h.id">
-                    {{ h.name }} — {{ h.path }}
-                  </a-option>
-                </a-select>
+              </a-select>
+            </div>
+
+            <div class="dl-row">
+              <div class="dl-row-info">
+                <span class="dl-row-label">{{ `DSH_HOME` }}</span>
               </div>
-            </template>
+              <a-select
+                v-model="homeId"
+                style="width: 230px"
+                :disabled="!!homeReadError"
+                :title="homeTitle"
+                @change="onHomePicked"
+              >
+                <a-option
+                  v-for="h in hostHomes"
+                  :key="h.id"
+                  :value="h.id"
+                  :label="h.name"
+                  :title="h.path"
+                >
+                  {{ h.name }} — {{ h.path }}
+                </a-option>
+                <a-option
+                  v-if="homeId && !hostHomes.some((h) => h.id === homeId)"
+                  :value="homeId"
+                  :label="homeLabel"
+                  :title="homeTitle"
+                >
+                  {{ homeRecord ? `${homeLabel} — ${homeTitle}` : homeLabel }}
+                </a-option>
+              </a-select>
+            </div>
 
             <div class="dl-row">
               <span class="dl-row-label">{{ `默认 Profile` }}</span>
@@ -540,11 +636,17 @@ function removeEnvRow(idx: number) {
                 v-model="defaultProfile"
                 style="width: 230px"
                 :placeholder="`启动时默认选择的 Profile`"
+                :disabled="!!profilesError"
                 allow-clear
               >
                 <a-option v-for="p in profiles" :key="p" :value="p">{{
                   p
                 }}</a-option>
+                <a-option
+                  v-if="defaultProfile && !profiles.includes(defaultProfile)"
+                  :value="defaultProfile"
+                  >{{ defaultProfile }}</a-option
+                >
               </a-select>
             </div>
           </div>
@@ -639,6 +741,7 @@ function removeEnvRow(idx: number) {
                 class="dl-input dl-input--mono env-key"
                 :class="{ 'dl-input--error': !!envKeyError(row) }"
                 :placeholder="`变量名`"
+                :title="row.key"
               />
               <span class="env-eq">=</span>
               <input
@@ -687,9 +790,9 @@ function removeEnvRow(idx: number) {
       <button
         class="dl-btn dl-btn--quiet"
         :disabled="!dirty || saving"
-        @click="onCancel"
+        @click="restoreChanges"
       >
-        {{ `取消` }}
+        {{ `还原修改` }}
       </button>
       <button
         class="dl-btn dl-btn--primary"
@@ -714,8 +817,8 @@ function removeEnvRow(idx: number) {
 }
 
 .detail-name {
-  font-size: var(--dl-text-xl);
-  font-weight: 650;
+  font-size: var(--dl-text-2xl);
+  font-weight: 600;
 }
 
 .detail-sub {
@@ -735,6 +838,54 @@ function removeEnvRow(idx: number) {
   white-space: nowrap;
   max-width: 220px;
   color: var(--dl-ink-4);
+}
+
+// A resource this page needs on the host could not be read. The saved values
+// stay on screen; this block states the reason once and keeps the raw reply
+// behind 查看错误详情.
+.detail-resource-error {
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--dl-line);
+}
+
+.detail-resource-error-title {
+  margin: 0;
+  font-size: var(--dl-text-md);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.detail-resource-error-text {
+  margin: 4px 0 0;
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-ink-3);
+}
+
+.detail-resource-error-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.detail-error-details {
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+
+  summary {
+    cursor: pointer;
+    color: var(--dl-ink-2);
+  }
+}
+
+.detail-error-raw {
+  margin: 6px 0 0;
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-sm);
+  line-height: 1.5;
+  color: var(--dl-danger);
+  overflow-wrap: anywhere;
 }
 
 // Left: what the instance is. Right: what is attached to it.

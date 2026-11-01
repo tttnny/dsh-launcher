@@ -221,7 +221,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
         :description="`安装一个 DSH 版本会自动创建它的第一个实例；也可以在这里为已安装的版本再建一个。`"
       >
         <button
-          class="dl-btn dl-btn--primary"
+          class="dl-btn dl-btn--primary-soft"
           @click="router.push({ name: 'library', query: { tab: 'versions' } })"
         >
           <DlIcon name="download" :size="13" />

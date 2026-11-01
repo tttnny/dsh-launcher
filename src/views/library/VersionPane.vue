@@ -4,6 +4,7 @@ import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { installKey, useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
+import { useCopy } from '@/composables/useCopy'
 import type { DshVersion, RemoteVersion, TaskInfo } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
@@ -15,6 +16,7 @@ import DlRefreshButton from '@/components/DlRefreshButton.vue'
 // visit.
 
 const store = useLauncherStore()
+const { copy } = useCopy()
 
 onMounted(() => {
   void store.refreshRemoteVersions()
@@ -41,6 +43,12 @@ const hostLabel = computed(() => {
   const host = store.currentHost
   return host?.builtin ? `本机` : (host?.display_name ?? store.currentHostId)
 })
+
+/** Keep the last two path segments visible; the full path stays in the title and on the clipboard. */
+function shortDir(dir: string): string {
+  const parts = dir.split(/[\\/]+/).filter(Boolean)
+  return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : dir
+}
 
 // Remote versions split into what can be installed and what already is.
 const installable = computed(() =>
@@ -159,10 +167,19 @@ const removeAction = useAction(
 const usedByCount = (versionId: string) =>
   store.instancesOfVersion(versionId).length
 
-// --- PATH registration ---------------------------------------------------------
+/** The delete confirmation names the machine and the instances it takes with it. */
+function removeConfirm(v: DshVersion): string {
+  const names = store.instancesOfVersion(v.id).map((i) => i.name)
+  const affected = names.length
+    ? `实例「${names.join('」「')}」会一并移除，`
+    : ''
+  return `在「${hostLabel.value}」上删除版本 ${v.version}？${affected}版本专属的 DSH_HOME「${v.dedicated_home}」也会被删除，其中包含会话历史与凭据，删除后不可恢复。`
+}
 
-/** The link is `~/.local/bin/dsh` on the machine this page is showing — 本机
- *  or a server — and the backend writes it wherever that is. */
+// --- dsh command --------------------------------------------------------------
+
+/** The dsh command is `~/.local/bin/dsh` on the machine this page is showing —
+ *  本机 or a server — and the backend writes it wherever that is. */
 const pathLinkAction = useAction(
   async (v: DshVersion) => {
     const linked = v.path_linked
@@ -175,10 +192,27 @@ const pathLinkAction = useAction(
     key: (v) => v.id,
     success: ({ linked, version }) =>
       linked
-        ? `版本 ${version} 的 dsh 登记已取消`
-        : `版本 ${version} 已登记为 dsh`,
+        ? `已取消版本 ${version} 的 dsh 命令`
+        : `已把版本 ${version} 设为 dsh 命令`,
   },
 )
+
+/** Setting another version as the dsh command says which version it replaces. */
+function onTogglePathLink(v: DshVersion) {
+  const current = store.versions.find((x) => x.path_linked && x.id !== v.id)
+  if (v.path_linked || !current) {
+    void pathLinkAction.run(v)
+    return
+  }
+  Modal.confirm({
+    title: `把 dsh 命令切换到 ${v.version}`,
+    content: `「${hostLabel.value}」上的 dsh 命令现在指向版本 ${current.version}。切换后，终端和 magpie 里的 dsh 都会改用 ${v.version}，版本 ${current.version} 不再作为命令使用。`,
+    okText: `设为 ${v.version}`,
+    cancelText: `取消`,
+    modalClass: 'dl-sheet',
+    onOk: () => pathLinkAction.run(v),
+  })
+}
 </script>
 
 <template>
@@ -225,28 +259,39 @@ const pathLinkAction = useAction(
             <span
               v-if="v.path_linked"
               class="dl-tag dl-tag--muted"
-              :title="`在版本所在主机的 ~/.local/bin 建立 dsh 命令，让 magpie、终端等按命令名查找 dsh 的程序找到这个版本。同一台机器上同一时间只能登记一个版本。`"
+              :title="`终端和 magpie 里的 dsh 命令指向这个版本。同一台机器同一时间只能有一个版本作为 dsh 命令。`"
             >
-              {{ `已在 PATH` }}
+              {{ `当前 dsh 命令` }}
             </span>
           </div>
-          <span class="ver-path dl-mono" :title="v.dir">{{ v.dir }}</span>
+          <div class="ver-path-row">
+            <span class="ver-path dl-mono" :title="v.dir">{{
+              shortDir(v.dir)
+            }}</span>
+            <button
+              class="dl-icon-btn ver-path-copy"
+              :title="`复制完整路径`"
+              @click="copy(v.dir, '已复制路径')"
+            >
+              <DlIcon name="copy" :size="12" />
+            </button>
+          </div>
         </div>
         <span class="ver-used dl-tnum">{{
           `${usedByCount(v.id)} 个实例`
         }}</span>
         <button
           class="dl-btn dl-btn--quiet"
-          :title="`在版本所在主机的 ~/.local/bin 建立 dsh 命令，让 magpie、终端等按命令名查找 dsh 的程序找到这个版本。同一台机器上同一时间只能登记一个版本。`"
+          :title="`把终端和 magpie 里的 dsh 命令指向这个版本。同一台机器同一时间只能有一个版本作为 dsh 命令。`"
           :disabled="
             (!v.path_linked && !v.bin_ready) || !!pathLinkAction.busy[v.id]
           "
-          @click="pathLinkAction.run(v)"
+          @click="onTogglePathLink(v)"
         >
-          {{ v.path_linked ? `取消登记` : `登记 dsh` }}
+          {{ v.path_linked ? `取消 dsh 命令` : `设为 dsh 命令` }}
         </button>
         <a-popconfirm
-          :content="`删除版本 ${v.version}？对应的实例会一并移除，专属 DSH_HOME「${v.dedicated_home}」也会被删除——其中包含会话历史与凭据，删除后不可恢复。`"
+          :content="removeConfirm(v)"
           :ok-text="`删除`"
           :cancel-text="`取消`"
           modal-class="dl-sheet"
@@ -470,13 +515,26 @@ const pathLinkAction = useAction(
   color: var(--dl-ink);
 }
 
+.ver-path-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .ver-path,
 .ver-sub {
+  min-width: 0;
   font-size: var(--dl-text-sm);
   color: var(--dl-ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ver-path-copy {
+  flex-shrink: 0;
+  color: var(--dl-ink-3);
 }
 
 .ver-used {

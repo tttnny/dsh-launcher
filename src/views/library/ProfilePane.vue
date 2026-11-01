@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { LOCAL_HOST_ID } from '@/api/types'
@@ -44,11 +45,19 @@ function onSelectHome(id: string) {
   })
 }
 
-/** Instances that launch with this profile by default (or last did). */
-function usersOf(profile: string): DshInstance[] {
+/** Instances whose default Profile is this one. */
+function defaultUsersOf(profile: string): DshInstance[] {
   if (!selectedHomeId.value) return []
   return instancesOfHome(selectedHomeId.value).filter(
-    (i) => (i.default_profile ?? i.last_profile) === profile,
+    (i) => i.default_profile === profile,
+  )
+}
+
+/** Instances that last launched with this Profile but default to another one. */
+function lastUsersOf(profile: string): DshInstance[] {
+  if (!selectedHomeId.value) return []
+  return instancesOfHome(selectedHomeId.value).filter(
+    (i) => i.default_profile !== profile && i.last_profile === profile,
   )
 }
 
@@ -77,12 +86,39 @@ const hostId = computed(
 )
 const versions = computed(() => store.versionsByHost[hostId.value] ?? [])
 
+/** Where the new Profile will land: the chosen version's own DSH_HOME. */
+const createTarget = computed(() => {
+  const version = versions.value.find((v) => v.id === newVersionId.value)
+  if (!version) return ''
+  const versionHost = version.host_id ?? LOCAL_HOST_ID
+  const known = (store.homesByHost[versionHost] ?? []).find(
+    (h) => h.path === version.dedicated_home,
+  )
+  return known
+    ? `${known.name}（${version.dedicated_home}）`
+    : version.dedicated_home
+})
+
 function startAdding() {
-  newVersionId.value ??= versions.value[0]?.id
   if (!versions.value.some((v) => v.id === newVersionId.value))
     newVersionId.value = versions.value[0]?.id
   adding.value = true
 }
+
+/** The version the new Profile is created from, when it belongs to the shown HOME. */
+const newVersion = computed(() =>
+  versions.value.find((v) => v.id === newVersionId.value),
+)
+
+// Opening the create row on one HOME then switching to another must not keep a
+// version from the old one: reset to the shown HOME's first version when the
+// current choice no longer exists.
+watch([selectedHomeId, versions], () => {
+  if (!adding.value) return
+  if (!versions.value.some((v) => v.id === newVersionId.value)) {
+    newVersionId.value = versions.value[0]?.id
+  }
+})
 
 /** A version's own DSH_HOME record, made on first use if this is somehow the
  *  first time the launcher hears about it. */
@@ -120,18 +156,13 @@ async function load() {
 
 watch(selectedHomeId, () => void load(), { immediate: true })
 
-const createAction = useAction(
-  async (version: DshVersion, name: string) => {
-    // The Profile is created in the version's own DSH_HOME, on the machine the
-    // version is installed on: that is the whole of 「选一个版本」.
-    const homeId = await dedicatedHomeOf(version)
-    const created = await api.createProfile(homeId, name)
-    return { name: created, homeId }
-  },
-  {
-    success: ({ name }) => `Profile「${name}」已创建`,
-  },
-)
+const createAction = useAction(async (version: DshVersion, name: string) => {
+  // The Profile is created in the version's own DSH_HOME, on the machine the
+  // version is installed on: that is the whole of 「选一个版本」.
+  const homeId = await dedicatedHomeOf(version)
+  const created = await api.createProfile(homeId, name)
+  return { name: created, homeId }
+})
 
 async function onCreate() {
   const name = newName.value.trim()
@@ -141,9 +172,16 @@ async function onCreate() {
   if (!res) return
   newName.value = ''
   adding.value = false
-  // Show the HOME that just received it, so the new row is on screen.
-  if (res.homeId !== selectedHomeId.value) onSelectHome(res.homeId)
-  else await load()
+  // The Profile lands in the version's own DSH_HOME; when that is not the one
+  // on screen, say where it went before switching the view to it.
+  if (res.homeId !== selectedHomeId.value) {
+    const targetName = store.homeById(res.homeId)?.name ?? ''
+    Message.info(`Profile「${res.name}」已创建在「${targetName}」，已切换过去`)
+    onSelectHome(res.homeId)
+  } else {
+    Message.success(`Profile「${res.name}」已创建`)
+    await load()
+  }
 }
 
 const renameAction = useAction(
@@ -223,6 +261,20 @@ async function confirmDelete(name: string) {
 
 const busy = (name: string) =>
   !!renameAction.busy[name] || !!deleteAction.busy[name]
+
+/** The delete confirmation names the instances whose default or last Profile it clears. */
+function deleteConfirm(profile: string): string {
+  const homeName = selectedHome.value?.name ?? ''
+  const defaults = defaultUsersOf(profile).map((i) => i.name)
+  const lasts = lastUsersOf(profile).map((i) => i.name)
+  const parts: string[] = []
+  if (defaults.length) parts.push(`实例「${defaults.join('」「')}」默认使用它`)
+  if (lasts.length) parts.push(`实例「${lasts.join('」「')}」上次使用它`)
+  const impact = parts.length
+    ? `删除后，${parts.join('，')}，这些实例需要重新选择 Profile。`
+    : `当前没有实例使用这个 Profile。`
+  return `从 DSH_HOME「${homeName}」删除 Profile「${profile}」？${impact}此操作不可恢复。`
+}
 </script>
 
 <template>
@@ -303,7 +355,7 @@ const busy = (name: string) =>
           />
           <button
             class="dl-btn dl-btn--primary"
-            :disabled="!newVersionId || createAction.busy['*']"
+            :disabled="!newVersion || createAction.busy['*']"
             @click="onCreate"
           >
             {{ `创建` }}
@@ -312,6 +364,9 @@ const busy = (name: string) =>
             {{ `取消` }}
           </button>
         </div>
+        <p v-if="adding && versions.length > 0" class="profile-create-target">
+          {{ `将创建在：${createTarget}` }}
+        </p>
         <p v-if="adding && versions.length === 0" class="profile-create-hint">
           {{
             `这台主机还没有安装任何 DSH 版本：先在「DSH 版本」标签页安装一个，Profile 会建在它的专属 DSH_HOME 里。`
@@ -392,16 +447,31 @@ const busy = (name: string) =>
                    instance's own default profile is an instance setting, edited
                    on the instance. Showing a select here made a profile row
                    read "web → web" and implied it did something to the profile. -->
-              <div v-if="usersOf(p).length > 0" class="profile-users">
+              <div v-if="defaultUsersOf(p).length > 0" class="profile-users">
                 <span class="profile-users-label">{{ `默认用于` }}</span>
                 <span
-                  v-for="inst in usersOf(p)"
+                  v-for="inst in defaultUsersOf(p)"
                   :key="inst.id"
                   class="profile-user"
                   >{{ inst.name }}</span
                 >
               </div>
-              <span v-else class="profile-no-user">{{ `没有被实例引用` }}</span>
+              <div v-if="lastUsersOf(p).length > 0" class="profile-users">
+                <span class="profile-users-label">{{ `上次用于` }}</span>
+                <span
+                  v-for="inst in lastUsersOf(p)"
+                  :key="inst.id"
+                  class="profile-user"
+                  >{{ inst.name }}</span
+                >
+              </div>
+              <span
+                v-if="
+                  defaultUsersOf(p).length === 0 && lastUsersOf(p).length === 0
+                "
+                class="profile-no-user"
+                >{{ `没有被实例引用` }}</span
+              >
             </div>
 
             <div class="profile-actions">
@@ -420,7 +490,7 @@ const busy = (name: string) =>
                 {{ `复制` }}
               </button>
               <a-popconfirm
-                :content="`删除 Profile「${p}」？此操作不可恢复。`"
+                :content="deleteConfirm(p)"
                 :ok-text="`删除`"
                 :cancel-text="`取消`"
                 modal-class="dl-sheet"
@@ -500,7 +570,17 @@ const busy = (name: string) =>
   margin: 0;
   padding: 0 16px 12px;
   font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
+  color: var(--dl-ink-3);
+}
+
+.profile-create-target {
+  margin: 0;
+  padding: 8px 16px 12px;
+  font-size: var(--dl-text-sm);
+  color: var(--dl-ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .profile-row {
@@ -558,12 +638,12 @@ const busy = (name: string) =>
 
 .profile-users-label {
   font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
+  color: var(--dl-ink-3);
 }
 
 .profile-no-user {
   font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
+  color: var(--dl-ink-2);
 }
 
 .profile-note {

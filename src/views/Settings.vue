@@ -97,6 +97,22 @@ const envOk = computed(
     !!envRuntime.value?.node?.installed && !!envRuntime.value?.pnpm?.installed,
 )
 
+/** The environment readout's badge: loading, unreachable and missing are
+ *  separate answers, so the red 「环境未就绪」 only appears once a host has
+ *  actually answered and a tool is missing. */
+const envState = computed(() => {
+  if (envError.value) return { label: '无法检测', tone: 'dl-tag--warn' }
+  if (!envRuntime.value) return { label: '检测中…', tone: 'dl-tag--muted' }
+  return envOk.value
+    ? { label: '环境就绪', tone: 'dl-tag--run' }
+    : { label: '环境未就绪', tone: 'dl-tag--danger' }
+})
+
+/** The environment row's error copy, shaped the same way as a host card's. */
+const envErrorText = computed(() =>
+  envError.value ? parseHostError(envError.value) : null,
+)
+
 async function loadEnv() {
   const wanted = envHostId.value
   try {
@@ -294,9 +310,52 @@ function statusLabel(status: HostStatus | null): string {
 /** Colour carries state: reachable / unreachable / not asked yet. */
 function statusTone(status: HostStatus | null): string {
   if (status?.state === 'reachable') return 'dl-tag--run'
-  if (status?.state === 'unreachable') return 'dl-tag--danger'
+  if (status?.state === 'unreachable') return 'dl-tag--warn'
   return 'dl-tag--muted'
 }
+
+/**
+ * The host row's error copy: a short reason and a next step taken from the
+ * backend's message, with the technical original kept for the detail fold.
+ */
+interface HostErrorText {
+  reason: string
+  advice: string
+  raw: string
+}
+
+function parseHostError(message: string): HostErrorText {
+  const raw = message.trim()
+  let reason = '连不上这台主机'
+  let advice = '确认这台机器开着、地址没写错，再点「重试」。'
+  if (/refused/i.test(raw)) {
+    reason = '这台主机拒绝了连接'
+  } else if (/timed out|time out|timeout/i.test(raw)) {
+    reason = '连接这台主机超时'
+    advice = '确认这台机器能连上网络，再点「重试」。'
+  } else if (/no route|unreachable|network is down/i.test(raw)) {
+    reason = '网络不通，连不到这台主机'
+    advice = '确认这台机器在网络里、地址没写错，再点「重试」。'
+  } else if (/permission denied|authentication/i.test(raw)) {
+    reason = '这台主机拒绝了登录'
+    advice = '确认登录账号和密钥可用，再点「重试」。'
+  } else if (/could not resolve|name or service not known/i.test(raw)) {
+    reason = '找不到这台主机'
+    advice = '确认地址拼写正确、网络能查到这台机器，再点「重试」。'
+  }
+  return { reason, advice, raw }
+}
+
+/** The unreachable hosts' error copy, keyed by host id. */
+const hostErrors = computed<Record<string, HostErrorText>>(() => {
+  const map: Record<string, HostErrorText> = {}
+  for (const host of hosts.value) {
+    if (host.status?.state === 'unreachable' && host.status.message?.trim()) {
+      map[host.id] = parseHostError(host.status.message)
+    }
+  }
+  return map
+})
 
 function systemLine(test: ConnectionTest): string {
   const system = test.system
@@ -527,8 +586,9 @@ function trackActiveSection() {
   const top = box.getBoundingClientRect().top
 
   // The last section can never clear the reading line: the scroller runs out of
-  // room before its heading gets there. At the bottom, the bottom section is
-  // what the reader is looking at.
+  // room before its heading gets there. When the page is truly at the bottom, the
+  // last section is what the reader is looking at, so it is selected here while
+  // the reading line keeps handling the sections in between.
   if (box.scrollTop + box.clientHeight >= box.scrollHeight - 4) {
     activeSection.value =
       sections.value[sections.value.length - 1]?.key ?? activeSection.value
@@ -586,9 +646,10 @@ onUnmounted(() => {
           <div class="dl-section-label">{{ `常规` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
-              <span class="dl-row-label">{{ `主题` }}</span>
+              <span id="set-theme" class="dl-row-label">{{ `主题` }}</span>
               <a-select
                 :model-value="store.settings.theme"
+                aria-labelledby="set-theme"
                 style="width: 190px"
                 size="small"
                 @change="
@@ -604,27 +665,36 @@ onUnmounted(() => {
               </a-select>
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{
+              <span id="set-minimize" class="dl-row-label">{{
                 `关闭主窗口时最小化到系统托盘`
               }}</span>
               <a-switch
                 :model-value="store.settings.minimize_to_tray"
+                aria-labelledby="set-minimize"
+                class="row-switch"
                 size="small"
                 @change="(v) => patchSettings({ minimize_to_tray: Boolean(v) })"
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `开机自动启动启动器` }}</span>
+              <span id="set-autostart" class="dl-row-label">{{
+                `开机自动启动启动器`
+              }}</span>
               <a-switch
                 :model-value="store.settings.autostart"
+                aria-labelledby="set-autostart"
+                class="row-switch"
                 size="small"
                 @change="(v) => patchSettings({ autostart: Boolean(v) })"
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `日志等级` }}</span>
+              <span id="set-log-level" class="dl-row-label">{{
+                `日志等级`
+              }}</span>
               <a-select
                 :model-value="store.settings.log_level"
+                aria-labelledby="set-log-level"
                 style="width: 190px"
                 size="small"
                 @change="
@@ -640,9 +710,12 @@ onUnmounted(() => {
               </a-select>
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `外部终端` }}</span>
+              <span id="set-terminal" class="dl-row-label">{{
+                `外部终端`
+              }}</span>
               <a-select
                 :model-value="store.settings.terminal"
+                aria-labelledby="set-terminal"
                 style="width: 220px"
                 size="small"
                 @change="(v) => patchSettings({ terminal: String(v) })"
@@ -680,12 +753,21 @@ onUnmounted(() => {
                 <span v-if="h.ssh_target" class="dl-row-desc dl-mono">{{
                   h.ssh_target
                 }}</span>
-                <span
-                  v-if="h.status?.state === 'unreachable' && h.status.message"
-                  class="dl-row-desc"
-                >
-                  {{ h.status.message }}
-                </span>
+                <div v-if="hostErrors[h.id]" class="host-error">
+                  <DlIcon name="alert" :size="13" class="host-error-icon" />
+                  <div class="host-error-body">
+                    <span class="host-error-reason">{{
+                      hostErrors[h.id]?.reason
+                    }}</span>
+                    <span class="host-error-advice">{{
+                      hostErrors[h.id]?.advice
+                    }}</span>
+                    <details class="host-error-detail">
+                      <summary>{{ `查看错误详情` }}</summary>
+                      <code class="dl-mono">{{ hostErrors[h.id]?.raw }}</code>
+                    </details>
+                  </div>
+                </div>
               </div>
               <div v-if="!h.builtin" class="row-actions">
                 <button
@@ -703,9 +785,10 @@ onUnmounted(() => {
                   {{ `编辑` }}
                 </button>
                 <button
-                  class="dl-btn dl-btn--ghost"
+                  class="dl-btn dl-btn--danger row-delete"
                   @click="hostPendingDelete = h"
                 >
+                  <DlIcon name="trash" :size="13" />
                   {{ `删除` }}
                 </button>
               </div>
@@ -719,9 +802,7 @@ onUnmounted(() => {
                   {{ `${hostName(testResult.hostId)} 的连接测试` }}
                   <span
                     class="dl-tag"
-                    :class="
-                      testResult.test.ok ? 'dl-tag--run' : 'dl-tag--danger'
-                    "
+                    :class="testResult.test.ok ? 'dl-tag--run' : 'dl-tag--warn'"
                   >
                     {{ testResult.test.ok ? `可达` : `不可达` }}
                   </span>
@@ -754,11 +835,8 @@ onUnmounted(() => {
           <div class="dl-section-label">
             {{ `环境` }}
             <span class="dl-section-count">
-              <span
-                class="dl-tag"
-                :class="envOk ? 'dl-tag--run' : 'dl-tag--danger'"
-              >
-                {{ envOk ? `环境就绪` : `环境未就绪` }}
+              <span class="dl-tag" :class="envState.tone">
+                {{ envState.label }}
               </span>
             </span>
           </div>
@@ -779,7 +857,27 @@ onUnmounted(() => {
             <!-- A machine that did not answer has no paths to report: the row
                  says why, instead of claiming the tools are missing. -->
             <div v-if="envError" class="dl-row">
-              <span class="dl-error-text">{{ envError }}</span>
+              <div class="dl-row-info">
+                <div class="host-error">
+                  <DlIcon name="alert" :size="13" class="host-error-icon" />
+                  <div class="host-error-body">
+                    <span class="host-error-reason">{{
+                      envErrorText?.reason
+                    }}</span>
+                    <span class="host-error-advice">{{
+                      envErrorText?.advice
+                    }}</span>
+                    <details class="host-error-detail">
+                      <summary>{{ `查看错误详情` }}</summary>
+                      <code class="dl-mono">{{ envErrorText?.raw }}</code>
+                    </details>
+                  </div>
+                </div>
+              </div>
+              <button class="dl-btn dl-btn--quiet" @click="loadEnv">
+                <DlIcon name="refresh" :size="13" />
+                {{ `重新检测` }}
+              </button>
             </div>
             <div v-if="!envError" class="dl-row">
               <span class="dl-row-label">Node.js</span>
@@ -787,10 +885,12 @@ onUnmounted(() => {
                 class="row-path dl-mono"
                 :title="envRuntime?.node?.path ?? ''"
               >
-                {{ envRuntime?.node?.path ?? `未找到` }}
+                {{
+                  envRuntime ? (envRuntime.node?.path ?? `未找到`) : `检测中…`
+                }}
               </span>
               <span class="dl-chip">{{
-                envRuntime?.node?.version ?? `未安装`
+                envRuntime ? (envRuntime.node?.version ?? `未安装`) : `检测中…`
               }}</span>
             </div>
             <div v-if="!envError" class="dl-row">
@@ -799,10 +899,12 @@ onUnmounted(() => {
                 class="row-path dl-mono"
                 :title="envRuntime?.pnpm?.path ?? ''"
               >
-                {{ envRuntime?.pnpm?.path ?? `未找到` }}
+                {{
+                  envRuntime ? (envRuntime.pnpm?.path ?? `未找到`) : `检测中…`
+                }}
               </span>
               <span class="dl-chip">{{
-                envRuntime?.pnpm?.version ?? `未安装`
+                envRuntime ? (envRuntime.pnpm?.version ?? `未安装`) : `检测中…`
               }}</span>
             </div>
             <div class="dl-row">
@@ -822,17 +924,24 @@ onUnmounted(() => {
           <div class="dl-section-label">{{ `代理` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
-              <span class="dl-row-label">{{ `启用代理` }}</span>
+              <span id="set-proxy-enabled" class="dl-row-label">{{
+                `启用代理`
+              }}</span>
               <a-switch
                 :model-value="store.settings.proxy_enabled"
+                aria-labelledby="set-proxy-enabled"
+                class="row-switch"
                 size="small"
                 @change="(v) => patchSettings({ proxy_enabled: Boolean(v) })"
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `代理地址` }}</span>
+              <span id="set-proxy-url" class="dl-row-label">{{
+                `代理地址`
+              }}</span>
               <input
                 v-model="proxyUrl"
+                aria-labelledby="set-proxy-url"
                 class="dl-input dl-input--mono"
                 :disabled="!store.settings.proxy_enabled"
                 placeholder="http://127.0.0.1"
@@ -842,9 +951,10 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `端口` }}</span>
+              <span id="set-proxy-port" class="dl-row-label">{{ `端口` }}</span>
               <input
                 v-model="proxyPort"
+                aria-labelledby="set-proxy-port"
                 type="number"
                 class="dl-input dl-input--mono"
                 :disabled="!store.settings.proxy_enabled"
@@ -857,13 +967,16 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ `绕过列表` }}</span>
+                <span id="set-no-proxy" class="dl-row-label">{{
+                  `绕过列表`
+                }}</span>
                 <span class="dl-row-desc">{{
                   `不走代理的地址，逗号分隔。`
                 }}</span>
               </div>
               <input
                 v-model="noProxy"
+                aria-labelledby="set-no-proxy"
                 class="dl-input dl-input--mono"
                 :disabled="!store.settings.proxy_enabled"
                 placeholder="127.0.0.1,localhost,::1"
@@ -873,10 +986,14 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ `在 DSH 中生效` }}</span>
+              <span id="set-proxy-apply" class="dl-row-label">{{
+                `在 DSH 中生效`
+              }}</span>
               <a-switch
                 :model-value="store.settings.proxy_apply_dsh"
+                aria-labelledby="set-proxy-apply"
                 :disabled="!store.settings.proxy_enabled"
+                class="row-switch"
                 size="small"
                 @change="(v) => patchSettings({ proxy_apply_dsh: Boolean(v) })"
               />
@@ -1195,10 +1312,95 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+// The destructive action sits apart from its everyday neighbours, and its
+// danger colour is the visible warning that it cannot be undone.
+.row-delete {
+  margin-left: 12px;
+}
+
+.host-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 4px;
+}
+
+.host-error-icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+  color: var(--dl-danger);
+}
+
+.host-error-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.host-error-reason {
+  font-size: var(--dl-text-sm);
+  line-height: 1.45;
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.host-error-advice {
+  font-size: var(--dl-text-sm);
+  line-height: 1.45;
+  color: var(--dl-ink-3);
+}
+
+.host-error-detail {
+  margin-top: 3px;
+
+  summary {
+    width: fit-content;
+    cursor: pointer;
+    font-size: var(--dl-text-xs);
+    font-weight: 600;
+    color: var(--dl-danger);
+  }
+
+  code {
+    display: block;
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: var(--dl-r-ctl);
+    background: var(--dl-danger-soft);
+    color: var(--dl-ink-2);
+    font-size: var(--dl-text-xs);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+}
+
+// Keycaps share one column: the fixed width makes a two-key combo and a single
+// key begin at the same left edge.
 .kbd-row {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 4px;
+  min-width: 72px;
+}
+
+// Enlarge the small switch's hit area; the visual size stays compact.
+.row-switch {
+  min-width: 34px !important;
+  height: 20px !important;
+
+  :deep(.arco-switch-handle) {
+    top: 3px;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+  }
+
+  &.arco-switch-checked :deep(.arco-switch-handle) {
+    left: calc(100% - 17px);
+  }
 }
 
 .dl-kbd {
