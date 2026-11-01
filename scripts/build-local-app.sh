@@ -9,7 +9,7 @@
 # 表现为系统设置里开关还开着、实际却没有权限。证书签名的 DR 只钉 bundle id 和
 # 证书，不含 cdhash，重建后逐字节不变，授权得以跨更新保留。
 #
-# 用法: ci/build-local-app.sh [--no-build]
+# 用法: scripts/build-local-app.sh [--no-build]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

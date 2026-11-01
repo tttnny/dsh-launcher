@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # 本仓库合并前质量门禁的唯一入口。
 #
-# 为什么要有这个脚本：这些检查原先散落在四处——开发文档里的几条命令、CI 两个
-# job 各自的步骤表、package.json 里一串 test:* 脚本，剩下的只活在人的记忆里。四份
-# 清单必然各自漂移，而漂移的代价是「CI 里没接上的检查，本地也没人跑」。现在清单只
-# 有这一份，CI 与每个人执行的是同一行命令。
+# 为什么要有这个脚本：这些检查原先散落在四处——开发文档里的几条命令、各处零散的
+# 步骤表、package.json 里一串 test:* 脚本，剩下的只活在人的记忆里。几份清单必然
+# 各自漂移，而漂移的代价是「没被接上的检查等于不存在」。现在清单只有这一份，每个
+# 人执行的都是同一行命令。
 #
-# `ci/*.test.mjs` 一律按通配符发现，不写死名单：一个新增的测试文件如果还得有人记得
+# `scripts/*.test.mjs` 一律按通配符发现，不写死名单：一个新增的测试文件如果还得有人记得
 # 往清单里补一行，它就已经在「被漏跑」的路上了——这正是要结束的那种漂移。
 #
-# 用法: ci/verify.sh [--quick | --source-only]
+# 用法: scripts/verify.sh [--quick | --source-only]
 #
 #   （无参数）     全部检查。合并前跑这一次。
 #   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
-#   --source-only 只跑版本同步检查与 ci/*.test.mjs。这一类只读文件、不需要
-#                 node_modules，也不需要 pnpm 与 Rust 工具链，是 Linux CI job
-#                 （它刻意不装任何依赖）能跑的那一份。
+#   --source-only 只跑版本同步检查与 scripts/*.test.mjs。这一类只读文件、不需要
+#                 node_modules，也不需要 pnpm 与 Rust 工具链，只装了 node 的机器
+#                 就能跑。
 #
 # 需要的工具：无参数要 cargo（含 rustfmt 与 clippy 组件）、node、pnpm（含 node_modules
 #             里的 prettier）；--quick 要 cargo（含 clippy）；--source-only 只要 node。
@@ -29,14 +29,14 @@ MANIFEST="src-tauri/Cargo.toml"
 
 usage() {
   cat <<'TEXT'
-用法: ci/verify.sh [--quick | --source-only]
+用法: scripts/verify.sh [--quick | --source-only]
 
   （无参数）     全部检查：cargo fmt --check、clippy、Rust 测试、版本同步、
-                 ci/*.test.mjs（通配符发现）、prettier --check、pnpm build。
+                 scripts/*.test.mjs（通配符发现）、prettier --check、pnpm build。
                  合并前跑这一次。
   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
-  --source-only 只跑版本同步检查与 ci/*.test.mjs，不需要 node_modules、
-                 pnpm 与 Rust 工具链（Linux CI job 跑的就是这一份）。
+  --source-only 只跑版本同步检查与 scripts/*.test.mjs，不需要 node_modules、
+                 pnpm 与 Rust 工具链（只需要 node）。
 TEXT
 }
 
@@ -80,9 +80,9 @@ case "$MODE" in
     ;;
 esac
 
-# 测试文件由通配符发现。仓库已移除 ci/*.test.mjs，一个都匹配不上时按「无源码级测试」
+# 测试文件由通配符发现。仓库已移除 scripts/*.test.mjs，一个都匹配不上时按「无源码级测试」
 # 处理，让 verify 仍能跑完其余检查，而不是因为目录里没有测试就直接失败。
-SUITES=(ci/*.test.mjs)
+SUITES=(scripts/*.test.mjs)
 if [ ! -e "${SUITES[0]}" ]; then
   SUITES=()
 fi
@@ -121,7 +121,7 @@ case "$MODE" in
     echo "verify: 模式 ${MODE}，共 ${TOTAL} 步"
     ;;
   *)
-    echo "verify: 模式 ${MODE}，共 ${TOTAL} 步（${#SUITES[@]} 个 ci/*.test.mjs 由通配符发现）"
+    echo "verify: 模式 ${MODE}，共 ${TOTAL} 步（${#SUITES[@]} 个 scripts/*.test.mjs 由通配符发现）"
     ;;
 esac
 
@@ -134,7 +134,7 @@ case "$MODE" in
     ;;
   source_only)
     step "版本同步（package.json / Cargo.toml / tauri.conf.json）" \
-      node ci/check-versions.mjs
+      node scripts/check-versions.mjs
     run_suites
     ;;
   full)
@@ -145,7 +145,7 @@ case "$MODE" in
     step "Rust 测试" \
       cargo test --manifest-path "$MANIFEST" --workspace --locked
     step "版本同步（package.json / Cargo.toml / tauri.conf.json）" \
-      node ci/check-versions.mjs
+      node scripts/check-versions.mjs
     run_suites
     step "前端格式检查（prettier --check）" \
       pnpm exec prettier --check .

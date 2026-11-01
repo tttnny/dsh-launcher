@@ -10,10 +10,10 @@
     "build": "vue-tsc --noEmit && vite build",
     "tauri": "tauri",
     "tauri-dev": "tauri dev",
-    "app:local": "bash ci/build-local-app.sh",
+    "app:local": "bash scripts/build-local-app.sh",
     "format": "prettier --write .",
-    "verify": "bash ci/verify.sh",
-    "verify:quick": "bash ci/verify.sh --quick"
+    "verify": "bash scripts/verify.sh",
+    "verify:quick": "bash scripts/verify.sh --quick"
   },
   "dependencies": {
     "@arco-design/web-vue": "^2.57.0",

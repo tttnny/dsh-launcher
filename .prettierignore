@@ -13,8 +13,7 @@ src-tauri/
 # ADRs and AGENTS.md wrap where the sentence breaks, not at a column.
 *.md
 
-# YAML is CI and package-manager plumbing: the workflows, the pnpm workspace
-# and the lockfile. pnpm writes pnpm-lock.yaml, and the workflows are read by
-# GitHub — reformatting either is a diff nobody asked for.
+# YAML is package-manager plumbing: the pnpm workspace and the lockfile. pnpm
+# writes pnpm-lock.yaml — reformatting it is a diff nobody asked for.
 *.yml
 *.yaml
