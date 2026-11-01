@@ -1,6 +1,6 @@
 // Prettier's own defaults, plus the two the tree already forced.
 //
-// semi: false — src/ and ci/ are written without semicolons (5 lines in the
+// semi: false — src/ and scripts/ are written without semicolons (5 lines in the
 //   whole frontend end in one). `semi: true`, the default, would rewrite every
 //   line of every file.
 // singleQuote: true — the tree quotes with '...' throughout. The default,

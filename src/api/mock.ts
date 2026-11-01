@@ -1,7 +1,7 @@
 // Mock adapter (browser preview): a localStorage-backed reference
 // implementation of the backend command contract. Every command the public
-// api object can invoke MUST have a case in mockCall — ci/api-contract.test.mjs
-// enforces it so the two adapters cannot drift silently.
+// api object can invoke MUST have a case in mockCall, so the two adapters
+// cannot drift silently.
 
 import type {
   BundleItem,
@@ -637,9 +637,8 @@ function mockNewId(prefix: string): string {
  * The commands whose Rust signature declares `rename_all = "snake_case"`: they
  * read their arguments under the underscore spelling, every other command under
  * the camelCase one. The backend decides this, so this list is the mock's copy
- * of a rule it cannot see — `ci/api-contract.test.mjs` checks the copy against
- * the Rust sources, and every argument the mock reads against the keys its
- * command really takes, so neither can drift silently.
+ * of a rule it cannot see: every argument the mock reads must use the spelling
+ * its command really declares, or the preview drifts silently.
  */
 const SNAKE_CASE_COMMANDS = new Set([
   'start_install_version_task',
