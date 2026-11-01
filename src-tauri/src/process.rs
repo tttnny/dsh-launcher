@@ -1195,8 +1195,11 @@ pub(crate) async fn spawn_remote_instance(
 
     // The interpreter is that machine's resolved binding (ADR-0005 追加), and
     // the flags are the launcher's policy — `--host` deliberately never among
-    // them, `--no-open` only when that machine's bundle understands it.
-    let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
+    // them, `--no-open` only when that machine's bundle understands it. The same
+    // resolution names the directories to put on the child's `PATH`: the DSH it
+    // starts looks `pnpm` up by name for plugin management, and the ssh
+    // session's own `PATH` does not reach a version-manager install.
+    let (node, path_dirs) = crate::runtime::remote_spawn_tools(state, host, &run_host).await?;
     let no_open = web_port.is_some()
         && startup_doc
             .as_deref()
@@ -1225,7 +1228,7 @@ pub(crate) async fn spawn_remote_instance(
 
     let pid = state
         .host_transport
-        .spawn_detached(&run_host, &argv, &log_path)
+        .spawn_detached(&run_host, &argv, &log_path, &path_dirs)
         .await
         .map_err(|e| format!("在「{}」上启动失败：{e}", host.display_name))?;
     let started_at = crate::remote::process_start_time(&*state.host_transport, &run_host, pid)
@@ -1354,7 +1357,7 @@ pub(crate) async fn ensure_remote_web_profile_template(
         .map_err(|e| format!("无法读取那台机器上的日志（{log_path}）：{e}"))?;
     let pid = state
         .host_transport
-        .spawn_detached(&run_host, &argv, &log_path)
+        .spawn_detached(&run_host, &argv, &log_path, &[])
         .await
         .map_err(|e| format!("在「{}」上启动失败：{e}", host.display_name))?;
     let started_at = crate::remote::process_start_time(transport, &run_host, pid)
@@ -3672,8 +3675,13 @@ mod tests {
     /// pid's start time, and the empty running record it completes.
     ///
     /// `profile_doc` is the profile's `package.json` on that machine; `None` is a
-    /// profile this start materializes.
-    fn remote_start_answers(node: &str, profile_doc: Option<&[u8]>) -> Vec<FakeAnswer> {
+    /// profile this start materializes. `pnpm` is where that machine keeps the
+    /// package manager, when the probe found one.
+    fn remote_start_answers(
+        node: &str,
+        pnpm: Option<&str>,
+        profile_doc: Option<&[u8]>,
+    ) -> Vec<FakeAnswer> {
         const BIN: &[u8] = b"#!/usr/bin/env node\n";
         const STARTUP: &[u8] = b"const p = new Command().option('--no-open', 'x')";
         vec![
@@ -3691,10 +3699,13 @@ mod tests {
             // 2.-3. profile 自己那份 pnpm store 与 peer 策略：各写一次。
             FakeAnswer::Done,
             FakeAnswer::Done,
-            // 4. 那台机器自己的绝对 Node。
+            // 4. 那台机器自己的绝对 Node（和 pnpm，如果那台机器有）。
             FakeAnswer::stdout(crate::remote::testing::environment_stdout(
                 crate::remote::testing::remote_tool(node, "v26.0.0", "system"),
-                crate::remote::testing::remote_tool_missing(vec![]),
+                match pnpm {
+                    Some(path) => crate::remote::testing::remote_tool(path, "10.0.0", "system"),
+                    None => crate::remote::testing::remote_tool_missing(vec![]),
+                },
                 &[],
             )),
             // 5. 日志现在有多少字节（起进程之前问的）。
@@ -3863,7 +3874,7 @@ mod tests {
         let node = "/usr/bin/node";
         let fake = FakeTransport::new();
         // 那个 profile 在那台机器上还没有自己的 package.json。
-        let answers = remote_start_answers(node, None);
+        let answers = remote_start_answers(node, None, None);
         for answer in answers {
             fake.answering(answer);
         }
@@ -3906,7 +3917,11 @@ mod tests {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let node = "/home/linuxbrew/.linuxbrew/bin/node";
         let fake = FakeTransport::new();
-        for answer in remote_start_answers(node, Some(&web_profile_document_fixture())) {
+        for answer in remote_start_answers(
+            node,
+            Some("/home/demo/.local/share/pnpm/pnpm"),
+            Some(&web_profile_document_fixture()),
+        ) {
             fake.answering(answer);
         }
         let state = remote_app_state(
@@ -3958,6 +3973,16 @@ mod tests {
             !script.contains("--host"),
             "绑定地址归 profile 层：{script}"
         );
+        // The DSH this starts invokes `pnpm` by name for plugin management, and
+        // an ssh session's PATH does not reach a version-manager install — so the
+        // directories the probe resolved there go in front of it, node's first so
+        // a pnpm that is a Node script finds its interpreter.
+        assert!(
+            script.contains(
+                "export PATH='/home/linuxbrew/.linuxbrew/bin':'/home/demo/.local/share/pnpm':\"$PATH\""
+            ),
+            "让那台机器上起的 DSH 能找到 pnpm：{script}"
+        );
         // The environment: DSH_HOME, the instance's name, its own variables, and
         // the host record's variables.
         assert!(
@@ -3994,7 +4019,9 @@ mod tests {
     async fn the_remote_run_record_names_the_pid_its_start_time_and_the_profile() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let fake = FakeTransport::new();
-        for answer in remote_start_answers("/usr/bin/node", Some(&web_profile_document_fixture())) {
+        for answer in
+            remote_start_answers("/usr/bin/node", None, Some(&web_profile_document_fixture()))
+        {
             fake.answering(answer);
         }
         let state = remote_app_state(

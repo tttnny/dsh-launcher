@@ -885,6 +885,43 @@ pub(crate) async fn node_for_spawn_checked_for(
     }
 }
 
+/// The interpreter and the `PATH` directories one **remote** DSH spawn needs.
+///
+/// The interpreter is resolved exactly as [`node_for_spawn_checked_for`] resolves
+/// it. The directories are the ones a DSH started there cannot do without: a DSH
+/// run by the launcher is handed an absolute `node`, but its own plugin manager
+/// invokes `pnpm` **by name**, and an ssh session's minimal `PATH` does not
+/// reach a version-manager or standalone install. Naming `node`'s directory too
+/// keeps a `pnpm` that is a Node script able to find its interpreter.
+///
+/// Both come from the one probe the spawn already needs, so the paths are the
+/// ones the environment page reports.
+pub(crate) async fn remote_spawn_tools(
+    state: &AppState,
+    host: &crate::config::Host,
+    target: &crate::ssh::RemoteHost,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let env = remote_probe(state, host, target, false).await?;
+    let binding = binding_of_remote(&env);
+    let Some(node) = binding.node.as_ref().map(|bound| bound.path.clone()) else {
+        return Err(node_missing_error());
+    };
+
+    let mut dirs: Vec<String> = Vec::new();
+    for tool in [Some(&node), binding.pnpm.as_ref().map(|bound| &bound.path)]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(dir) = tool.parent() {
+            let text = dir.to_string_lossy().to_string();
+            if !text.is_empty() && !dirs.contains(&text) {
+                dirs.push(text);
+            }
+        }
+    }
+    Ok((node, dirs))
+}
+
 /// The status the setup page renders for one host — 本机 when the caller names
 /// none, which is what every caller written before hosts existed meant.
 ///

@@ -1745,7 +1745,7 @@ async fn spawn_remote_run(
 ) -> Result<RemoteRun, crate::ssh::HostError> {
     let pid = state
         .host_transport
-        .spawn_detached(target, argv, log_path)
+        .spawn_detached(target, argv, log_path, &[])
         .await?;
     Ok(RemoteRun {
         host: target.clone(),

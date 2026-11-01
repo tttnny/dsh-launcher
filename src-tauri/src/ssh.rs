@@ -300,13 +300,15 @@ pub trait HostTransport: Send + Sync {
 
     /// Starts one session-detached process (ADR-0007: it must outlive the ssh
     /// session) and returns its pid. `argv` is the command line as the launcher
-    /// would run it locally; the detached-start script is [`crate::remote`]'s,
-    /// never the caller's.
+    /// would run it locally; `path_dirs` are put in front of the process's
+    /// `PATH` (see [`crate::remote::spawn_script`]); the detached-start script
+    /// is [`crate::remote`]'s, never the caller's.
     fn spawn_detached<'a>(
         &'a self,
         host: &'a RemoteHost,
         argv: &'a [String],
         log_path: &'a str,
+        path_dirs: &'a [String],
     ) -> HostFuture<'a, Result<i32, HostError>>;
 
     /// Sends SIGTERM to one pid on that host.
@@ -492,9 +494,10 @@ impl HostTransport for SshTransport {
         host: &'a RemoteHost,
         argv: &'a [String],
         log_path: &'a str,
+        path_dirs: &'a [String],
     ) -> HostFuture<'a, Result<i32, HostError>> {
         Box::pin(async move {
-            let call = RemoteCall::new(crate::remote::spawn_script(argv, log_path));
+            let call = RemoteCall::new(crate::remote::spawn_script(argv, log_path, path_dirs));
             let out = self.script(host, call).await?;
             crate::remote::decode_pid(&out)
         })

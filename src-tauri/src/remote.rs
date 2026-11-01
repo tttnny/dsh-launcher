@@ -2483,12 +2483,20 @@ printf '<<<DSH-JSON>>>{"exists":%s}<<<DSH-END>>>' "$dsh_has"
 /// (`setsid`), stdin from `/dev/null`, output appended to the remote log file,
 /// and the pid printed for the remote running record.
 ///
+/// `%%PATH_PREPEND%%` puts the caller's tool directories in front of the session's
+/// own `PATH` (empty when there are none). A remote DSH is handed an absolute
+/// `node`, but it invokes `pnpm` by name for plugin management, and an ssh
+/// session's minimal `PATH` does not reach a version-manager install — so the
+/// directories the launcher resolved there go in front, and `"$PATH"` keeps
+/// whatever the session already had.
+///
 /// The pid is `$!` as the shell saw it. Our sessions have no job control (bash
 /// says so on stderr), so the background child is not a process-group leader and
 /// `setsid` does not need to fork — `$!` is the process itself.
 const SPAWN: &str = r#"set -u
 dsh_log=%%LOG%%
 mkdir -p "$(dirname "$dsh_log")" || exit 2
+%%PATH_PREPEND%%
 nohup setsid %%ARGV%% >> "$dsh_log" 2>&1 < /dev/null &
 printf '<<<DSH-JSON>>>{"pid":%s}<<<DSH-END>>>' "$!"
 "#;
@@ -2612,16 +2620,39 @@ pub fn mint_script(url: &str) -> String {
 
 /// The script for one detached process: `argv` is the command line (already the
 /// argv the launcher would run locally, never a shell string), `log_path` the
-/// remote file its output is appended to.
-pub fn spawn_script(argv: &[String], log_path: &str) -> String {
+/// remote file its output is appended to, and `path_dirs` the directories to put
+/// at the front of that process's `PATH`.
+///
+/// A remote DSH is started with an absolute `node`, but it looks `pnpm` up by
+/// name when the plugin manager installs or inspects a plugin — and an ssh
+/// session's `PATH` does not include a version-manager or standalone install.
+/// The caller passes the directories the launcher resolved on that machine, so
+/// the child `pnpm` resolves there without depending on the session's shell.
+pub fn spawn_script(argv: &[String], log_path: &str, path_dirs: &[String]) -> String {
     let command = argv
         .iter()
         .map(|word| quote(word))
         .collect::<Vec<_>>()
         .join(" ");
+    let path_prepend = if path_dirs.is_empty() {
+        String::new()
+    } else {
+        let joined = path_dirs
+            .iter()
+            .map(|dir| quote(dir))
+            .collect::<Vec<_>>()
+            .join(":");
+        // `"$PATH"` is expanded by the remote shell, so the session's own `PATH`
+        // survives behind ours instead of being replaced.
+        format!("export PATH={joined}:\"$PATH\"")
+    };
     fill(
         SPAWN,
-        &[("%%LOG%%", quote(log_path)), ("%%ARGV%%", command)],
+        &[
+            ("%%LOG%%", quote(log_path)),
+            ("%%ARGV%%", command),
+            ("%%PATH_PREPEND%%", path_prepend),
+        ],
     )
 }
 
@@ -3308,8 +3339,9 @@ pub(crate) mod testing {
             _host: &'a RemoteHost,
             argv: &'a [String],
             log_path: &'a str,
+            path_dirs: &'a [String],
         ) -> HostFuture<'a, Result<i32, HostError>> {
-            let script = spawn_script(argv, log_path);
+            let script = spawn_script(argv, log_path, path_dirs);
             Box::pin(async move {
                 self.calls.lock().unwrap().push(FakeCall::Spawn(script));
                 match self.answer()? {
@@ -4264,6 +4296,7 @@ mod tests {
                 &host,
                 &["/usr/bin/node".to_string(), "/opt/dsh/bin.js".to_string()],
                 "/home/demo/.local/share/dsh-launcher/logs/i-1.log",
+                &[],
             ))
             .unwrap(),
             4242
@@ -4291,6 +4324,29 @@ mod tests {
         assert_eq!(
             calls[4],
             FakeCall::WriteFile("/home/demo/.dsh/icons/i-1.png".into(), vec![1, 2, 3])
+        );
+    }
+
+    /// A detached spawn's `PATH` prefix is built from the caller's directories:
+    /// quoted like every other word, `"$PATH"` left for the remote shell to
+    /// expand, and nothing emitted when the caller names none.
+    #[test]
+    fn a_detached_spawn_prepends_the_given_directories_to_path() {
+        let argv = vec!["/usr/bin/node".to_string()];
+        let plain = spawn_script(&argv, "/tmp/log", &[]);
+        assert!(!plain.contains("export PATH="), "{plain}");
+
+        let with = spawn_script(
+            &argv,
+            "/tmp/log",
+            &[
+                "/home/demo/.local/share/pnpm".to_string(),
+                "/opt/node/bin".to_string(),
+            ],
+        );
+        assert!(
+            with.contains("export PATH='/home/demo/.local/share/pnpm':'/opt/node/bin':\"$PATH\""),
+            "{with}"
         );
     }
 
