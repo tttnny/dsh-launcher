@@ -16,9 +16,6 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 | `docs/agents/rules/hosts.md` | 本机以外的机器：传输层、隧道、远端起停、环境检测 |
 | `docs/agents/rules/dev.md` | 门禁、测试、排版、真机验证、自测 App、打包 |
 
-读的时候手边放上 `GLOSSARY.md`（词义按它，不要另造说法）与 `docs/adr/`（每条契约的
-完整推理）。真机验证与无窗口 harness 见 `docs/testing-on-a-real-host.md`。
-
 ## 日常开发
 
 - 提交前跑 `pnpm verify`；想快过一遍用 `pnpm verify:quick`；想单独跑一个门禁用对应的
