@@ -10,7 +10,7 @@
 // `docs/adr/` 里有同号的文件；每一个 `docs/...` 路径都在盘上；每一个 `ci/...` 路径
 // 也在盘上（它点名的都是门禁与脚本——搬家了、改名了，照它做的人会照着一条不存在的
 // 命令做下去）；它点名的每一个 `pnpm <脚本>` 都是 package.json 的 scripts 里的一个。
-// `docs/agents/rules/` 下的每一份都进这份名单，所以新拆一份出来也自动被查。
+// `docs/rules/` 下的每一份都进这份名单，所以新拆一份出来也自动被查。
 //
 // 两种提法都按它们自己的意思读：
 //
@@ -43,13 +43,13 @@ function read(rel) {
   return readFileSync(new URL(rel, root), 'utf8')
 }
 
-/** `docs/agents/rules/` 里的每一份规则文档，按名字排序。 */
+/** `docs/rules/` 里的每一份规则文档，按名字排序。 */
 function ruleDocs() {
   try {
-    return readdirSync(new URL('docs/agents/rules', root))
+    return readdirSync(new URL('docs/rules', root))
       .filter((name) => name.endsWith('.md'))
       .sort()
-      .map((name) => `docs/agents/rules/${name}`)
+      .map((name) => `docs/rules/${name}`)
   } catch {
     return []
   }

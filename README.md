@@ -52,7 +52,7 @@ pnpm dev          # 仅浏览器预览：localStorage mock，无 Rust 后端
 
 - `AGENTS.md`：开发命令速查与规则文档索引
 - `GLOSSARY.md`：术语表
-- `docs/agents/rules/`：按主题拆分的规则
+- `docs/rules/`：按主题拆分的规则
 - `docs/adr/`：每条设计约定的完整推理
 
 ## License

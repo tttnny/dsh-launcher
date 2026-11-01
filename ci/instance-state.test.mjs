@@ -1,6 +1,6 @@
 // 一个实例状态活在三个地方（契约里的「四处」第四处是 store，见文件末尾）。
 //
-// 实例状态那几处的契约写在 `docs/agents/rules/instances.md`：往 `InstanceState`
+// 实例状态那几处的契约写在 `docs/rules/instances.md`：往 `InstanceState`
 // 加一个值，要四处一起改——`src/api/types.ts` 的联合、两边 locale 的
 // `home.status.*`、`src/styles/index.scss` 里 `.dl-status` 的 `is-*` 变体、以及
 // `src/stores/launcher.ts` 的 `statusOf`。

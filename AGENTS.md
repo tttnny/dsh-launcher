@@ -4,17 +4,17 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 每个实例有独立的 `DSH_HOME`、Profile 和环境变量。运行数据在
 `~/Library/Application Support/in.dsh-plug.dsh-launcher`（布局见 README「运行数据」）。
 
-**规则在 `docs/agents/rules/` 里，按主题分成五份**。凡是要改动一个行为、改一条数据
+**规则在 `docs/rules/` 里，按主题分成五份**。凡是要改动一个行为、改一条数据
 的归属、加一个命令或一个状态值，先读相关的那一份：里面写的是只看代码学不到的东西
 ——约定、取舍的理由、踩过的坑，以及各处不可回退的契约。代码自己说得清的事那里不写。
 
 | 文档 | 管什么 |
 | --- | --- |
-| `docs/agents/rules/instances.md` | 实例这条记录是什么、进程状态怎么变、实例行怎么排 |
-| `docs/agents/rules/versions-and-homes.md` | 版本、DSH_HOME、Profile、插件，归谁、在哪儿装与删 |
-| `docs/agents/rules/frontend.md` | 四个页面的导航与跳转、状态怎么显示、样式写在哪里 |
-| `docs/agents/rules/hosts.md` | 本机以外的机器：传输层、隧道、远端起停、环境检测 |
-| `docs/agents/rules/dev.md` | 门禁、测试、排版、真机验证、自测 App、打包 |
+| `docs/rules/instances.md` | 实例这条记录是什么、进程状态怎么变、实例行怎么排 |
+| `docs/rules/versions-and-homes.md` | 版本、DSH_HOME、Profile、插件，归谁、在哪儿装与删 |
+| `docs/rules/frontend.md` | 四个页面的导航与跳转、状态怎么显示、样式写在哪里 |
+| `docs/rules/hosts.md` | 本机以外的机器：传输层、隧道、远端起停、环境检测 |
+| `docs/rules/dev.md` | 门禁、测试、排版、真机验证、自测 App、打包 |
 
 ## 日常开发
 
@@ -23,7 +23,7 @@ Tauri 2 + Vue 3 的 macOS Apple Silicon 桌面启动器：管理多版本 DSH �
 - 手工点击验证走 `pnpm tauri dev`（真桌面 + Rust 后端）；`pnpm dev` 只有浏览器
   localStorage mock，测不到真实行为；装到 `/Applications` 的本机副本用 `pnpm app:local`。
 - 新增 Tauri 命令要同时改三处，参数拼写两处必须一致。
-- 其余门禁、测试写法、排版、打包与自测 App 的细节全在 `docs/agents/rules/dev.md`。
+- 其余门禁、测试写法、排版、打包与自测 App 的细节全在 `docs/rules/dev.md`。
 
 ## Agent skills
 
