@@ -35,12 +35,19 @@
   --dl-signal-line: rgba(0, 122, 255, 0.32);
 
   // --- State (system colours) ----------------------------------------------
-  --dl-run: #248a3d;
+  --dl-run: #1f7d38;
   --dl-run-soft: rgba(52, 199, 89, 0.15);
   --dl-warn: #b25000;
   --dl-warn-soft: rgba(255, 149, 0, 0.15);
   --dl-danger: #d70015;
   --dl-danger-soft: rgba(255, 59, 48, 0.12);
+  // A running channel carries a barely-there green wash; the colour is a
+  // readout of state, never decoration.
+  --dl-live-wash: rgba(52, 199, 89, 0.06);
+  // The one solid green fill (打开) is deeper than the text green so white
+  // label text clears 4.5:1 on it in both appearances.
+  --dl-live-btn-bg: #1f7d38;
+  --dl-live-btn-ink: #ffffff;
 
   // --- Type -----------------------------------------------------------------
   // UI keeps the macOS system stack; machine identifiers (versions, ports,
@@ -65,10 +72,10 @@
   --dl-r-card: 12px;
   --dl-r-panel: 14px;
 
-  --dl-sidebar: 220px;
+  --dl-sidebar: 224px;
   --dl-sidebar-collapsed: 64px;
-  --dl-header: 52px;
-  --dl-content: 1040px;
+  --dl-header: 48px;
+  --dl-content: 1240px;
 
   // --- Motion ---------------------------------------------------------------
   --dl-ease: cubic-bezier(0.32, 0.72, 0, 1);
@@ -126,6 +133,8 @@ body[arco-theme='dark'] {
   --dl-warn-soft: rgba(255, 159, 10, 0.2);
   --dl-danger: #ff453a;
   --dl-danger-soft: rgba(255, 69, 58, 0.2);
+  --dl-live-wash: rgba(48, 209, 88, 0.09);
+  --dl-live-btn-bg: #1a7f37;
 
   --dl-lift-1:
     0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5);

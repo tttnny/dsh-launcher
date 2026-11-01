@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
-import type { DshInstance, ThemeMode } from '@/api/types'
+import { LOCAL_HOST_ID, type DshInstance, type ThemeMode } from '@/api/types'
 import { api } from '@/api'
 import {
   MENU_NAVIGATE_EVENTS,
@@ -323,6 +323,66 @@ const envOk = computed(
   () => !!store.runtime?.node?.installed && !!store.runtime?.pnpm?.installed,
 )
 
+// --- Host rail ----------------------------------------------------------------
+//
+// 主机 is the axis the whole launcher is filed under: every instance, version,
+// DSH_HOME and Profile belongs to exactly one machine. Keeping it in the
+// persistent rail — instead of re-inventing it as a filter on each page — is
+// what makes 「我现在在看哪台机器」 one answer everywhere.
+
+const hostsNav = computed(() =>
+  store.hosts.map((h) => {
+    const st = h.status?.state
+    const tone = h.builtin
+      ? 'local'
+      : st === 'reachable'
+        ? 'ok'
+        : st === 'connecting'
+          ? 'busy'
+          : st === 'unreachable'
+            ? 'warn'
+            : 'idle'
+    return {
+      id: h.id,
+      name: h.display_name,
+      count: store.instancesOfHost(h.id).length,
+      tone,
+      title: h.ssh_target || '本机',
+    }
+  }),
+)
+
+function pickAllHosts() {
+  store.setAllHosts(true)
+}
+
+function pickHost(id: string) {
+  store.setAllHosts(false)
+  void store.selectHost(id)
+}
+
+/**
+ * 「全部主机」 is a fleet view: it only means anything where the board can show
+ * more than one machine at once. On a page about one machine's resources
+ * (Library, Settings) or about one instance (which lives on one machine) the
+ * rail highlights that machine instead, so the rail and the page never
+ * disagree about which machine is current.
+ */
+const onFleetView = computed(() => route.name === 'instances')
+const hostAllActive = computed(() => onFleetView.value && store.allHosts)
+/** The machine the current page is really about. */
+const activeHostId = computed(() => {
+  if (route.name === 'instance-detail') {
+    const id = route.params.id
+    const inst = typeof id === 'string' ? store.instanceById(id) : undefined
+    return inst?.host_id ?? LOCAL_HOST_ID
+  }
+  return store.currentHostId
+})
+function hostRowActive(id: string) {
+  return !hostAllActive.value && activeHostId.value === id
+}
+
 // --- Header -------------------------------------------------------------------
 
 const showBack = computed(
@@ -438,6 +498,31 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           <span v-if="!siderCollapsed" class="dl-nav-label">{{ `设置` }}</span>
         </button>
       </nav>
+
+      <div class="dl-hosts">
+        <div v-if="!siderCollapsed" class="dl-rail-label">{{ '主机' }}</div>
+        <button
+          class="dl-host-row"
+          :class="{ 'is-active': hostAllActive }"
+          @click="pickAllHosts"
+        >
+          <span class="dl-host-dot is-all" />
+          <span class="dl-host-name">{{ '全部主机' }}</span>
+          <span class="dl-host-count">{{ store.instances.length }}</span>
+        </button>
+        <button
+          v-for="h in hostsNav"
+          :key="h.id"
+          class="dl-host-row"
+          :class="{ 'is-active': hostRowActive(h.id) }"
+          :title="h.title"
+          @click="pickHost(h.id)"
+        >
+          <span class="dl-host-dot" :class="'is-' + h.tone" />
+          <span class="dl-host-name">{{ h.name }}</span>
+          <span class="dl-host-count">{{ h.count }}</span>
+        </button>
+      </div>
 
       <div class="dl-sidebar-foot">
         <button
@@ -595,6 +680,123 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+// --- Host rail ---------------------------------------------------------------
+
+.dl-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-height: 0;
+  padding: 0 10px;
+  overflow-y: auto;
+}
+
+.dl-rail-label {
+  margin: 14px 0 3px;
+  padding-left: 9px;
+  font-size: var(--dl-text-xs);
+  font-weight: 600;
+  color: var(--dl-ink-3);
+}
+
+.dl-host-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dl-ink-2);
+  font-family: inherit;
+  font-size: var(--dl-text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
+
+  &:hover:not(.is-active) {
+    background: var(--dl-nav-hover);
+    color: var(--dl-ink);
+  }
+
+  &.is-active {
+    background: var(--dl-nav-active);
+    color: var(--dl-ink);
+    font-weight: 600;
+  }
+}
+
+// The dot is the whole state readout for a machine: steady, one colour, no
+// pulse. 本机 has no dial to make, so it reads as reachable by definition.
+.dl-host-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--dl-ink-4);
+
+  &.is-local,
+  &.is-ok {
+    background: var(--dl-run);
+  }
+
+  &.is-warn {
+    background: var(--dl-warn);
+  }
+
+  &.is-busy {
+    background: var(--dl-signal);
+  }
+
+  &.is-all {
+    background: var(--dl-ink-3);
+  }
+}
+
+.dl-host-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dl-host-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dl-surface-3);
+  color: var(--dl-ink-3);
+  font-size: var(--dl-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+// Collapsed, the rail keeps the hosts as a column of state dots — the machine
+// dimension never disappears, it just goes quiet.
+.dl-sidebar.is-collapsed {
+  .dl-hosts {
+    padding: 0 12px;
+  }
+
+  .dl-host-row {
+    justify-content: center;
+    height: 26px;
+    padding: 0;
+  }
+
+  .dl-host-name,
+  .dl-host-count {
+    display: none;
+  }
 }
 
 .dl-sidebar-foot {

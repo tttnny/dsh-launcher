@@ -71,7 +71,7 @@ body {
 .dl-page {
   max-width: var(--dl-content);
   margin: 0 auto;
-  padding: 30px 34px 64px;
+  padding: 26px 36px 56px;
 }
 
 // Page head: the title alone carries the top of the page. No rule beneath it —
@@ -81,7 +81,7 @@ body {
   align-items: flex-end;
   justify-content: space-between;
   gap: 20px;
-  margin-bottom: 26px;
+  margin-bottom: 22px;
 
   .dl-head-text {
     min-width: 0;
@@ -272,8 +272,8 @@ body {
 // The live action: opening a running instance is the happy path, so it is the
 // only control that carries the run colour.
 .dl-btn--live {
-  background: var(--dl-run);
-  color: #fff;
+  background: var(--dl-live-btn-bg);
+  color: var(--dl-live-btn-ink);
 
   &:hover:not(:disabled) {
     filter: brightness(1.06);

@@ -6,6 +6,7 @@ import { useProfiles } from '@/composables/useProfiles'
 import { api } from '@/api'
 import { bulkScope } from '@/instancesBulk'
 import { useAction } from '@/composables/useAction'
+import type { DshInstance } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
 import InstanceRow from '@/components/InstanceRow.vue'
@@ -16,9 +17,6 @@ const router = useRouter()
 const route = useRoute()
 const store = useLauncherStore()
 const { selectionByInstance, ensureSelection, profilesError } = useProfiles()
-
-/** The 全部 option of the host filter: a view, not a host. */
-const HOST_ALL = 'all'
 
 const query = ref('')
 /**
@@ -57,23 +55,6 @@ function duplicateInstance(id: string) {
   newDialogVisible.value = true
 }
 
-/**
- * The host filter: 「全部」 or one machine, and picking a machine sets the one
- * 当前主机 the Library also reads — two places each keeping their own idea of
- * "which machine am I looking at" is what ADR-0006 §3 forbids.
- */
-const hostFilter = computed({
-  get: () => (store.allHosts ? HOST_ALL : store.currentHostId),
-  set: (value: string) => {
-    if (value === HOST_ALL) {
-      store.setAllHosts(true)
-      return
-    }
-    store.setAllHosts(false)
-    void store.selectHost(value)
-  },
-})
-
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   const list = !q
@@ -82,14 +63,31 @@ const filtered = computed(() => {
         (i) =>
           i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q),
       )
-  // Live instances float to the top: the board is a control surface, and the
-  // thing you are controlling should be nearest your hand.
-  return [...list].sort((a, b) => {
-    const rank = (s: string) => (s === 'running' ? 0 : s === 'starting' ? 1 : 2)
-    const d =
-      rank(store.statusOf(a.id).state) - rank(store.statusOf(b.id).state)
-    return d !== 0 ? d : a.name.localeCompare(b.name)
-  })
+  return [...list].sort((a, b) => a.name.localeCompare(b.name))
+})
+
+/**
+ * The board, grouped by what the rows actually are. State is the one axis a
+ * launcher is read along, so it becomes the page's structure rather than a
+ * sort order: live channels first (nearest the hand), then the resting ones,
+ * then the machines that did not answer — never folded into 已停止, because
+ * unknown is not stopped.
+ */
+const groups = computed(() => {
+  const running: DshInstance[] = []
+  const stopped: DshInstance[] = []
+  const unreachable: DshInstance[] = []
+  for (const inst of filtered.value) {
+    const state = store.statusOf(inst.id).state
+    if (state === 'running' || state === 'starting') running.push(inst)
+    else if (state === 'unreachable') unreachable.push(inst)
+    else stopped.push(inst)
+  }
+  return [
+    { key: 'running', label: '运行中', items: running },
+    { key: 'stopped', label: '已停止', items: stopped },
+    { key: 'unreachable', label: '主机不可达', items: unreachable },
+  ].filter((g) => g.items.length > 0)
 })
 
 // --- What the two bulk buttons act on -----------------------------------------
@@ -261,8 +259,8 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
     </div>
 
     <template v-else>
-      <!-- Toolbar: search and the host filter narrow what the board shows, so
-           they sit together above the list rather than in each row. -->
+      <!-- The board's own toolbar: a filter for the rows in view, and the
+           self-check console. 主机 lives in the rail, so it is not repeated here. -->
       <div class="board-toolbar">
         <div class="dl-input dl-search board-search">
           <DlIcon name="search" :size="14" />
@@ -277,24 +275,6 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
             @click="query = ''"
           >
             <DlIcon name="close" :size="12" />
-          </button>
-        </div>
-
-        <div class="dl-segmented board-hosts">
-          <button
-            :class="{ 'is-active': hostFilter === HOST_ALL }"
-            @click="hostFilter = HOST_ALL"
-          >
-            {{ `全部` }}
-          </button>
-          <button
-            v-for="h in store.hosts"
-            :key="h.id"
-            :class="{ 'is-active': hostFilter === h.id }"
-            :title="h.ssh_target || `本机`"
-            @click="hostFilter = h.id"
-          >
-            {{ h.display_name }}
           </button>
         </div>
 
@@ -321,16 +301,25 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
         <DlEmpty icon="search" :description="`没有匹配的实例`" />
       </div>
 
-      <div v-else class="dl-surface board">
-        <InstanceRow
-          v-for="inst in filtered"
-          :key="inst.id"
-          :inst="inst"
-          :focus="inst.id === focusId"
-          @changed="() => {}"
-          @duplicate="duplicateInstance"
-        />
-      </div>
+      <template v-else>
+        <section v-for="g in groups" :key="g.key" class="board-group">
+          <div class="board-group-head">
+            <span class="board-group-dot" :class="'is-' + g.key" />
+            <span class="board-group-title">{{ g.label }}</span>
+            <span class="board-group-count">{{ g.items.length }}</span>
+          </div>
+          <div class="dl-surface board">
+            <InstanceRow
+              v-for="inst in g.items"
+              :key="inst.id"
+              :inst="inst"
+              :focus="inst.id === focusId"
+              @changed="() => {}"
+              @duplicate="duplicateInstance"
+            />
+          </div>
+        </section>
+      </template>
     </template>
 
     <NewInstanceDialog
@@ -355,14 +344,52 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
 
 // Only the width is local: the field itself is `.dl-search` in index.scss.
 .board-search {
-  width: 260px;
+  width: 300px;
 }
 
-// The host filter can carry several machine names; it wraps instead of pushing
-// the summary and the health button off the row.
-.board-hosts {
-  flex-wrap: wrap;
-  max-width: 46%;
+// --- Board groups -----------------------------------------------------------
+// A quiet group head over each band of channels: the state is the structure,
+// not a colour on a row.
+
+.board-group + .board-group {
+  margin-top: 22px;
+}
+
+.board-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding-left: 2px;
+}
+
+.board-group-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--dl-ink-4);
+
+  &.is-running {
+    background: var(--dl-run);
+  }
+
+  &.is-unreachable {
+    background: var(--dl-warn);
+  }
+}
+
+.board-group-title {
+  font-size: var(--dl-text-sm);
+  font-weight: 600;
+  color: var(--dl-ink-2);
+}
+
+.board-group-count {
+  font-size: var(--dl-text-xs);
+  font-weight: 600;
+  color: var(--dl-ink-3);
+  font-variant-numeric: tabular-nums;
 }
 
 .board-spacer {

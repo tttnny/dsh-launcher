@@ -411,6 +411,7 @@ onMounted(() => {
       @click="onRowClick"
       @keydown.enter.space="onRowKeydown"
     >
+      <span class="channel-spine" :class="`is-${status.state}`" />
       <InstanceAvatar :id="inst.id" :icon="inst.icon" :size="36" />
 
       <div class="inst-main">
@@ -443,6 +444,16 @@ onMounted(() => {
           <span class="inst-meta-home" :title="home?.path || inst.home_id">
             {{ homeName }}
           </span>
+          <template v-if="running && status.url">
+            <span class="inst-meta-sep" />
+            <button
+              class="inst-url dl-mono"
+              :title="`在浏览器里打开`"
+              @click.stop="onOpen"
+            >
+              {{ status.url }}
+            </button>
+          </template>
         </div>
       </div>
 
@@ -803,6 +814,7 @@ onMounted(() => {
 // The row proper; the facts panel below it is a sibling so a row can grow
 // downward without turning into a nested flex mess.
 .inst-line {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -818,6 +830,63 @@ onMounted(() => {
   &:focus-visible {
     outline: 2px solid var(--dl-signal-line);
     outline-offset: -3px;
+  }
+}
+
+// The channel spine: a 3px state readout on the row's leading edge. Live
+// channels carry it at full strength; a resting row has none, so the eye
+// finds what is running before it reads a word.
+.channel-spine {
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: transparent;
+
+  &.is-running {
+    background: var(--dl-run);
+  }
+
+  &.is-starting {
+    background: var(--dl-warn);
+  }
+
+  &.is-exited {
+    background: var(--dl-danger);
+  }
+
+  &.is-unreachable {
+    background: var(--dl-warn);
+  }
+}
+
+// A live channel sits on a barely-there wash; hover still lifts it.
+.inst-row.is-live .inst-line {
+  background: var(--dl-live-wash);
+}
+
+.inst-row.is-live .inst-line:hover {
+  background: var(--dl-surface-2);
+}
+
+// The live address, on the row itself: the one thing a running channel is for.
+.inst-url {
+  min-width: 0;
+  max-width: 320px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dl-run);
+  font-size: var(--dl-text-xs);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    text-decoration: underline;
   }
 }
 
@@ -1014,6 +1083,8 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: var(--dl-text-sm);
   color: var(--dl-ink-3);
 }
