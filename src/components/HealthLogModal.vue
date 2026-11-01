@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
 import { useCopy } from '@/composables/useCopy'
@@ -18,7 +17,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: 'update:visible', v: boolean): void }>()
 
-const { t } = useI18n()
 const { copy } = useCopy()
 const store = useLauncherStore()
 
@@ -45,7 +43,7 @@ async function onCopy() {
         `[${formatTime(l.timestamp)}] [${l.level.toUpperCase()}] [${l.instanceName} · ${l.profile}] ${l.message}`,
     )
     .join('\n')
-  await copy(text, 'home.copiedLogs')
+  await copy(text, '已复制自检日志')
 }
 
 async function onRecheck() {
@@ -75,8 +73,8 @@ async function onRecheck() {
         // Advisory check failure ignored
       }
     }
-    if (found > 0) Message.warning(t('home.recheckFound', { count: found }))
-    else Message.success(t('home.noHealthLogs'))
+    if (found > 0) Message.warning(`发现 ${found} 项异常`)
+    else Message.success(`没有发现异常`)
   } finally {
     rechecking.value = false
   }
@@ -95,12 +93,12 @@ async function onRecheck() {
     <template #title>
       <div class="health-title">
         <DlIcon name="health" :size="16" />
-        <span>{{ t('home.healthModalTitle') }}</span>
+        <span>{{ `依赖自检` }}</span>
         <span v-if="store.healthErrorCount > 0" class="dl-tag dl-tag--danger">
-          {{ t('home.filterError') }} {{ store.healthErrorCount }}
+          {{ `错误` }} {{ store.healthErrorCount }}
         </span>
         <span v-if="store.healthWarnCount > 0" class="dl-tag dl-tag--warn">
-          {{ t('home.filterWarn') }} {{ store.healthWarnCount }}
+          {{ `警告` }} {{ store.healthWarnCount }}
         </span>
       </div>
     </template>
@@ -112,21 +110,21 @@ async function onRecheck() {
             :class="{ 'is-active': filter === 'all' }"
             @click="filter = 'all'"
           >
-            {{ t('home.filterAll') }}
+            {{ `全部` }}
             <span class="dl-tnum">{{ store.healthTotalCount }}</span>
           </button>
           <button
             :class="{ 'is-active': filter === 'error' }"
             @click="filter = 'error'"
           >
-            {{ t('home.filterError') }}
+            {{ `错误` }}
             <span class="dl-tnum">{{ store.healthErrorCount }}</span>
           </button>
           <button
             :class="{ 'is-active': filter === 'warn' }"
             @click="filter = 'warn'"
           >
-            {{ t('home.filterWarn') }}
+            {{ `警告` }}
             <span class="dl-tnum">{{ store.healthWarnCount }}</span>
           </button>
         </div>
@@ -139,7 +137,7 @@ async function onRecheck() {
           @click="onRecheck"
         >
           <DlIcon name="refresh" :size="13" />
-          {{ t('home.recheckHealth') }}
+          {{ `重新自检` }}
         </button>
         <button
           class="dl-btn dl-btn--quiet"
@@ -147,21 +145,21 @@ async function onRecheck() {
           @click="onCopy"
         >
           <DlIcon name="copy" :size="13" />
-          {{ t('home.copyLogs') }}
+          {{ `复制` }}
         </button>
         <button
           class="dl-btn dl-btn--danger"
           :disabled="store.healthLogs.length === 0"
           @click="store.clearHealthLogs()"
         >
-          {{ t('home.clearLogs') }}
+          {{ `清空` }}
         </button>
       </div>
 
       <div class="health-console">
         <div v-if="logs.length === 0" class="health-empty">
           <span class="health-empty-mark">✓</span>
-          <span>{{ t('home.noHealthLogs') }}</span>
+          <span>{{ `没有发现异常` }}</span>
         </div>
 
         <div

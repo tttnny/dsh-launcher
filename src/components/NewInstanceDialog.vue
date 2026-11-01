@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
@@ -31,7 +30,6 @@ const emit = defineEmits<{
   (e: 'created', id: string): void
 }>()
 
-const { t } = useI18n()
 const store = useLauncherStore()
 
 const name = ref('')
@@ -82,7 +80,7 @@ function uniqueName(base: string): string {
 function reset() {
   const preset = props.preset
   if (preset) {
-    name.value = uniqueName(t('instances.copyName', { name: preset.name }))
+    name.value = uniqueName(`${preset.name} 副本`)
     versionId.value = preset.versionId
     homeId.value = preset.homeId
     return
@@ -90,8 +88,8 @@ function reset() {
   const onThisHost = store.instancesOfHost(hostId.value)
   let n = onThisHost.length + 1
   const existing = new Set(onThisHost.map((i) => i.name))
-  while (existing.has(`${t('instances.namePrefix')}${n}`)) n += 1
-  name.value = `${t('instances.namePrefix')}${n}`
+  while (existing.has(`${`实例 `}${n}`)) n += 1
+  name.value = `${`实例 `}${n}`
   versionId.value = versions.value[0]?.id
   homeId.value = homes.value[0]?.id
 }
@@ -119,7 +117,7 @@ const createAction = useAction(
       homeId.value!,
       hostId.value,
     ),
-  { success: () => t('instances.created') },
+  { success: () => `实例已创建` },
 )
 const saving = computed(() => createAction.busy['*'])
 
@@ -154,20 +152,20 @@ function close() {
     modal-class="dl-sheet"
     @update:visible="(v) => emit('update:visible', v)"
   >
-    <template #title>{{
-      preset ? t('instances.duplicate') : t('instances.newInstance')
-    }}</template>
+    <template #title>{{ preset ? `复制实例` : `新建实例` }}</template>
 
     <!-- The machine has to answer before the sheet can offer anything: a host
          whose read failed gets the reason and a retry, never a stale list. -->
     <div v-if="hostError" class="dl-surface dl-failure">
-      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
       <p class="dl-failure-text">{{ hostError }}</p>
-      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+      <p class="dl-failure-hint">
+        {{ `上面是那台机器回的话。修好之后再试一次。` }}
+      </p>
       <div class="sheet-footer" style="margin-top: 8px">
-        <button class="dl-btn" @click="close">{{ t('common.close') }}</button>
+        <button class="dl-btn" @click="close">{{ `关闭` }}</button>
         <button class="dl-btn dl-btn--primary" @click="retryHost">
-          {{ t('common.refresh') }}
+          {{ `刷新` }}
         </button>
       </div>
     </div>
@@ -175,33 +173,37 @@ function close() {
     <!-- Nothing installed yet: the sheet cannot do its job, so it says which
          page can, instead of offering three empty selects. -->
     <div v-else-if="noVersions" class="dl-empty">
-      <p class="dl-empty-title">{{ t('instances.noVersionsTitle') }}</p>
-      <p class="dl-empty-text">{{ t('instances.noVersionsDesc') }}</p>
+      <p class="dl-empty-title">{{ `还没有安装任何 DSH 版本` }}</p>
+      <p class="dl-empty-text">
+        {{ `先在资源库里安装一个版本，再回来创建实例。` }}
+      </p>
       <button
         class="dl-btn dl-btn--primary"
         style="margin-top: 6px"
         @click="close"
       >
-        {{ t('common.close') }}
+        {{ `关闭` }}
       </button>
     </div>
 
     <div v-else class="new-instance-body">
       <p v-if="host && !host.builtin" class="dl-field-hint">
-        {{ t('instances.hostScope', { host: host.display_name }) }}
+        {{
+          `这台机器的资源只属于它自己：下面只能选「${host.display_name}」上的 DSH 版本与 DSH_HOME。`
+        }}
       </p>
       <div class="dl-field">
-        <label class="dl-field-label">{{ t('instanceEdit.name') }}</label>
+        <label class="dl-field-label">{{ `实例名称` }}</label>
         <input
           v-model="name"
           class="dl-input"
-          :placeholder="t('instanceEdit.namePlaceholder')"
+          :placeholder="`例如：主实例`"
           @keydown.enter="onCreate"
         />
       </div>
 
       <div class="dl-field">
-        <label class="dl-field-label">{{ t('instanceEdit.version') }}</label>
+        <label class="dl-field-label">{{ `DSH 版本` }}</label>
         <a-select v-model="versionId" style="width: 100%">
           <a-option v-for="v in versions" :key="v.id" :value="v.id">{{
             v.version
@@ -210,27 +212,29 @@ function close() {
       </div>
 
       <div class="dl-field">
-        <label class="dl-field-label">{{ t('instanceEdit.home') }}</label>
+        <label class="dl-field-label">{{ `DSH_HOME` }}</label>
         <a-select v-model="homeId" style="width: 100%">
           <a-option v-for="h in homes" :key="h.id" :value="h.id">
             {{ h.name }} — {{ h.path }}
           </a-option>
         </a-select>
-        <p class="dl-field-hint">{{ t('instances.homeHint') }}</p>
+        <p class="dl-field-hint">
+          {{ `同一版本可以绑定到不同的 DSH_HOME，或与其他实例共用一个。` }}
+        </p>
       </div>
     </div>
 
     <template v-if="!noVersions" #footer>
       <div class="sheet-footer">
         <button class="dl-btn dl-btn--quiet" @click="close">
-          {{ t('common.cancel') }}
+          {{ `取消` }}
         </button>
         <button
           class="dl-btn dl-btn--primary"
           :disabled="!valid || saving"
           @click="onCreate"
         >
-          {{ t('instances.create') }}
+          {{ `创建` }}
         </button>
       </div>
     </template>

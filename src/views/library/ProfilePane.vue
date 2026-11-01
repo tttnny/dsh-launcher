@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { LOCAL_HOST_ID } from '@/api/types'
@@ -15,7 +14,6 @@ import DlEmpty from '@/components/DlEmpty.vue'
 // it — the two facts (what it is, who uses it) that decide whether it is safe
 // to rename, copy or delete. Managing its plugins opens the manager page.
 
-const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
@@ -131,7 +129,7 @@ const createAction = useAction(
     return { name: created, homeId }
   },
   {
-    success: ({ name }) => t('profiles.profileCreated', { name }),
+    success: ({ name }) => `Profile「${name}」已创建`,
   },
 )
 
@@ -155,7 +153,7 @@ const renameAction = useAction(
   },
   {
     key: (_h, old) => old,
-    success: ({ old, name }) => t('profiles.profileRenamed', { old, name }),
+    success: ({ old, name }) => `Profile「${old}」已重命名为「${name}」`,
   },
 )
 
@@ -183,7 +181,7 @@ const copyAction = useAction(
     const copied = await api.copyProfile(homeId, source, name)
     return { name: copied }
   },
-  { success: ({ name }) => t('profiles.profileCopiedPlain', { name }) },
+  { success: ({ name }) => `已复制为「${name}」` },
 )
 
 function startCopy(name: string) {
@@ -211,7 +209,7 @@ const deleteAction = useAction(
   },
   {
     key: (_h, name) => name,
-    success: (name) => t('profiles.profileDeleted', { name }),
+    success: (name) => `Profile「${name}」已删除`,
   },
 )
 
@@ -232,13 +230,18 @@ const busy = (name: string) =>
        that cannot be reached still has it. A failed read of the records is what
        this says, rather than showing an empty shelf that looks like "no HOMEs". -->
   <div v-if="store.homeError" class="dl-surface dl-failure">
-    <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+    <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
     <p class="dl-failure-text">{{ store.homeError }}</p>
-    <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+    <p class="dl-failure-hint">
+      {{ `上面是那台机器回的话。修好之后再试一次。` }}
+    </p>
   </div>
 
   <div v-else-if="!selectedHomeId" class="dl-surface">
-    <DlEmpty icon="profile" :description="t('profiles.noHomeSelected')" />
+    <DlEmpty
+      icon="profile"
+      :description="`还没有 DSH_HOME，先在 DSH_HOME 标签页里添加一个`"
+    />
   </div>
 
   <template v-else>
@@ -267,7 +270,7 @@ const busy = (name: string) =>
 
     <section class="dl-section">
       <div class="dl-section-label">
-        {{ t('profiles.profilesTitle') }}
+        {{ `Profile` }}
         <span class="dl-section-count">{{ profiles.length }}</span>
         <span class="profile-label-spacer" />
         <button
@@ -276,7 +279,7 @@ const busy = (name: string) =>
           @click="startAdding"
         >
           <DlIcon name="plus" :size="13" />
-          {{ t('profiles.profileAdd') }}
+          {{ `新建 Profile` }}
         </button>
       </div>
 
@@ -287,7 +290,7 @@ const busy = (name: string) =>
           <a-select
             v-model="newVersionId"
             style="width: 150px; flex-shrink: 0"
-            :placeholder="t('profiles.profileCreateVersion')"
+            :placeholder="`DSH 版本`"
           >
             <a-option v-for="v in versions" :key="v.id" :value="v.id">
               {{ v.version }}
@@ -296,7 +299,7 @@ const busy = (name: string) =>
           <input
             v-model="newName"
             class="dl-input"
-            :placeholder="t('profiles.profileCreatePlaceholder')"
+            :placeholder="`输入新 Profile 名称`"
             @keydown.enter="onCreate"
           />
           <button
@@ -304,14 +307,16 @@ const busy = (name: string) =>
             :disabled="!newVersionId || createAction.busy['*']"
             @click="onCreate"
           >
-            {{ t('profiles.profileCreate') }}
+            {{ `创建` }}
           </button>
           <button class="dl-btn dl-btn--quiet" @click="adding = false">
-            {{ t('common.cancel') }}
+            {{ `取消` }}
           </button>
         </div>
         <p v-if="adding && versions.length === 0" class="profile-create-hint">
-          {{ t('profiles.profileCreateNoVersions') }}
+          {{
+            `这台主机还没有安装任何 DSH 版本：先在「DSH 版本」标签页安装一个，Profile 会建在它的专属 DSH_HOME 里。`
+          }}
         </p>
 
         <DlEmpty
@@ -322,13 +327,13 @@ const busy = (name: string) =>
             !profilesError
           "
           icon="profile"
-          :description="t('profiles.profilesEmpty')"
+          :description="`暂无 Profile`"
         />
         <div
           v-else-if="profilesLoading && profiles.length === 0"
           class="dl-row-none"
         >
-          {{ t('common.loading') }}
+          {{ `加载中…` }}
         </div>
         <div v-else-if="profilesError" class="dl-row-none profile-error">
           {{ profilesError }}
@@ -348,10 +353,10 @@ const busy = (name: string) =>
               :disabled="renameAction.busy[p]"
               @click="confirmRename"
             >
-              {{ t('profiles.profileRenameSave') }}
+              {{ `保存` }}
             </button>
             <button class="dl-btn dl-btn--quiet" @click="renaming = null">
-              {{ t('common.cancel') }}
+              {{ `取消` }}
             </button>
           </div>
 
@@ -372,10 +377,10 @@ const busy = (name: string) =>
               :disabled="copyAction.busy['*']"
               @click="confirmCopy"
             >
-              {{ t('profiles.profileCopySave') }}
+              {{ `保存` }}
             </button>
             <button class="dl-btn dl-btn--quiet" @click="copying = null">
-              {{ t('common.cancel') }}
+              {{ `取消` }}
             </button>
           </div>
 
@@ -389,9 +394,7 @@ const busy = (name: string) =>
                    on the instance. Showing a select here made a profile row
                    read "web → web" and implied it did something to the profile. -->
               <div v-if="usersOf(p).length > 0" class="profile-users">
-                <span class="profile-users-label">{{
-                  t('profiles.usedByInstances')
-                }}</span>
+                <span class="profile-users-label">{{ `默认用于` }}</span>
                 <span
                   v-for="inst in usersOf(p)"
                   :key="inst.id"
@@ -399,9 +402,7 @@ const busy = (name: string) =>
                   >{{ inst.name }}</span
                 >
               </div>
-              <span v-else class="profile-no-user">{{
-                t('profiles.noInstances')
-              }}</span>
+              <span v-else class="profile-no-user">{{ `没有被实例引用` }}</span>
             </div>
 
             <div class="profile-actions">
@@ -410,24 +411,24 @@ const busy = (name: string) =>
                 :disabled="busy(p)"
                 @click="startRename(p)"
               >
-                {{ t('profiles.profileRename') }}
+                {{ `重命名` }}
               </button>
               <button
                 class="dl-btn dl-btn--ghost"
                 :disabled="busy(p)"
                 @click="startCopy(p)"
               >
-                {{ t('profiles.profileCopy') }}
+                {{ `复制` }}
               </button>
               <a-popconfirm
-                :content="t('profiles.profileDeleteConfirm', { name: p })"
-                :ok-text="t('instances.table.delete')"
-                :cancel-text="t('common.cancel')"
+                :content="`删除 Profile「${p}」？此操作不可恢复。`"
+                :ok-text="`删除`"
+                :cancel-text="`取消`"
                 modal-class="dl-sheet"
                 @ok="confirmDelete(p)"
               >
                 <button class="dl-btn dl-btn--danger" :disabled="busy(p)">
-                  {{ t('instances.table.delete') }}
+                  {{ `删除` }}
                 </button>
               </a-popconfirm>
             </div>
@@ -438,7 +439,11 @@ const busy = (name: string) =>
       <!-- A profile selects patch layers, but it does not own them: the running
            instance does. Saying so once, under the list, saves the user from
            hunting for a plugin button that was never here. -->
-      <p class="profile-note">{{ t('profiles.pluginsLiveOnInstances') }}</p>
+      <p class="profile-note">
+        {{
+          `补丁层属于运行中的实例：在实例页展开实例卡片，或进实例设置，点「管理插件」。`
+        }}
+      </p>
     </section>
   </template>
 </template>

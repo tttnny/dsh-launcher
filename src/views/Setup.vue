@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { LOCAL_HOST_ID } from '@/api/types'
@@ -25,7 +24,6 @@ const TOOL_IDS: ToolId[] = ['node', 'pnpm']
 const TOOL_LABELS: Record<ToolId, string> = { node: 'Node.js', pnpm: 'pnpm' }
 
 const router = useRouter()
-const { t } = useI18n()
 const { copy } = useCopy()
 const store = useLauncherStore()
 
@@ -102,13 +100,16 @@ const pnpmCommand = computed(
 // machine (on a remote host each is prefixed with `ssh <host>`), so the copy
 // only has to say where they are run.
 const nodeCommandDesc = computed(() =>
-  t(isRemote.value ? 'setup.remoteNodeCommandDesc' : 'setup.nodeCommandDesc'),
+  isRemote.value
+    ? '在本机终端执行以下命令；它会经 ssh 连到那台机器，在它的交互式登录 shell 里安装 Node.js：'
+    : '在终端执行以下命令安装 Node.js：',
 )
-const pnpmCommandDesc = computed(() =>
-  t(isRemote.value ? 'setup.remotePnpmCommandDesc' : 'setup.pnpmCommandDesc', {
-    major: requirements.value?.min_pnpm_major,
-  }),
-)
+const pnpmCommandDesc = computed(() => {
+  const major = requirements.value?.min_pnpm_major
+  return isRemote.value
+    ? `那台机器上需要 pnpm ${major} 或更高。在本机终端执行以下命令；它会经 ssh 连到那台机器，在它的交互式登录 shell 里安装：`
+    : `启动器需要 pnpm ${major} 或更高版本。在终端执行以下命令安装：`
+})
 
 // The candidates the probe passed over on its way to a conclusion: on a remote
 // host an old Node is passed over rather than warned about, and the user is
@@ -119,19 +120,12 @@ const skipped = computed<SkippedCandidate[]>(
 
 function skippedReason(candidate: SkippedCandidate): string {
   if (candidate.reason === 'below-minimum') {
-    return t('setup.skippedBelowMinimum', {
-      path: candidate.path,
-      version: candidate.version ?? '',
-      major: candidate.major ?? '',
-    })
+    return `${candidate.path} 的 ${candidate.version ?? ''} 低于 ${candidate.major ?? ''}，已跳过`
   }
   if (candidate.reason === 'unparsable') {
-    return t('setup.skippedUnparsable', {
-      path: candidate.path,
-      version: candidate.version ?? '',
-    })
+    return `${candidate.path} 的版本号「${candidate.version ?? ''}」读不出来，已跳过`
   }
-  return t('setup.skippedUnusable', { path: candidate.path })
+  return `${candidate.path} 用不了，已跳过`
 }
 
 const overridePath = (id: ToolId) => statusOf(id)?.manual_path ?? null
@@ -154,10 +148,11 @@ const manualTools = computed(() =>
 )
 
 function sourceLabel(tool: ToolRow): string {
-  if (!tool.ok) return t('setup.sourceMissing')
-  if (tool.source === 'system') return t('setup.sourceSystem')
-  if (tool.source === 'fallback') return t('setup.sourceFallback')
-  if (tool.source === 'manual') return t('setup.sourceManual')
+  if (!tool.ok) return `系统环境变量里没有，常用安装目录里也没有`
+  if (tool.source === 'system') return `来自系统环境变量`
+  if (tool.source === 'fallback')
+    return `系统环境变量里没有，启动器在常用安装目录里找到的`
+  if (tool.source === 'manual') return `你手动指定的路径`
   return ''
 }
 
@@ -209,7 +204,7 @@ async function recheck() {
   checking.value = true
   try {
     await load(true)
-    if (nodeOk.value && pnpmOk.value) Message.success(t('setup.allReady'))
+    if (nodeOk.value && pnpmOk.value) Message.success(`环境已就绪`)
   } finally {
     checking.value = false
   }
@@ -230,9 +225,7 @@ async function applyOverride(id: ToolId, path: string | null) {
     if (answer.host_id === LOCAL_HOST_ID) store.runtime = answer
     manualInput.value[id] = ''
     Message.success(
-      t(path ? 'setup.overrideApplied' : 'setup.overrideCleared', {
-        tool: TOOL_LABELS[id],
-      }),
+      path ? `已指定 ${TOOL_LABELS[id]}` : `已取消指定 ${TOOL_LABELS[id]}`,
     )
   } catch (e) {
     Message.error(String(e))
@@ -251,7 +244,7 @@ function submitManual(id: ToolId) {
 
 async function pickFile(id: ToolId) {
   if (!api.isTauri) {
-    Message.info(t('setup.browserPickHint'))
+    Message.info(`浏览器预览不支持系统文件选择，请在桌面版里指定`)
     return
   }
   picking.value = id
@@ -282,8 +275,12 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
   <div class="dl-page setup-page">
     <header class="dl-head">
       <div class="dl-head-text">
-        <h1>{{ t('setup.title') }}</h1>
-        <p class="dl-head-sub">{{ t('setup.desc') }}</p>
+        <h1>{{ `环境检测` }}</h1>
+        <p class="dl-head-sub">
+          {{
+            `运行 DSH 实例需要 Node.js，安装版本与管理插件还需要 pnpm。启动器以系统环境变量为准来判断（就是你在终端里用的那一套 PATH），那里没有才去常见安装目录里找；两边都没有时可以自己指定可执行文件。`
+          }}
+        </p>
       </div>
       <div class="dl-head-actions">
         <a-select
@@ -302,14 +299,14 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
           @click="recheck"
         >
           <DlIcon name="refresh" :size="13" />
-          {{ t('setup.recheck') }}
+          {{ `重新检测` }}
         </button>
         <button
           v-if="allOk"
           class="dl-btn dl-btn--primary"
           @click="router.push({ name: 'instances' })"
         >
-          {{ t('setup.enterApp') }}
+          {{ `进入启动器` }}
         </button>
       </div>
     </header>
@@ -319,13 +316,13 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
          both things at once. -->
     <section class="dl-section">
       <div class="dl-section-label">
-        {{ t('settings.environment.title') }}
+        {{ `环境` }}
         <span class="dl-section-count">
           <span
             class="dl-tag"
             :class="allOk ? 'dl-tag--run' : 'dl-tag--danger'"
           >
-            {{ allOk ? t('setup.allReady') : t('nav.envMissing') }}
+            {{ allOk ? `环境已就绪` : `环境未就绪` }}
           </span>
         </span>
       </div>
@@ -346,29 +343,25 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             }}</span>
             <span class="tool-source">{{ sourceLabel(tool) }}</span>
           </div>
-          <span class="dl-chip">{{
-            tool.ok ? tool.version : t('setup.missing')
-          }}</span>
+          <span class="dl-chip">{{ tool.ok ? tool.version : `未安装` }}</span>
         </div>
       </div>
 
       <p v-if="isRemote" class="setup-note setup-note--quiet">
-        {{ t('setup.remoteNote', { host: selectedHost?.display_name ?? '' }) }}
+        {{
+          `这里的结论来自「${selectedHost?.display_name ?? ''}」自己的交互式登录 shell（就是你在那台机器的终端里敲命令时命中的那一套），不是本机的。`
+        }}
       </p>
 
       <p v-if="nodeOk && belowRecommended" class="setup-note">
         <DlIcon name="alert" :size="13" />
-        {{
-          t('setup.nodeBelowRecommended', {
-            v: requirements?.recommended_node_major,
-          })
-        }}
+        {{ `建议升级到 ${requirements?.recommended_node_major} 或更高` }}
       </p>
 
       <!-- On a remote host an old candidate is passed over instead of warned
            about, so the page has to say which ones it walked past and why. -->
       <div v-if="skipped.length" class="dl-surface skipped">
-        <div class="skipped-head">{{ t('setup.skippedTitle') }}</div>
+        <div class="skipped-head">{{ `被跳过的候选` }}</div>
         <div
           v-for="candidate in skipped"
           :key="candidate.tool + candidate.path"
@@ -385,22 +378,20 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
          every tool the terminal would not find, plus any tool the user already
          picked, so their choice stays visible and revisable. -->
     <section v-if="!loadError && manualTools.length" class="dl-section">
-      <div class="dl-section-label">{{ t('setup.manualSection') }}</div>
+      <div class="dl-section-label">{{ `手动指定可执行文件` }}</div>
 
       <div v-for="tool in manualTools" :key="tool.id" class="dl-surface pick">
         <div class="pick-head">
-          <span class="pick-title">{{
-            t('setup.manualToolTitle', { tool: tool.name })
-          }}</span>
+          <span class="pick-title">{{ `指定 ${tool.name} 的可执行文件` }}</span>
           <span class="pick-desc">{{
-            t('setup.manualDesc', { tool: tool.name })
+            `可以直接选择 ${tool.name} 的可执行文件；也可以去终端把它加进 PATH（例如写进 ~/.zshrc），回来点「重新检测」。`
           }}</span>
           <span v-if="overridePath(tool.id)" class="pick-path dl-mono">
             {{ overridePath(tool.id) }}
           </span>
           <span v-if="overrideBroken(tool.id)" class="pick-broken">
             <DlIcon name="alert" :size="13" />
-            {{ t('setup.manualBroken') }}
+            {{ `指定的路径已不可用，已改回自动检测` }}
           </span>
         </div>
         <div class="pick-actions">
@@ -408,7 +399,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             <input
               v-model="manualInput[tool.id]"
               class="dl-input dl-mono"
-              :placeholder="t('setup.remoteManualPlaceholder')"
+              :placeholder="`/usr/local/bin/node`"
               @keyup.enter="submitManual(tool.id)"
             />
             <button
@@ -416,7 +407,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
               :disabled="!manualInput[tool.id].trim()"
               @click="submitManual(tool.id)"
             >
-              {{ t('setup.remoteManualApply') }}
+              {{ `使用这个路径` }}
             </button>
           </template>
           <button
@@ -426,7 +417,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             @click="pickFile(tool.id)"
           >
             <DlIcon name="folder" :size="13" />
-            {{ t('setup.pickFile') }}
+            {{ `选择可执行文件` }}
           </button>
           <button
             v-if="overridePath(tool.id)"
@@ -434,18 +425,18 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             :disabled="picking === tool.id"
             @click="clearOverride(tool.id)"
           >
-            {{ t('setup.clearOverride') }}
+            {{ `取消指定` }}
           </button>
         </div>
       </div>
     </section>
 
     <section v-if="!loadError && !allOk" class="dl-section">
-      <div class="dl-section-label">{{ t('setup.howTo') }}</div>
+      <div class="dl-section-label">{{ `怎么装` }}</div>
 
       <div v-if="!nodeOk" class="dl-surface guide">
         <div class="guide-head">
-          <span class="guide-title">{{ t('setup.installNode') }}</span>
+          <span class="guide-title">{{ `安装 Node.js` }}</span>
           <span class="guide-desc">{{ nodeCommandDesc }}</span>
         </div>
         <div class="cmd-row">
@@ -455,14 +446,14 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             @click="copyCommand(nodeCommand, 'node')"
           >
             <DlIcon name="copy" :size="13" />
-            {{ copied === 'node' ? t('common.copied') : t('common.copy') }}
+            {{ copied === 'node' ? `已复制` : `复制` }}
           </button>
         </div>
       </div>
 
       <div v-if="!pnpmOk" class="dl-surface guide">
         <div class="guide-head">
-          <span class="guide-title">{{ t('setup.installPnpm') }}</span>
+          <span class="guide-title">{{ `安装 pnpm` }}</span>
           <span class="guide-desc">{{ pnpmCommandDesc }}</span>
         </div>
         <div class="cmd-row">
@@ -472,12 +463,16 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
             @click="copyCommand(pnpmCommand, 'pnpm')"
           >
             <DlIcon name="copy" :size="13" />
-            {{ copied === 'pnpm' ? t('common.copied') : t('common.copy') }}
+            {{ copied === 'pnpm' ? `已复制` : `复制` }}
           </button>
         </div>
       </div>
 
-      <p class="setup-note">{{ t('setup.afterInstallHint') }}</p>
+      <p class="setup-note">
+        {{
+          `上面的命令都执行完后，切回本窗口即会自动重新检测；也可以点页头的「重新检测」强制重读一次系统环境变量。`
+        }}
+      </p>
     </section>
   </div>
 </template>

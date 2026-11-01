@@ -1,7 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import VueI18nPlugin from '@intlify/unplugin-vue-i18n/vite'
 
 // https://vite.dev/config/
 // The Vite root is src/, so the HTML entry lives at src/index.html instead of
@@ -9,22 +8,7 @@ import VueI18nPlugin from '@intlify/unplugin-vue-i18n/vite'
 // is the page src-tauri/src/windows.rs loads in the window.
 export default defineConfig({
   root: fileURLToPath(new URL('./src', import.meta.url)),
-  plugins: [
-    vue(),
-    // Discover every JSON locale file under src/locales, pre-compiles the
-    // messages at build time and hot-reloads them during development.
-    VueI18nPlugin({
-      // Normalize to posix separators so picomatch patterns always match.
-      include: [
-        fileURLToPath(new URL('./src/locales/**', import.meta.url)).replace(
-          /\\/g,
-          '/',
-        ),
-      ],
-      strictMessage: false,
-      escapeHtml: false,
-    }),
-  ],
+  plugins: [vue()],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

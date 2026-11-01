@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { useLibraryTab } from '@/composables/useLibraryTab'
 import VersionPane from '@/views/library/VersionPane.vue'
@@ -17,14 +16,13 @@ import ProfilePane from '@/views/library/ProfilePane.vue'
 // and installing a version means picking a machine. There is no 「全部」 here —
 // a version is installed somewhere (ADR-0006 §3).
 
-const { t } = useI18n()
 const store = useLauncherStore()
 const { current, select, tabs } = useLibraryTab()
 
 const LABELS: Record<string, string> = {
-  versions: 'library.tabVersions',
-  homes: 'library.tabHomes',
-  profiles: 'library.tabProfiles',
+  versions: 'DSH 版本',
+  homes: 'DSH_HOME',
+  profiles: 'Profile',
 }
 
 /** The one current host: the instances page's filter is the same state. */
@@ -38,12 +36,16 @@ const hostId = computed({
   <div class="dl-page">
     <header class="dl-head">
       <div class="dl-head-text">
-        <h1>{{ t('library.title') }}</h1>
-        <p class="dl-head-sub">{{ t('library.pageDesc') }}</p>
+        <h1>{{ `资源库` }}</h1>
+        <p class="dl-head-sub">
+          {{
+            `实例由三样东西组成：一份 DSH 版本、一个 DSH_HOME、一个 Profile。这里准备它们。`
+          }}
+        </p>
       </div>
       <div class="dl-head-actions">
         <div class="host-picker">
-          <span class="host-picker-label">{{ t('library.currentHost') }}</span>
+          <span class="host-picker-label">{{ `当前主机` }}</span>
           <a-select v-model="hostId" size="small" class="host-picker-select">
             <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">
               {{ h.display_name }}
@@ -57,7 +59,7 @@ const hostId = computed({
             :class="{ 'is-active': current === tab }"
             @click="select(tab)"
           >
-            {{ t(LABELS[tab]) }}
+            {{ LABELS[tab] }}
           </button>
         </div>
       </div>

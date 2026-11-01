@@ -166,7 +166,6 @@ export interface InstanceLocation {
 }
 
 export interface LauncherSettings {
-  locale: string
   minimize_to_tray: boolean
   autostart: boolean
   last_instance_id: string | null

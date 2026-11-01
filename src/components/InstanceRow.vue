@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore, type HealthLogItem } from '@/stores/launcher'
@@ -32,7 +31,6 @@ const props = defineProps<{
 const emit = defineEmits<{ changed: []; duplicate: [id: string] }>()
 
 const router = useRouter()
-const { t } = useI18n()
 const { copy } = useCopy()
 const store = useLauncherStore()
 const {
@@ -47,6 +45,14 @@ const { canManagePlugins, openPlugins } = usePluginLink()
 // --- Derived facts ------------------------------------------------------------
 
 const status = computed(() => store.statusOf(props.inst.id))
+
+const STATUS_LABELS: Record<string, string> = {
+  stopped: '已停止',
+  starting: '启动中',
+  running: '运行中',
+  exited: '已退出',
+  unreachable: '主机不可达',
+}
 const expanded = ref(false)
 const rowEl = ref<HTMLElement | null>(null)
 const highlighted = ref(false)
@@ -146,13 +152,13 @@ const remote = computed(() => !!host.value && !host.value.builtin)
  */
 const statusHint = computed(() => {
   if (!unreachable.value) return undefined
-  return host.value?.status?.message || t('home.retryHint')
+  return host.value?.status?.message || `再向那台机器问一次这个实例的状态。`
 })
 const envEntries = computed(() =>
   Object.entries(props.inst.env_overrides ?? {}),
 )
 const portLabel = computed(() =>
-  props.inst.port ? String(props.inst.port) : t('instances.portRandom'),
+  props.inst.port ? String(props.inst.port) : `随机端口`,
 )
 /**
  * Where a remote instance really is, as that machine printed it. It is stated
@@ -185,7 +191,8 @@ watch(
   () => props.inst.home_id,
   () => {
     void ensureSelection(props.inst).then((p) => {
-      if (p === undefined) Message.warning(t('home.noProfile'))
+      if (p === undefined)
+        Message.warning(`该实例的 DSH_HOME 下没有可用 Profile`)
     })
   },
   { immediate: true },
@@ -201,15 +208,15 @@ async function refreshProfiles() {
 const startAction = useAction(
   (args: { id: string; profile: string }) =>
     api.startInstance(args.id, args.profile),
-  { key: (args) => args.id, success: () => t('home.started') },
+  { key: (args) => args.id, success: () => `实例启动命令已发送` },
 )
 const stopAction = useAction((id: string) => api.stopInstance(id), {
   key: (id) => id,
-  success: () => t('home.stopped'),
+  success: () => `实例已停止`,
 })
 const restartAction = useAction((id: string) => api.restartInstance(id), {
   key: (id) => id,
-  success: () => t('home.started'),
+  success: () => `实例启动命令已发送`,
 })
 const openAction = useAction((id: string) => api.openInstanceWindow(id), {
   key: (id) => id,
@@ -295,15 +302,15 @@ async function onRestart() {
 // --- Utilities ----------------------------------------------------------------
 
 const dirAction = useAction(() => api.openInstanceDirectory(props.inst.id), {
-  success: (path) => t('instanceEdit.dirOpened', { path }),
+  success: (path) => `已在访达中打开目录：${path}`,
 })
 const logAction = useAction(() => api.openInstanceLog(props.inst.id), {
-  success: (path) => t('instanceEdit.logOpened', { path }),
+  success: (path) => `已在访达中定位日志：${path}`,
 })
 const terminalAction = useAction(
   () => api.openInstanceTerminal(props.inst.id),
   {
-    success: (label) => t('home.terminalOpened', { label }),
+    success: (label) => `已打开终端：${label}`,
   },
 )
 
@@ -314,7 +321,7 @@ const remoteCopyAction = useAction(async (what: 'path' | 'command') => {
   const location = await api.instanceRemoteLocation(props.inst.id)
   await copy(
     what === 'path' ? location.path : location.command,
-    what === 'path' ? 'instances.pathCopied' : 'instances.commandCopied',
+    what === 'path' ? '远端路径已复制' : '命令已复制，粘到终端里就能连上去',
   )
 })
 
@@ -336,20 +343,17 @@ const deleteAction = useAction(
 
 function confirmDelete() {
   Modal.confirm({
-    title: t('instances.deleteTitle', { name: props.inst.name }),
-    content: t('instances.deleteContent', {
-      name: props.inst.name,
-      home: homeName.value,
-    }),
-    okText: t('instances.table.delete'),
-    cancelText: t('common.cancel'),
+    title: `删除实例「${props.inst.name}」？`,
+    content: `只删除启动器里的这条实例记录：DSH 版本和 DSH_HOME「${homeName.value}」都会保留。实例专属图标会一并删除。`,
+    okText: `删除`,
+    cancelText: `取消`,
     okButtonProps: { status: 'danger' },
     modalClass: 'dl-sheet',
     onOk: async () => {
       const ok = await deleteAction.run(props.inst.id)
       if (ok !== true) return
       await store.refreshInstances()
-      Message.success(t('instances.deleted', { name: props.inst.name }))
+      Message.success(`已删除实例「${props.inst.name}」`)
       emit('changed')
     },
   })
@@ -396,7 +400,7 @@ onMounted(() => {
             {{ inst.name }}
           </button>
           <span v-if="sharedHome" class="dl-tag dl-tag--warn">{{
-            t('home.sharedHome')
+            `共享 DSH_HOME`
           }}</span>
         </div>
         <div class="inst-meta">
@@ -421,16 +425,14 @@ onMounted(() => {
            remote instance's address here is the forwarded one, so the row says
            which address it is showing and the card states both. -->
         <div v-if="running && status.url" class="inst-url">
-          <span v-if="remoteUrl" class="inst-url-label">{{
-            t('instances.localAddress')
-          }}</span>
+          <span v-if="remoteUrl" class="inst-url-label">{{ `本机可达` }}</span>
           <button class="inst-url-link" @click="onOpen">
             <DlIcon name="link" :size="12" />
             <span class="dl-mono">{{ status.url }}</span>
           </button>
           <button
             class="dl-icon-btn inst-url-copy"
-            :title="t('common.copy')"
+            :title="`复制`"
             @click="copy(status.url!)"
           >
             <DlIcon name="copy" :size="12" />
@@ -448,7 +450,7 @@ onMounted(() => {
             <a-select
               v-if="!running && !starting"
               v-model="selectedProfile"
-              :placeholder="t('home.selectProfile')"
+              :placeholder="`选择 Profile`"
               :loading="profilesLoading"
               size="small"
               :allow-clear="false"
@@ -464,7 +466,7 @@ onMounted(() => {
               class="dl-chip"
               :title="status.profile ?? selectedProfile"
             >
-              {{ status.profile ?? selectedProfile ?? t('home.selectProfile') }}
+              {{ status.profile ?? selectedProfile ?? `选择 Profile` }}
             </span>
           </div>
 
@@ -473,7 +475,7 @@ onMounted(() => {
             :class="`is-${status.state}`"
             :title="statusHint"
           >
-            {{ t(`home.status.${status.state}`) }}
+            {{ STATUS_LABELS[status.state] }}
           </span>
 
           <div class="inst-actions">
@@ -484,7 +486,7 @@ onMounted(() => {
               @click="onOpen"
             >
               <DlIcon name="external" :size="13" />
-              {{ t('home.openBrowser') }}
+              {{ `打开` }}
             </button>
             <button
               v-else-if="starting"
@@ -492,7 +494,7 @@ onMounted(() => {
               disabled
             >
               <span class="dl-spinner" />
-              {{ t('home.status.starting') }}
+              {{ `启动中` }}
             </button>
             <!-- Unknown is not stopped: the only useful move is to ask again, and
                a 启动 here is exactly the click that creates a second DSH. -->
@@ -504,7 +506,7 @@ onMounted(() => {
               @click="onRetry"
             >
               <DlIcon name="refresh" :size="13" />
-              {{ t('home.retryCheck') }}
+              {{ `重试` }}
             </button>
             <button
               v-else
@@ -515,7 +517,7 @@ onMounted(() => {
               @click="onStart"
             >
               <DlIcon name="play" :size="13" />
-              {{ t('home.start') }}
+              {{ `启动` }}
             </button>
           </div>
         </div>
@@ -528,7 +530,7 @@ onMounted(() => {
             @click="onRestart"
           >
             <DlIcon name="restart" :size="13" />
-            {{ t('home.restart') }}
+            {{ `重启` }}
           </button>
           <button
             class="dl-btn dl-btn--quiet inst-stop"
@@ -536,7 +538,7 @@ onMounted(() => {
             @click="onStop"
           >
             <DlIcon name="stop" :size="13" />
-            {{ t('home.stop') }}
+            {{ `停止` }}
           </button>
           <button
             v-if="canManagePlugins(inst.id)"
@@ -544,7 +546,7 @@ onMounted(() => {
             @click="openPlugins(inst.id, 'instances')"
           >
             <DlIcon name="plugin" :size="13" />
-            {{ t('profiles.managePlugins') }}
+            {{ `管理插件` }}
           </button>
         </div>
       </div>
@@ -564,40 +566,38 @@ onMounted(() => {
     <div v-if="expanded" class="inst-facts">
       <div class="facts-grid">
         <div class="fact">
-          <span class="fact-label">{{ t('instanceEdit.version') }}</span>
+          <span class="fact-label">{{ `DSH 版本` }}</span>
           <span class="fact-value dl-mono" :title="version?.dir">{{
             versionName
           }}</span>
         </div>
         <div class="fact">
-          <span class="fact-label">{{ t('instanceEdit.home') }}</span>
+          <span class="fact-label">{{ `DSH_HOME` }}</span>
           <span class="fact-value" :title="home?.path">
             {{ homeName }}
             <span class="fact-sub dl-mono">{{ home?.path }}</span>
           </span>
         </div>
         <div class="fact">
-          <span class="fact-label">{{ t('instanceEdit.defaultProfile') }}</span>
-          <span class="fact-value">{{
-            inst.default_profile || t('home.profileUnset')
-          }}</span>
+          <span class="fact-label">{{ `默认 Profile` }}</span>
+          <span class="fact-value">{{ inst.default_profile || `未设置` }}</span>
         </div>
         <div class="fact">
-          <span class="fact-label">{{ t('instanceEdit.port') }}</span>
+          <span class="fact-label">{{ `端口号` }}</span>
           <span class="fact-value dl-mono">{{ portLabel }}</span>
         </div>
         <!-- The two addresses of a remote instance, stated apart: where it really
            is, and where it is reachable from here. They are the same address
            only when the remote port was free on this Mac. -->
         <div v-if="remoteUrl" class="fact">
-          <span class="fact-label">{{ t('instances.remoteAddress') }}</span>
+          <span class="fact-label">{{ `远端位置` }}</span>
           <span class="fact-value fact-chips">
             <span class="fact-chip dl-mono" :title="remoteUrl">{{
               remoteUrl
             }}</span>
             <button
               class="dl-icon-btn"
-              :title="t('common.copy')"
+              :title="`复制`"
               @click="copy(remoteUrl!)"
             >
               <DlIcon name="copy" :size="12" />
@@ -605,14 +605,14 @@ onMounted(() => {
           </span>
         </div>
         <div v-if="remoteUrl && status.url" class="fact">
-          <span class="fact-label">{{ t('instances.localAddress') }}</span>
+          <span class="fact-label">{{ `本机可达` }}</span>
           <span class="fact-value fact-chips">
             <span class="fact-chip dl-mono" :title="status.url">{{
               status.url
             }}</span>
             <button
               class="dl-icon-btn"
-              :title="t('common.copy')"
+              :title="`复制`"
               @click="copy(status.url!)"
             >
               <DlIcon name="copy" :size="12" />
@@ -621,7 +621,7 @@ onMounted(() => {
         </div>
         <div class="fact">
           <span class="fact-label">
-            {{ t('instanceEdit.env') }}
+            {{ `环境变量覆写` }}
             <span v-if="envEntries.length" class="fact-count">{{
               envEntries.length
             }}</span>
@@ -637,25 +637,25 @@ onMounted(() => {
                 {{ key }}
               </span>
             </template>
-            <span v-else class="fact-sub">{{ t('instances.envNone') }}</span>
+            <span v-else class="fact-sub">{{ `无` }}</span>
           </span>
         </div>
         <div class="fact">
-          <span class="fact-label">{{ t('home.healthLogs') }}</span>
+          <span class="fact-label">{{ `自检` }}</span>
           <span class="fact-value">
             <span v-if="health.errors > 0" class="fact-bad">
-              {{ t('instances.healthErrors', { count: health.errors }) }}
+              {{ `${health.errors} 个错误` }}
             </span>
             <span v-else-if="health.warns > 0" class="fact-warn">
-              {{ t('instances.healthWarns', { count: health.warns }) }}
+              {{ `${health.warns} 个警告` }}
             </span>
             <!-- The dependency tree of a remote instance is on that machine, and
                the launcher does not read it: 「没有发现问题」 would be a claim it
                never checked. -->
             <span v-else-if="remote" class="fact-sub">{{
-              t('instances.healthNotChecked')
+              `远端实例还没有自检过`
             }}</span>
-            <span v-else class="fact-sub">{{ t('instances.healthOk') }}</span>
+            <span v-else class="fact-sub">{{ `没有异常` }}</span>
           </span>
         </div>
       </div>
@@ -664,7 +664,9 @@ onMounted(() => {
            control surface, and this is the sentence that keeps a remote
            instance from reading as if DSH were bound on this Mac. -->
       <p v-if="remoteUrl" class="facts-note">
-        {{ t('instances.addressHint') }}
+        {{
+          `远端实例的地址经本机的 ssh 转发到达：远端位置是它在那台机器上的地址，本机可达是它在这台 Mac 上的地址（远端端口在本机被占用时两者端口不同）。「打开」用的是本机可达这个。`
+        }}
       </p>
 
       <!-- The action bar is grouped by what an action acts on, and the groups
@@ -676,7 +678,7 @@ onMounted(() => {
         <div class="facts-line">
           <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
             <DlIcon name="terminal" :size="13" />
-            {{ t('home.openTerminal') }}
+            {{ `打开终端` }}
           </button>
           <!-- This Mac's file manager cannot open a directory on another
                machine, so that machine's DSH_HOME is handed over as what it
@@ -687,23 +689,23 @@ onMounted(() => {
               @click="remoteCopyAction.run('path')"
             >
               <DlIcon name="copy" :size="13" />
-              {{ t('instances.copyPath') }}
+              {{ `复制路径` }}
             </button>
             <button
               class="dl-btn dl-btn--quiet"
               @click="remoteCopyAction.run('command')"
             >
               <DlIcon name="copy" :size="13" />
-              {{ t('instances.copyCommand') }}
+              {{ `复制命令` }}
             </button>
           </template>
           <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
             <DlIcon name="folder" :size="13" />
-            {{ t('instanceEdit.openDir') }}
+            {{ `打开目录` }}
           </button>
           <button class="dl-btn dl-btn--quiet" @click="logAction.run()">
             <DlIcon name="log" :size="13" />
-            {{ t('instanceEdit.viewLog') }}
+            {{ `查看日志` }}
           </button>
         </div>
 
@@ -715,14 +717,14 @@ onMounted(() => {
         <div class="facts-line">
           <button class="dl-btn dl-btn--quiet" @click="openDetail">
             <DlIcon name="settings" :size="13" />
-            {{ t('instanceEdit.titleEdit') }}
+            {{ `实例设置` }}
           </button>
           <button
             class="dl-btn dl-btn--quiet"
             @click="emit('duplicate', inst.id)"
           >
             <DlIcon name="copy" :size="13" />
-            {{ t('instances.duplicate') }}
+            {{ `复制实例` }}
           </button>
           <button
             v-if="!running && !starting"
@@ -731,7 +733,7 @@ onMounted(() => {
             @click="refreshProfiles"
           >
             <DlIcon name="refresh" :size="13" />
-            {{ t('home.reloadProfiles') }}
+            {{ `重新读取 Profile 列表` }}
           </button>
           <!-- Removing the binding, next to the other actions that act on the
                binding itself. Only the record goes; the version and the
@@ -742,7 +744,7 @@ onMounted(() => {
             @click="confirmDelete"
           >
             <DlIcon name="trash" :size="13" />
-            {{ t('instances.table.delete') }}
+            {{ `删除` }}
           </button>
         </div>
       </div>

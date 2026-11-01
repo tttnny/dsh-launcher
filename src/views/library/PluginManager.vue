@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
@@ -24,7 +23,6 @@ import DlEmpty from '@/components/DlEmpty.vue'
 // applied / restart-required / overridden / failed / cancelled, or a refusal
 // carrying the instance's own localized reason.
 
-const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
@@ -63,10 +61,8 @@ const canFix = computed(
     !!instance.value && !!profile.value && instanceState.value !== 'starting',
 )
 const fixLabel = computed(() => {
-  if (unreachable.value) return t('home.retryCheck')
-  return instanceState.value === 'running'
-    ? t('plugins.instanceRestart')
-    : t('plugins.instanceStart')
+  if (unreachable.value) return `重试`
+  return instanceState.value === 'running' ? `重启实例` : `启动实例`
 })
 
 const fixAction = useAction(async () => {
@@ -174,19 +170,22 @@ function applicationOutcome(application: string): {
 } {
   switch (application) {
     case 'applied':
-      return { tone: 'success', label: t('plugins.outcomeApplied') }
+      return { tone: 'success', label: `已生效` }
     case 'restart-required':
-      return { tone: 'success', label: t('plugins.outcomeRestartRequired') }
+      return { tone: 'success', label: `需重启该实例后生效` }
     case 'overridden':
-      return { tone: 'warning', label: t('plugins.outcomeOverridden') }
+      return {
+        tone: 'warning',
+        label: `已被更高优先级的层覆盖，本次改动不生效`,
+      }
     case 'failed':
-      return { tone: 'warning', label: t('plugins.outcomeFailed') }
+      return { tone: 'warning', label: `改动已记录但未能生效` }
     case 'cancelled':
-      return { tone: 'info', label: t('plugins.outcomeCancelled') }
+      return { tone: 'info', label: `已取消` }
     default:
       return {
         tone: 'warning',
-        label: t('plugins.outcomeUnknown', { application }),
+        label: `实例返回了未知结果：${application}`,
       }
   }
 }
@@ -207,9 +206,7 @@ function renderOutcome(
     const why = o.diagnostic?.trim()
     return {
       tone: 'warning',
-      message: why
-        ? t('plugins.outcomeRefused', { reason: why })
-        : t('plugins.outcomeNoReason'),
+      message: why ? `未能改动：${why}` : `未能改动`,
     }
   }
   const { tone, label } = applicationOutcome(o.application)
@@ -304,13 +301,13 @@ const groups = computed(() =>
       {
         key: 'mine',
         tone: 'own' as const,
-        label: t('plugins.bundlesMineGroup'),
+        label: `你添加的`,
         items: ownLayers.value,
       },
       {
         key: 'shipped',
         tone: 'shipped' as const,
-        label: t('plugins.bundlesShippedGroup'),
+        label: `随 DSH 发布`,
         items: shippedLayers.value,
       },
     ] as const
@@ -349,10 +346,8 @@ async function toggleBundle(b: BundleItem, enabled: boolean) {
       enabled,
     })
     reportOutcome(outcome, {
-      applied: t('plugins.bundleApplied', { name: bundleName(b) }),
-      restartRequired: t('plugins.bundleAppliedRestart', {
-        name: bundleName(b),
-      }),
+      applied: `已更新补丁层「${bundleName(b)}」`,
+      restartRequired: `已更新补丁层「${bundleName(b)}」，需重启实例后生效`,
     })
     await load()
   } catch (e) {
@@ -380,10 +375,8 @@ async function removeBundle(b: BundleItem) {
       name: b.name,
     })
     reportOutcome(outcome, {
-      applied: t('plugins.bundleRemoved', { name: bundleName(b) }),
-      restartRequired: t('plugins.bundleRemovedRestart', {
-        name: bundleName(b),
-      }),
+      applied: `已卸载补丁层「${bundleName(b)}」`,
+      restartRequired: `已卸载补丁层「${bundleName(b)}」，需重启实例后生效`,
     })
     await load()
   } catch (e) {
@@ -401,7 +394,7 @@ async function removeBundle(b: BundleItem) {
   <div class="dl-page">
     <header class="dl-head">
       <div class="dl-head-text">
-        <h1>{{ t('plugins.pageTitle') }}</h1>
+        <h1>{{ `插件管理` }}</h1>
         <p class="dl-head-sub plugin-scope">
           <span
             v-if="scopeInstance"
@@ -419,15 +412,13 @@ async function removeBundle(b: BundleItem) {
       <div class="dl-head-actions">
         <button class="dl-btn dl-btn--quiet" @click="goBack">
           <DlIcon name="back" :size="13" />
-          {{
-            instance ? t('plugins.backToInstance') : t('plugins.backToProfiles')
-          }}
+          {{ instance ? `返回实例` : `返回 Profile` }}
         </button>
       </div>
     </header>
 
     <div v-if="!homeId || !profile" class="dl-surface">
-      <DlEmpty icon="plugin" :description="t('plugins.pluginsPickProfile')" />
+      <DlEmpty icon="plugin" :description="`请先选择一个 Profile`" />
     </div>
 
     <template v-else>
@@ -453,7 +444,7 @@ async function removeBundle(b: BundleItem) {
            old ones until it comes back. -->
       <div v-else-if="restartNeeded" class="restart-banner">
         <DlIcon name="restart" :size="14" />
-        <span>{{ t('plugins.restartNeeded') }}</span>
+        <span>{{ `补丁层的改动要重启实例后才生效` }}</span>
         <span class="readonly-spacer" />
         <button
           v-if="instanceId"
@@ -462,11 +453,11 @@ async function removeBundle(b: BundleItem) {
           @click="fixInstance"
         >
           <DlIcon name="restart" :size="13" />
-          {{ t('plugins.instanceRestart') }}
+          {{ `重启实例` }}
         </button>
         <button
           class="dl-icon-btn"
-          :title="t('common.close')"
+          :title="`关闭`"
           @click="restartNeeded = false"
         >
           <DlIcon name="close" :size="12" />
@@ -478,20 +469,15 @@ async function removeBundle(b: BundleItem) {
            reported as a count, not managed one by one. -->
       <section v-if="managed" class="dl-section">
         <div class="dl-section-label">
-          {{ t('plugins.bundlesTitle') }}
+          {{ `补丁层` }}
           <span class="dl-section-count">
-            {{
-              t('plugins.bundlesMountedOf', {
-                mounted: mountedCount,
-                total: bundles.length,
-              })
-            }}
+            {{ `已挂载 ${mountedCount} / ${bundles.length}` }}
           </span>
         </div>
 
         <div class="dl-surface bundle-list">
           <div v-if="bundles.length === 0" class="dl-row-none">
-            {{ loading ? t('common.loading') : t('plugins.bundlesEmpty') }}
+            {{ loading ? `加载中…` : `该 Profile 没有可管理的补丁层` }}
           </div>
 
           <template v-else>
@@ -512,7 +498,7 @@ async function removeBundle(b: BundleItem) {
               </button>
               <template v-if="expandedGroups[g.key]">
                 <div v-if="g.items.length === 0" class="dl-row-none">
-                  {{ t('plugins.bundlesNoneMine') }}
+                  {{ `没有你自己添加的补丁层（下面那一组是 DSH 自带的）` }}
                 </div>
                 <BundleRow
                   v-for="b in g.items"
@@ -530,7 +516,11 @@ async function removeBundle(b: BundleItem) {
           </template>
         </div>
 
-        <p class="bundle-hint">{{ t('plugins.bundleOrderHint') }}</p>
+        <p class="bundle-hint">
+          {{
+            `顺序 = 优先级：补丁层按列表从上到下依次应用。重新挂载的补丁层会排到末尾，优先级随之改变。`
+          }}
+        </p>
       </section>
 
       <!-- Read-only: the layers the profile's own files declare. No folds and
@@ -538,14 +528,9 @@ async function removeBundle(b: BundleItem) {
            so this is a flat list of facts with the switches locked. -->
       <section v-else class="dl-section">
         <div class="dl-section-label">
-          {{ t('plugins.offlineTitle') }}
+          {{ `这个 Profile 装了什么` }}
           <span v-if="bundles.length" class="dl-section-count">
-            {{
-              t('plugins.bundlesMountedOf', {
-                mounted: mountedCount,
-                total: bundles.length,
-              })
-            }}
+            {{ `已挂载 ${mountedCount} / ${bundles.length}` }}
           </span>
         </div>
 
@@ -553,10 +538,10 @@ async function removeBundle(b: BundleItem) {
           <div v-if="bundles.length === 0" class="dl-row-none">
             {{
               loading
-                ? t('common.loading')
+                ? `加载中…`
                 : unreadable
-                  ? t('plugins.offlineUnreadable')
-                  : t('plugins.offlineEmpty')
+                  ? `读不到这个 Profile 上的文件（原因见上面那条提示）`
+                  : `这个 Profile 还没有装任何补丁层`
             }}
           </div>
           <template v-else>
@@ -578,7 +563,9 @@ async function removeBundle(b: BundleItem) {
              one action this state must not offer. The banner above says what
              happened and how to leave it. -->
         <p v-if="!unreadable" class="bundle-hint">
-          {{ t('plugins.offlineNote') }}
+          {{
+            `读自 Profile 自己声明的层与依赖：只读投影，没有实例的实时状态、可用性、卸载规则与条目数。启动实例后可在这里管理。`
+          }}
         </p>
       </section>
     </template>

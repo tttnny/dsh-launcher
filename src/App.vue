@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
 import type { DshInstance, ThemeMode } from '@/api/types'
@@ -16,7 +15,6 @@ import DlIcon from '@/components/DlIcon.vue'
 
 const route = useRoute()
 const router = useRouter()
-const { t, locale } = useI18n()
 const store = useLauncherStore()
 const isTauri = api.isTauri
 
@@ -53,7 +51,6 @@ function onSystemThemeChange() {
 
 onMounted(async () => {
   await store.init()
-  locale.value = store.settings.locale || 'zh-CN'
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
 
@@ -168,11 +165,9 @@ async function onMenuCheckUpdate() {
   checkingMenuUpdate = true
   try {
     const info = await api.checkLauncherUpdate('dev')
-    if (info.up_to_date) Message.success(t('settings.update.upToDate'))
+    if (info.up_to_date) Message.success(`当前已是最新版本`)
     else {
-      Message.info(
-        t('settings.update.available', { version: info.latest ?? '' }),
-      )
+      Message.info(`发现新版本 v${info.latest ?? ''}`)
       if (info.url) await api.openExternal(info.url)
     }
   } catch (e) {
@@ -239,7 +234,7 @@ async function launchFromDeepLink(u: URL) {
   if (!ref) return
   const inst = launchTarget(ref)
   if (!inst) {
-    Message.error(t('app.launchInstanceMissing', { ref }))
+    Message.error(`这台主机上没有名为「${ref}」的实例`)
     return
   }
   try {
@@ -278,13 +273,6 @@ onUnmounted(() => {
   unlistenMenu.forEach((un) => un())
   unlistenMenu = []
 })
-
-watch(
-  () => store.settings.locale,
-  (v) => {
-    if (v) locale.value = v
-  },
-)
 
 watch(
   () => store.settings.theme,
@@ -413,13 +401,11 @@ async function onHeaderDoubleClick(e: MouseEvent) {
         <button
           class="dl-nav-item"
           :class="{ 'is-active': navSelected === 'instances' }"
-          :title="siderCollapsed ? t('nav.instances') : ''"
+          :title="siderCollapsed ? `实例` : ''"
           @click="navGo('instances')"
         >
           <DlIcon name="instances" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{
-            t('nav.instances')
-          }}</span>
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `实例` }}</span>
           <span
             v-if="!siderCollapsed && runningCount > 0"
             class="dl-nav-badge"
@@ -430,25 +416,23 @@ async function onHeaderDoubleClick(e: MouseEvent) {
         <button
           class="dl-nav-item"
           :class="{ 'is-active': navSelected === 'library' }"
-          :title="siderCollapsed ? t('nav.library') : ''"
+          :title="siderCollapsed ? `资源库` : ''"
           @click="navGo('library')"
         >
           <DlIcon name="library" :size="17" />
           <span v-if="!siderCollapsed" class="dl-nav-label">{{
-            t('nav.library')
+            `资源库`
           }}</span>
         </button>
 
         <button
           class="dl-nav-item"
           :class="{ 'is-active': navSelected === 'settings' }"
-          :title="siderCollapsed ? t('nav.settings') : ''"
+          :title="siderCollapsed ? `设置` : ''"
           @click="navGo('settings')"
         >
           <DlIcon name="settings" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{
-            t('nav.settings')
-          }}</span>
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `设置` }}</span>
         </button>
       </nav>
 
@@ -457,13 +441,11 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           v-if="store.healthTotalCount > 0"
           class="dl-foot-row"
           :class="store.healthErrorCount > 0 ? 'is-danger' : 'is-warn'"
-          :title="t('home.healthLogs')"
+          :title="`自检`"
           @click="navGo('instances')"
         >
           <DlIcon name="health" :size="15" />
-          <span v-if="!siderCollapsed" class="dl-foot-label">{{
-            t('home.healthLogs')
-          }}</span>
+          <span v-if="!siderCollapsed" class="dl-foot-label">{{ `自检` }}</span>
           <span v-if="!siderCollapsed" class="dl-foot-count">{{
             store.healthTotalCount
           }}</span>
@@ -472,12 +454,12 @@ async function onHeaderDoubleClick(e: MouseEvent) {
         <button
           class="dl-foot-row"
           :class="{ 'is-danger': !envOk }"
-          :title="t('setup.title')"
+          :title="`环境检测`"
           @click="router.push({ name: 'setup' })"
         >
           <DlIcon name="terminal" :size="15" />
           <span v-if="!siderCollapsed" class="dl-foot-label">
-            {{ envOk ? t('nav.envReady') : t('nav.envMissing') }}
+            {{ envOk ? `环境就绪` : `环境未就绪` }}
           </span>
         </button>
       </div>
@@ -491,7 +473,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
       >
         <button
           class="dl-icon-btn"
-          :title="t('nav.toggleSider')"
+          :title="`收起 / 展开侧栏`"
           data-no-drag
           @click="toggleSider"
         >
@@ -500,7 +482,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
         <button
           v-if="showBack"
           class="dl-icon-btn"
-          :title="t('common.back')"
+          :title="`返回`"
           data-no-drag
           @click="onHeaderBack"
         >
@@ -512,7 +494,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           class="dl-tag dl-tag--muted"
           style="margin-left: 4px"
         >
-          {{ t('app.mockBadge') }}
+          {{ `浏览器预览` }}
         </span>
 
         <span class="dl-toolbar-spacer" />

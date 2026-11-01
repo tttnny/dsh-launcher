@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { useI18n } from 'vue-i18n'
 import type { BundleItem } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 
@@ -28,8 +27,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{ toggle: [enabled: boolean]; remove: [] }>()
 
-const { t } = useI18n()
-
 function name(): string {
   return props.bundle.title?.trim() || props.bundle.name
 }
@@ -47,16 +44,14 @@ function bundleHasOwnTitle(): boolean {
  */
 function managedReason(): string | null {
   return props.bundle.readOnlyReason === 'management-required'
-    ? t('plugins.bundleManagedWhy')
+    ? `这个补丁层撑着 DSH 自己的插件管理，只能停用，不能卸载`
     : null
 }
 
 /** A layer with no rows is a real thing (an install-only or config-only
  *  layer); printing "0 条目" would be noise, so the fact stays absent. */
 function rowCount(): string | null {
-  return props.bundle.rowCount > 0
-    ? t('plugins.bundleRows', { count: props.bundle.rowCount })
-    : null
+  return props.bundle.rowCount > 0 ? `${props.bundle.rowCount} 个条目` : null
 }
 </script>
 
@@ -80,14 +75,14 @@ function rowCount(): string | null {
         }}</span>
         <span v-if="rowCount()" class="bundle-rows">{{ rowCount() }}</span>
         <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{
-          t('plugins.bundleOptional')
+          `可选`
         }}</span>
         <span
           v-if="managedReason()"
           class="dl-tag dl-tag--muted"
           :title="managedReason()!"
         >
-          {{ t('plugins.bundleManaged') }}
+          {{ `DSH 自身依赖` }}
         </span>
         <!-- "The package files are unreadable" already says the layer cannot
              load; the error code would be a second amber tag saying it twice. -->
@@ -95,14 +90,14 @@ function rowCount(): string | null {
           v-if="bundle.availability === 'missing'"
           class="dl-tag dl-tag--warn"
         >
-          {{ t('plugins.bundleMissing') }}
+          {{ `包文件读不到` }}
         </span>
         <span
           v-else-if="bundle.errorCode"
           class="dl-tag dl-tag--warn"
           :title="bundle.errorCode"
         >
-          {{ t('plugins.bundleErrored') }}
+          {{ `加载失败` }}
         </span>
       </div>
       <span v-if="bundleHasOwnTitle()" class="bundle-sub dl-mono">{{
@@ -119,15 +114,15 @@ function rowCount(): string | null {
       />
       <a-popconfirm
         v-if="managed && bundle.removable"
-        :content="t('plugins.bundleRemoveConfirm', { name: name() })"
-        :ok-text="t('plugins.bundleRemoveOk')"
-        :cancel-text="t('common.cancel')"
+        :content="`卸载补丁层「${name()}」？它带来的条目与配置一起消失，这个 Profile 也不再依赖该包（本地 link 指向的源码目录不受影响）。`"
+        :ok-text="`卸载`"
+        :cancel-text="`取消`"
         modal-class="dl-sheet"
         @ok="emit('remove')"
       >
         <button class="dl-btn dl-btn--danger" :disabled="pending || !!locked">
           <DlIcon name="trash" :size="13" />
-          {{ t('plugins.bundleRemove') }}
+          {{ `卸载` }}
         </button>
       </a-popconfirm>
     </div>

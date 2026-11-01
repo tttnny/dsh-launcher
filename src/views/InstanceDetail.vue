@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
@@ -20,7 +19,6 @@ import InstanceAvatar from '@/components/InstanceAvatar.vue'
 
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
 const store = useLauncherStore()
 const { canManagePlugins, openPlugins } = usePluginLink()
 
@@ -45,8 +43,8 @@ const RESERVED_KEYS = new Set(['DSH_HOME'])
 
 function envKeyError(row: EnvRow): string | null {
   if (!row.key) return null
-  if (RESERVED_KEYS.has(row.key)) return t('instanceEdit.envKeyReserved')
-  if (!ENV_KEY_RE.test(row.key)) return t('instanceEdit.envKeyInvalid')
+  if (RESERVED_KEYS.has(row.key)) return `DSH_HOME 由启动器管理，不可覆写`
+  if (!ENV_KEY_RE.test(row.key)) return `需匹配 [A-Za-z_][A-Za-z0-9_]*`
   return null
 }
 
@@ -57,7 +55,7 @@ onMounted(async () => {
     store.instanceById(id.value) ??
     (await api.listInstances(null, true)).find((i) => i.id === id.value)
   if (!inst) {
-    Message.error(t('instanceEdit.notFound'))
+    Message.error(`实例不存在`)
     void router.replace({ name: 'instances' })
     return
   }
@@ -69,6 +67,14 @@ onMounted(async () => {
 
 const current = computed(() => store.instanceById(id.value))
 const status = computed(() => store.statusOf(id.value))
+
+const STATUS_LABELS: Record<string, string> = {
+  stopped: '已停止',
+  starting: '启动中',
+  running: '运行中',
+  exited: '已退出',
+  unreachable: '主机不可达',
+}
 /** Where a remote instance really is, as that machine printed it — stated next
  * to the forwarded address so the two are never read as one. */
 const remoteUrl = computed(() => status.value.remote_url ?? null)
@@ -189,7 +195,7 @@ function parsePort(raw: string): number | null {
 
 const portError = computed(() =>
   portInput.value.trim() && parsePort(portInput.value) === null
-    ? t('instanceEdit.portInvalid')
+    ? `端口号需为 1-65535 的整数`
     : '',
 )
 
@@ -220,7 +226,7 @@ const saveAction = useAction(
     }
     return api.updateInstance(updated, inst.host_id)
   },
-  { success: () => t('instanceEdit.saved') },
+  { success: () => `实例已保存` },
 )
 
 const saving = computed(() => saveAction.busy['*'])
@@ -265,7 +271,7 @@ const iconAction = useAction(
     await api.setInstanceIcon(id.value, source)
     return true
   },
-  { success: () => t('instanceEdit.iconUpdated') },
+  { success: () => `实例图标已更新` },
 )
 
 const clearIconAction = useAction(async () => {
@@ -310,13 +316,13 @@ async function clearIcon() {
 // --- Quick links --------------------------------------------------------------
 
 const dirAction = useAction(() => api.openInstanceDirectory(id.value), {
-  success: (path) => t('instanceEdit.dirOpened', { path }),
+  success: (path) => `已在访达中打开目录：${path}`,
 })
 const logAction = useAction(() => api.openInstanceLog(id.value), {
-  success: (path) => t('instanceEdit.logOpened', { path }),
+  success: (path) => `已在访达中定位日志：${path}`,
 })
 const terminalAction = useAction(() => api.openInstanceTerminal(id.value), {
-  success: (label) => t('home.terminalOpened', { label }),
+  success: (label) => `已打开终端：${label}`,
 })
 // A remote DSH_HOME is a directory on that machine: what the user can use from
 // here is the path and one command, not a file manager that cannot reach it.
@@ -325,7 +331,7 @@ const remoteCopyAction = useAction(async (what: 'path' | 'command') => {
   const location = await api.instanceRemoteLocation(id.value)
   await copy(
     what === 'path' ? location.path : location.command,
-    what === 'path' ? 'instances.pathCopied' : 'instances.commandCopied',
+    what === 'path' ? '远端路径已复制' : '命令已复制，粘到终端里就能连上去',
   )
 })
 
@@ -341,20 +347,17 @@ const deleteAction = useAction(async () => {
 function confirmDelete() {
   if (!current.value) return
   Modal.confirm({
-    title: t('instances.deleteTitle', { name: name.value }),
-    content: t('instances.deleteContent', {
-      name: name.value,
-      home: homeLabel.value,
-    }),
-    okText: t('instances.table.delete'),
-    cancelText: t('common.cancel'),
+    title: `删除实例「${name.value}」？`,
+    content: `只删除启动器里的这条实例记录：DSH 版本和 DSH_HOME「${homeLabel.value}」都会保留。实例专属图标会一并删除。`,
+    okText: `删除`,
+    cancelText: `取消`,
     okButtonProps: { status: 'danger' },
     modalClass: 'dl-sheet',
     onOk: async () => {
       const ok = await deleteAction.run()
       if (ok !== true) return
       await store.refreshInstances()
-      Message.success(t('instances.deleted', { name: name.value }))
+      Message.success(`已删除实例「${name.value}」`)
       void router.push({ name: 'instances' })
     },
   })
@@ -374,15 +377,13 @@ function removeEnvRow(idx: number) {
       <div class="dl-head-text">
         <h1 class="detail-title">
           <InstanceAvatar :id="id" :icon="current?.icon" :size="34" />
-          <span class="detail-name">{{
-            name.trim() || t('instanceEdit.titleEdit')
-          }}</span>
+          <span class="detail-name">{{ name.trim() || `实例设置` }}</span>
           <span
             class="dl-status"
             :class="`is-${status.state}`"
             :title="unreachable ? hostReason : undefined"
           >
-            {{ t(`home.status.${status.state}`) }}
+            {{ STATUS_LABELS[status.state] }}
           </span>
         </h1>
         <p class="dl-head-sub detail-sub">
@@ -403,13 +404,13 @@ function removeEnvRow(idx: number) {
              the board states the same pair; a page opened straight at this
              instance must not have to be read without them. -->
         <p v-if="remoteUrl" class="dl-head-sub detail-sub detail-addresses">
-          <span class="detail-dot">{{ t('instances.remoteAddress') }}</span>
+          <span class="detail-dot">{{ `远端位置` }}</span>
           <span class="dl-mono detail-id" :title="remoteUrl">{{
             remoteUrl
           }}</span>
           <template v-if="status.url">
             <span class="detail-dot">·</span>
-            <span>{{ t('instances.localAddress') }}</span>
+            <span>{{ `本机可达` }}</span>
             <span class="dl-mono detail-id" :title="status.url">{{
               status.url
             }}</span>
@@ -427,7 +428,7 @@ function removeEnvRow(idx: number) {
           @click="retryAction.run(id)"
         >
           <DlIcon name="refresh" :size="13" />
-          {{ t('home.retryCheck') }}
+          {{ `重试` }}
         </button>
         <!-- Only a running instance has a plugin manager to talk to. -->
         <button
@@ -436,11 +437,11 @@ function removeEnvRow(idx: number) {
           @click="openPlugins(id, 'instance-detail')"
         >
           <DlIcon name="plugin" :size="13" />
-          {{ t('profiles.managePlugins') }}
+          {{ `管理插件` }}
         </button>
         <button class="dl-btn dl-btn--quiet" @click="terminalAction.run()">
           <DlIcon name="terminal" :size="13" />
-          {{ t('home.openTerminal') }}
+          {{ `打开终端` }}
         </button>
         <template v-if="remote">
           <button
@@ -448,23 +449,23 @@ function removeEnvRow(idx: number) {
             @click="remoteCopyAction.run('path')"
           >
             <DlIcon name="copy" :size="13" />
-            {{ t('instances.copyPath') }}
+            {{ `复制路径` }}
           </button>
           <button
             class="dl-btn dl-btn--quiet"
             @click="remoteCopyAction.run('command')"
           >
             <DlIcon name="copy" :size="13" />
-            {{ t('instances.copyCommand') }}
+            {{ `复制命令` }}
           </button>
         </template>
         <button v-else class="dl-btn dl-btn--quiet" @click="dirAction.run()">
           <DlIcon name="folder" :size="13" />
-          {{ t('instanceEdit.openDir') }}
+          {{ `打开目录` }}
         </button>
         <button class="dl-btn dl-btn--quiet" @click="logAction.run()">
           <DlIcon name="log" :size="13" />
-          {{ t('instanceEdit.viewLog') }}
+          {{ `查看日志` }}
         </button>
       </div>
     </header>
@@ -477,27 +478,29 @@ function removeEnvRow(idx: number) {
       <div class="detail-col">
         <section class="dl-section">
           <div class="dl-section-label">
-            {{ t('instanceEdit.sectionBinding') }}
+            {{ `绑定` }}
           </div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('instanceEdit.name') }}</span>
+                <span class="dl-row-label">{{ `实例名称` }}</span>
               </div>
               <input
                 v-model="name"
                 class="dl-input detail-ctl"
-                :placeholder="t('instanceEdit.namePlaceholder')"
+                :placeholder="`例如：主实例`"
               />
             </div>
 
             <div v-if="hostError" class="dl-surface dl-failure">
-              <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+              <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
               <p class="dl-failure-text">{{ hostError }}</p>
-              <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+              <p class="dl-failure-hint">
+                {{ `上面是那台机器回的话。修好之后再试一次。` }}
+              </p>
               <div style="margin-top: 6px">
                 <button class="dl-btn" @click="retryHost">
-                  {{ t('common.refresh') }}
+                  {{ `刷新` }}
                 </button>
               </div>
             </div>
@@ -505,9 +508,7 @@ function removeEnvRow(idx: number) {
             <template v-else>
               <div class="dl-row">
                 <div class="dl-row-info">
-                  <span class="dl-row-label">{{
-                    t('instanceEdit.version')
-                  }}</span>
+                  <span class="dl-row-label">{{ `DSH 版本` }}</span>
                 </div>
                 <a-select v-model="versionId" style="width: 230px">
                   <a-option
@@ -521,7 +522,7 @@ function removeEnvRow(idx: number) {
 
               <div class="dl-row">
                 <div class="dl-row-info">
-                  <span class="dl-row-label">{{ t('instanceEdit.home') }}</span>
+                  <span class="dl-row-label">{{ `DSH_HOME` }}</span>
                 </div>
                 <a-select
                   v-model="homeId"
@@ -537,17 +538,15 @@ function removeEnvRow(idx: number) {
 
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('instanceEdit.defaultProfile')
-                }}</span>
+                <span class="dl-row-label">{{ `默认 Profile` }}</span>
                 <span class="dl-row-desc">{{
-                  t('instanceEdit.defaultProfileHint')
+                  `与上方 DSH_HOME 联动：切换 HOME 后请重新确认。`
                 }}</span>
               </div>
               <a-select
                 v-model="defaultProfile"
                 style="width: 230px"
-                :placeholder="t('instanceEdit.defaultProfilePlaceholder')"
+                :placeholder="`启动时默认选择的 Profile`"
                 allow-clear
               >
                 <a-option v-for="p in profiles" :key="p" :value="p">{{
@@ -560,14 +559,14 @@ function removeEnvRow(idx: number) {
 
         <section class="dl-section">
           <div class="dl-section-label">
-            {{ t('instanceEdit.sectionLaunch') }}
+            {{ `启动` }}
           </div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{ t('instanceEdit.port') }}</span>
+                <span class="dl-row-label">{{ `端口号` }}</span>
                 <span class="dl-row-desc">{{
-                  t('instanceEdit.portHint')
+                  `Web 界面监听的端口；留空表示随机端口。随实例设置一起保存，运行中的实例需重启后生效。`
                 }}</span>
               </div>
               <div class="detail-inline">
@@ -575,7 +574,7 @@ function removeEnvRow(idx: number) {
                   v-model="portInput"
                   class="dl-input dl-input--mono detail-port"
                   :class="{ 'dl-input--error': !!portError }"
-                  :placeholder="t('instanceEdit.portPlaceholder')"
+                  :placeholder="`留空 = 随机端口`"
                 />
                 <span v-if="portError" class="dl-error-text">{{
                   portError
@@ -588,7 +587,7 @@ function removeEnvRow(idx: number) {
 
       <div class="detail-col">
         <section class="dl-section">
-          <div class="dl-section-label">{{ t('instanceEdit.icon') }}</div>
+          <div class="dl-section-label">{{ `实例图标` }}</div>
           <div class="dl-surface detail-pad">
             <div class="icon-block">
               <span class="icon-preview">
@@ -606,14 +605,14 @@ function removeEnvRow(idx: number) {
                   <input
                     v-model="iconInput"
                     class="dl-input icon-url"
-                    :placeholder="t('instanceEdit.iconUrlHint')"
+                    :placeholder="`https:// 图片地址`"
                   />
                   <button
                     class="dl-btn dl-btn--quiet"
                     :disabled="!iconInput.trim() || iconAction.busy['*']"
                     @click="applyIconInput"
                   >
-                    {{ t('instanceEdit.iconApply') }}
+                    {{ `应用` }}
                   </button>
                 </div>
                 <div class="detail-inline">
@@ -622,14 +621,14 @@ function removeEnvRow(idx: number) {
                     :disabled="iconAction.busy['*']"
                     @click="pickIconFile"
                   >
-                    {{ t('instanceEdit.iconPickFile') }}
+                    {{ `选择图片` }}
                   </button>
                   <button
                     v-if="iconUrl"
                     class="dl-btn dl-btn--danger"
                     @click="clearIcon"
                   >
-                    {{ t('instanceEdit.iconClear') }}
+                    {{ `恢复默认` }}
                   </button>
                 </div>
               </div>
@@ -639,23 +638,27 @@ function removeEnvRow(idx: number) {
 
         <section class="dl-section">
           <div class="dl-section-label">
-            {{ t('instanceEdit.env') }}
+            {{ `环境变量覆写` }}
             <span class="dl-section-count">{{ envRows.length }}</span>
           </div>
           <div class="dl-surface detail-pad">
-            <p class="dl-row-desc env-desc">{{ t('instanceEdit.envDesc') }}</p>
+            <p class="dl-row-desc env-desc">
+              {{
+                `启动实例时注入的运行时环境变量，覆盖同名系统变量。DSH_HOME 由启动器注入，不可覆写。`
+              }}
+            </p>
             <div v-for="(row, idx) in envRows" :key="idx" class="env-row">
               <input
                 v-model="row.key"
                 class="dl-input dl-input--mono env-key"
                 :class="{ 'dl-input--error': !!envKeyError(row) }"
-                :placeholder="t('instanceEdit.envKey')"
+                :placeholder="`变量名`"
               />
               <span class="env-eq">=</span>
               <input
                 v-model="row.value"
                 class="dl-input dl-input--mono env-value"
-                :placeholder="t('instanceEdit.envValue')"
+                :placeholder="`值`"
               />
               <button class="dl-icon-btn" @click="removeEnvRow(idx)">
                 <DlIcon name="trash" :size="14" />
@@ -666,21 +669,21 @@ function removeEnvRow(idx: number) {
             </div>
             <button class="dl-btn dl-btn--quiet" @click="addEnvRow">
               <DlIcon name="plus" :size="13" />
-              {{ t('instanceEdit.envAdd') }}
+              {{ `添加一行` }}
             </button>
           </div>
         </section>
 
         <section class="dl-section">
           <div class="dl-section-label">
-            {{ t('instanceEdit.sectionDanger') }}
+            {{ `危险操作` }}
           </div>
           <div class="dl-surface detail-pad danger-card">
             <div class="danger-text">
-              <span class="danger-title">{{
-                t('instances.deleteTitleShort')
+              <span class="danger-title">{{ `删除这个实例` }}</span>
+              <span class="dl-row-desc">{{
+                `版本与 DSH_HOME 是共享资源，删除实例不会碰到它们。`
               }}</span>
-              <span class="dl-row-desc">{{ t('instances.deleteHint') }}</span>
             </div>
             <button
               class="dl-btn dl-btn--danger"
@@ -688,7 +691,7 @@ function removeEnvRow(idx: number) {
               @click="confirmDelete"
             >
               <DlIcon name="trash" :size="13" />
-              {{ t('instances.table.delete') }}
+              {{ `删除` }}
             </button>
           </div>
         </section>
@@ -697,22 +700,20 @@ function removeEnvRow(idx: number) {
 
     <!-- Footer: the sticky save bar for the whole form. -->
     <div class="detail-footer">
-      <span v-if="dirty" class="footer-dirty">{{
-        t('instanceEdit.unsaved')
-      }}</span>
+      <span v-if="dirty" class="footer-dirty">{{ `有未保存的修改` }}</span>
       <button
         class="dl-btn dl-btn--quiet"
         :disabled="!dirty || saving"
         @click="onCancel"
       >
-        {{ t('instanceEdit.cancel') }}
+        {{ `取消` }}
       </button>
       <button
         class="dl-btn dl-btn--primary"
         :disabled="!formValid || !dirty || saving"
         @click="onSave"
       >
-        {{ t('instanceEdit.save') }}
+        {{ `保存` }}
       </button>
     </div>
   </div>

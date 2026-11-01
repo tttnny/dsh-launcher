@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { Message, Modal } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { installKey, useLauncherStore } from '@/stores/launcher'
@@ -15,7 +14,6 @@ import DlRefreshButton from '@/components/DlRefreshButton.vue'
 // it installs, on the machine it installs onto, and there is no task page to
 // visit.
 
-const { t } = useI18n()
 const store = useLauncherStore()
 
 onMounted(() => {
@@ -41,9 +39,7 @@ const installedVersions = computed(() =>
 /** The machine an install goes onto: the Library's current host. */
 const hostLabel = computed(() => {
   const host = store.currentHost
-  return host?.builtin
-    ? t('versions.hostLocal')
-    : (host?.display_name ?? store.currentHostId)
+  return host?.builtin ? `本机` : (host?.display_name ?? store.currentHostId)
 })
 
 // Remote versions split into what can be installed and what already is.
@@ -102,8 +98,7 @@ const installAction = useAction(
   },
   {
     key: (version) => version,
-    success: ({ version, host }) =>
-      t('versions.installTaskStarted', { version, host }),
+    success: ({ version, host }) => `已开始在「${host}」上安装 DSH ${version}`,
   },
 )
 
@@ -128,23 +123,17 @@ function recentLogs(task: TaskInfo): string[] {
 
 function onInstall(row: RemoteVersion) {
   if (installedSet.value.has(row.version)) {
-    Message.info(t('versions.alreadyInstalled', { version: row.version }))
+    Message.info(`版本 ${row.version} 已经安装`)
     return
   }
   const isSourceBuild = row.source === 'github'
   Modal.confirm({
-    title: t('versions.confirmInstallTitle', { host: hostLabel.value }),
+    title: `安装版本并创建实例（${hostLabel.value}）`,
     content: isSourceBuild
-      ? t('versions.confirmInstallSourceContent', {
-          version: row.version,
-          host: hostLabel.value,
-        })
-      : t('versions.confirmInstallContent', {
-          version: row.version,
-          host: hostLabel.value,
-        }),
-    okText: t('versions.installNow'),
-    cancelText: t('common.cancel'),
+      ? `在「${hostLabel.value}」上安装 DSH ${row.version}？该版本只在 GitHub 发布，会在那台机器上从源码克隆并构建（可能较慢），完成后自动创建实例与专属目录。`
+      : `在「${hostLabel.value}」上下载并安装 DSH ${row.version}？完成后会在那台机器上创建对应实例与专属目录。`,
+    okText: `安装`,
+    cancelText: `取消`,
     modalClass: 'dl-sheet',
     onOk: async () => {
       const started = await installAction.run(row.version)
@@ -175,7 +164,7 @@ const removeAction = useAction(
   },
   {
     key: (id) => id,
-    success: (version) => t('versions.versionDeleted', { version }),
+    success: (version) => `版本 ${version} 已删除`,
   },
 )
 
@@ -197,9 +186,9 @@ const pathLinkAction = useAction(
   {
     key: (v) => v.id,
     success: ({ linked, version }) =>
-      t(linked ? 'versions.pathLinkRemoved' : 'versions.pathLinkAdded', {
-        version,
-      }),
+      linked
+        ? `版本 ${version} 的 dsh 登记已取消`
+        : `版本 ${version} 已登记为 dsh`,
   },
 )
 </script>
@@ -211,24 +200,26 @@ const pathLinkAction = useAction(
        instead of showing it. -->
   <section class="dl-section">
     <div class="dl-section-label">
-      {{ t('versions.installedTitle') }}
+      {{ `已安装` }}
       <span class="dl-section-count">{{ installedVersions.length }}</span>
       <span class="ver-label-spacer" />
       <DlRefreshButton
         class="dl-icon-btn"
-        :title="t('common.refresh')"
+        :title="`刷新`"
         :action="() => store.loadHostResources(store.currentHostId)"
       />
     </div>
 
     <div v-if="store.versionError" class="dl-surface dl-failure">
-      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
       <p class="dl-failure-text">{{ store.versionError }}</p>
-      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+      <p class="dl-failure-hint">
+        {{ `上面是那台机器回的话。修好之后再试一次。` }}
+      </p>
     </div>
 
     <div v-else-if="installedVersions.length === 0" class="dl-surface">
-      <DlEmpty icon="version" :description="t('versions.emptyInstalled')" />
+      <DlEmpty icon="version" :description="`还没有安装任何 DSH 版本`" />
     </div>
 
     <div v-else class="dl-surface">
@@ -238,51 +229,42 @@ const pathLinkAction = useAction(
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
             <span v-if="v.bin_ready" class="dl-tag dl-tag--run">{{
-              t('versions.installedTag')
+              `已安装`
             }}</span>
             <span
               v-else
               class="dl-tag dl-tag--warn"
-              :title="t('versions.binMissingHint')"
+              :title="`这个版本的启动文件不在，装一次才算装好。`"
             >
-              {{ t('versions.binMissing') }}
+              {{ `安装不完整` }}
             </span>
             <span
               v-if="v.path_linked"
               class="dl-tag dl-tag--muted"
-              :title="t('versions.pathLinkHint')"
+              :title="`在版本所在主机的 ~/.local/bin 建立 dsh 命令，让 magpie、终端等按命令名查找 dsh 的程序找到这个版本。同一台机器上同一时间只能登记一个版本。`"
             >
-              {{ t('versions.pathLinkTag') }}
+              {{ `已在 PATH` }}
             </span>
           </div>
           <span class="ver-path dl-mono" :title="v.dir">{{ v.dir }}</span>
         </div>
         <span class="ver-used dl-tnum">{{
-          t('versions.usedBy', { count: usedByCount(v.id) })
+          `${usedByCount(v.id)} 个实例`
         }}</span>
         <button
           class="dl-btn dl-btn--quiet"
-          :title="t('versions.pathLinkHint')"
+          :title="`在版本所在主机的 ~/.local/bin 建立 dsh 命令，让 magpie、终端等按命令名查找 dsh 的程序找到这个版本。同一台机器上同一时间只能登记一个版本。`"
           :disabled="
             (!v.path_linked && !v.bin_ready) || !!pathLinkAction.busy[v.id]
           "
           @click="pathLinkAction.run(v)"
         >
-          {{
-            v.path_linked
-              ? t('versions.pathLinkRemove')
-              : t('versions.pathLinkAdd')
-          }}
+          {{ v.path_linked ? `取消登记` : `登记 dsh` }}
         </button>
         <a-popconfirm
-          :content="
-            t('versions.confirmDeleteVersion', {
-              version: v.version,
-              path: v.dedicated_home,
-            })
-          "
-          :ok-text="t('versions.deleteVersion')"
-          :cancel-text="t('common.cancel')"
+          :content="`删除版本 ${v.version}？对应的实例会一并移除，专属 DSH_HOME「${v.dedicated_home}」也会被删除——其中包含会话历史与凭据，删除后不可恢复。`"
+          :ok-text="`删除`"
+          :cancel-text="`取消`"
           modal-class="dl-sheet"
           @ok="removeAction.run(v.id, v.version)"
         >
@@ -291,7 +273,7 @@ const pathLinkAction = useAction(
             :disabled="!!removeAction.busy[v.id]"
           >
             <DlIcon name="trash" :size="13" />
-            {{ t('versions.deleteVersion') }}
+            {{ `删除` }}
           </button>
         </a-popconfirm>
       </div>
@@ -302,7 +284,7 @@ const pathLinkAction = useAction(
        An install in flight renders its progress on its own row. -->
   <section class="dl-section">
     <div class="dl-section-label">
-      {{ t('versions.availableTitle') }}
+      {{ `可安装` }}
       <span class="dl-section-count">{{ channelCounts.all }}</span>
       <span class="ver-label-spacer" />
       <div v-if="searchable" class="dl-input dl-search ver-search">
@@ -310,7 +292,7 @@ const pathLinkAction = useAction(
         <input
           v-model="search"
           class="dl-search-input"
-          :placeholder="t('versions.searchPlaceholder')"
+          :placeholder="`搜索版本号`"
         />
         <button
           v-if="search"
@@ -325,24 +307,24 @@ const pathLinkAction = useAction(
           :class="{ 'is-active': channel === 'all' }"
           @click="channel = 'all'"
         >
-          {{ t('versions.channelAll') }}
+          {{ `全部` }}
         </button>
         <button
           :class="{ 'is-active': channel === 'stable' }"
           @click="channel = 'stable'"
         >
-          {{ t('versions.stable') }}
+          {{ `正式版` }}
         </button>
         <button
           :class="{ 'is-active': channel === 'prerelease' }"
           @click="channel = 'prerelease'"
         >
-          {{ t('versions.prerelease') }}
+          {{ `预览版` }}
         </button>
       </div>
       <DlRefreshButton
         class="dl-icon-btn"
-        :title="t('common.refresh')"
+        :title="`刷新`"
         :disabled="store.remoteLoading"
         :action="() => store.refreshRemoteVersions(true)"
       />
@@ -358,10 +340,10 @@ const pathLinkAction = useAction(
       <div v-else-if="visibleInstallable.length === 0" class="dl-row-none">
         {{
           store.remoteLoading
-            ? t('common.loading')
+            ? `加载中…`
             : search
-              ? t('versions.searchEmpty')
-              : t('versions.noData')
+              ? `没有匹配的版本`
+              : `暂无数据`
         }}
       </div>
 
@@ -375,14 +357,14 @@ const pathLinkAction = useAction(
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
             <span v-if="isPrerelease(v.version)" class="dl-tag dl-tag--muted">
-              {{ t('versions.prerelease') }}
+              {{ `预览版` }}
             </span>
             <span v-if="v.source === 'github'" class="dl-tag dl-tag--warn">
-              {{ t('versions.sourceBuildTag') }}
+              {{ `源码构建` }}
             </span>
           </div>
           <span class="ver-sub">
-            {{ t('versions.releasedAt', { date: formatDate(v.released_at) }) }}
+            {{ `发布于 ${formatDate(v.released_at)}` }}
           </span>
 
           <!-- An install in flight: its progress, what it is doing, and a way
@@ -401,7 +383,7 @@ const pathLinkAction = useAction(
                 :disabled="!!cancelAction.busy[installOf(v.version)?.id ?? '']"
                 @click="onCancelInstall(installOf(v.version)!.id)"
               >
-                {{ t('versions.cancelInstall') }}
+                {{ `取消安装` }}
               </button>
             </div>
             <p
@@ -414,7 +396,7 @@ const pathLinkAction = useAction(
               v-else-if="installOf(v.version)?.state === 'cancelled'"
               class="ver-cancelled"
             >
-              {{ t('versions.installCancelled') }}
+              {{ `已取消，那台机器上的安装进程已停止` }}
             </p>
             <div v-if="installOf(v.version)?.logs.length" class="ver-log">
               <span
@@ -433,16 +415,10 @@ const pathLinkAction = useAction(
           :disabled="!!installAction.busy[v.version]"
           @click="onInstall(v)"
         >
-          {{
-            t(
-              installOf(v.version)?.state === 'error'
-                ? 'versions.retryInstall'
-                : 'versions.installNow',
-            )
-          }}
+          {{ installOf(v.version)?.state === 'error' ? '重试' : '安装' }}
         </button>
         <span v-else class="dl-tag dl-tag--signal ver-installing">
-          {{ t('versions.installing') }}
+          {{ `安装中` }}
         </span>
       </div>
     </div>

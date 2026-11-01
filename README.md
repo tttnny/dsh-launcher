@@ -10,11 +10,11 @@ DeepSeek Harness（DSH）的桌面启动器。它把多份 DSH 版本、多个�
 - **配置档**：新建、复制、改名和删除配置档，给实例套用不同的设置。
 - **实例**：新建、复制、启动、停止、重启和删除实例；查看运行状态与健康日志，打开实例窗口和终端。
 - **插件**：在实例的展开卡片里打开插件管理，查看和调整该实例使用的插件。
-- **设置**：调整启动器的全局选项，并管理界面语言（简体中文、English）。
+- **设置**：调整启动器的全局选项。
 
 ## 技术栈
 
-- 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Arco Design Vue、vue-i18n
+- 前端：Vue 3、TypeScript、Vite、Pinia、Vue Router、Arco Design Vue
 - 桌面端：Tauri 2（Rust）
 - 包管理：pnpm
 
@@ -51,7 +51,7 @@ pnpm format          # 用 prettier 格式化代码
 ## 目录结构
 
 ```
-src/          Vue 前端（页面、组件、状态、接口、多语言文案）
+src/          Vue 前端（页面、组件、状态、接口）
 src-tauri/    Tauri 桌面端（Rust 后端与打包配置）
 scripts/      构建、校验等辅助脚本
 ```

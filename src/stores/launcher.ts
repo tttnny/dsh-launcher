@@ -128,7 +128,6 @@ export const useLauncherStore = defineStore('launcher', {
     versionErrors: {},
     instances: [],
     settings: {
-      locale: 'zh-CN',
       minimize_to_tray: true,
       autostart: false,
       last_instance_id: null,

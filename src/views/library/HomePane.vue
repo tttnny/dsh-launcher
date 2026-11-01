@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
@@ -20,7 +19,6 @@ import DlEmpty from '@/components/DlEmpty.vue'
 // no picker for another machine's disk) and settled there before the record is
 // saved. Removing a record removes the record only, on either machine.
 
-const { t } = useI18n()
 const router = useRouter()
 const store = useLauncherStore()
 const { copy } = useCopy()
@@ -54,7 +52,7 @@ async function pickDir() {
       Message.error(String(e))
     }
   } else {
-    Message.info(t('homes.browserPickHint'))
+    Message.info(`浏览器预览不支持系统目录选择，请手动输入路径`)
   }
 }
 
@@ -63,7 +61,7 @@ async function pickDir() {
 const addAction = useAction(
   (name: string, path: string) =>
     api.createHome(name, path, store.currentHostId),
-  { success: () => t('settings.saved') },
+  { success: () => `设置已保存` },
 )
 
 async function onAdd() {
@@ -79,7 +77,7 @@ const removeAction = useAction(
     await api.removeHome(id, store.currentHostId)
     return true
   },
-  { success: () => t('settings.saved') },
+  { success: () => `设置已保存` },
 )
 
 async function onRemove(id: string) {
@@ -90,7 +88,7 @@ async function onRemove(id: string) {
 
 const dirAction = useAction((id: string) => api.openHomeDirectory(id), {
   key: (id) => id,
-  success: (path) => t('homes.dirOpened', { path }),
+  success: (path) => `已打开目录：${path}`,
 })
 
 function viewProfiles(homeId: string) {
@@ -101,7 +99,7 @@ function viewProfiles(homeId: string) {
 <template>
   <section class="dl-section">
     <div class="dl-section-label">
-      {{ t('homes.homesTitle') }}
+      {{ `DSH_HOME 目录` }}
       <span class="dl-section-count">{{ store.homes.length }}</span>
     </div>
 
@@ -112,53 +110,55 @@ function viewProfiles(homeId: string) {
       <input
         v-model="newName"
         class="dl-input"
-        :placeholder="t('homes.homeNamePlaceholder')"
+        :placeholder="`名称，例如：默认 DSH_HOME`"
       />
       <input
         v-model="newPath"
         class="dl-input dl-input--mono home-path-input"
         :placeholder="
-          remote
-            ? t('homes.remotePathPlaceholder')
-            : t('homes.homePathPlaceholder')
+          remote ? `服务器上的路径，例如 /home/me/.dsh` : `DSH_HOME 目录路径`
         "
       />
       <button v-if="!remote" class="dl-btn dl-btn--quiet" @click="pickDir">
-        {{ t('homes.pickDir') }}
+        {{ `选择目录` }}
       </button>
       <button
         class="dl-btn dl-btn--primary"
         :disabled="!newName.trim() || !newPath.trim() || addAction.busy['*']"
         @click="onAdd"
       >
-        {{ t('homes.addHome') }}
+        {{ `添加` }}
       </button>
     </div>
-    <p v-if="remote" class="home-note">{{ t('homes.remoteAddNote') }}</p>
+    <p v-if="remote" class="home-note">
+      {{
+        `这是那台机器上的路径：启动器会在那边把它建出来（不存在的目录会新建），确认可用之后才记下这条记录。`
+      }}
+    </p>
 
     <!-- A DSH_HOME is a record the launcher keeps, so a machine that cannot be
          reached still has its list here; only a failed read of the records
          themselves replaces the list with what went wrong. -->
     <div v-if="store.homeError" class="dl-surface dl-failure">
-      <p class="dl-failure-title">{{ t('library.hostErrorTitle') }}</p>
+      <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
       <p class="dl-failure-text">{{ store.homeError }}</p>
-      <p class="dl-failure-hint">{{ t('library.hostErrorHint') }}</p>
+      <p class="dl-failure-hint">
+        {{ `上面是那台机器回的话。修好之后再试一次。` }}
+      </p>
     </div>
 
     <div v-else class="dl-surface home-list">
       <DlEmpty
         v-if="store.homes.length === 0"
         icon="tray"
-        :description="t('homes.homesEmpty')"
+        :description="`暂无 DSH_HOME`"
       />
       <p
         v-if="store.homes.length === 0 && remote && hostUnreachable"
         class="dl-field-hint"
       >
         {{
-          t('homes.homesEmptyUnreachable', {
-            host: store.currentHost?.display_name ?? '',
-          })
+          `不过这只是启动器自己记下的记录：「${store.currentHost?.display_name ?? ''}」现在问不到，那台机器上已有的 DSH_HOME（比如 ~/.dsh）没读到。`
         }}
       </p>
 
@@ -167,18 +167,14 @@ function viewProfiles(homeId: string) {
           <div class="home-title">
             <span class="home-name">{{ h.name }}</span>
             <span v-if="usedBy(h.id) > 1" class="dl-tag dl-tag--warn">
-              {{ t('homes.sharedTag') }}
+              {{ `共享` }}
             </span>
           </div>
           <span class="home-path dl-mono" :title="h.path">{{ h.path }}</span>
         </div>
 
         <span class="home-used dl-tnum">
-          {{
-            usedBy(h.id) === 0
-              ? t('homes.unused')
-              : t('homes.homeUsedByCount', { count: usedBy(h.id) })
-          }}
+          {{ usedBy(h.id) === 0 ? `未被引用` : `${usedBy(h.id)} 个实例` }}
         </span>
 
         <div class="home-actions">
@@ -188,10 +184,10 @@ function viewProfiles(homeId: string) {
           <button
             v-if="remote"
             class="dl-btn dl-btn--ghost"
-            @click="copy(h.path, 'homes.pathCopied')"
+            @click="copy(h.path, '已复制路径')"
           >
             <DlIcon name="copy" :size="13" />
-            {{ t('homes.copyPath') }}
+            {{ `复制路径` }}
           </button>
           <button
             v-else
@@ -200,20 +196,20 @@ function viewProfiles(homeId: string) {
             @click="dirAction.run(h.id)"
           >
             <DlIcon name="folder" :size="13" />
-            {{ t('homes.openDir') }}
+            {{ `打开目录` }}
           </button>
           <button class="dl-btn dl-btn--ghost" @click="viewProfiles(h.id)">
             <DlIcon name="profile" :size="13" />
-            {{ t('homes.viewProfiles') }}
+            {{ `查看 Profile` }}
           </button>
           <a-popconfirm
             :content="
               remote
-                ? t('homes.confirmDeleteRemoteHome', { name: h.name })
-                : t('homes.confirmDeleteHome', { name: h.name })
+                ? `从启动器移除 DSH_HOME「${h.name}」？只删这条记录：那台机器上的目录一个字节都不动。`
+                : `从启动器移除 DSH_HOME「${h.name}」？只删记录，磁盘目录不动。`
             "
-            :ok-text="t('homes.deleteHome')"
-            :cancel-text="t('common.cancel')"
+            :ok-text="`移除`"
+            :cancel-text="`取消`"
             :disabled="usedBy(h.id) > 0"
             modal-class="dl-sheet"
             @ok="onRemove(h.id)"
@@ -221,9 +217,11 @@ function viewProfiles(homeId: string) {
             <button
               class="dl-btn dl-btn--danger"
               :disabled="usedBy(h.id) > 0"
-              :title="usedBy(h.id) > 0 ? t('homes.deleteBlocked') : ''"
+              :title="
+                usedBy(h.id) > 0 ? `仍有实例引用该 DSH_HOME，无法移除` : ''
+              "
             >
-              {{ t('homes.deleteHome') }}
+              {{ `移除` }}
             </button>
           </a-popconfirm>
         </div>

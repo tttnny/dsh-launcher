@@ -28,13 +28,13 @@ export const MENU_NAVIGATE_EVENTS = [
 ] as const
 
 /**
- * Single source of truth for the Settings shortcut card. `labelKey` is a
- * vue-i18n key under `settings.shortcuts`; `keys` are the display chips. Rows
- * marked `native` are handled by the OS/Rust menu rather than
- * `handleAppKeydown`, but are listed so the card cannot drift from the table.
+ * Single source of truth for the Settings shortcut card. `label` is the row's
+ * text; `keys` are the display chips. Rows marked `native` are handled by the
+ * OS/Rust menu rather than `handleAppKeydown`, but are listed so the card
+ * cannot drift from the table.
  */
 export interface ShortcutDoc {
-  labelKey: string
+  label: string
   keys: string[]
   native?: boolean
 }
@@ -42,15 +42,15 @@ export interface ShortcutDoc {
 const MOD = '\u2318 / Ctrl'
 
 export const SHORTCUT_DOCS: ShortcutDoc[] = [
-  { labelKey: 'settings.shortcuts.goInstances', keys: [MOD, '1'] },
-  { labelKey: 'settings.shortcuts.goVersions', keys: [MOD, '2'] },
-  { labelKey: 'settings.shortcuts.goHomes', keys: [MOD, '3'] },
-  { labelKey: 'settings.shortcuts.goProfiles', keys: [MOD, '4'] },
-  { labelKey: 'settings.shortcuts.openSettings', keys: [MOD, ','] },
-  { labelKey: 'settings.shortcuts.refresh', keys: [MOD, 'R'] },
-  { labelKey: 'settings.shortcuts.back', keys: ['Esc'] },
-  { labelKey: 'settings.shortcuts.showMain', keys: [MOD, '0'], native: true },
-  { labelKey: 'settings.shortcuts.quitApp', keys: [MOD, 'Q'], native: true },
+  { label: '前往实例', keys: [MOD, '1'] },
+  { label: '前往 DSH 版本', keys: [MOD, '2'] },
+  { label: '前往 DSH_HOME', keys: [MOD, '3'] },
+  { label: '前往 Profile', keys: [MOD, '4'] },
+  { label: '打开设置', keys: [MOD, ','] },
+  { label: '刷新状态', keys: [MOD, 'R'] },
+  { label: '返回上一页（输入框内仅退出输入）', keys: ['Esc'] },
+  { label: '显示主窗口', keys: [MOD, '0'], native: true },
+  { label: '退出启动器', keys: [MOD, 'Q'], native: true },
 ]
 
 /** Backend route payload → the route this app should render. */

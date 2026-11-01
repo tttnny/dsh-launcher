@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { useProfiles } from '@/composables/useProfiles'
 import { api } from '@/api'
@@ -15,7 +14,6 @@ import HealthLogModal from '@/components/HealthLogModal.vue'
 
 const router = useRouter()
 const route = useRoute()
-const { t } = useI18n()
 const store = useLauncherStore()
 const { selectionByInstance } = useProfiles()
 
@@ -145,18 +143,13 @@ function summarize(
   }
 }
 
-function bulkMessage(outcome: BulkOutcome, doneKey: string): string {
-  const parts = [t(doneKey, { count: outcome.done })]
+function bulkMessage(outcome: BulkOutcome, doneVerb: string): string {
+  const parts = [`${doneVerb} ${outcome.done} 个实例`]
   if (outcome.failed) {
-    parts.push(
-      t('instances.bulkFailed', {
-        count: outcome.failed,
-        reason: outcome.reason,
-      }),
-    )
+    parts.push(`${outcome.failed} 个失败（${outcome.reason}）`)
   }
   if (outcome.skipped) {
-    parts.push(t('instances.startAllSkipped', { count: outcome.skipped }))
+    parts.push(`${outcome.skipped} 个在不可达的主机上，未动`)
   }
   return parts.join('，')
 }
@@ -169,7 +162,7 @@ const startAllAction = useAction(
     )
     return summarize(results, bulk.value.unreachable.length)
   },
-  { success: (outcome) => bulkMessage(outcome, 'instances.startAllDone') },
+  { success: (outcome) => bulkMessage(outcome, '已启动') },
 )
 
 const stopAllAction = useAction(
@@ -179,7 +172,7 @@ const stopAllAction = useAction(
     )
     return summarize(results, 0)
   },
-  { success: (outcome) => bulkMessage(outcome, 'instances.stopAllDone') },
+  { success: (outcome) => bulkMessage(outcome, '已停止') },
 )
 
 const anyRunning = computed(() => bulk.value.stop.length > 0)
@@ -193,8 +186,12 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
   <div class="dl-page">
     <header class="dl-head">
       <div class="dl-head-text">
-        <h1>{{ t('instances.pageTitle') }}</h1>
-        <p class="dl-head-sub">{{ t('instances.pageDesc') }}</p>
+        <h1>{{ `实例` }}</h1>
+        <p class="dl-head-sub">
+          {{
+            `每个实例绑定一份 DSH 版本、一个 DSH_HOME 和一个 Profile。启动后，DSH 的 Web 界面会在系统浏览器里打开。`
+          }}
+        </p>
       </div>
       <div class="dl-head-actions">
         <button
@@ -204,7 +201,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           @click="startAllAction.run()"
         >
           <DlIcon name="play" :size="13" />
-          {{ t('instances.startAll') }}
+          {{ `全部启动` }}
         </button>
         <button
           v-if="anyRunning"
@@ -213,11 +210,11 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           @click="stopAllAction.run()"
         >
           <DlIcon name="stop" :size="13" />
-          {{ t('instances.stopAll') }}
+          {{ `全部停止` }}
         </button>
         <button class="dl-btn dl-btn--primary" @click="openNewInstance()">
           <DlIcon name="plus" :size="13" />
-          {{ t('instances.newInstance') }}
+          {{ `新建实例` }}
         </button>
       </div>
     </header>
@@ -227,15 +224,15 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
     <div v-if="store.instances.length === 0" class="dl-surface">
       <DlEmpty
         icon="version"
-        :title="t('instances.emptyTitle')"
-        :description="t('instances.emptyDesc')"
+        :title="`还没有实例`"
+        :description="`安装一个 DSH 版本会自动创建它的第一个实例；也可以在这里为已安装的版本再建一个。`"
       >
         <button
           class="dl-btn dl-btn--primary"
           @click="router.push({ name: 'library', query: { tab: 'versions' } })"
         >
           <DlIcon name="download" :size="13" />
-          {{ t('instances.emptyCta') }}
+          {{ `安装 DSH 版本` }}
         </button>
       </DlEmpty>
     </div>
@@ -250,7 +247,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           <input
             v-model="query"
             class="dl-search-input"
-            :placeholder="t('home.searchPlaceholder')"
+            :placeholder="`搜索实例名称`"
           />
           <button
             v-if="query"
@@ -261,19 +258,19 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           </button>
         </div>
 
-        <span class="board-host-label">{{ t('instances.hostFilter') }}</span>
+        <span class="board-host-label">{{ `主机` }}</span>
         <div class="dl-segmented board-hosts">
           <button
             :class="{ 'is-active': hostFilter === HOST_ALL }"
             @click="hostFilter = HOST_ALL"
           >
-            {{ t('instances.hostAll') }}
+            {{ `全部` }}
           </button>
           <button
             v-for="h in store.hosts"
             :key="h.id"
             :class="{ 'is-active': hostFilter === h.id }"
-            :title="h.ssh_target || t('instances.localTag')"
+            :title="h.ssh_target || `本机`"
             @click="hostFilter = h.id"
           >
             {{ h.display_name }}
@@ -281,12 +278,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
         </div>
 
         <span class="board-summary dl-tnum">
-          {{
-            t('instances.summary', {
-              total: filtered.length,
-              running: runningCount,
-            })
-          }}
+          {{ `共 ${filtered.length} 个 · 运行中 ${runningCount}` }}
         </span>
 
         <span class="board-spacer" />
@@ -301,7 +293,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           @click="healthVisible = true"
         >
           <DlIcon name="health" :size="13" />
-          {{ t('home.healthLogs') }}
+          {{ `自检` }}
           <span v-if="store.healthTotalCount > 0" class="board-health-count">
             {{ store.healthTotalCount > 99 ? '99+' : store.healthTotalCount }}
           </span>
@@ -309,7 +301,7 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
       </div>
 
       <div v-if="filtered.length === 0" class="dl-surface">
-        <DlEmpty icon="search" :description="t('home.noMatchingInstances')" />
+        <DlEmpty icon="search" :description="`没有匹配的实例`" />
       </div>
 
       <div v-else class="dl-surface board">

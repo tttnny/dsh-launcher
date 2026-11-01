@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useI18n } from 'vue-i18n'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import { LOCAL_HOST_ID } from '@/api/types'
@@ -19,7 +18,6 @@ import type {
 } from '@/api/types'
 import { useAction } from '@/composables/useAction'
 import { useCopy } from '@/composables/useCopy'
-import { SUPPORTED_LOCALES } from '@/i18n'
 import { useLauncherStore } from '@/stores/launcher'
 import { directoryCommand } from '@/remoteCommand'
 import { SHORTCUT_DOCS } from '@/shortcuts'
@@ -30,35 +28,34 @@ import DlIcon from '@/components/DlIcon.vue'
 // the sidebar, and duplicating it here was the old page's biggest confusion.
 
 const router = useRouter()
-const { t, locale } = useI18n()
 const store = useLauncherStore()
 
 const THEME_OPTIONS = computed<{ value: ThemeMode; label: string }[]>(() => [
-  { value: 'light', label: t('settings.theme.light') },
-  { value: 'dark', label: t('settings.theme.dark') },
-  { value: 'system', label: t('settings.theme.system') },
+  { value: 'light', label: `浅色` },
+  { value: 'dark', label: `深色` },
+  { value: 'system', label: `跟随系统` },
 ])
 
 const LOG_LEVEL_OPTIONS = computed<{ value: LogLevel; label: string }[]>(() => [
-  { value: 'debug', label: t('settings.logLevel.debug') },
-  { value: 'info', label: t('settings.logLevel.info') },
-  { value: 'warn', label: t('settings.logLevel.warn') },
-  { value: 'error', label: t('settings.logLevel.error') },
+  { value: 'debug', label: `调试 (debug)` },
+  { value: 'info', label: `信息 (info)` },
+  { value: 'warn', label: `警告 (warn)` },
+  { value: 'error', label: `错误 (error)` },
 ])
 
 const TERMINAL_OPTIONS = computed(() => [
-  { value: 'system', label: t('settings.terminal.system') },
-  { value: 'ghostty', label: t('settings.terminal.ghostty') },
+  { value: 'system', label: `系统终端（Terminal.app）` },
+  { value: 'ghostty', label: `Ghostty` },
 ])
 
 const UPDATE_CHANNEL_OPTIONS = computed(() => [
-  { value: 'dev', label: t('settings.update.channel.dev') },
-  { value: 'release', label: t('settings.update.channel.release') },
+  { value: 'dev', label: `dev 渠道` },
+  { value: 'release', label: `release 渠道` },
 ])
 
 const shortcutRows = computed(() =>
   SHORTCUT_DOCS.map((d) => ({
-    label: t(d.labelKey),
+    label: d.label,
     keys: d.keys,
     native: d.native ?? false,
   })),
@@ -67,7 +64,7 @@ const shortcutRows = computed(() =>
 const saveAction = useAction(
   (patch: Parameters<typeof api.updateSettings>[0]) =>
     api.updateSettings(patch),
-  { success: () => t('settings.saved') },
+  { success: () => `设置已保存` },
 )
 
 async function patchSettings(patch: Parameters<typeof api.updateSettings>[0]) {
@@ -176,7 +173,7 @@ const hostForm = ref<HostForm>(emptyHostForm())
 const saveHostAction = useAction(
   (id: string, input: HostInput) =>
     id ? api.updateHost(id, input) : api.createHost(input),
-  { success: () => t('settings.hosts.saved') },
+  { success: () => `主机已保存` },
 )
 
 /** `KEY=VALUE` lines → the map the backend takes; `null` when a line is unusable. */
@@ -234,16 +231,18 @@ function aliasTarget(alias: SshAlias): string {
 async function saveHost() {
   const form = hostForm.value
   if (!form.display_name.trim()) {
-    Message.error(t('settings.hosts.nameRequired'))
+    Message.error(`请填写主机的显示名`)
     return
   }
   if (!form.ssh_target.trim()) {
-    Message.error(t('settings.hosts.targetRequired'))
+    Message.error(
+      `请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串`,
+    )
     return
   }
   const extraEnv = parseEnvLines(form.extra_env)
   if (!extraEnv) {
-    Message.error(t('settings.hosts.extraEnvInvalid'))
+    Message.error(`环境变量要写成每行一个 KEY=VALUE`)
     return
   }
   const input: HostInput = {
@@ -281,9 +280,15 @@ async function testHost(host: HostWithStatus) {
   }
 }
 
+const HOST_STATUS_LABELS: Record<string, string> = {
+  connecting: '连接中',
+  reachable: '可达',
+  unreachable: '不可达',
+}
+
 function statusLabel(status: HostStatus | null): string {
-  if (!status) return t('settings.hosts.statusUnknown')
-  return t(`settings.hosts.status.${status.state}`)
+  if (!status) return '未测试'
+  return HOST_STATUS_LABELS[status.state]
 }
 
 /** Colour carries state: reachable / unreachable / not asked yet. */
@@ -300,7 +305,7 @@ function systemLine(test: ConnectionTest): string {
 
 /** What the connection test found for one tool; a missing command is said out loud. */
 function toolLine(tool: RemoteTool | null): string {
-  if (!tool) return t('settings.hosts.toolMissing')
+  if (!tool) return `没有这个命令`
   return tool.version ? `${tool.version} · ${tool.path}` : tool.path
 }
 
@@ -320,7 +325,7 @@ function dataDirLine(test: ConnectionTest): string {
   const dir = test.data_dir ?? '—'
   return test.data_dir_exists
     ? dir
-    : `${dir} · ${t('settings.hosts.dataDirMissing')}`
+    : `${dir} · ${`还不存在（启动器第一次写入时会创建）`}`
 }
 
 /** One row per fact the connection test reports: label + mono value. */
@@ -328,9 +333,9 @@ const testFacts = computed(() => {
   const test = passedTest.value
   if (!test) return []
   return [
-    { label: t('settings.hosts.system'), value: systemLine(test) },
-    { label: t('settings.hosts.home'), value: test.home ?? '—' },
-    { label: t('settings.hosts.dataDirResult'), value: dataDirLine(test) },
+    { label: `系统`, value: systemLine(test) },
+    { label: `家目录`, value: test.home ?? '—' },
+    { label: `数据目录`, value: dataDirLine(test) },
     { label: 'Node', value: toolLine(test.node) },
     { label: 'pnpm', value: toolLine(test.pnpm) },
   ]
@@ -340,7 +345,7 @@ const testFacts = computed(() => {
 
 const hostPendingDelete = ref<HostWithStatus | null>(null)
 const removeHostAction = useAction((id: string) => api.deleteHost(id), {
-  success: () => t('settings.hosts.deleted'),
+  success: () => `主机记录已删除`,
 })
 
 /**
@@ -371,9 +376,7 @@ const hostRunsOnDelete = computed(() => {
 /** Those names as one phrase for the confirmation. The message names all of
  *  them, so they are joined here rather than passed as an interpolation list
  *  (which would only ever render the first name). */
-const hostRunNames = computed(() =>
-  hostRunsOnDelete.value.join(locale.value === 'zh-CN' ? '、' : ', '),
-)
+const hostRunNames = computed(() => hostRunsOnDelete.value.join('、'))
 
 /** What the user can run on the server to look at what the launcher left
  *  behind. Read-only on purpose: nothing here removes anything there.
@@ -433,7 +436,7 @@ async function onCheckUpdate() {
   const res = await checkUpdateAction.run()
   if (res === undefined) return
   updateInfo.value = res
-  if (res.up_to_date) Message.success(t('settings.update.upToDate'))
+  if (res.up_to_date) Message.success(`当前已是最新版本`)
 }
 
 // --- Proxy fields -------------------------------------------------------------
@@ -479,19 +482,19 @@ async function onOpenDataDir() {
 }
 
 const openLogAction = useAction(() => api.openLauncherLog(), {
-  success: (path) => t('settings.logOpened', { path }),
+  success: (path) => `已在访达中定位日志：${path}`,
 })
 
 // --- Section rail -------------------------------------------------------------
 
 const sections = computed(() => [
-  { key: 'general', label: t('settings.general') },
-  { key: 'hosts', label: t('settings.hosts.title') },
-  { key: 'environment', label: t('settings.environment.title') },
-  { key: 'proxy', label: t('settings.proxy.title') },
-  { key: 'update', label: t('settings.update.title') },
-  { key: 'data', label: t('settings.dataDir.title') },
-  { key: 'shortcuts', label: t('settings.shortcuts.title') },
+  { key: 'general', label: `常规` },
+  { key: 'hosts', label: `主机` },
+  { key: 'environment', label: `环境` },
+  { key: 'proxy', label: `代理` },
+  { key: 'update', label: `启动器更新` },
+  { key: 'data', label: `数据目录` },
+  { key: 'shortcuts', label: `键盘快捷键` },
 ])
 
 const sectionEls = ref<Record<string, HTMLElement | null>>({})
@@ -565,8 +568,12 @@ onUnmounted(() => {
   <div class="dl-page settings-page">
     <header class="dl-head">
       <div class="dl-head-text">
-        <h1>{{ t('settings.title') }}</h1>
-        <p class="dl-head-sub">{{ t('settings.subtitle') }}</p>
+        <h1>{{ `设置` }}</h1>
+        <p class="dl-head-sub">
+          {{
+            `启动器自身的行为。DSH 版本、DSH_HOME 与 Profile 在资源库里管理。`
+          }}
+        </p>
       </div>
       <div class="dl-head-actions">
         <span class="dl-chip"
@@ -592,26 +599,10 @@ onUnmounted(() => {
       <div class="settings-body">
         <!-- General -->
         <section :ref="(el) => setSectionRef('general', el)" class="dl-section">
-          <div class="dl-section-label">{{ t('settings.general') }}</div>
+          <div class="dl-section-label">{{ `常规` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.language') }}</span>
-              <a-select
-                :model-value="store.settings.locale"
-                style="width: 190px"
-                size="small"
-                @change="(v) => patchSettings({ locale: String(v) })"
-              >
-                <a-option
-                  v-for="l in SUPPORTED_LOCALES"
-                  :key="l.value"
-                  :value="l.value"
-                  >{{ l.label }}</a-option
-                >
-              </a-select>
-            </div>
-            <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.theme.label') }}</span>
+              <span class="dl-row-label">{{ `主题` }}</span>
               <a-select
                 :model-value="store.settings.theme"
                 style="width: 190px"
@@ -630,7 +621,7 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <span class="dl-row-label">{{
-                t('settings.minimizeToTray')
+                `关闭主窗口时最小化到系统托盘`
               }}</span>
               <a-switch
                 :model-value="store.settings.minimize_to_tray"
@@ -639,7 +630,7 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.autostart') }}</span>
+              <span class="dl-row-label">{{ `开机自动启动启动器` }}</span>
               <a-switch
                 :model-value="store.settings.autostart"
                 size="small"
@@ -648,11 +639,9 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.logLevel.label')
-                }}</span>
+                <span class="dl-row-label">{{ `日志等级` }}</span>
                 <span class="dl-row-desc">{{
-                  t('settings.logLevel.hint')
+                  `运行日志写入数据目录 logs/latest.log，每次启动轮转上一份。`
                 }}</span>
               </div>
               <a-select
@@ -673,11 +662,9 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.terminal.label')
-                }}</span>
+                <span class="dl-row-label">{{ `外部终端` }}</span>
                 <span class="dl-row-desc">{{
-                  t('settings.terminal.hint')
+                  `实例的「打开终端」按钮调用这里选择的终端，启动时注入 DSH_HOME 与实例环境变量。`
                 }}</span>
               </div>
               <a-select
@@ -702,7 +689,7 @@ onUnmounted(() => {
              cannot be reached keeps its record and says 不可达. -->
         <section :ref="(el) => setSectionRef('hosts', el)" class="dl-section">
           <div class="dl-section-label">
-            {{ t('settings.hosts.title') }}
+            {{ `主机` }}
             <span class="dl-section-count">{{ hosts.length }}</span>
           </div>
           <div class="dl-surface">
@@ -711,7 +698,7 @@ onUnmounted(() => {
                 <span class="dl-row-label">
                   {{ h.display_name }}
                   <span v-if="h.builtin" class="dl-tag dl-tag--muted">{{
-                    t('settings.hosts.builtin')
+                    `内置`
                   }}</span>
                   <span v-else class="dl-tag" :class="statusTone(h.status)">
                     {{ statusLabel(h.status) }}
@@ -735,18 +722,18 @@ onUnmounted(() => {
                 >
                   {{
                     h.status && h.status.state !== 'connecting'
-                      ? t('settings.hosts.retest')
-                      : t('settings.hosts.test')
+                      ? `重试`
+                      : `测试连接`
                   }}
                 </button>
                 <button class="dl-btn dl-btn--quiet" @click="startEditHost(h)">
-                  {{ t('settings.hosts.edit') }}
+                  {{ `编辑` }}
                 </button>
                 <button
                   class="dl-btn dl-btn--ghost"
                   @click="hostPendingDelete = h"
                 >
-                  {{ t('settings.hosts.remove') }}
+                  {{ `删除` }}
                 </button>
               </div>
             </div>
@@ -756,22 +743,14 @@ onUnmounted(() => {
             <div v-if="testResult" class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">
-                  {{
-                    t('settings.hosts.testTitle', {
-                      name: hostName(testResult.hostId),
-                    })
-                  }}
+                  {{ `${hostName(testResult.hostId)} 的连接测试` }}
                   <span
                     class="dl-tag"
                     :class="
                       testResult.test.ok ? 'dl-tag--run' : 'dl-tag--danger'
                     "
                   >
-                    {{
-                      testResult.test.ok
-                        ? t('settings.hosts.status.reachable')
-                        : t('settings.hosts.status.unreachable')
-                    }}
+                    {{ testResult.test.ok ? `可达` : `不可达` }}
                   </span>
                 </span>
                 <span v-if="testResult.test.message" class="dl-row-desc">{{
@@ -788,13 +767,17 @@ onUnmounted(() => {
 
             <div class="dl-row">
               <button class="dl-btn dl-btn--quiet" @click="startAddHost">
-                ＋ {{ t('settings.hosts.add') }}
+                ＋ {{ `添加主机` }}
               </button>
             </div>
           </div>
-          <p class="section-note">{{ t('settings.hosts.note') }}</p>
+          <p class="section-note">
+            {{
+              `启动器管理的机器。本机是启动器自己所在的那台 Mac，是内置的一条，不能删除。远程主机经系统 ssh 连接，只支持免密（密钥或 ssh-agent）——启动器不保存密码，也不保存口令。`
+            }}
+          </p>
           <p v-if="hosts.some((h) => !h.builtin)" class="section-note">
-            {{ t('settings.hosts.cannotReach') }}
+            {{ `连不上的主机照样存下来：它可能只是现在关机或不在这个网络里。` }}
           </p>
         </section>
 
@@ -804,21 +787,19 @@ onUnmounted(() => {
           class="dl-section"
         >
           <div class="dl-section-label">
-            {{ t('settings.environment.title') }}
+            {{ `环境` }}
             <span class="dl-section-count">
               <span
                 class="dl-tag"
                 :class="envOk ? 'dl-tag--run' : 'dl-tag--danger'"
               >
-                {{ envOk ? t('nav.envReady') : t('nav.envMissing') }}
+                {{ envOk ? `环境就绪` : `环境未就绪` }}
               </span>
             </span>
           </div>
           <div class="dl-surface">
             <div v-if="hosts.length > 1" class="dl-row">
-              <span class="dl-row-label">{{
-                t('settings.environment.host')
-              }}</span>
+              <span class="dl-row-label">{{ `主机` }}</span>
               <a-select
                 :model-value="envHostId"
                 style="width: 190px"
@@ -841,12 +822,10 @@ onUnmounted(() => {
                 class="row-path dl-mono"
                 :title="envRuntime?.node?.path ?? ''"
               >
-                {{
-                  envRuntime?.node?.path ?? t('settings.environment.notFound')
-                }}
+                {{ envRuntime?.node?.path ?? `未找到` }}
               </span>
               <span class="dl-chip">{{
-                envRuntime?.node?.version ?? t('settings.environment.missing')
+                envRuntime?.node?.version ?? `未安装`
               }}</span>
             </div>
             <div v-if="!envError" class="dl-row">
@@ -855,23 +834,21 @@ onUnmounted(() => {
                 class="row-path dl-mono"
                 :title="envRuntime?.pnpm?.path ?? ''"
               >
-                {{
-                  envRuntime?.pnpm?.path ?? t('settings.environment.notFound')
-                }}
+                {{ envRuntime?.pnpm?.path ?? `未找到` }}
               </span>
               <span class="dl-chip">{{
-                envRuntime?.pnpm?.version ?? t('settings.environment.missing')
+                envRuntime?.pnpm?.version ?? `未安装`
               }}</span>
             </div>
             <div class="dl-row">
               <span class="dl-row-desc">{{
-                t('settings.environment.desc')
+                `启动器已识别并绑定的工具链。实例与插件都使用这里的路径。`
               }}</span>
               <button
                 class="dl-btn dl-btn--quiet"
                 @click="router.push({ name: 'setup' })"
               >
-                {{ t('settings.environment.openGuide') }}
+                {{ `打开环境检测` }}
               </button>
             </div>
           </div>
@@ -879,15 +856,13 @@ onUnmounted(() => {
 
         <!-- Proxy -->
         <section :ref="(el) => setSectionRef('proxy', el)" class="dl-section">
-          <div class="dl-section-label">{{ t('settings.proxy.title') }}</div>
+          <div class="dl-section-label">{{ `代理` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.proxy.enabled')
-                }}</span>
+                <span class="dl-row-label">{{ `启用代理` }}</span>
                 <span class="dl-row-desc">{{
-                  t('settings.proxy.enabledHint')
+                  `启动器自身的网络请求（版本下载、更新检查等）走该代理。`
                 }}</span>
               </div>
               <a-switch
@@ -897,7 +872,7 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.proxy.url') }}</span>
+              <span class="dl-row-label">{{ `代理地址` }}</span>
               <input
                 v-model="proxyUrl"
                 class="dl-input dl-input--mono"
@@ -909,7 +884,7 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <span class="dl-row-label">{{ t('settings.proxy.port') }}</span>
+              <span class="dl-row-label">{{ `端口` }}</span>
               <input
                 v-model="proxyPort"
                 type="number"
@@ -924,11 +899,9 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.proxy.noProxy')
-                }}</span>
+                <span class="dl-row-label">{{ `绕过列表` }}</span>
                 <span class="dl-row-desc">{{
-                  t('settings.proxy.noProxyHint')
+                  `逗号分隔的主机 / 地址，这些地址不经过代理。`
                 }}</span>
               </div>
               <input
@@ -943,11 +916,9 @@ onUnmounted(() => {
             </div>
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.proxy.applyDsh')
-                }}</span>
+                <span class="dl-row-label">{{ `在 DSH 中生效` }}</span>
                 <span class="dl-row-desc">{{
-                  t('settings.proxy.applyDshHint')
+                  `启动实例时注入 HTTP_PROXY / HTTPS_PROXY / NO_PROXY，并覆盖实例的同名环境变量；已启动的实例需重启。`
                 }}</span>
               </div>
               <a-switch
@@ -962,12 +933,12 @@ onUnmounted(() => {
 
         <!-- Update -->
         <section :ref="(el) => setSectionRef('update', el)" class="dl-section">
-          <div class="dl-section-label">{{ t('settings.update.title') }}</div>
+          <div class="dl-section-label">{{ `启动器更新` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">{{
-                  t('settings.update.channelHint')
+                  `dev 渠道包含预发布版本；release 渠道只检查正式版本。`
                 }}</span>
               </div>
               <div class="row-actions">
@@ -995,20 +966,20 @@ onUnmounted(() => {
                   :disabled="checkUpdateAction.busy['*']"
                   @click="onCheckUpdate"
                 >
-                  {{ t('settings.update.check') }}
+                  {{ `检查更新` }}
                 </button>
               </div>
             </div>
             <div v-if="updateInfo && !updateInfo.up_to_date" class="dl-row">
               <span class="dl-row-label">{{
-                t('settings.update.available', { version: updateInfo.latest })
+                `发现新版本 v${updateInfo.latest}`
               }}</span>
               <button
                 v-if="updateInfo.url"
                 class="dl-btn dl-btn--primary"
                 @click="api.openExternal(updateInfo.url!)"
               >
-                {{ t('settings.update.viewRelease') }}
+                {{ `前往下载` }}
               </button>
             </div>
           </div>
@@ -1016,31 +987,31 @@ onUnmounted(() => {
 
         <!-- Data directory -->
         <section :ref="(el) => setSectionRef('data', el)" class="dl-section">
-          <div class="dl-section-label">{{ t('settings.dataDir.title') }}</div>
+          <div class="dl-section-label">{{ `数据目录` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
               <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  t('settings.dataDir.pathLabel')
-                }}</span>
+                <span class="dl-row-label">{{ `目录路径` }}</span>
                 <span class="row-desc dl-mono">{{ dataDir || '—' }}</span>
               </div>
               <div class="row-actions">
                 <button class="dl-btn dl-btn--quiet" @click="onOpenDataDir">
                   <DlIcon name="folder" :size="13" />
-                  {{ t('settings.dataDir.open') }}
+                  {{ `打开目录` }}
                 </button>
                 <button
                   class="dl-btn dl-btn--quiet"
                   @click="openLogAction.run()"
                 >
                   <DlIcon name="log" :size="13" />
-                  {{ t('settings.dataDir.viewLog') }}
+                  {{ `查看日志` }}
                 </button>
               </div>
             </div>
             <div class="dl-row">
-              <span class="dl-row-desc">{{ t('settings.dataDir.desc') }}</span>
+              <span class="dl-row-desc">{{
+                `启动器自己的数据目录：配置、日志、版本安装目录与专属 DSH_HOME 都在这里。`
+              }}</span>
             </div>
           </div>
         </section>
@@ -1051,14 +1022,14 @@ onUnmounted(() => {
           class="dl-section"
         >
           <div class="dl-section-label">
-            {{ t('settings.shortcuts.title') }}
+            {{ `键盘快捷键` }}
           </div>
           <div class="dl-surface">
             <div v-for="row in shortcutRows" :key="row.label" class="dl-row">
               <span class="dl-row-label">
                 {{ row.label }}
                 <span v-if="row.native" class="dl-tag dl-tag--muted">{{
-                  t('settings.shortcuts.nativeTag')
+                  `原生`
                 }}</span>
               </span>
               <span class="kbd-row">
@@ -1068,7 +1039,11 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-          <p class="section-note">{{ t('settings.shortcuts.note') }}</p>
+          <p class="section-note">
+            {{
+              `macOS 用 ⌘，Windows / Linux 用 Ctrl；⌘/Ctrl+R 只刷新应用内状态，不会重载页面；输入框内的普通编辑按键不会被劫持。标「原生」的行由系统菜单直接处理。`
+            }}
+          </p>
         </section>
       </div>
     </div>
@@ -1077,31 +1052,27 @@ onUnmounted(() => {
          bookmark, and 「测试连接」 is what talks to the machine. -->
     <a-modal
       :visible="hostSheet"
-      :title="
-        hostEditingId
-          ? t('settings.hosts.editTitle')
-          : t('settings.hosts.addTitle')
-      "
-      :ok-text="t('settings.hosts.save')"
-      :cancel-text="t('common.cancel')"
+      :title="hostEditingId ? `编辑主机` : `添加远程主机`"
+      :ok-text="`保存`"
+      :cancel-text="`取消`"
       :ok-loading="saveHostAction.busy['*']"
       unmount-on-close
       @ok="saveHost"
       @cancel="hostSheet = false"
     >
       <div class="dl-field">
-        <span class="dl-field-label">{{ t('settings.hosts.name') }}</span>
+        <span class="dl-field-label">{{ `显示名` }}</span>
         <a-input
           v-model="hostForm.display_name"
-          :placeholder="t('settings.hosts.namePlaceholder')"
+          :placeholder="`例如：阿里云服务器`"
         />
       </div>
       <div class="dl-field">
-        <span class="dl-field-label">{{ t('settings.hosts.target') }}</span>
+        <span class="dl-field-label">{{ `ssh 目标` }}</span>
         <a-select
           v-if="sshAliases.length"
           :model-value="hostForm.ssh_target"
-          :placeholder="t('settings.hosts.pickAlias')"
+          :placeholder="`从 ~/.ssh/config 挑选`"
           allow-clear
           allow-search
           @change="(v) => (hostForm.ssh_target = String(v ?? ''))"
@@ -1116,42 +1087,46 @@ onUnmounted(() => {
         <a-input
           v-model="hostForm.ssh_target"
           class="dl-mono"
-          :placeholder="t('settings.hosts.targetPlaceholder')"
+          :placeholder="`zjq_aliyun 或 user@host`"
         />
-        <span class="dl-field-hint">{{ t('settings.hosts.targetHint') }}</span>
+        <span class="dl-field-hint">{{
+          `整串原样交给系统 ssh；~/.ssh/config 里的别名、user@host、user@host -p 2222 都可以。`
+        }}</span>
         <span v-if="!sshAliases.length" class="dl-field-hint">
-          {{ t('settings.hosts.pickAliasEmpty') }}
+          {{ `~/.ssh/config 里没有可用的别名` }}
         </span>
       </div>
       <div class="dl-field">
-        <span class="dl-field-label">{{ t('settings.hosts.registry') }}</span>
+        <span class="dl-field-label">{{ `registry（可选）` }}</span>
         <a-input
           v-model="hostForm.registry"
-          :placeholder="t('settings.hosts.registryPlaceholder')"
+          :placeholder="`留空就用启动器自己的`"
         />
         <span class="dl-field-hint">{{
-          t('settings.hosts.registryHint')
+          `只有这台主机有自己的 registry 时才填。`
         }}</span>
       </div>
       <div class="dl-field">
-        <span class="dl-field-label">{{ t('settings.hosts.extraEnv') }}</span>
+        <span class="dl-field-label">{{ `额外环境变量（可选）` }}</span>
         <a-textarea
           v-model="hostForm.extra_env"
-          :placeholder="t('settings.hosts.extraEnvPlaceholder')"
+          :placeholder="`每行一个：KEY=VALUE`"
           :auto-size="{ minRows: 2, maxRows: 5 }"
         />
         <span class="dl-field-hint">{{
-          t('settings.hosts.extraEnvHint')
+          `在这台主机上装版本与跑实例时都注入。`
         }}</span>
       </div>
       <div class="dl-field">
-        <span class="dl-field-label">{{ t('settings.hosts.dataDir') }}</span>
+        <span class="dl-field-label">{{ `数据目录（可选）` }}</span>
         <a-input
           v-model="hostForm.data_dir"
           class="dl-mono"
-          :placeholder="t('settings.hosts.dataDirPlaceholder')"
+          :placeholder="`留空就用那台机器上的默认目录`"
         />
-        <span class="dl-field-hint">{{ t('settings.hosts.dataDirHint') }}</span>
+        <span class="dl-field-hint">{{
+          `这台主机上放版本、专属 DSH_HOME、日志与运行记录的地方；留空则按那台机器上的家目录推（~/.local/share/dsh-launcher）。写 ~/dsh 这样的路径会在那台机器上展开，第一次测连接时定下来。`
+        }}</span>
       </div>
     </a-modal>
 
@@ -1160,35 +1135,40 @@ onUnmounted(() => {
          user can run there themselves (ADR-0006 §5). -->
     <a-modal
       :visible="!!hostPendingDelete"
-      :title="
-        t('settings.hosts.deleteTitle', {
-          name: hostPendingDelete?.display_name ?? '',
-        })
-      "
-      :ok-text="t('settings.hosts.remove')"
-      :cancel-text="t('common.cancel')"
+      :title="`删除主机「${hostPendingDelete?.display_name ?? ''}」？`"
+      :ok-text="`删除`"
+      :cancel-text="`取消`"
       :ok-loading="removeHostAction.busy['*']"
       @ok="confirmDeleteHost"
       @cancel="hostPendingDelete = null"
     >
-      <p class="delete-warning">{{ t('settings.hosts.deleteWarning') }}</p>
-      <p v-if="hostRunsOnDelete.length" class="delete-warning">
-        {{ t('settings.hosts.deleteRunning', { names: hostRunNames }) }}
+      <p class="delete-warning">
+        {{
+          `只删启动器里的这条记录：服务器上什么都不动，在那台机器上跑着的实例会继续跑。`
+        }}
       </p>
-      <p class="delete-warning">{{ t('settings.hosts.deleteRecords') }}</p>
-      <p class="delete-warning">{{ t('settings.hosts.deleteLeft') }}</p>
+      <p v-if="hostRunsOnDelete.length" class="delete-warning">
+        {{
+          `「${hostRunNames}」会继续在那台机器上跑，启动器里再也看不到它们——要停只能在服务器上停。`
+        }}
+      </p>
+      <p class="delete-warning">
+        {{
+          `启动器里归属这台主机的版本、DSH_HOME 与实例记录会一起消失，此后它上面的实例在启动器里看不到了。`
+        }}
+      </p>
+      <p class="delete-warning">
+        {{
+          `远端数据目录原样留在那台机器上（版本、专属 DSH_HOME、日志、运行记录）。想在服务器上自己看一眼，可以在终端里跑：`
+        }}
+      </p>
       <div class="cleanup-command">
         <code class="dl-mono">{{ inspectCommand(hostPendingDelete) }}</code>
         <button
           class="dl-btn dl-btn--quiet"
-          @click="
-            copy(
-              inspectCommand(hostPendingDelete),
-              'settings.hosts.deleteInspectCopied',
-            )
-          "
+          @click="copy(inspectCommand(hostPendingDelete), '查看命令已复制')"
         >
-          {{ t('common.copy') }}
+          {{ `复制` }}
         </button>
       </div>
     </a-modal>

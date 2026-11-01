@@ -178,7 +178,6 @@ function seedDb(): MockDb {
       },
     ],
     settings: {
-      locale: 'zh-CN',
       minimize_to_tray: true,
       autostart: false,
       last_instance_id: 'i-main',

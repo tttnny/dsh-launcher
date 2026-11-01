@@ -1,5 +1,4 @@
 import { Message } from '@arco-design/web-vue'
-import { useI18n } from 'vue-i18n'
 
 /**
  * One clipboard write, with the launcher's toast policy.
@@ -10,22 +9,20 @@ import { useI18n } from 'vue-i18n'
  * 「已复制」for a clipboard that did not change. Every copy path in the app
  * goes through here so the outcome shown is the real one.
  *
- * `successKey` lets a caller name what was copied (e.g. a URL vs a log dump);
- * failures always use the shared key.
+ * `successMessage` lets a caller name what was copied (e.g. a URL vs a log
+ * dump); failures always use the shared message.
  */
 export function useCopy() {
-  const { t } = useI18n()
-
   async function copy(
     text: string,
-    successKey = 'common.copied',
+    successMessage = '已复制',
   ): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text)
-      Message.success(t(successKey))
+      Message.success(successMessage)
       return true
     } catch {
-      Message.error(t('common.copyFailed'))
+      Message.error('复制失败，请手动选择后复制')
       return false
     }
   }
