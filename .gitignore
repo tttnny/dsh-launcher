@@ -23,10 +23,8 @@ Thumbs.db
 
 # Agent tooling — kept local, never commit
 .agent-teams/
-.agents/
 .claude/
 .zcode/
-skills-lock.json
 
 # Parallel-dev worktrees (untracked, never commit)
 worktrees/
