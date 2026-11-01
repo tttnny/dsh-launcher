@@ -1,23 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '@/api'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
+import DlIcon from '@/components/DlIcon.vue'
 
-// Creating an instance is one decision with three parts: a name, an installed
-// version, and the DSH_HOME that version reads. Installing a version already
-// makes one instance, so this sheet is how a *second* instance of the same
-// version — or the same version on another HOME — gets made.
+// 新建实例是一次四个选择的组合：机器、版本、数据目录、名称。一次把所有
+// 条件摊开，不做多步向导，也不把「去哪儿装版本」藏起来。
 
 const props = defineProps<{
   visible: boolean
-  /**
-   * Pre-fills the sheet from an existing instance ("duplicate"). The profile
-   * is not part of it: a copy is a new binding, and the profile is picked at
-   * launch time. `hostId` comes along because a copy binds on the machine the
-   * original runs on — the sheet then offers that machine's versions and
-   * DSH_HOMEs, not the current host's.
-   */
   preset?: {
     name: string
     versionId: string
@@ -25,46 +18,30 @@ const props = defineProps<{
     hostId?: string
   } | null
 }>()
+
 const emit = defineEmits<{
   (e: 'update:visible', v: boolean): void
   (e: 'created', id: string): void
 }>()
 
 const store = useLauncherStore()
+const router = useRouter()
 
-const name = ref('')
+const hostId = ref(store.currentHostId)
 const versionId = ref<string | undefined>(undefined)
 const homeId = ref<string | undefined>(undefined)
+const name = ref('')
 
-/**
- * The machine this sheet binds on: the instance being copied, or 当前主机. An
- * instance is one binding on one host (ADR-0006 §1), so both selects list that
- * host's resources only — an impossible combination is not offered in the first
- * place rather than refused on submit.
- */
-const hostId = computed(() => props.preset?.hostId ?? store.currentHostId)
 const host = computed(() => store.hostById(hostId.value))
 const versions = computed(() => store.versionsByHost[hostId.value] ?? [])
 const homes = computed(() => store.homesByHost[hostId.value] ?? [])
-/**
- * Why this machine's versions and DSH_HOMEs could not be read. The two selects
- * list **one machine's** resources, so that machine has to answer for them: a
- * failed read leaves the store with no list at all (`loadHostResources`), and
- * this sheet says what went wrong instead of offering yesterday's list as
- * today's — or, worse, 「还没有装任何版本」 about a machine that never answered.
- */
 const hostError = computed(
   () =>
     store.versionErrors[hostId.value] || store.homeErrors[hostId.value] || '',
 )
+const noVersions = computed(() => versions.value.length === 0)
+const noHomes = computed(() => homes.value.length === 0)
 
-function retryHost() {
-  void store.loadHostResources(hostId.value)
-}
-
-/** `base`, then `base 2`, `base 3`… — instance names are unique **on their own
- *  host** (ADR-0006 §1), so only this machine's names are in the way: `web` on
- *  another machine says nothing about `web` here. */
 function uniqueName(base: string): string {
   const existing = new Set(
     store.instancesOfHost(hostId.value).map((i) => i.name),
@@ -75,23 +52,25 @@ function uniqueName(base: string): string {
   return `${base} ${n}`
 }
 
-// Defaults follow the common case: a name that cannot collide, and the version
-// the last install produced.
 function reset() {
-  const preset = props.preset
-  if (preset) {
-    name.value = uniqueName(`${preset.name} 副本`)
-    versionId.value = preset.versionId
-    homeId.value = preset.homeId
-    return
+  hostId.value = props.preset?.hostId ?? store.currentHostId
+  if (
+    !store.versionsByHost[hostId.value] &&
+    !store.versionErrors[hostId.value]
+  ) {
+    void store.loadHostResources(hostId.value)
   }
-  const onThisHost = store.instancesOfHost(hostId.value)
-  let n = onThisHost.length + 1
-  const existing = new Set(onThisHost.map((i) => i.name))
-  while (existing.has(`${`实例 `}${n}`)) n += 1
-  name.value = `${`实例 `}${n}`
-  versionId.value = versions.value[0]?.id
-  homeId.value = homes.value[0]?.id
+  versionId.value = props.preset?.versionId ?? versions.value[0]?.id
+  homeId.value = props.preset?.homeId ?? homes.value[0]?.id
+  name.value = props.preset
+    ? uniqueName(`${props.preset.name} 副本`)
+    : uniqueName('新实例')
+  if (!props.preset) {
+    // 如果默认数据目录还没读出来，等列表到达后再补上。
+    window.setTimeout(() => {
+      if (!homeId.value) homeId.value = homes.value[0]?.id
+    }, 0)
+  }
 }
 
 watch(
@@ -101,25 +80,29 @@ watch(
   },
 )
 
-// A new instance is a fresh binding, so it can only use a version that is
-// already installed — installing is the Versions tab's job, not this sheet's.
-const noVersions = computed(() => versions.value.length === 0)
-const noHomes = computed(() => homes.value.length === 0)
+watch(hostId, () => {
+  versionId.value = versions.value[0]?.id
+  homeId.value = homes.value[0]?.id
+  name.value = uniqueName('新实例')
+  if (
+    !store.versionsByHost[hostId.value] &&
+    !store.versionErrors[hostId.value]
+  ) {
+    void store.loadHostResources(hostId.value)
+  }
+})
 
-const createAction = useAction(
-  // The instance is bound on the machine whose versions and DSH_HOMEs the two
-  // selects are listing — the current host (ADR-0006 §3: a binding never spans
-  // two machines).
-  () =>
-    api.createInstance(
-      name.value.trim(),
-      versionId.value!,
-      homeId.value!,
-      hostId.value,
-    ),
-  { success: () => `实例已创建` },
-)
-const saving = computed(() => createAction.busy['*'])
+watch(versions, (list) => {
+  if (!versionId.value || !list.some((v) => v.id === versionId.value)) {
+    versionId.value = list[0]?.id
+  }
+})
+
+watch(homes, (list) => {
+  if (!homeId.value || !list.some((h) => h.id === homeId.value)) {
+    homeId.value = list[0]?.id
+  }
+})
 
 const valid = computed(
   () =>
@@ -128,6 +111,17 @@ const valid = computed(
     !!homeId.value &&
     !noVersions.value &&
     !noHomes.value,
+)
+
+const createAction = useAction(
+  () =>
+    api.createInstance(
+      name.value.trim(),
+      versionId.value!,
+      homeId.value!,
+      hostId.value,
+    ),
+  { success: () => '实例已创建' },
 )
 
 async function onCreate() {
@@ -142,103 +136,127 @@ async function onCreate() {
 function close() {
   emit('update:visible', false)
 }
+
+function goInstall() {
+  void store.selectHost(hostId.value)
+  close()
+  void router.push('/install')
+}
+
+function goData() {
+  void store.selectHost(hostId.value)
+  close()
+  void router.push('/data')
+}
 </script>
 
 <template>
   <a-modal
     :visible="visible"
     :mask-closable="true"
-    width="440px"
-    modal-class="dl-sheet"
+    width="480px"
+    title="新建实例"
     @update:visible="(v) => emit('update:visible', v)"
   >
-    <template #title>{{ preset ? `复制实例` : `新建实例` }}</template>
-
-    <!-- The machine has to answer before the sheet can offer anything: a host
-         whose read failed gets the reason and a retry, never a stale list. -->
-    <div v-if="hostError" class="dl-surface dl-failure">
-      <p class="dl-failure-title">{{ `读不到这台主机的资源` }}</p>
-      <p class="dl-failure-text">{{ hostError }}</p>
-      <p class="dl-failure-hint">
-        {{ `上面是那台机器回的话。修好之后再试一次。` }}
-      </p>
-      <div class="sheet-footer" style="margin-top: 8px">
-        <button class="dl-btn" @click="close">{{ `关闭` }}</button>
-        <button class="dl-btn dl-btn--primary" @click="retryHost">
-          {{ `刷新` }}
-        </button>
+    <div v-if="hostError" class="notice notice--warn">
+      <div class="notice-body">
+        <div class="notice-title">读不到这台机器的资源</div>
+        <div>{{ hostError }}</div>
+        <div style="margin-top: 8px">
+          <button
+            class="btn btn--quiet btn--sm"
+            @click="store.loadHostResources(hostId)"
+          >
+            重新读取
+          </button>
+        </div>
       </div>
     </div>
 
-    <!-- Nothing installed yet: the sheet cannot do its job, so it says which
-         page can, instead of offering three empty selects. -->
-    <div v-else-if="noVersions" class="dl-empty">
-      <p class="dl-empty-title">{{ `还没有安装任何 DSH 版本` }}</p>
-      <p class="dl-empty-text">
-        {{ `先在资源库里安装一个版本，再回来创建实例。` }}
-      </p>
-      <button
-        class="dl-btn dl-btn--primary"
-        style="margin-top: 6px"
-        @click="close"
-      >
-        {{ `关闭` }}
-      </button>
-    </div>
-
-    <div v-else class="new-instance-body">
-      <!-- Read-only, above the form: the instance is created on exactly this
-           machine, and the user checks it before naming anything. -->
-      <div class="new-instance-host">
-        <span class="new-instance-host-label">{{ `主机：` }}</span>
-        <span
-          class="new-instance-host-name"
-          :title="host?.ssh_target || hostId"
-        >
-          {{ host?.display_name || hostId }}
-        </span>
-      </div>
-
-      <div class="dl-field">
-        <label class="dl-field-label">{{ `实例名称` }}</label>
-        <input
-          v-model="name"
-          class="dl-input"
-          :placeholder="`例如：主实例`"
-          @keydown.enter="onCreate"
-        />
-      </div>
-
-      <div class="dl-field">
-        <label class="dl-field-label">{{ `DSH 版本` }}</label>
-        <a-select v-model="versionId" style="width: 100%">
-          <a-option v-for="v in versions" :key="v.id" :value="v.id">{{
-            v.version
-          }}</a-option>
-        </a-select>
-      </div>
-
-      <div class="dl-field">
-        <label class="dl-field-label">{{ `DSH_HOME` }}</label>
-        <a-select v-model="homeId" style="width: 100%">
-          <a-option v-for="h in homes" :key="h.id" :value="h.id">
-            {{ h.name }} — {{ h.path }}
+    <template v-else>
+      <div v-if="store.hosts.length > 1" class="field">
+        <label class="field-label">机器</label>
+        <a-select v-model="hostId" style="width: 100%">
+          <a-option v-for="h in store.hosts" :key="h.id" :value="h.id">
+            {{ h.display_name }}
           </a-option>
         </a-select>
       </div>
-    </div>
 
-    <template v-if="!noVersions" #footer>
-      <div class="sheet-footer">
-        <button class="dl-btn dl-btn--quiet" @click="close">
-          {{ `取消` }}
-        </button>
+      <div v-if="noVersions" class="notice notice--info">
+        <div class="notice-body">
+          <div class="notice-title">这台机器还没有安装 DSH 版本</div>
+          <div>
+            先安装一个版本，安装完成后会自动创建它专用的数据目录和第一个实例。
+          </div>
+          <button
+            class="btn btn--primary btn--sm"
+            style="margin-top: 10px"
+            @click="goInstall"
+          >
+            去安装
+          </button>
+        </div>
+      </div>
+
+      <template v-else>
+        <div class="field">
+          <label class="field-label">DSH 版本</label>
+          <a-select v-model="versionId" style="width: 100%">
+            <a-option v-for="v in versions" :key="v.id" :value="v.id">{{
+              v.version
+            }}</a-option>
+          </a-select>
+        </div>
+
+        <div v-if="noHomes" class="notice notice--info">
+          <div class="notice-body">
+            <div class="notice-title">这台机器还没有数据目录</div>
+            <div>实例需要绑定一个 DSH_HOME 来保存会话、凭据和配置。</div>
+            <button
+              class="btn btn--primary btn--sm"
+              style="margin-top: 10px"
+              @click="goData"
+            >
+              去创建数据目录
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="field">
+          <label class="field-label">数据目录（DSH_HOME）</label>
+          <a-select v-model="homeId" style="width: 100%">
+            <a-option v-for="h in homes" :key="h.id" :value="h.id">
+              {{ h.name }} — {{ h.path }}
+            </a-option>
+          </a-select>
+          <span class="field-hint"
+            >会话、凭据和 Profile 都存在这个目录里。</span
+          >
+        </div>
+
+        <div class="field">
+          <label class="field-label">实例名称</label>
+          <input
+            v-model="name"
+            class="input"
+            placeholder="例如：主实例"
+            @keydown.enter="onCreate"
+          />
+        </div>
+      </template>
+    </template>
+
+    <template #footer>
+      <div class="dialog-footer">
+        <button class="btn btn--quiet" @click="close">取消</button>
         <button
-          class="dl-btn dl-btn--primary"
-          :disabled="!valid || saving"
+          v-if="!noVersions && !noHomes"
+          class="btn btn--primary"
+          :disabled="!valid || !!createAction.busy['*']"
           @click="onCreate"
         >
-          {{ `创建` }}
+          创建实例
         </button>
       </div>
     </template>
@@ -246,35 +264,7 @@ function close() {
 </template>
 
 <style lang="scss" scoped>
-.new-instance-body {
-  padding-top: 2px;
-}
-
-// The machine this sheet binds on, stated once and quietly above the fields.
-.new-instance-host {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-  padding: 8px 10px;
-  border-radius: var(--dl-r-ctl);
-  background: var(--dl-surface-2);
-  font-size: var(--dl-text-sm);
-}
-
-.new-instance-host-label {
-  color: var(--dl-ink-3);
-}
-
-.new-instance-host-name {
-  color: var(--dl-ink);
-  font-weight: 550;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sheet-footer {
+.dialog-footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;

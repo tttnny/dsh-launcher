@@ -1,27 +1,18 @@
 <script setup lang="ts">
+import { Modal } from '@arco-design/web-vue'
 import type { BundleItem } from '@/api/types'
 import DlIcon from '@/components/DlIcon.vue'
 
-// One 补丁层 in the plugin manager's list.
-//
-// A layer states what it *is* (name, version, how many composition rows it
-// contributes) and offers the two things a layer can do: mount/unmount, and —
-// only for a layer the user added — 卸载. Which of the page's two groups it
-// lands in (yours / ships with DSH) is the page's business, so this row carries
-// no group logic beyond the tone it is drawn with.
+// 插件管理里的一层「补丁层」。它说明自己是什么（名称、版本、贡献多少条目），
+// 并提供这个层仅有的两个动作：启用/停用，以及只对用户自己添加的层开放的移除。
 
 const props = defineProps<{
   bundle: BundleItem
   pending: boolean
   managed: boolean
-  /**
-   * True while *any* layer on the page has a write in flight. The instance
-   * serializes writes on one profile file lock, so a second click would queue
-   * behind the first and can come back as a confusing refusal; the native page
-   * locks every control for the same reason.
-   */
+  /** 该页有任意写入进行中时，整页控件一起锁住。 */
   locked?: boolean
-  /** Which fold the row belongs to; only changes how loud it is. */
+  /** 这一行属于哪一组，只影响视觉轻重。 */
   tone: 'own' | 'shipped'
 }>()
 
@@ -31,80 +22,73 @@ function name(): string {
   return props.bundle.title?.trim() || props.bundle.name
 }
 
-/** The package name only earns a second line when it is not what the title says. */
+/** 只有当标题和包名不同时，包名才值得再占一行。 */
 function bundleHasOwnTitle(): boolean {
   const title = props.bundle.title?.trim()
   return Boolean(title) && title !== props.bundle.name
 }
 
-/**
- * Why a layer offers no 卸载 button, when the instance bothered to say. The
- * three layers that back the plugin manager itself are the ones that do, and
- * without this tag a user reads their missing button as a bug.
- */
+/** 补丁层为什么没有「移除」按钮；DSH 自己的插件管理靠这几层撑着。 */
 function managedReason(): string | null {
   return props.bundle.readOnlyReason === 'management-required'
-    ? `这个补丁层撑着 DSH 自己的插件管理，只能停用，不能卸载`
+    ? '这个补丁层撑着 DSH 自己的插件管理，只能停用，不能移除'
     : null
 }
 
-/** A layer with no rows is a real thing (an install-only or config-only
- *  layer); printing "0 条目" would be noise, so the fact stays absent. */
+/** 没有条目的层是真实存在的（只装包或只做配置），不显示「0 个条目」。 */
 function rowCount(): string | null {
   return props.bundle.rowCount > 0 ? `${props.bundle.rowCount} 个条目` : null
+}
+
+function confirmRemove() {
+  Modal.confirm({
+    title: `移除补丁层「${name()}」？`,
+    content: `它带来的条目与配置会一起消失，这个 Profile 也不再依赖该包。本地 link 指向的源码目录不受影响。`,
+    okText: '移除',
+    cancelText: '取消',
+    okButtonProps: { status: 'danger' },
+    onOk: () => emit('remove'),
+  })
 }
 </script>
 
 <template>
-  <div class="bundle-row" :class="`is-${tone}`">
+  <div class="list-row bundle-row" :class="`is-${tone}`">
     <span
       class="bundle-dot"
       :class="{ 'is-on': bundle.enabled, 'is-bad': !!bundle.errorCode }"
     />
-    <div class="bundle-main">
-      <div class="bundle-title">
-        <!-- Mono exactly when the name on show *is* the package name: machine
-             identifiers wear the readout face, a translated title does not. -->
-        <span
-          class="bundle-name"
-          :class="{ 'dl-mono': !bundleHasOwnTitle() }"
-          >{{ name() }}</span
-        >
-        <span v-if="bundle.version" class="dl-chip dl-mono">{{
-          bundle.version
+
+    <div class="row-main">
+      <div class="row-title">
+        <!-- 展示的若就是包名，就用等宽字体：机器标识走读数面，翻译过的标题不走。 -->
+        <span class="bundle-name" :class="{ mono: !bundleHasOwnTitle() }">{{
+          name()
         }}</span>
-        <span v-if="rowCount()" class="bundle-rows">{{ rowCount() }}</span>
-        <span v-if="bundle.optional" class="dl-tag dl-tag--muted">{{
-          `可选`
+        <span v-if="bundle.version" class="tag tag--muted mono">{{
+          bundle.version
         }}</span>
         <span
           v-if="managedReason()"
-          class="dl-tag dl-tag--muted"
+          class="tag tag--muted"
           :title="managedReason()!"
         >
-          {{ `DSH 自身依赖` }}
+          DSH 自身依赖
         </span>
-        <!-- "The package files are unreadable" already says the layer cannot
-             load; the error code would be a second amber tag saying it twice. -->
-        <span
-          v-if="bundle.availability === 'missing'"
-          class="dl-tag dl-tag--warn"
-        >
-          {{ `包文件读不到` }}
+        <span v-if="bundle.availability === 'missing'" class="tag tag--warn">
+          包文件读不到
         </span>
         <span
           v-else-if="bundle.errorCode"
-          class="dl-tag dl-tag--warn"
+          class="tag tag--warn"
           :title="bundle.errorCode"
         >
-          {{ `加载失败` }}
+          加载失败
         </span>
       </div>
-      <span v-if="bundleHasOwnTitle()" class="bundle-sub dl-mono">{{
-        bundle.name
-      }}</span>
     </div>
-    <div class="bundle-actions">
+
+    <div class="row-actions">
       <a-switch
         :model-value="bundle.enabled"
         :loading="pending"
@@ -112,45 +96,33 @@ function rowCount(): string | null {
         size="small"
         @change="(v: string | number | boolean) => emit('toggle', v === true)"
       />
-      <a-popconfirm
+      <button
         v-if="managed && bundle.removable"
-        :content="`卸载补丁层「${name()}」？它带来的条目与配置一起消失，这个 Profile 也不再依赖该包（本地 link 指向的源码目录不受影响）。`"
-        :ok-text="`卸载`"
-        :cancel-text="`取消`"
-        modal-class="dl-sheet"
-        @ok="emit('remove')"
+        class="btn btn--danger btn--sm"
+        :disabled="pending || !!locked"
+        @click="confirmRemove"
       >
-        <button class="dl-btn dl-btn--danger" :disabled="pending || !!locked">
-          <DlIcon name="trash" :size="13" />
-          {{ `卸载` }}
-        </button>
-      </a-popconfirm>
+        <DlIcon name="trash" :size="13" />
+        移除
+      </button>
     </div>
   </div>
 </template>
 
 <style lang="scss" scoped>
 .bundle-row {
-  display: flex;
-  align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--dl-line);
-
-  &:first-child {
-    border-top: none;
-  }
+  min-height: 58px;
+  padding: 11px 16px;
 }
 
-// The folded group sits quieter than the layers you added yourself.
-.bundle-row.is-shipped {
-  .bundle-name {
-    font-weight: 500;
-    color: var(--dl-ink-2);
-  }
+// 折叠的「随 DSH 发布」那一组比你自己添加的层安静一些。
+.bundle-row.is-shipped .bundle-name {
+  font-weight: 500;
+  color: var(--dl-ink-2);
 }
 
-// Colour says one thing only: is this layer live right now.
+// 颜色只说一件事：这一层现在是不是生效的。
 .bundle-dot {
   width: 8px;
   height: 8px;
@@ -160,57 +132,24 @@ function rowCount(): string | null {
 
   &.is-on {
     background: var(--dl-run);
-    box-shadow: 0 0 0 3px var(--dl-run-soft);
   }
 
   &.is-bad {
     background: var(--dl-warn);
-    box-shadow: 0 0 0 3px var(--dl-warn-soft);
   }
 }
 
-.bundle-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.bundle-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
 .bundle-name {
-  font-size: var(--dl-text-md);
-  font-weight: 550;
-  color: var(--dl-ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-// The layer's size: a count, not a list — the rows are DSH's own detail.
+// 层的规模：一个数字，不是一张列表 —— 里面的条目是 DSH 自己的组合细节。
 .bundle-rows {
   font-size: var(--dl-text-xs);
   color: var(--dl-ink-3);
   font-variant-numeric: tabular-nums;
-}
-
-.bundle-sub {
-  font-size: var(--dl-text-xs);
-  color: var(--dl-ink-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bundle-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  white-space: nowrap;
 }
 </style>

@@ -1,63 +1,41 @@
 /**
- * In-app keyboard shortcuts + the backend menu-event contract.
+ * 应用内快捷键与原生菜单事件契约。
  *
- * The Rust side (native menu bar, tray) emits Tauri events carrying a route
- * payload; this module is the single place that defines the event names and
- * the payload → route mapping, so the two sides cannot drift.
- *
- * The app has four top-level pages now, so the digits address pages and
- * Library tabs:
- *   ⌘1 instances · ⌘2 library/versions · ⌘3 homes · ⌘4 profiles · ⌘5 hosts ·
- *   ⌘, settings
- * Legacy payloads (`/homes`, `/profiles`, `/versions`, `/plugins`) keep
- * working — they land on the matching Library tab.
+ * 原生菜单栏和托盘发出的导航事件统一走 `menu-navigate`，载荷是路由字符串；
+ * 这个文件是唯一把事件名与「载荷 → 页面」写在一起的地方，前后端不会各说各话。
  */
 
 export type ShortcutRoute =
-  | 'instances'
-  | 'library'
-  | 'hosts'
-  | 'library:versions'
-  | 'library:homes'
-  | 'library:profiles'
-  | 'settings'
+  'instances' | 'install' | 'data' | 'machines' | 'settings'
 
-/** Canonical first, aliases after. */
+/** 规范事件名在前，历史别名在后。 */
 export const MENU_NAVIGATE_EVENTS = [
   'menu-navigate',
   'navigate',
   'app-navigate',
 ] as const
 
-/**
- * Single source of truth for the Settings shortcut card. `label` is the row's
- * text; `keys` are the display chips. Rows marked `native` are handled by the
- * OS/Rust menu rather than `handleAppKeydown`, but are listed so the card
- * cannot drift from the table.
- */
 export interface ShortcutDoc {
   label: string
   keys: string[]
   native?: boolean
 }
 
-/** The one modifier this app ships with: the macOS Command key. */
-const MOD = '\u2318'
+const MOD = '⌘'
 
 export const SHORTCUT_DOCS: ShortcutDoc[] = [
   { label: '前往实例', keys: [MOD, '1'] },
-  { label: '前往 DSH 版本', keys: [MOD, '2'] },
-  { label: '前往 DSH_HOME', keys: [MOD, '3'] },
-  { label: '前往 Profile', keys: [MOD, '4'] },
-  { label: '前往主机', keys: [MOD, '5'] },
+  { label: '前往安装', keys: [MOD, '2'] },
+  { label: '前往数据', keys: [MOD, '3'] },
+  { label: '前往机器', keys: [MOD, '4'] },
   { label: '打开设置', keys: [MOD, ','] },
-  { label: '刷新状态', keys: [MOD, 'R'] },
+  { label: '刷新当前数据', keys: [MOD, 'R'] },
   { label: '返回上一页（输入框内仅退出输入）', keys: ['Esc'] },
   { label: '显示主窗口', keys: [MOD, '0'], native: true },
   { label: '退出启动器', keys: [MOD, 'Q'], native: true },
 ]
 
-/** Backend route payload → the route this app should render. */
+/** 原生菜单载荷 → 新页面。旧路径一并兼容，避免托盘和历史链接失效。 */
 export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   let raw: unknown = payload
   if (
@@ -71,12 +49,11 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   }
   if (typeof raw !== 'string') return null
 
-  // Strip any query the backend appended (`/library?tab=homes`).
   const [path, query] = raw.trim().split('?')
   const key = path.replace(/^\/+/, '').replace(/\/+$/, '')
   const tab = new URLSearchParams(query ?? '').get('tab')
-  if (tab === 'versions' || tab === 'homes' || tab === 'profiles') {
-    return `library:${tab}` as ShortcutRoute
+  if (key === 'library') {
+    return tab === 'versions' ? 'install' : 'data'
   }
 
   switch (key) {
@@ -84,22 +61,20 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
     case 'instances':
     case 'home':
       return 'instances'
-    case 'homes':
-      return 'library:homes'
-    case 'profiles':
-    case 'plugins':
-      return 'library:profiles'
+    case 'install':
     case 'versions':
     case 'tasks':
-      return 'library:versions'
-    case 'library':
-      return 'library'
+      return 'install'
+    case 'data':
+    case 'homes':
+    case 'profiles':
+      return 'data'
+    case 'machines':
     case 'hosts':
-      return 'hosts'
+      return 'machines'
     case 'settings':
       return 'settings'
     default:
-      // `instances/:id` and anything else instance-shaped lands on the list.
       return key.startsWith('instance') ? 'instances' : null
   }
 }
@@ -110,7 +85,6 @@ export interface ShortcutActions {
   back: () => void
 }
 
-/** True when the keydown originated inside a text-editing control. */
 export function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   if (target.isContentEditable) return true
@@ -118,19 +92,11 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
 }
 
-/**
- * Global keydown dispatcher for in-app shortcuts.
- *
- * Every combo requires the platform modifier except Esc, so plain typing is
- * never hijacked; Esc inside a field only blurs instead of navigating. Returns
- * true when the event was handled.
- */
 export function handleAppKeydown(
   e: KeyboardEvent,
   actions: ShortcutActions,
 ): boolean {
   if (e.defaultPrevented) return false
-  // Tauri webviews may deliver key events for IME composition; ignore them.
   if (e.isComposing || e.keyCode === 229) return false
 
   const target = e.target as EventTarget | null
@@ -153,16 +119,13 @@ export function handleAppKeydown(
       actions.go('instances')
       return true
     case '2':
-      actions.go('library:versions')
+      actions.go('install')
       return true
     case '3':
-      actions.go('library:homes')
+      actions.go('data')
       return true
     case '4':
-      actions.go('library:profiles')
-      return true
-    case '5':
-      actions.go('hosts')
+      actions.go('machines')
       return true
     case ',':
       actions.go('settings')

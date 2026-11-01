@@ -6,7 +6,7 @@
 //! 其中 PredefinedMenuItem 提供原生行为与加速键，
 //! 自定义 MenuItem 用于导航与功能项并转发事件到前端。
 //!
-//! ## 前端契约 (M3 收敛后的唯一规范)
+//! ## 前端契约
 //!
 //! 导航统一走 `menu-navigate` 事件（载荷为路由字符串，前端用
 //! `@tauri-apps/api/event` 的 `listen` 订阅后交 `resolveMenuRoute` 解析）：
@@ -14,19 +14,14 @@
 //! | `menu-navigate` 载荷 | 菜单来源 |
 //! | --- | --- |
 //! | `/` | “显示”→实例 (Cmd+1) |
-//! | `/library?tab=versions` | “显示”→DSH 版本 (Cmd+2) |
-//! | `/library?tab=homes` | “显示”→DSH_HOME (Cmd+3) |
-//! | `/library?tab=profiles` | “显示”→Profile (Cmd+4) |
-//! | `/hosts` | “显示”→主机 (Cmd+5) |
+//! | `/install` | “显示”→安装 (Cmd+2) |
+//! | `/data` | “显示”→数据 (Cmd+3) |
+//! | `/machines` | “显示”→机器 (Cmd+4) |
 //! | `/settings` | App 菜单→偏好设置 (Cmd+,) |
 //!
-//! 插件管理不占顶级导航：它属于运行中的实例，入口只在实例侧两处（详情页头部
-//! 按钮与实例行展开卡片里的按钮），跳转带 `?instanceId=` 以便返回。`/tasks` 保留
-//! 为可用的历史链接，前端把它重定向到 `/versions`（安装进度就显示在那个版本那
-//! 一行上）。
+//! 插件管理属于运行中的实例，入口在实例详情页的「插件」标签里。
 //!
-//! 刷新没有菜单项：实例状态由后端事件推送，`⌘R` 走前端 `handleAppKeydown`，
-//! 用于「在启动器外面改了什么」的少数场景。
+//! 刷新没有菜单项：实例状态由后端事件推送，`⌘R` 走前端 `handleAppKeydown`。
 //!
 //! 非导航动作仍用各自事件（载荷为 `()`）：
 //!
@@ -55,10 +50,9 @@ use tauri::{AppHandle, Emitter, Manager};
 const ID_PREFERENCES: &str = "appmenu-preferences";
 const ID_QUIT: &str = "appmenu-quit";
 const ID_VIEW_HOME: &str = "appmenu-view-home";
-const ID_VIEW_HOMES: &str = "appmenu-view-homes";
-const ID_VIEW_PROFILES: &str = "appmenu-view-profiles";
-const ID_VIEW_VERSIONS: &str = "appmenu-view-versions";
-const ID_VIEW_HOSTS: &str = "appmenu-view-hosts";
+const ID_VIEW_INSTALL: &str = "appmenu-view-install";
+const ID_VIEW_DATA: &str = "appmenu-view-data";
+const ID_VIEW_MACHINES: &str = "appmenu-view-machines";
 const ID_VIEW_SETTINGS: &str = "appmenu-view-settings";
 const ID_SHOW_MAIN: &str = "appmenu-show-main";
 const ID_CHECK_UPDATE: &str = "appmenu-check-update";
@@ -133,16 +127,12 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )?;
 
     // ── 显示 (应用内导航快捷键→转发前端) ──────────────────
-    // 顶层四个目的地（实例 / 资源库 / 主机 / 设置）；资源库的三个标签页各占一格，
-    // 所以 DSH 版本 / DSH_HOME / Profile 仍然一键直达。主机单独一格，与侧栏一致。
-    // 插件管理不占位：它属于运行中的实例，入口在实例页那一行展开的卡片里。
+    // 五个目的地与左侧导航一致：实例、安装、数据、机器、设置。
     let view_home = MenuItem::with_id(app, ID_VIEW_HOME, "实例", true, Some("CmdOrCtrl+1"))?;
-    let view_versions =
-        MenuItem::with_id(app, ID_VIEW_VERSIONS, "DSH 版本", true, Some("CmdOrCtrl+2"))?;
-    let view_homes = MenuItem::with_id(app, ID_VIEW_HOMES, "DSH_HOME", true, Some("CmdOrCtrl+3"))?;
-    let view_profiles =
-        MenuItem::with_id(app, ID_VIEW_PROFILES, "Profile", true, Some("CmdOrCtrl+4"))?;
-    let view_hosts = MenuItem::with_id(app, ID_VIEW_HOSTS, "主机", true, Some("CmdOrCtrl+5"))?;
+    let view_install = MenuItem::with_id(app, ID_VIEW_INSTALL, "安装", true, Some("CmdOrCtrl+2"))?;
+    let view_data = MenuItem::with_id(app, ID_VIEW_DATA, "数据", true, Some("CmdOrCtrl+3"))?;
+    let view_machines =
+        MenuItem::with_id(app, ID_VIEW_MACHINES, "机器", true, Some("CmdOrCtrl+4"))?;
     // “设置”不重复占用 Cmd+,，加速键归偏好设置独占。
     let view_settings = MenuItem::with_id(app, ID_VIEW_SETTINGS, "设置", true, None::<&str>)?;
     let sep_v = PredefinedMenuItem::separator(app)?;
@@ -152,10 +142,9 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &view_home,
-            &view_homes,
-            &view_profiles,
-            &view_versions,
-            &view_hosts,
+            &view_install,
+            &view_data,
+            &view_machines,
             &sep_v,
             &view_settings,
         ],
@@ -224,10 +213,9 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
         ID_SHOW_MAIN => crate::windows::show_or_create_main(app),
         ID_VIEW_HOME => show_and_emit(app, "/"),
-        ID_VIEW_VERSIONS => show_and_emit(app, "/library?tab=versions"),
-        ID_VIEW_HOMES => show_and_emit(app, "/library?tab=homes"),
-        ID_VIEW_PROFILES => show_and_emit(app, "/library?tab=profiles"),
-        ID_VIEW_HOSTS => show_and_emit(app, "/hosts"),
+        ID_VIEW_INSTALL => show_and_emit(app, "/install"),
+        ID_VIEW_DATA => show_and_emit(app, "/data"),
+        ID_VIEW_MACHINES => show_and_emit(app, "/machines"),
         ID_VIEW_SETTINGS | ID_PREFERENCES => show_and_emit(app, "/settings"),
         ID_CHECK_UPDATE => {
             if let Err(e) = app.emit(EVT_CHECK_UPDATE, ()) {

@@ -13,17 +13,6 @@ import type {
   TaskInfo,
 } from '@/api/types'
 
-export interface HealthLogItem {
-  id: string
-  timestamp: number
-  instanceId: string
-  instanceName: string
-  profile: string
-  level: 'warn' | 'error'
-  code: string
-  message: string
-}
-
 /**
  * The install ledger: versions an install task is currently fetching, keyed by
  * **host + version** — two machines can install the same version at the same
@@ -113,7 +102,6 @@ interface LauncherState {
   remoteErrors: Record<string, string>
   remoteLoading: boolean
   runtime: RuntimeStatus | null
-  healthLogs: HealthLogItem[]
   loaded: boolean
   /**
    * Why one of the six start-up reads failed, one entry each. A failed read
@@ -154,7 +142,6 @@ export const useLauncherStore = defineStore('launcher', {
     remoteErrors: {},
     remoteLoading: false,
     runtime: null,
-    healthLogs: [],
     loaded: false,
     initErrors: [],
   }),
@@ -234,11 +221,6 @@ export const useLauncherStore = defineStore('launcher', {
           profile: null,
           exit_code: null,
         },
-    healthErrorCount: (s) =>
-      s.healthLogs.filter((l) => l.level === 'error').length,
-    healthWarnCount: (s) =>
-      s.healthLogs.filter((l) => l.level === 'warn').length,
-    healthTotalCount: (s) => s.healthLogs.length,
   },
 
   actions: {
@@ -569,17 +551,6 @@ export const useLauncherStore = defineStore('launcher', {
       } finally {
         this.remoteLoading = false
       }
-    },
-
-    addHealthLogs(logs: HealthLogItem[]) {
-      this.healthLogs.unshift(...logs)
-      if (this.healthLogs.length > 500) {
-        this.healthLogs.splice(500)
-      }
-    },
-
-    clearHealthLogs() {
-      this.healthLogs = []
     },
   },
 })

@@ -1,33 +1,37 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { useLauncherStore } from '@/stores/launcher'
-import { LOCAL_HOST_ID, type DshInstance, type ThemeMode } from '@/api/types'
 import { api } from '@/api'
+import { LOCAL_HOST_ID, type DshInstance, type ThemeMode } from '@/api/types'
 import {
   MENU_NAVIGATE_EVENTS,
   handleAppKeydown,
   resolveMenuRoute,
   type ShortcutRoute,
 } from '@/shortcuts'
-import DlIcon from '@/components/DlIcon.vue'
+import AppRail from '@/components/AppRail.vue'
+import launcherIcon from '@/assets/launcher-icon.png'
 
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
 const isTauri = api.isTauri
+const contentEl = ref<HTMLElement | null>(null)
 
-// --- Theme: light / dark / follow system -------------------------------------
+watch(
+  () => route.fullPath,
+  async () => {
+    await nextTick()
+    contentEl.value?.scrollTo({ top: 0 })
+  },
+)
+
+// --- 主题 -------------------------------------------------------------------
 
 const themeMedia = window.matchMedia('(prefers-color-scheme: dark)')
 
-/**
- * Applies the effective Arco theme to <body> (body[arco-theme='dark']) and
- * keeps the native window in step. The title bar is drawn by macOS, not by the
- * page: without the native half, a dark app under a light OS keeps a white
- * title bar and the chrome contradicts the content.
- */
 function applyTheme(mode: ThemeMode) {
   const dark = mode === 'dark' || (mode === 'system' && themeMedia.matches)
   if (dark) document.body.setAttribute('arco-theme', 'dark')
@@ -41,7 +45,7 @@ async function applyNativeTheme(mode: ThemeMode) {
     const win = await appWindow
     await win.setTheme(mode === 'system' ? null : mode)
   } catch {
-    // Older runtimes or a non-Tauri context: the page theme still applies.
+    // 浏览器预览或旧运行时：页面主题仍然生效。
   }
 }
 
@@ -57,68 +61,28 @@ onMounted(async () => {
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
 
-  // Land on the environment check when the toolchain is incomplete: pnpm is a
-  // hard requirement for installing a version and for plugin management, and
-  // the launcher no longer installs one itself. Navigation stays open, so a
-  // network-restricted user can still reach Settings and configure a proxy.
-  const runtimeIncomplete =
-    !store.runtime?.node?.installed || !store.runtime?.pnpm?.installed
-  if (runtimeIncomplete && route.name !== 'setup') {
-    void router.push({ name: 'setup' })
-  }
-
   await setupLaunchDeepLink()
   window.addEventListener('keydown', onAppKeydown)
   await setupMenuListeners()
 })
 
-// --- Shortcuts ----------------------------------------------------------------
-
-function pushLibrary(tab: 'versions' | 'homes' | 'profiles' | undefined) {
-  const query = tab ? { tab } : {}
-  if (route.name === 'library') {
-    void router.replace({ name: 'library', query })
-    return
-  }
-  void router.push({ name: 'library', query })
-}
+// --- 快捷键 -----------------------------------------------------------------
 
 function goShortcut(name: ShortcutRoute) {
-  switch (name) {
-    case 'instances':
-      if (route.name === 'instance-detail') return
-      void router.push({ name: 'instances' }).catch(() => undefined)
-      return
-    case 'library':
-      pushLibrary(undefined)
-      return
-    case 'hosts':
-      void router.push({ name: 'hosts' }).catch(() => undefined)
-      return
-    case 'library:versions':
-      pushLibrary('versions')
-      return
-    case 'library:homes':
-      pushLibrary('homes')
-      return
-    case 'library:profiles':
-      pushLibrary('profiles')
-      return
-    case 'settings':
-      void router.push({ name: 'settings' }).catch(() => undefined)
-      return
+  const target: Record<ShortcutRoute, string> = {
+    instances: '/',
+    install: '/install',
+    data: '/data',
+    machines: '/machines',
+    settings: '/settings',
   }
+  void router.push(target[name]).catch(() => undefined)
 }
 
 async function refreshAll() {
-  // ⌘R re-reads what the pages show: the board, the current host's versions and
-  // DSH_HOMEs (whether or not it answered last time), and what that host's
-  // registry offers *now* — the installable list is cached per host, so it takes
-  // the forced read.
   await Promise.allSettled([
     store.refreshInstances(),
     store.loadHostResources(store.currentHostId),
-    store.refreshRemoteVersions(true),
     store.checkRuntime(),
   ])
 }
@@ -140,7 +104,7 @@ function backShortcut() {
   router.back()
 }
 
-// --- Backend menu events ------------------------------------------------------
+// --- 原生菜单 -----------------------------------------------------------------
 
 let unlistenMenu: (() => void)[] = []
 
@@ -160,7 +124,7 @@ async function setupMenuListeners() {
     )
     unlistenMenu.push(await listen('open-help', () => void onMenuOpenHelp()))
   } catch {
-    // Event bridge unavailable (browser preview); shortcuts still work.
+    // 事件桥不可用时（浏览器预览）快捷键仍然可用。
   }
 }
 
@@ -171,7 +135,7 @@ async function onMenuCheckUpdate() {
   checkingMenuUpdate = true
   try {
     const info = await api.checkLauncherUpdate('dev')
-    if (info.up_to_date) Message.success(`当前已是最新版本`)
+    if (info.up_to_date) Message.success('当前已是最新版本')
     else {
       Message.info(`发现新版本 v${info.latest ?? ''}`)
       if (info.url) await api.openExternal(info.url)
@@ -191,7 +155,7 @@ async function onMenuOpenHelp() {
   }
 }
 
-// --- Launch deep link: dsh-launcher://launch → start instance -----------------
+// --- 启动深链接 ---------------------------------------------------------------
 
 let unlistenDeepLink: (() => void) | undefined
 
@@ -211,24 +175,10 @@ function handleDeepLink(raw: string) {
     if (u.protocol !== 'dsh-launcher:') return
     if (u.host === 'launch') void launchFromDeepLink(u)
   } catch {
-    // Ignore invalid protocol
+    // 忽略无效链接
   }
 }
 
-/**
- * The instance a deep link names.
- *
- * This launcher only **reads** `dsh-launcher://launch` links — nothing in this
- * tree writes one, and the parameters the scheme is known to carry are
- * `instance`, holding either an id or a name (a link that arrives from outside
- * is hand-written), and `profile`, the profile to start it with when it is not
- * already running. An id names one instance on one machine, so it resolves
- * anywhere. A **name** only has to be unique on its own host
- * (两台机器可以各有一个 `web`, ADR-0006 §1), and the link carries no host of its
- * own — so a name is read as 「当前主机上叫这个名字的那一个」, and a link whose
- * name is not there says so rather than starting whatever instance happens to
- * share the name on another machine.
- */
 function launchTarget(ref: string): DshInstance | undefined {
   const byId = store.instanceById(ref)
   if (byId) return byId
@@ -240,7 +190,7 @@ async function launchFromDeepLink(u: URL) {
   if (!ref) return
   const inst = launchTarget(ref)
   if (!inst) {
-    Message.error(`这台主机上没有名为「${ref}」的实例`)
+    Message.error(`这台机器上没有名为「${ref}」的实例`)
     return
   }
   try {
@@ -287,122 +237,13 @@ watch(
   },
 )
 
-// --- Sidebar ------------------------------------------------------------------
-
-type NavKey = 'instances' | 'library' | 'hosts' | 'settings'
-
-const siderCollapsed = ref(
-  localStorage.getItem('dsh-launcher.siderCollapsed') === '1',
-)
-
-function toggleSider() {
-  siderCollapsed.value = !siderCollapsed.value
-  try {
-    localStorage.setItem(
-      'dsh-launcher.siderCollapsed',
-      siderCollapsed.value ? '1' : '0',
-    )
-  } catch {
-    // Private mode fallback
-  }
-}
-
-const navSelected = computed<NavKey>(() => {
-  const name = route.name as string
-  if (name === 'library') return 'library'
-  if (name === 'hosts') return 'hosts'
-  // 环境检测 answers for one machine, so it belongs under 主机 — the rail
-  // highlights the machine whose environment the page is about.
-  if (name === 'setup') return 'hosts'
-  if (name === 'settings') return 'settings'
-  return 'instances'
-})
-
-const navGo = goShortcut
-
-const runningCount = computed(
-  () =>
-    store.instances.filter((i) => store.statusOf(i.id).state === 'running')
-      .length,
-)
-
-const envOk = computed(
-  () => !!store.runtime?.node?.installed && !!store.runtime?.pnpm?.installed,
-)
-
-// --- Host rail ----------------------------------------------------------------
-//
-// 主机 is the axis the whole launcher is filed under: every instance, version,
-// DSH_HOME and Profile belongs to exactly one machine. Keeping it in the
-// persistent rail — instead of re-inventing it as a filter on each page — is
-// what makes 「我现在在看哪台机器」 one answer everywhere.
-
-const hostsNav = computed(() =>
-  store.hosts.map((h) => {
-    const st = h.status?.state
-    const tone = h.builtin
-      ? 'local'
-      : st === 'reachable'
-        ? 'ok'
-        : st === 'connecting'
-          ? 'busy'
-          : st === 'unreachable'
-            ? 'warn'
-            : 'idle'
-    return {
-      id: h.id,
-      name: h.display_name,
-      count: store.instancesOfHost(h.id).length,
-      tone,
-      title: h.ssh_target || '本机',
-    }
-  }),
-)
-
-function pickAllHosts() {
-  store.setAllHosts(true)
-}
-
-function pickHost(id: string) {
-  store.setAllHosts(false)
-  void store.selectHost(id)
-}
-
-/**
- * 「全部主机」 is a fleet view: it only means anything where the board can show
- * more than one machine at once. On a page about one machine's resources
- * (Library, Settings) or about one instance (which lives on one machine) the
- * rail highlights that machine instead, so the rail and the page never
- * disagree about which machine is current.
- */
-const onFleetView = computed(() => route.name === 'instances')
-const hostAllActive = computed(() => onFleetView.value && store.allHosts)
-/** The machine the current page is really about. */
-const activeHostId = computed(() => {
-  if (route.name === 'instance-detail') {
-    const id = route.params.id
-    const inst = typeof id === 'string' ? store.instanceById(id) : undefined
-    return inst?.host_id ?? LOCAL_HOST_ID
-  }
-  return store.currentHostId
-})
-function hostRowActive(id: string) {
-  return !hostAllActive.value && activeHostId.value === id
-}
-
-// --- Header -------------------------------------------------------------------
-
-const showBack = computed(
-  () => route.name === 'instance-detail' || route.name === 'setup',
-)
-
-function onHeaderBack() {
-  router.back()
-}
+// --- 窗口拖动 -----------------------------------------------------------------
 
 const appWindow = (() => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (window as any)?.__TAURI_INTERNALS__ ? loadWindowApi() : null
+  return (window as unknown as { __TAURI_INTERNALS__?: unknown })
+    .__TAURI_INTERNALS__
+    ? loadWindowApi()
+    : null
 })()
 
 async function loadWindowApi() {
@@ -410,17 +251,12 @@ async function loadWindowApi() {
   return getCurrentWindow()
 }
 
-// --- Title bar drag & double-click zoom ---------------------------------------
-// startDragging() enters a native drag loop that swallows the pending click, so
-// only start dragging once the pointer moves past a small threshold — fast
-// clicks then complete normally and dblclick (zoom) still reaches the webview.
-
 let dragArmed: { x: number; y: number; started: boolean } | null = null
 
-function onHeaderMouseDown(e: MouseEvent) {
+function onTitlebarMouseDown(e: MouseEvent) {
   if (!isTauri || e.button !== 0) return
   const el = e.target as HTMLElement | null
-  if (el?.closest('.dl-nav-item, a, button, input, [data-no-drag]')) return
+  if (el?.closest('button, a, input, [data-no-drag]')) return
   dragArmed = { x: e.screenX, y: e.screenY, started: false }
   window.addEventListener('mousemove', onDragThresholdMove)
   window.addEventListener('mouseup', onDragFinish, { once: true })
@@ -441,153 +277,37 @@ function onDragFinish() {
   window.removeEventListener('mousemove', onDragThresholdMove)
 }
 
-/** macOS native title bar behavior: double-click empty strip zooms the window. */
-async function onHeaderDoubleClick(e: MouseEvent) {
+async function onTitlebarDoubleClick(e: MouseEvent) {
   if (!isTauri || e.button !== 0) return
   const el = e.target as HTMLElement | null
-  if (el?.closest('.dl-nav-item, a, button, input, [data-no-drag]')) return
+  if (el?.closest('button, a, input, [data-no-drag]')) return
   try {
     const w = await appWindow
     if (!w) return
     if (await w.isMaximized()) await w.unmaximize()
     else await w.maximize()
   } catch {
-    // Advisory only
+    // 仅影响窗口缩放，忽略。
   }
 }
 </script>
 
 <template>
-  <div class="dl-app">
-    <aside class="dl-sidebar" :class="{ 'is-collapsed': siderCollapsed }">
-      <!-- Drag strip: the native traffic lights draw over its left end. -->
+  <div v-if="!store.loaded" class="app-boot">
+    <img class="app-boot-mark" :src="launcherIcon" alt="" />
+    <span class="app-boot-title">DSH Launcher</span>
+    <span class="app-boot-hint">正在读取启动器数据…</span>
+  </div>
+
+  <div v-else class="app-shell">
+    <AppRail />
+    <main class="app-main">
       <div
-        class="dl-sidebar-drag"
-        @mousedown="onHeaderMouseDown"
-        @dblclick="onHeaderDoubleClick"
-      />
-
-      <nav class="dl-nav">
-        <button
-          class="dl-nav-item"
-          :class="{ 'is-active': navSelected === 'instances' }"
-          :title="siderCollapsed ? `实例` : ''"
-          @click="navGo('instances')"
-        >
-          <DlIcon name="instances" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `实例` }}</span>
-          <span
-            v-if="!siderCollapsed && runningCount > 0"
-            class="dl-nav-badge"
-            >{{ runningCount }}</span
-          >
-        </button>
-
-        <button
-          class="dl-nav-item"
-          :class="{ 'is-active': navSelected === 'library' }"
-          :title="siderCollapsed ? `资源库` : ''"
-          @click="navGo('library')"
-        >
-          <DlIcon name="library" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{
-            `资源库`
-          }}</span>
-        </button>
-
-        <button
-          class="dl-nav-item"
-          :class="{ 'is-active': navSelected === 'hosts' }"
-          :title="siderCollapsed ? `主机` : ''"
-          @click="navGo('hosts')"
-        >
-          <DlIcon name="host" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `主机` }}</span>
-        </button>
-
-        <button
-          class="dl-nav-item"
-          :class="{ 'is-active': navSelected === 'settings' }"
-          :title="siderCollapsed ? `设置` : ''"
-          @click="navGo('settings')"
-        >
-          <DlIcon name="settings" :size="17" />
-          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `设置` }}</span>
-        </button>
-      </nav>
-
-      <div class="dl-hosts">
-        <div v-if="!siderCollapsed" class="dl-rail-label">{{ '主机' }}</div>
-        <button
-          class="dl-host-row"
-          :class="{ 'is-active': hostAllActive }"
-          @click="pickAllHosts"
-        >
-          <span class="dl-host-dot is-all" />
-          <span class="dl-host-name">{{ '全部主机' }}</span>
-          <span class="dl-host-count">{{ store.instances.length }}</span>
-        </button>
-        <button
-          v-for="h in hostsNav"
-          :key="h.id"
-          class="dl-host-row"
-          :class="{ 'is-active': hostRowActive(h.id) }"
-          :title="h.title"
-          @click="pickHost(h.id)"
-        >
-          <span class="dl-host-dot" :class="'is-' + h.tone" />
-          <span class="dl-host-name">{{ h.name }}</span>
-          <span class="dl-host-count">{{ h.count }}</span>
-        </button>
-      </div>
-
-      <div class="dl-sidebar-foot">
-        <button
-          class="dl-foot-row"
-          :class="{ 'is-danger': !envOk }"
-          :title="`环境检测`"
-          @click="router.push({ name: 'setup' })"
-        >
-          <span class="dl-foot-dot" />
-          <span v-if="!siderCollapsed" class="dl-foot-label">
-            {{ envOk ? `环境就绪` : `环境未就绪` }}
-          </span>
-        </button>
-      </div>
-    </aside>
-
-    <main class="dl-main">
-      <header
-        class="dl-toolbar"
-        @mousedown="onHeaderMouseDown"
-        @dblclick="onHeaderDoubleClick"
-      >
-        <button
-          class="dl-icon-btn"
-          :title="`收起 / 展开侧栏`"
-          data-no-drag
-          @click="toggleSider"
-        >
-          <DlIcon name="sidebar" :size="15" />
-        </button>
-        <button
-          v-if="showBack"
-          class="dl-icon-btn"
-          :title="`返回`"
-          data-no-drag
-          @click="onHeaderBack"
-        >
-          <DlIcon name="back" :size="15" />
-        </button>
-
-        <span v-if="!isTauri" class="dl-preview">{{ `浏览器预览` }}</span>
-
-        <span class="dl-toolbar-spacer" />
-      </header>
-
-      <div class="dl-content">
-        <!-- Keyed by route name only: switching a Library tab is a query change
-             on the same page, and the panes react to it without a remount. -->
+        class="app-titlebar"
+        @mousedown="onTitlebarMouseDown"
+        @dblclick="onTitlebarDoubleClick"
+      ></div>
+      <div ref="contentEl" class="app-scroll">
         <router-view :key="String(route.name)" />
       </div>
     </main>
@@ -595,285 +315,45 @@ async function onHeaderDoubleClick(e: MouseEvent) {
 </template>
 
 <style lang="scss" scoped>
-.dl-app {
+.app-boot {
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
   height: 100%;
-  width: 100%;
-  overflow: hidden;
-  background: var(--dl-canvas);
+  background: var(--dl-bg);
+  color: var(--dl-ink);
 }
 
-// --- Sidebar -----------------------------------------------------------------
-
-.dl-sidebar {
-  display: flex;
-  flex-direction: column;
-  width: var(--dl-sidebar);
-  flex-shrink: 0;
-  background: var(--dl-sidebar-bg);
-  box-shadow: 1px 0 0 var(--dl-line);
-  transition: width var(--dl-slow) var(--dl-ease);
-
-  &.is-collapsed {
-    width: var(--dl-sidebar-collapsed);
-  }
+.app-boot-mark {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 8px;
+  border-radius: 12px;
 }
 
-.dl-sidebar-drag {
-  height: var(--dl-header);
-  flex-shrink: 0;
-  user-select: none;
-}
-
-.dl-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 10px;
-}
-
-.dl-nav-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 32px;
-  padding: 0 9px;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--dl-ink-2);
-  font-family: inherit;
-  font-size: var(--dl-text-md);
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--dl-fast) var(--dl-ease),
-    color var(--dl-fast) var(--dl-ease);
-
-  &:hover:not(.is-active) {
-    background: var(--dl-nav-hover);
-    color: var(--dl-ink);
-  }
-
-  // The current destination: a neutral filled row with an accent tick, so the
-  // navigation reads through placement rather than a block of accent colour.
-  &.is-active {
-    background: var(--dl-nav-active);
-    color: var(--dl-ink);
-    font-weight: 600;
-
-    &::before {
-      content: '';
-      position: absolute;
-      top: 50%;
-      left: -6px;
-      width: 2px;
-      height: 14px;
-      transform: translateY(-50%);
-      border-radius: 1px;
-      background: var(--dl-signal);
-    }
-  }
-}
-
-.dl-nav-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dl-nav-badge {
-  min-width: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--dl-surface-3);
-  color: var(--dl-ink-2);
-  font-size: var(--dl-text-xs);
+.app-boot-title {
+  font-family: var(--dl-font-display);
+  font-size: 20px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
 }
 
-// --- Host rail ---------------------------------------------------------------
-
-.dl-hosts {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-height: 0;
-  padding: 0 10px;
-  overflow-y: auto;
-}
-
-.dl-rail-label {
-  margin: 14px 0 3px;
-  padding-left: 9px;
-  font-size: var(--dl-text-xs);
-  font-weight: 600;
+.app-boot-hint {
   color: var(--dl-ink-3);
-}
-
-.dl-host-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  height: 28px;
-  padding: 0 9px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dl-ink-2);
-  font-family: inherit;
   font-size: var(--dl-text-sm);
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--dl-fast) var(--dl-ease),
-    color var(--dl-fast) var(--dl-ease);
-
-  &:hover:not(.is-active) {
-    background: var(--dl-nav-hover);
-    color: var(--dl-ink);
-  }
-
-  &.is-active {
-    background: var(--dl-nav-active);
-    color: var(--dl-ink);
-    font-weight: 600;
-  }
 }
 
-// The dot is the whole state readout for a machine: steady, one colour, no
-// pulse. 本机 has no dial to make, so it reads as reachable by definition.
-.dl-host-dot {
-  width: 7px;
-  height: 7px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--dl-ink-4);
-
-  &.is-local,
-  &.is-ok {
-    background: var(--dl-run);
-  }
-
-  &.is-warn {
-    background: var(--dl-warn);
-  }
-
-  &.is-busy {
-    background: var(--dl-signal);
-  }
-
-  &.is-all {
-    background: var(--dl-ink-3);
-  }
-}
-
-.dl-host-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dl-host-count {
-  min-width: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: var(--dl-surface-3);
-  color: var(--dl-ink-3);
-  font-size: var(--dl-text-xs);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-
-// Collapsed, the rail keeps the hosts as a column of state dots — the machine
-// dimension never disappears, it just goes quiet.
-.dl-sidebar.is-collapsed {
-  .dl-hosts {
-    padding: 0 12px;
-  }
-
-  .dl-host-row {
-    justify-content: center;
-    height: 26px;
-    padding: 0;
-  }
-
-  .dl-host-name,
-  .dl-host-count {
-    display: none;
-  }
-}
-
-.dl-sidebar-foot {
-  margin-top: auto;
-  padding: 8px 10px 10px;
-}
-
-.dl-foot-row {
+.app-shell {
   display: flex;
-  align-items: center;
-  gap: 9px;
   width: 100%;
-  height: 28px;
-  padding: 0 9px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dl-ink-3);
-  font-family: inherit;
-  font-size: var(--dl-text-sm);
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    background-color var(--dl-fast) var(--dl-ease),
-    color var(--dl-fast) var(--dl-ease);
-
-  &:hover {
-    background: var(--dl-nav-hover);
-    color: var(--dl-ink);
-  }
-
-  &.is-danger {
-    color: var(--dl-danger);
-  }
-}
-
-.dl-foot-dot {
-  width: 7px;
-  height: 7px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--dl-run);
-
-  .is-danger & {
-    background: var(--dl-danger);
-  }
-}
-
-.dl-foot-label {
-  flex: 1;
-  min-width: 0;
+  height: 100%;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: var(--dl-bg);
 }
 
-// --- Main --------------------------------------------------------------------
-
-.dl-main {
+.app-main {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -881,32 +361,17 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   height: 100%;
 }
 
-.dl-toolbar {
+.app-titlebar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: var(--dl-header);
+  justify-content: flex-end;
+  height: 26px;
   flex-shrink: 0;
-  padding: 0 14px;
-  background: var(--dl-canvas);
+  padding: 0 16px;
   user-select: none;
 }
 
-.dl-toolbar-spacer {
-  flex: 1;
-}
-
-.dl-preview {
-  margin-left: 6px;
-  padding: 1px 7px;
-  border-radius: 5px;
-  background: var(--dl-surface-3);
-  color: var(--dl-ink-3);
-  font-size: var(--dl-text-xs);
-  font-weight: 500;
-}
-
-.dl-content {
+.app-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;

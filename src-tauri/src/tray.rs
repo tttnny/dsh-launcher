@@ -21,9 +21,9 @@ const MENU_STATUS: &str = "status-header";
 const MENU_EMPTY: &str = "empty-hint";
 const MENU_QUICK_SUB: &str = "quick-entries";
 const MENU_QUICK_HOME: &str = "quick::home";
-const MENU_QUICK_HOMES: &str = "quick::homes";
-const MENU_QUICK_PROFILES: &str = "quick::profiles";
-const MENU_QUICK_VERSIONS: &str = "quick::versions";
+const MENU_QUICK_INSTALL: &str = "quick::install";
+const MENU_QUICK_DATA: &str = "quick::data";
+const MENU_QUICK_MACHINES: &str = "quick::machines";
 const MENU_START_ALL: &str = "start-all";
 const MENU_STOP_ALL: &str = "stop-all";
 const MENU_OPEN_DATA_DIR: &str = "open-data-dir";
@@ -73,12 +73,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_launcher(app);
             } else if id == MENU_QUICK_HOME {
                 show_and_navigate(app, "/");
-            } else if id == MENU_QUICK_VERSIONS {
-                show_and_navigate(app, "/library?tab=versions");
-            } else if id == MENU_QUICK_HOMES {
-                show_and_navigate(app, "/library?tab=homes");
-            } else if id == MENU_QUICK_PROFILES {
-                show_and_navigate(app, "/library?tab=profiles");
+            } else if id == MENU_QUICK_INSTALL {
+                show_and_navigate(app, "/install");
+            } else if id == MENU_QUICK_DATA {
+                show_and_navigate(app, "/data");
+            } else if id == MENU_QUICK_MACHINES {
+                show_and_navigate(app, "/machines");
             } else if id == MENU_START_ALL {
                 start_all_instances(app);
             } else if id == MENU_STOP_ALL {
@@ -349,15 +349,11 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     // Launcher page shortcuts: show the main window and ask the frontend to
     // navigate (event is a no-op until the frontend listens).
     let quick_home = MenuItem::with_id(app, MENU_QUICK_HOME, "实例", true, None::<&str>)?;
-    // DSH 版本 / DSH_HOME / Profile 都是资源库的标签页，点进去直达对应那一页。
-    // 插件管理不占格：它属于运行中的实例，入口在实例行展开的卡片里。
-    let quick_versions =
-        MenuItem::with_id(app, MENU_QUICK_VERSIONS, "DSH 版本", true, None::<&str>)?;
-    let quick_homes = MenuItem::with_id(app, MENU_QUICK_HOMES, "DSH_HOME", true, None::<&str>)?;
-    let quick_profiles =
-        MenuItem::with_id(app, MENU_QUICK_PROFILES, "Profile", true, None::<&str>)?;
+    let quick_install = MenuItem::with_id(app, MENU_QUICK_INSTALL, "安装", true, None::<&str>)?;
+    let quick_data = MenuItem::with_id(app, MENU_QUICK_DATA, "数据", true, None::<&str>)?;
+    let quick_machines = MenuItem::with_id(app, MENU_QUICK_MACHINES, "机器", true, None::<&str>)?;
     let quick_refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
-        vec![&quick_home, &quick_homes, &quick_profiles, &quick_versions];
+        vec![&quick_home, &quick_install, &quick_data, &quick_machines];
     let quick_sub = Submenu::with_id_and_items(app, MENU_QUICK_SUB, "快捷入口", true, &quick_refs)?;
 
     // Running profiles live in a second-level submenu: each instance gets an
@@ -392,7 +388,7 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
         running_sub = Some(Submenu::with_id_and_items(
             app,
             MENU_RUNNING_SUB,
-            format!("运行中的 Profile ({})", running.len()),
+            format!("运行中的实例 ({})", running.len()),
             true,
             &refs,
         )?);

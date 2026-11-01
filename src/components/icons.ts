@@ -33,6 +33,9 @@ export type IconName =
   | 'profile'
   | 'plugin'
   | 'bundle'
+  | 'database'
+  | 'more'
+  | 'arrow-left'
 
 /** Filled glyphs opt out of the stroke treatment. */
 export const FILLED: Partial<Record<IconName, string>> = {
@@ -84,4 +87,8 @@ export const PATHS: Record<IconName, string> = {
     '<path d="M6.4 2.6a1.6 1.6 0 0 1 3.2 0v1.1h2.4a.9.9 0 0 1 .9.9v2.4h1.1a1.6 1.6 0 0 1 0 3.2h-1.1v2.4a.9.9 0 0 1-.9.9H9.6v-1.1a1.6 1.6 0 0 0-3.2 0v1.1H4a.9.9 0 0 1-.9-.9V9.6H2a1.6 1.6 0 0 1 0-3.2h1.1V4.6a.9.9 0 0 1 .9-.9h2.4z"/>',
   bundle:
     '<rect x="2.25" y="4.5" width="11.5" height="8.75" rx="1.75"/><path d="M2.25 7.5h11.5M6.4 7.5v5.75"/>',
+  database:
+    '<ellipse cx="8" cy="3.9" rx="5.25" ry="1.9"/><path d="M2.75 3.9v8.2c0 1.05 2.35 1.9 5.25 1.9s5.25-.85 5.25-1.9V3.9"/><path d="M2.75 8c0 1.05 2.35 1.9 5.25 1.9S13.25 9.05 13.25 8"/>',
+  more: '<circle cx="3.5" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r=".9" fill="currentColor" stroke="none"/>',
+  'arrow-left': '<path d="M13 8H3.4M7.4 3.6 3 8l4.4 4.4"/>',
 }

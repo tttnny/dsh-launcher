@@ -63,9 +63,8 @@ function localHost(): Host {
 /** The preview's remote machine, so host-aware pages have two of them to show. */
 const REMOTE_HOST_ID = 'host-aliyun'
 
-/** 本机's data directory as the preview spells it (sample paths are Windows-style). */
-const LOCAL_DATA_DIR =
-  'C:\\Users\\Administrator\\AppData\\Roaming\\in.dsh-plug.dsh-launcher'
+/** 本机's data directory as the preview spells it. */
+const LOCAL_DATA_DIR = '/Users/demo/Library/Application Support/dsh-launcher'
 
 function remoteHost(): Host {
   return {
@@ -100,13 +99,13 @@ function seedDb(): MockDb {
       {
         id: 'h-default',
         name: '默认 DSH_HOME',
-        path: 'C:\\Users\\Administrator\\.dsh',
+        path: '/Users/demo/.dsh',
         host_id: LOCAL_HOST_ID,
       },
       {
         id: 'h-lab',
         name: '实验室环境',
-        path: 'D:\\dsh-homes\\lab',
+        path: '/Users/demo/dsh-homes/lab',
         host_id: LOCAL_HOST_ID,
       },
       {
@@ -120,8 +119,8 @@ function seedDb(): MockDb {
       {
         id: 'v-rc6',
         version: '0.1.0-rc.6',
-        dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.6`,
-        dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.6`,
+        dir: `${LOCAL_DATA_DIR}/versions/0.1.0-rc.6`,
+        dedicated_home: `${LOCAL_DATA_DIR}/homes/0.1.0-rc.6`,
         bin_ready: true,
         path_linked: true,
         host_id: LOCAL_HOST_ID,
@@ -129,8 +128,8 @@ function seedDb(): MockDb {
       {
         id: 'v-rc5',
         version: '0.1.0-rc.5',
-        dir: `${LOCAL_DATA_DIR}\\versions\\0.1.0-rc.5`,
-        dedicated_home: `${LOCAL_DATA_DIR}\\homes\\0.1.0-rc.5`,
+        dir: `${LOCAL_DATA_DIR}/versions/0.1.0-rc.5`,
+        dedicated_home: `${LOCAL_DATA_DIR}/homes/0.1.0-rc.5`,
         bin_ready: true,
         path_linked: false,
         host_id: LOCAL_HOST_ID,
@@ -211,7 +210,7 @@ function loadDb(): MockDb {
       // Backfill the dedicated DSH_HOME added with the version-delete change.
       for (const v of db.versions) {
         v.dedicated_home =
-          v.dedicated_home ?? `${LOCAL_DATA_DIR}\\homes\\${v.version}`
+          v.dedicated_home ?? `${LOCAL_DATA_DIR}/homes/${v.version}`
         // Bin readiness is what the machine answers; a version stored before
         // the field existed was installed by the launcher, so it is ready.
         v.bin_ready = v.bin_ready ?? true
@@ -706,9 +705,8 @@ function hostDirOf(db: MockDb, hostId: string): string {
 }
 
 /**
- * The separator the preview's sample paths use for one host: 本机's samples are
- * Windows-style, the remote machine's are POSIX — joining a path has to follow
- * whichever directory it starts from.
+ * The separator the preview's sample paths use: joining a path follows whichever
+ * separator the starting directory already uses.
  */
 function sepOf(dir: string): string {
   return dir.includes('\\') ? '\\' : '/'
@@ -938,8 +936,7 @@ export async function mockCall<T>(
       const name = String(args?.name ?? 'instance')
       const safe = name.replace(/[^\w一-龥.-]+/g, '_')
       const hostDir = hostDirOf(db, hostIdArg(cmd, args))
-      // The sample paths are Windows-style on 本机 and POSIX on the remote
-      // machine; the joined path follows whichever the host's directory is.
+      // The joined path follows whichever separator the host's directory uses.
       const sep = hostDir.includes('\\') ? '\\' : '/'
       return `${hostDir}${sep}homes${sep}${safe}` as T
     }

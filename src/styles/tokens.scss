@@ -1,160 +1,155 @@
 // DSH Launcher — design tokens.
 //
-// The launcher is a native macOS control surface, so it follows the platform's
-// own language: SF type on system gray, one accent blue, colour reserved for
-// state, and grouping carried by spacing and quiet insets instead of lines and
-// chrome. The palette is Apple's semantic set, named the same way across light
-// and dark so a view never has to know which appearance is on.
+// Apple 风格：系统灰背景、白色分组列表、系统蓝强调色、SF 字体。颜色只留给状态和
+// 主要动作，其余交给留白与层级。
 
 :root {
-  // --- Surfaces (light) -----------------------------------------------------
-  --dl-canvas: #f1f1f3; // window background behind the content
-  --dl-sidebar-bg: #e9e9ec; // gray window material behind the navigation
-  --dl-surface: #ffffff; // grouped list / card
-  --dl-surface-2: #f5f5f7; // inset fill, row hover
-  --dl-surface-3: #e9e9ec; // pressed / stronger fill
-  --dl-line: rgba(0, 0, 0, 0.07); // inset separator
-  --dl-line-strong: rgba(0, 0, 0, 0.14); // control border
+  // --- Surfaces -------------------------------------------------------------
+  --dl-bg: #f5f5f7;
+  --dl-canvas: var(--dl-bg);
+  --dl-surface: #ffffff;
+  --dl-surface-2: #f5f5f7;
+  --dl-surface-3: #e8e8ed;
+  --dl-line: rgba(0, 0, 0, 0.08);
+  --dl-line-strong: rgba(0, 0, 0, 0.14);
 
-  // Sidebar navigation states: translucent neutral washes that composite to
-  // the grouped-list gray, so the current row reads without an accent block.
-  --dl-nav-hover: rgba(255, 255, 255, 0.34);
-  --dl-nav-active: rgba(255, 255, 255, 0.6);
+  // --- Rail -----------------------------------------------------------------
+  --dl-rail: rgba(236, 236, 239, 0.92);
+  --dl-rail-2: #f0f0f2;
+  --dl-rail-ink: #1d1d1f;
+  --dl-rail-dim: #6e6e73;
+  --dl-rail-line: rgba(0, 0, 0, 0.08);
+  --dl-rail-hover: rgba(0, 0, 0, 0.04);
+  --dl-rail-active: rgba(0, 0, 0, 0.07);
 
-  // --- Ink (Apple label hierarchy) -----------------------------------------
-  --dl-ink: #1d1d1f; // label
-  --dl-ink-2: #48484a; // secondary label
-  --dl-ink-3: #68686e; // tertiary label
-  --dl-ink-4: #6c6c71; // placeholder text only
+  // --- Ink ------------------------------------------------------------------
+  --dl-ink: #1d1d1f;
+  --dl-ink-2: #3a3a3c;
+  --dl-ink-3: #6e6e73;
+  --dl-ink-4: #8e8e93;
 
-  // --- The one accent: system blue ------------------------------------------
-  --dl-signal: #007aff;
-  --dl-signal-ink: #0063d1;
-  --dl-signal-soft: rgba(0, 122, 255, 0.12);
-  --dl-signal-soft-ink: #0058b8; // label on a soft signal fill
-  --dl-signal-line: rgba(0, 122, 255, 0.32);
+  // --- Signal ---------------------------------------------------------------
+  --dl-accent: #007aff;
+  --dl-accent-ink: #0063d1;
+  --dl-accent-soft: rgba(0, 122, 255, 0.12);
+  --dl-accent-line: rgba(0, 122, 255, 0.3);
+  --dl-signal: var(--dl-accent);
+  --dl-signal-ink: var(--dl-accent-ink);
+  --dl-signal-soft: var(--dl-accent-soft);
+  --dl-signal-soft-ink: var(--dl-accent-ink);
+  --dl-signal-line: var(--dl-accent-line);
+  --dl-focus: rgba(0, 122, 255, 0.4);
 
-  // --- State (system colours) ----------------------------------------------
-  --dl-run: #1f7d38;
-  --dl-run-soft: rgba(52, 199, 89, 0.15);
+  // --- State ----------------------------------------------------------------
+  --dl-run: #248a3d;
+  --dl-run-soft: rgba(52, 199, 89, 0.12);
   --dl-warn: #b25000;
-  --dl-warn-soft: rgba(255, 149, 0, 0.15);
+  --dl-warn-soft: rgba(255, 149, 0, 0.12);
   --dl-danger: #d70015;
-  --dl-danger-soft: rgba(255, 59, 48, 0.12);
-  // A running channel carries a barely-there green wash; the colour is a
-  // readout of state, never decoration.
-  --dl-live-wash: rgba(52, 199, 89, 0.06);
-  // The one solid green fill (打开) is deeper than the text green so white
-  // label text clears 4.5:1 on it in both appearances.
-  --dl-live-btn-bg: #1f7d38;
+  --dl-danger-soft: rgba(255, 59, 48, 0.1);
+  --dl-live-wash: rgba(52, 199, 89, 0.045);
+  --dl-live-btn-bg: #248a3d;
   --dl-live-btn-ink: #ffffff;
 
   // --- Type -----------------------------------------------------------------
-  // UI keeps the macOS system stack; machine identifiers (versions, ports,
-  // URLs, paths) take SF Mono, which is the platform's own monospace face.
   --dl-font-ui:
     -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
     'PingFang SC', 'Hiragino Sans GB', 'Segoe UI', system-ui, sans-serif;
+  --dl-font-display: var(--dl-font-ui);
   --dl-font-mono:
-    'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, Monaco, 'PingFang SC',
-    monospace;
+    'SF Mono', ui-monospace, Menlo, Monaco, 'PingFang SC', monospace;
 
   --dl-text-xs: 11px;
   --dl-text-sm: 12px;
   --dl-text-md: 13px;
   --dl-text-lg: 15px;
   --dl-text-xl: 20px;
-  --dl-text-2xl: 22px;
+  --dl-text-2xl: 28px;
 
   // --- Geometry -------------------------------------------------------------
-  // macOS rounds controls and grouped lists generously; overlays a touch more.
-  --dl-r-ctl: 6px;
-  --dl-r-card: 12px;
-  --dl-r-panel: 14px;
+  --dl-r-ctl: 7px;
+  --dl-r-card: 10px;
+  --dl-r-panel: 12px;
 
-  --dl-sidebar: 224px;
-  --dl-sidebar-collapsed: 64px;
-  --dl-header: 48px;
-  --dl-content: 1240px;
+  --dl-rail-w: 216px;
+  --dl-header: 44px;
+  --dl-content: 1000px;
 
   // --- Motion ---------------------------------------------------------------
-  --dl-ease: cubic-bezier(0.32, 0.72, 0, 1);
-  --dl-fast: 0.16s;
-  --dl-slow: 0.34s;
+  --dl-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dl-fast: 0.14s;
+  --dl-slow: 0.25s;
 
   // --- Elevation ------------------------------------------------------------
-  // Flat by default; a raised surface is a real overlay, not a hover decoration.
-  --dl-lift-1: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --dl-lift-1: 0 0 0 0.5px rgba(0, 0, 0, 0.04);
   --dl-lift-2:
-    0 8px 28px -8px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+    0 10px 30px -10px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
   --dl-lift-3:
-    0 24px 64px -16px rgba(0, 0, 0, 0.32), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+    0 20px 50px -14px rgba(0, 0, 0, 0.24), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
 
-  // --- Readout --------------------------------------------------------------
-  // The diagnostics console stays dark under both appearances (a readout is a
-  // readout), so it gets its own fixed set. Nothing else may use these.
-  --dl-readout-bg: #0f141c;
-  --dl-readout-body: #cbd5e1;
-  --dl-readout-ink: #e2e8f0;
-  --dl-readout-dim: #64748b;
-  --dl-readout-run: #3dd68c;
-  --dl-readout-warn: #e8a33d;
-  --dl-readout-warn-soft: rgba(232, 163, 61, 0.08);
-  --dl-readout-danger: #f0756a;
-  --dl-readout-danger-soft: rgba(240, 117, 106, 0.08);
+  // --- Readout console ------------------------------------------------------
+  --dl-readout-bg: #1c1c1e;
+  --dl-readout-body: #d1d1d6;
+  --dl-readout-ink: #f2f2f7;
+  --dl-readout-dim: #8e8e93;
+  --dl-readout-run: #30d158;
+  --dl-readout-warn: #ff9f0a;
+  --dl-readout-warn-soft: rgba(255, 159, 10, 0.1);
+  --dl-readout-danger: #ff453a;
+  --dl-readout-danger-soft: rgba(255, 69, 58, 0.1);
 }
 
 body[arco-theme='dark'] {
-  --dl-canvas: #1c1c1e;
-  --dl-sidebar-bg: #242426;
+  --dl-bg: #1c1c1e;
+  --dl-canvas: var(--dl-bg);
   --dl-surface: #2c2c2e;
   --dl-surface-2: #3a3a3c;
   --dl-surface-3: #48484a;
-  --dl-line: rgba(255, 255, 255, 0.09);
-  --dl-line-strong: rgba(255, 255, 255, 0.16);
+  --dl-line: rgba(255, 255, 255, 0.1);
+  --dl-line-strong: rgba(255, 255, 255, 0.18);
 
-  --dl-nav-hover: rgba(255, 255, 255, 0.06);
-  --dl-nav-active: rgba(255, 255, 255, 0.11);
+  --dl-rail: rgba(21, 21, 23, 0.94);
+  --dl-rail-2: #2c2c2e;
+  --dl-rail-ink: #f5f5f7;
+  --dl-rail-dim: #98989d;
+  --dl-rail-line: rgba(255, 255, 255, 0.1);
+  --dl-rail-hover: rgba(255, 255, 255, 0.06);
+  --dl-rail-active: rgba(255, 255, 255, 0.1);
 
   --dl-ink: #f5f5f7;
-  --dl-ink-2: #c7c7cc;
-  --dl-ink-3: #a1a1a6;
-  --dl-ink-4: #a6a6ac;
+  --dl-ink-2: #d1d1d6;
+  --dl-ink-3: #98989d;
+  --dl-ink-4: #7c7c80;
 
-  --dl-signal: #0a84ff;
-  --dl-signal-ink: #409cff;
-  --dl-signal-soft: rgba(10, 132, 255, 0.22);
-  --dl-signal-soft-ink: #cfe4ff;
-  --dl-signal-line: rgba(10, 132, 255, 0.5);
+  --dl-accent: #0a84ff;
+  --dl-accent-ink: #409cff;
+  --dl-accent-soft: rgba(10, 132, 255, 0.18);
+  --dl-accent-line: rgba(10, 132, 255, 0.45);
 
   --dl-run: #30d158;
-  --dl-run-soft: rgba(48, 209, 88, 0.2);
+  --dl-run-soft: rgba(48, 209, 88, 0.16);
   --dl-warn: #ff9f0a;
-  --dl-warn-soft: rgba(255, 159, 10, 0.2);
+  --dl-warn-soft: rgba(255, 159, 10, 0.16);
   --dl-danger: #ff453a;
-  --dl-danger-soft: rgba(255, 69, 58, 0.2);
-  --dl-live-wash: rgba(48, 209, 88, 0.09);
-  --dl-live-btn-bg: #1a7f37;
+  --dl-danger-soft: rgba(255, 69, 58, 0.16);
+  --dl-live-wash: rgba(48, 209, 88, 0.06);
+  --dl-live-btn-bg: #248a3d;
 
-  --dl-lift-1:
-    0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5);
+  --dl-lift-1: 0 0 0 0.5px rgba(255, 255, 255, 0.04);
   --dl-lift-2:
-    0 10px 30px -8px rgba(0, 0, 0, 0.7), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+    0 10px 30px -10px rgba(0, 0, 0, 0.6), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
   --dl-lift-3:
-    0 28px 72px -18px rgba(0, 0, 0, 0.85), 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+    0 20px 50px -14px rgba(0, 0, 0, 0.7), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
 
-// ---------------------------------------------------------------------------
-// Mono: machine identifiers only — a version, a port, a path, a URL. Nothing
-// else uses it, so a monospaced run always reads as "this is a value".
-// ---------------------------------------------------------------------------
-
+.mono,
 .dl-mono {
   font-family: var(--dl-font-mono);
   font-variant-ligatures: none;
   letter-spacing: -0.01em;
 }
 
+.tnum,
 .dl-tnum {
   font-variant-numeric: tabular-nums;
 }

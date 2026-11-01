@@ -1,23 +1,20 @@
-// DSH Launcher — global stylesheet.
+// DSH Launcher — 全局样式。
 //
-// The visual language is macOS's own: grouped white lists on system gray,
-// spacing and quiet inset separators instead of borders and chrome, one accent
-// blue, and colour reserved for state. See tokens.scss for the palette.
+// 这个文件只放跨页面共享的东西：排版、按钮、输入框、列表、标签、弹层和 Arco 的皮肤。
+// 页面特有的布局放在各自组件的 scoped 样式里。
 
 @use './tokens.scss';
 
 // ---------------------------------------------------------------------------
-// Arco overrides
-// Arco supplies behaviour (select, switch, modal, tooltip, message); its skin is
-// replaced here so third-party widgets do not read as a different product.
+// Arco 皮肤
 // ---------------------------------------------------------------------------
 
 body {
-  --primary-1: 232, 240, 255;
-  --primary-2: 214, 226, 255;
-  --primary-3: 183, 200, 254;
-  --primary-4: 143, 174, 252;
-  --primary-5: 61, 133, 255;
+  --primary-1: 235, 242, 255;
+  --primary-2: 219, 233, 255;
+  --primary-3: 191, 218, 255;
+  --primary-4: 158, 200, 255;
+  --primary-5: 92, 174, 255;
   --primary-6: 0, 122, 255;
   --primary-7: 0, 99, 209;
   --primary-8: 0, 82, 173;
@@ -31,6 +28,7 @@ body {
   --color-border: var(--dl-line);
   --color-fill-1: var(--dl-surface-2);
   --color-fill-2: var(--dl-surface-3);
+  --color-fill-3: var(--dl-surface-3);
   --color-bg-1: var(--dl-surface);
   --color-bg-2: var(--dl-surface);
   --color-bg-3: var(--dl-surface);
@@ -59,239 +57,274 @@ body,
 body {
   font-family: var(--dl-font-ui);
   font-size: var(--dl-text-md);
-  background: var(--dl-canvas);
+  line-height: 1.5;
+  background: var(--dl-bg);
   color: var(--dl-ink);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.006em;
+}
+
+::selection {
+  background: var(--dl-accent-soft);
+  color: var(--dl-ink);
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+a {
+  color: var(--dl-accent-ink);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background: var(--dl-line-strong);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 // ---------------------------------------------------------------------------
-// Page skeleton
+// 页面骨架
 // ---------------------------------------------------------------------------
 
-.dl-page {
+.page {
+  width: 100%;
   max-width: var(--dl-content);
   margin: 0 auto;
-  padding: 26px 36px 56px;
+  padding: 36px 48px 64px;
 }
 
-// Page head: the title alone carries the top of the page. No rule beneath it —
-// the space between title and first group is the separation.
-.dl-head {
+.page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  margin-bottom: 22px;
-
-  .dl-head-text {
-    min-width: 0;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: var(--dl-text-2xl);
-    font-weight: 600;
-    letter-spacing: -0.022em;
-    line-height: 1.2;
-    color: var(--dl-ink);
-  }
-
-  // Kept for pages that still carry one line of context; it is a single quiet
-  // sentence, never a paragraph.
-  .dl-head-sub {
-    margin: 5px 0 0;
-    max-width: 66ch;
-    font-size: var(--dl-text-md);
-    line-height: 1.5;
-    color: var(--dl-ink-3);
-  }
-
-  .dl-head-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-    padding-bottom: 1px;
-  }
+  gap: 24px;
+  margin-bottom: 24px;
 }
 
-// Page title: one size and weight across every page, including pages whose
-// header is not built from .dl-head (the instance detail view).
-.dl-page-title {
+.page-head-main {
+  min-width: 0;
+}
+
+.page-title {
+  margin: 0;
+  font-family: var(--dl-font-display);
   font-size: var(--dl-text-2xl);
   font-weight: 600;
-  letter-spacing: -0.022em;
   line-height: 1.2;
+  letter-spacing: -0.022em;
   color: var(--dl-ink);
 }
 
-// A section within a page: a quiet group label, then its surface.
-.dl-section {
-  margin-top: 26px;
+.page-desc {
+  display: none;
+}
 
-  &:first-of-type {
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.page-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 8px -2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dl-accent);
+  font-family: inherit;
+  font-size: var(--dl-text-md);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--dl-accent-ink);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 区块 / 面板
+// ---------------------------------------------------------------------------
+
+.section {
+  margin-top: 28px;
+
+  &:first-child {
     margin-top: 0;
   }
 }
 
-.dl-section-label {
+.section-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  padding-left: 2px;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.section-title {
   font-size: var(--dl-text-sm);
   font-weight: 600;
   color: var(--dl-ink-3);
-
-  .dl-section-count {
-    font-weight: 500;
-    color: var(--dl-ink-3);
-    font-variant-numeric: tabular-nums;
-  }
 }
 
-// ---------------------------------------------------------------------------
-// Surface: the grouped list. Rows are divided by an inset separator that starts
-// where the text starts, the way macOS draws them.
-// ---------------------------------------------------------------------------
-
-.dl-surface {
-  background: var(--dl-surface);
-  border-radius: var(--dl-r-card);
-  box-shadow: var(--dl-lift-1);
-  overflow: hidden;
-
-  & + .dl-surface {
-    margin-top: 14px;
-  }
+.section-hint {
+  display: none;
 }
 
-.dl-row {
-  position: relative;
+.section-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 11px 16px;
-  min-height: 44px;
+  gap: 8px;
+  margin-left: auto;
+}
 
-  & + .dl-row::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 16px;
-    right: 0;
-    height: 1px;
-    background: var(--dl-line);
+.section-rule {
+  display: none;
+}
+
+.surface {
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-card);
+  background: var(--dl-surface);
+  overflow: hidden;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.02);
+}
+
+.surface--pad {
+  padding: 16px;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 62px;
+  padding: 12px 16px;
+
+  & + & {
+    border-top: 1px solid var(--dl-line);
   }
 }
 
-.dl-row-info {
+.row-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+  gap: 3px;
 }
 
-.dl-row-label {
-  display: inline-flex;
+.row-title {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: var(--dl-text-md);
-  font-weight: 400;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--dl-text-lg);
+  font-weight: 600;
   color: var(--dl-ink);
 }
 
-.dl-row-desc {
-  font-size: var(--dl-text-sm);
-  line-height: 1.45;
+.row-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
   color: var(--dl-ink-3);
+  font-size: var(--dl-text-sm);
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 // ---------------------------------------------------------------------------
-// Controls
+// 按钮
 // ---------------------------------------------------------------------------
 
-.dl-btn {
+.btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 12px;
+  height: 32px;
+  padding: 0 13px;
   border: 1px solid transparent;
   border-radius: var(--dl-r-ctl);
+  background: transparent;
+  color: var(--dl-ink-2);
   font-family: inherit;
   font-size: var(--dl-text-md);
-  font-weight: 500;
+  font-weight: 550;
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
   transition:
     background-color var(--dl-fast) var(--dl-ease),
     border-color var(--dl-fast) var(--dl-ease),
-    color var(--dl-fast) var(--dl-ease);
+    color var(--dl-fast) var(--dl-ease),
+    opacity var(--dl-fast) var(--dl-ease);
 
-  svg {
-    flex-shrink: 0;
-  }
-
-  &:active:not(:disabled) {
-    transform: translateY(0.5px);
+  &:focus-visible {
+    outline: 2px solid var(--dl-focus);
+    outline-offset: 1px;
   }
 
   &:disabled {
-    background: var(--dl-surface-3);
-    border-color: transparent;
-    color: var(--dl-ink-3);
-    cursor: not-allowed;
+    opacity: 0.42;
+    cursor: default;
+    pointer-events: none;
   }
 }
 
-.dl-btn--primary {
-  background: var(--dl-signal);
+.btn--primary {
+  background: var(--dl-accent);
+  border-color: var(--dl-accent);
   color: #fff;
 
   &:hover:not(:disabled) {
-    background: var(--dl-signal-ink);
+    background: #0071e3;
+    border-color: #0071e3;
   }
 }
 
-// Secondary primary action: a soft signal fill with a deep signal label, used
-// for inline actions such as starting a row so a screen keeps one solid button.
-.dl-btn--primary-soft {
-  background: var(--dl-signal-soft);
-  color: var(--dl-signal-soft-ink);
+.btn--run {
+  background: var(--dl-accent);
+  border-color: var(--dl-accent);
+  color: #fff;
 
   &:hover:not(:disabled) {
-    background: var(--dl-signal-soft);
-    box-shadow: inset 0 0 0 1px var(--dl-signal-line);
+    background: #0071e3;
+    border-color: #0071e3;
   }
 }
 
-// The live action: opening a running instance is the happy path, so it is the
-// only control that carries the run colour.
-.dl-btn--live {
-  background: var(--dl-live-btn-bg);
-  color: var(--dl-live-btn-ink);
-
-  &:hover:not(:disabled) {
-    filter: brightness(1.06);
-  }
-}
-
-.dl-btn--quiet {
-  background: var(--dl-surface);
+.btn--quiet {
   border-color: var(--dl-line-strong);
-  color: var(--dl-ink);
-
-  &:hover:not(:disabled) {
-    background: var(--dl-surface-2);
-  }
-}
-
-.dl-btn--ghost {
-  background: transparent;
+  background: var(--dl-surface);
   color: var(--dl-ink-2);
 
   &:hover:not(:disabled) {
@@ -300,24 +333,54 @@ body {
   }
 }
 
-.dl-btn--danger {
-  background: transparent;
+.btn--ghost {
+  padding: 0 8px;
+  color: var(--dl-accent);
+
+  &:hover:not(:disabled) {
+    background: var(--dl-accent-soft);
+    color: var(--dl-accent-ink);
+  }
+}
+
+.btn--danger {
+  border-color: transparent;
   color: var(--dl-danger);
+  background: transparent;
 
   &:hover:not(:disabled) {
     background: var(--dl-danger-soft);
   }
 }
 
-// Square icon button (toolbar / row overflow).
-.dl-icon-btn {
+.btn--danger-solid {
+  border-color: var(--dl-danger);
+  background: var(--dl-danger);
+  color: #fff;
+
+  &:hover:not(:disabled) {
+    background: #99322c;
+  }
+}
+
+.btn--sm {
+  height: 26px;
+  padding: 0 9px;
+  font-size: var(--dl-text-sm);
+}
+
+.btn--block {
+  width: 100%;
+}
+
+.icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--dl-r-ctl);
   background: transparent;
   color: var(--dl-ink-3);
@@ -327,20 +390,70 @@ body {
     color var(--dl-fast) var(--dl-ease);
 
   &:hover:not(:disabled) {
-    background: var(--dl-surface-3);
+    background: var(--dl-surface-2);
     color: var(--dl-ink);
   }
 
+  &:focus-visible {
+    outline: 2px solid var(--dl-focus);
+    outline-offset: 1px;
+  }
+
   &:disabled {
-    background: transparent;
-    color: var(--dl-ink-3);
-    cursor: not-allowed;
+    opacity: 0.4;
+    cursor: default;
   }
 }
 
-.dl-input {
-  height: 28px;
-  padding: 0 9px;
+// ---------------------------------------------------------------------------
+// 表单
+// ---------------------------------------------------------------------------
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-height: 48px;
+  padding: 10px 14px;
+
+  & + .field-row {
+    border-top: 1px solid var(--dl-line);
+  }
+}
+
+.field-row-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.field-label {
+  font-size: var(--dl-text-md);
+  font-weight: 550;
+  color: var(--dl-ink);
+}
+
+.field-hint {
+  display: none;
+}
+
+.input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--dl-line-strong);
   border-radius: var(--dl-r-ctl);
   background: var(--dl-surface);
@@ -352,492 +465,444 @@ body {
     border-color var(--dl-fast) var(--dl-ease),
     box-shadow var(--dl-fast) var(--dl-ease);
 
-  &.dl-search {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 8px 0 9px;
-    color: var(--dl-ink-3);
-
-    &:focus-within {
-      border-color: var(--dl-signal);
-      box-shadow: 0 0 0 3.5px var(--dl-signal-soft);
-    }
-
-    .dl-search-input {
-      flex: 1;
-      min-width: 0;
-      border: none;
-      outline: none;
-      background: transparent;
-      color: var(--dl-ink);
-      font-family: inherit;
-      font-size: var(--dl-text-md);
-
-      &::placeholder {
-        color: var(--dl-ink-4);
-      }
-    }
-
-    .dl-search-clear {
-      width: 20px;
-      height: 20px;
-    }
-  }
-
   &::placeholder {
     color: var(--dl-ink-4);
   }
 
   &:focus {
-    border-color: var(--dl-signal);
-    box-shadow: 0 0 0 3.5px var(--dl-signal-soft);
+    border-color: var(--dl-accent-line);
+    box-shadow: 0 0 0 3px var(--dl-accent-soft);
   }
 
   &:disabled {
     background: var(--dl-surface-2);
     color: var(--dl-ink-3);
+    cursor: not-allowed;
   }
 }
 
-.dl-input--mono {
+.input--mono {
   font-family: var(--dl-font-mono);
   font-size: var(--dl-text-sm);
 }
 
-.dl-input--error {
+.input--error {
   border-color: var(--dl-danger);
 }
 
-// Keyboard focus: only for keyboard users (macOS convention).
-:where(button, a, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid var(--dl-signal);
-  outline-offset: 1px;
+textarea.input {
+  height: auto;
+  min-height: 84px;
+  padding: 8px 10px;
+  line-height: 1.55;
+  resize: vertical;
 }
 
 // ---------------------------------------------------------------------------
-// Chips: quiet inline metadata. No border, no weight — a chip is a value, not a
-// badge, so it recedes until read.
+// 标签 / 状态
 // ---------------------------------------------------------------------------
 
-.dl-chip {
+.tag {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 100%;
-  padding: 1px 6px;
-  border-radius: 5px;
-  background: var(--dl-surface-2);
-  color: var(--dl-ink-2);
-  font-size: var(--dl-text-sm);
-  font-weight: 400;
-  line-height: 1.6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.dl-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 7px;
-  border-radius: 5px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--dl-surface-3);
+  color: var(--dl-ink-3);
   font-size: var(--dl-text-xs);
-  font-weight: 600;
-  line-height: 1.6;
+  font-weight: 500;
   white-space: nowrap;
 }
 
-.dl-tag--signal {
-  background: var(--dl-signal-soft);
-  color: var(--dl-signal-ink);
-}
-
-.dl-tag--run {
+.tag--run {
   background: var(--dl-run-soft);
   color: var(--dl-run);
 }
 
-.dl-tag--warn {
+.tag--warn {
   background: var(--dl-warn-soft);
   color: var(--dl-warn);
 }
 
-.dl-tag--danger {
+.tag--danger {
   background: var(--dl-danger-soft);
   color: var(--dl-danger);
 }
 
-.dl-tag--muted {
-  background: var(--dl-surface-2);
+.tag--muted {
+  background: var(--dl-surface-3);
   color: var(--dl-ink-3);
 }
 
-// ---------------------------------------------------------------------------
-// Status: dot + label. State is the only thing that gets colour, and the dot
-// is steady — nothing pulses.
-// ---------------------------------------------------------------------------
+.tag--accent {
+  background: var(--dl-accent-soft);
+  color: var(--dl-accent-ink);
+}
 
-.dl-status {
+.chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dl-ink-3);
   font-size: var(--dl-text-sm);
   font-weight: 500;
   white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dl-fast) var(--dl-ease),
+    color var(--dl-fast) var(--dl-ease);
 
-  &::before {
-    content: '';
-    width: 7px;
-    height: 7px;
-    flex-shrink: 0;
-    border-radius: 50%;
-    background: var(--dl-ink-3);
+  &:hover {
+    color: var(--dl-ink);
   }
 
-  &.is-running {
-    color: var(--dl-run);
-
-    &::before {
-      background: var(--dl-run);
-    }
-  }
-
-  &.is-starting {
-    color: var(--dl-warn);
-
-    &::before {
-      background: var(--dl-warn);
-    }
-  }
-
-  &.is-exited {
-    color: var(--dl-danger);
-
-    &::before {
-      background: var(--dl-danger);
-    }
-  }
-
-  &.is-stopped {
-    color: var(--dl-ink-3);
-  }
-
-  // 「主机不可达」 is not 「已停止」: the instance may well be running on a machine
-  // the launcher cannot reach right now, so it carries the attention colour.
-  &.is-unreachable {
-    color: var(--dl-warn);
-
-    &::before {
-      background: var(--dl-warn);
-    }
+  &.is-active {
+    background: var(--dl-surface);
+    color: var(--dl-ink);
+    box-shadow: var(--dl-lift-1);
   }
 }
 
+.chip-count {
+  font-family: var(--dl-font-mono);
+  font-size: var(--dl-text-xs);
+  opacity: 0.72;
+}
+
 // ---------------------------------------------------------------------------
-// Segmented control: list filtering only. Page-level switching uses .dl-tabs.
+// Tabs
 // ---------------------------------------------------------------------------
 
-.dl-segmented {
+.tabs {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
-  padding: 2px;
+  margin-bottom: 20px;
+  padding: 3px;
   border-radius: 8px;
-  background: var(--dl-surface-3);
-
-  button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 12px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--dl-ink-2);
-    font-family: inherit;
-    font-size: var(--dl-text-md);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      background-color var(--dl-fast) var(--dl-ease),
-      color var(--dl-fast) var(--dl-ease),
-      box-shadow var(--dl-fast) var(--dl-ease);
-
-    &:hover:not(.is-active) {
-      color: var(--dl-ink);
-    }
-
-    &.is-active {
-      background: var(--dl-surface);
-      color: var(--dl-ink);
-      box-shadow:
-        0 0 0 0.5px rgba(0, 0, 0, 0.06),
-        0 1px 2px rgba(0, 0, 0, 0.06);
-    }
-  }
+  background: var(--dl-surface-2);
 }
 
-// ---------------------------------------------------------------------------
-// Page tabs: the horizontal switch between a page's views, on its own row
-// under the title. The current view carries an accent underline; this is page
-// navigation, not list filtering.
-// ---------------------------------------------------------------------------
-
-.dl-tabs {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin: 0 0 18px;
-  border-bottom: 1px solid var(--dl-line);
-
-  button {
-    position: relative;
-    padding: 7px 12px 9px;
-    border: none;
-    background: transparent;
-    color: var(--dl-ink-3);
-    font-family: inherit;
-    font-size: var(--dl-text-md);
-    font-weight: 500;
-    cursor: pointer;
-    transition: color var(--dl-fast) var(--dl-ease);
-
-    &:hover:not(.is-active) {
-      color: var(--dl-ink);
-    }
-
-    &.is-active,
-    &[aria-selected='true'] {
-      color: var(--dl-ink);
-      font-weight: 600;
-
-      &::after {
-        content: '';
-        position: absolute;
-        left: 10px;
-        right: 10px;
-        bottom: -1px;
-        height: 2px;
-        border-radius: 1px;
-        background: var(--dl-signal);
-      }
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Empty state
-// ---------------------------------------------------------------------------
-
-.dl-row-none {
-  padding: 20px 16px;
-  text-align: center;
+.tab {
+  padding: 4px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dl-ink-3);
+  font-family: inherit;
   font-size: var(--dl-text-md);
-  color: var(--dl-ink-3);
-}
+  font-weight: 500;
+  cursor: pointer;
 
-.dl-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 52px 24px;
-  text-align: center;
-
-  .dl-empty-glyph {
-    color: var(--dl-ink-3);
-  }
-
-  .dl-empty-title {
-    font-size: var(--dl-text-lg);
-    font-weight: 600;
+  &:hover {
     color: var(--dl-ink);
   }
 
-  .dl-empty-text {
-    max-width: 44ch;
-    font-size: var(--dl-text-md);
-    line-height: 1.5;
-    color: var(--dl-ink-3);
-  }
-}
-
-// A machine that did not answer: the title says what could not be read, the
-// body is what it said. Shared by every Library pane.
-.dl-failure {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px;
-
-  .dl-failure-title {
-    font-size: var(--dl-text-md);
-    font-weight: 600;
+  &.is-active {
+    background: var(--dl-surface);
     color: var(--dl-ink);
-  }
-
-  .dl-failure-text {
-    font-size: var(--dl-text-sm);
-    line-height: 1.5;
-    color: var(--dl-danger);
-    overflow-wrap: anywhere;
-  }
-
-  .dl-failure-hint {
-    font-size: var(--dl-text-sm);
-    line-height: 1.5;
-    color: var(--dl-ink-3);
+    box-shadow: var(--dl-lift-1);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Overlays: sheets carry the real elevation in this app.
+// 提示块
 // ---------------------------------------------------------------------------
 
-.dl-sheet {
-  .arco-modal {
-    border-radius: var(--dl-r-panel) !important;
-    border: none;
-    background: var(--dl-surface) !important;
-    box-shadow: var(--dl-lift-3) !important;
-    overflow: hidden;
-  }
-
-  .arco-modal-header {
-    height: auto;
-    padding: 18px 20px 8px;
-    border-bottom: none;
-  }
-
-  .arco-modal-title {
-    font-size: var(--dl-text-lg);
-    font-weight: 600;
-    letter-spacing: -0.015em;
-    text-align: center;
-  }
-
-  .arco-modal-body {
-    padding: 10px 20px 18px;
-  }
-
-  .arco-modal-footer {
-    padding: 10px 20px 16px;
-    border-top: 1px solid var(--dl-line);
-  }
-}
-
-.dl-field {
+.notice {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-
-  & + .dl-field {
-    margin-top: 16px;
-  }
-}
-
-.dl-field-label {
-  font-size: var(--dl-text-sm);
-  font-weight: 600;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--dl-line);
+  border-radius: var(--dl-r-card);
+  background: var(--dl-surface-2);
   color: var(--dl-ink-2);
+  font-size: var(--dl-text-sm);
+  line-height: 1.55;
 }
 
-.dl-field-hint {
-  margin: 0;
-  font-size: var(--dl-text-sm);
-  line-height: 1.45;
-  color: var(--dl-ink-3);
+.notice--warn {
+  border-color: rgba(169, 106, 18, 0.28);
+  background: var(--dl-warn-soft);
+  color: var(--dl-warn);
 }
 
-.dl-error-text {
-  font-size: var(--dl-text-sm);
+.notice--danger {
+  border-color: rgba(174, 59, 52, 0.28);
+  background: var(--dl-danger-soft);
   color: var(--dl-danger);
 }
 
+.notice--ok {
+  border-color: rgba(47, 125, 82, 0.28);
+  background: var(--dl-run-soft);
+  color: var(--dl-run);
+}
+
+.notice--info {
+  border-color: var(--dl-accent-line);
+  background: var(--dl-accent-soft);
+  color: var(--dl-accent-ink);
+}
+
+.notice-title {
+  font-weight: 650;
+}
+
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
 // ---------------------------------------------------------------------------
-// Arco widget skins
+// 空状态
 // ---------------------------------------------------------------------------
 
-.arco-select-view:not(.arco-select-view-disabled),
-.arco-input:not(.arco-input-disabled),
-.arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled),
-.arco-textarea:not(.arco-textarea-disabled) {
-  border-radius: var(--dl-r-ctl) !important;
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 24px;
+  text-align: center;
+}
+
+.empty-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 14px;
+  border: 1px solid var(--dl-line);
+  border-radius: 50%;
+  color: var(--dl-ink-3);
+  background: var(--dl-surface-2);
+}
+
+.empty-title {
+  margin: 0;
+  font-size: var(--dl-text-lg);
+  font-weight: 600;
+  color: var(--dl-ink);
+}
+
+.empty-text {
+  max-width: 46ch;
+  margin: 6px 0 0;
+  color: var(--dl-ink-3);
+  font-size: var(--dl-text-md);
+  line-height: 1.6;
+}
+
+.empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+// ---------------------------------------------------------------------------
+// 工具类
+// ---------------------------------------------------------------------------
+
+.muted {
+  color: var(--dl-ink-3);
+}
+
+.dim {
+  color: var(--dl-ink-4);
+}
+
+.mono {
+  font-family: var(--dl-font-mono);
+  font-variant-ligatures: none;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wrap {
+  flex-wrap: wrap;
+}
+
+.error-text {
+  color: var(--dl-danger);
+  font-size: var(--dl-text-sm);
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: dl-spin 0.7s linear infinite;
+}
+
+@keyframes dl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Arco 控件：选择器 / 开关 / 弹层 / 消息
+// ---------------------------------------------------------------------------
+
+.arco-select-view {
   border-color: var(--dl-line-strong) !important;
-  background-color: var(--dl-surface) !important;
+  border-radius: var(--dl-r-ctl) !important;
+  background: var(--dl-surface) !important;
   color: var(--dl-ink) !important;
-  font-family: inherit;
-
-  &:hover {
-    border-color: var(--dl-ink-4) !important;
-    background-color: var(--dl-surface) !important;
-  }
+  font-size: var(--dl-text-md) !important;
 }
 
-// Disabled fields read as neutral and clearly non-editable. The base skin
-// above skips them so Arco's disabled state is not overridden.
-.arco-select-view-disabled,
-.arco-input-disabled,
-.arco-input-inner-wrapper-disabled,
-.arco-textarea-disabled {
-  border-color: var(--dl-line) !important;
-  background-color: var(--dl-surface-2) !important;
-  color: var(--dl-ink-3) !important;
-  cursor: not-allowed !important;
-
-  .arco-select-view-value,
-  .arco-select-view-input {
-    color: var(--dl-ink-3) !important;
-    cursor: not-allowed !important;
-  }
+.arco-select-view:hover {
+  border-color: var(--dl-line-strong) !important;
+  background: var(--dl-surface) !important;
 }
 
-.arco-select-view-focus {
-  border-color: var(--dl-signal) !important;
-  box-shadow: 0 0 0 3.5px var(--dl-signal-soft) !important;
+.arco-select-focused .arco-select-view {
+  border-color: var(--dl-accent-line) !important;
+  box-shadow: 0 0 0 3px var(--dl-accent-soft) !important;
+}
+
+.arco-select-size-small .arco-select-view {
+  height: 28px;
+  line-height: 26px;
+}
+
+.arco-select-popup {
+  border: 1px solid var(--dl-line) !important;
+  border-radius: var(--dl-r-card) !important;
+  background: var(--dl-surface) !important;
+  box-shadow: var(--dl-lift-2) !important;
+}
+
+.arco-select-option {
+  color: var(--dl-ink-2) !important;
+  font-size: var(--dl-text-md) !important;
+}
+
+.arco-select-option-hover {
+  background: var(--dl-surface-2) !important;
 }
 
 .arco-select-option-selected {
-  color: var(--dl-signal) !important;
-  font-weight: 600;
+  background: var(--dl-accent-soft) !important;
+  color: var(--dl-accent-ink) !important;
+}
+
+.arco-switch {
+  background: var(--dl-line-strong) !important;
 }
 
 .arco-switch-checked {
-  background-color: var(--dl-signal) !important;
+  background: var(--dl-run) !important;
 }
 
-.arco-progress-line-bar {
-  background-color: var(--dl-signal) !important;
+.arco-modal,
+.arco-modal-simple {
+  border-radius: var(--dl-r-panel) !important;
+  background: var(--dl-surface) !important;
+  box-shadow: var(--dl-lift-3) !important;
 }
 
-.arco-tooltip-content {
-  border-radius: var(--dl-r-ctl) !important;
-  background: var(--dl-ink) !important;
-  font-size: var(--dl-text-xs) !important;
-  max-width: 320px;
+.arco-modal-header {
+  border-bottom: none !important;
+  padding: 20px 22px 0 !important;
 }
 
-.arco-popconfirm {
-  .arco-popconfirm-content {
-    border-radius: var(--dl-r-card) !important;
-    border: 1px solid var(--dl-line);
-    background: var(--dl-surface) !important;
-    box-shadow: var(--dl-lift-2) !important;
-  }
+.arco-modal-title {
+  font-family: var(--dl-font-display) !important;
+  font-size: 20px !important;
+  font-weight: 600 !important;
+  color: var(--dl-ink) !important;
+}
+
+.arco-modal-body {
+  padding: 14px 22px 8px !important;
+  color: var(--dl-ink-2) !important;
+}
+
+.arco-modal-footer {
+  border-top: 1px solid var(--dl-line) !important;
+  padding: 12px 22px !important;
 }
 
 .arco-btn {
-  border-radius: var(--dl-r-ctl);
-  font-family: inherit;
+  border-radius: var(--dl-r-ctl) !important;
+  font-family: inherit !important;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
+.arco-btn-primary {
+  background: var(--dl-ink) !important;
+  border-color: var(--dl-ink) !important;
+}
+
+.arco-btn-primary:hover {
+  background: #343936 !important;
+}
+
+.arco-btn-status-danger {
+  background: var(--dl-danger) !important;
+  border-color: var(--dl-danger) !important;
+}
+
+.arco-popconfirm,
+.arco-dropdown-menu {
+  border: 1px solid var(--dl-line) !important;
+  border-radius: var(--dl-r-card) !important;
+  background: var(--dl-surface) !important;
+  box-shadow: var(--dl-lift-2) !important;
+}
+
+.arco-dropdown-option {
+  color: var(--dl-ink-2) !important;
+  font-size: var(--dl-text-md) !important;
+}
+
+.arco-dropdown-option:hover {
+  background: var(--dl-surface-2) !important;
+  color: var(--dl-ink) !important;
+}
+
+.arco-message {
+  border-radius: var(--dl-r-ctl) !important;
+  box-shadow: var(--dl-lift-2) !important;
+}
+
+.arco-progress-line {
+  background: var(--dl-surface-3) !important;
+}
+
+.arco-progress-line-inner {
+  background: var(--dl-run) !important;
 }
