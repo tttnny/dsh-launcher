@@ -233,6 +233,18 @@ function emptyHostForm(): HostForm {
 const hostSheet = ref(false)
 const hostEditingId = ref('')
 const hostForm = ref<HostForm>(emptyHostForm())
+/** Editing the built-in 本机: it has no ssh target, so the form drops that field
+ *  and the save does not demand one. */
+const editingBuiltin = computed(
+  () => !!hosts.value.find((h) => h.id === hostEditingId.value)?.builtin,
+)
+const hostSheetTitle = computed(() =>
+  hostEditingId.value
+    ? editingBuiltin.value
+      ? `编辑本机`
+      : `编辑主机`
+    : `添加远程主机`,
+)
 
 const saveHostAction = useAction(
   (id: string, input: HostInput) =>
@@ -296,7 +308,7 @@ async function saveHost() {
     Message.error(`请填写主机的显示名`)
     return
   }
-  if (!form.ssh_target.trim()) {
+  if (!editingBuiltin.value && !form.ssh_target.trim()) {
     Message.error(
       `请填写 ssh 目标：~/.ssh/config 里的别名，或 user@host 这样的字符串`,
     )
@@ -309,7 +321,7 @@ async function saveHost() {
   }
   const input: HostInput = {
     display_name: form.display_name.trim(),
-    ssh_target: form.ssh_target.trim(),
+    ssh_target: editingBuiltin.value ? '' : form.ssh_target.trim(),
     registry: form.registry.trim() || null,
     data_dir: form.data_dir.trim() || null,
     extra_env: extraEnv,
@@ -453,8 +465,9 @@ onMounted(loadHosts)
             >
             <span v-else class="host-target">{{ `这台 Mac` }}</span>
           </div>
-          <div v-if="!h.builtin" class="host-actions">
+          <div class="host-actions">
             <button
+              v-if="!h.builtin"
               class="dl-btn dl-btn--quiet"
               :disabled="testingHostId === h.id"
               @click="testHost(h)"
@@ -467,10 +480,13 @@ onMounted(loadHosts)
                     : `测试连接`
               }}
             </button>
+            <!-- 本机也能编辑：改名、换数据目录、registry、额外环境变量。它只是
+                 这台 Mac，没有可拨的地址，所以永远没有测试连接和删除。 -->
             <button class="dl-btn dl-btn--quiet" @click="startEditHost(h)">
               {{ `编辑` }}
             </button>
             <button
+              v-if="!h.builtin"
               class="dl-btn dl-btn--danger host-delete"
               @click="hostPendingDelete = h"
             >
@@ -577,7 +593,7 @@ onMounted(loadHosts)
          bookmark, and 「测试连接」 is what talks to the machine. -->
     <a-modal
       :visible="hostSheet"
-      :title="hostEditingId ? `编辑主机` : `添加远程主机`"
+      :title="hostSheetTitle"
       :ok-text="`保存`"
       :cancel-text="`取消`"
       :ok-loading="saveHostAction.busy['*']"
@@ -592,7 +608,7 @@ onMounted(loadHosts)
           :placeholder="`例如：阿里云服务器`"
         />
       </div>
-      <div class="dl-field">
+      <div v-if="!editingBuiltin" class="dl-field">
         <span class="dl-field-label">{{ `ssh 目标` }}</span>
         <a-select
           v-if="sshAliases.length"
@@ -619,6 +635,13 @@ onMounted(loadHosts)
         }}</span>
         <span v-if="!sshAliases.length" class="dl-field-hint">
           {{ `~/.ssh/config 里没有可用的别名` }}
+        </span>
+      </div>
+      <div v-else class="dl-field">
+        <span class="dl-field-hint">
+          {{
+            `本机就是运行启动器的这台 Mac，没有 ssh 目标；这里改的是它的名字与数据目录。`
+          }}
         </span>
       </div>
       <div class="dl-field">
