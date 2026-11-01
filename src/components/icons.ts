@@ -5,6 +5,7 @@
 export type IconName =
   | 'instances'
   | 'library'
+  | 'host'
   | 'settings'
   | 'health'
   | 'external'
@@ -44,6 +45,7 @@ export const PATHS: Record<IconName, string> = {
     '<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.5"/><path d="M4.75 6.25h6.5M4.75 9.75h4"/>',
   library:
     '<path d="M1.75 5.5 8 2.25l6.25 3.25v5L8 13.75 1.75 10.5z"/><path d="M1.75 5.5 8 8.75l6.25-3.25M8 8.75v5"/>',
+  host: '<rect x="2.25" y="2.75" width="11.5" height="4.4" rx="1.4"/><rect x="2.25" y="8.85" width="11.5" height="4.4" rx="1.4"/><path d="M4.6 4.95h.01M4.6 11.05h.01"/>',
   settings:
     '<path d="M2.5 5h11M2.5 11h11"/><circle cx="6" cy="5" r="1.75"/><circle cx="10.5" cy="11" r="1.75"/>',
   health: '<path d="M1.75 8.25h2.75l1.5-3.5 2.25 7 1.5-3.5h4.5"/>',

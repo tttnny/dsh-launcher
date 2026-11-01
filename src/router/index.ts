@@ -1,10 +1,11 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
-// Three top-level pages, matching the three things a user actually does:
-// run an instance (instances), prepare what instances run (library), and
-// configure the launcher (settings). Everything that used to be its own page
-// — HOME directories, profiles, plugin management — lives inside Library,
-// because they are all "what an instance can be pointed at".
+// Four top-level pages, matching the four things a user actually does: run an
+// instance (instances), prepare what instances run (library), manage the
+// machines they live on (hosts), and configure the launcher (settings).
+// Everything that used to be its own page — HOME directories, profiles, plugin
+// management — lives inside Library, because they are all "what an instance can
+// be pointed at"; the environment check is reached from the machine it is about.
 //
 // Legacy paths stay as redirects: they are real hash links in old docs, the
 // tray menu, and the native menu bar.
@@ -36,6 +37,14 @@ const router = createRouter({
       path: '/plugins',
       name: 'plugins',
       component: () => import('@/views/library/PluginManager.vue'),
+    },
+    // 主机: the machines themselves — add / edit / test / delete them, and read
+    // each one's footprint and environment. Managing a machine lives here, not
+    // inside 设置, because a machine is the axis every other page is filed under.
+    {
+      path: '/hosts',
+      name: 'hosts',
+      component: () => import('@/views/Hosts.vue'),
     },
     {
       path: '/settings',

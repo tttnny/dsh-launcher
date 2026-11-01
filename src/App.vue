@@ -92,6 +92,9 @@ function goShortcut(name: ShortcutRoute) {
     case 'library':
       pushLibrary(undefined)
       return
+    case 'hosts':
+      void router.push({ name: 'hosts' }).catch(() => undefined)
+      return
     case 'library:versions':
       pushLibrary('versions')
       return
@@ -286,7 +289,7 @@ watch(
 
 // --- Sidebar ------------------------------------------------------------------
 
-type NavKey = 'instances' | 'library' | 'settings'
+type NavKey = 'instances' | 'library' | 'hosts' | 'settings'
 
 const siderCollapsed = ref(
   localStorage.getItem('dsh-launcher.siderCollapsed') === '1',
@@ -307,7 +310,11 @@ function toggleSider() {
 const navSelected = computed<NavKey>(() => {
   const name = route.name as string
   if (name === 'library') return 'library'
-  if (name === 'settings' || name === 'setup') return 'settings'
+  if (name === 'hosts') return 'hosts'
+  // 环境检测 answers for one machine, so it belongs under 主机 — the rail
+  // highlights the machine whose environment the page is about.
+  if (name === 'setup') return 'hosts'
+  if (name === 'settings') return 'settings'
   return 'instances'
 })
 
@@ -486,6 +493,16 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           <span v-if="!siderCollapsed" class="dl-nav-label">{{
             `资源库`
           }}</span>
+        </button>
+
+        <button
+          class="dl-nav-item"
+          :class="{ 'is-active': navSelected === 'hosts' }"
+          :title="siderCollapsed ? `主机` : ''"
+          @click="navGo('hosts')"
+        >
+          <DlIcon name="host" :size="17" />
+          <span v-if="!siderCollapsed" class="dl-nav-label">{{ `主机` }}</span>
         </button>
 
         <button

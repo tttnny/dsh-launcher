@@ -5,9 +5,10 @@
  * payload; this module is the single place that defines the event names and
  * the payload → route mapping, so the two sides cannot drift.
  *
- * The app has three top-level pages now, so the digits address pages and
+ * The app has four top-level pages now, so the digits address pages and
  * Library tabs:
- *   ⌘1 instances · ⌘2 library/versions · ⌘3 homes · ⌘4 profiles · ⌘, settings
+ *   ⌘1 instances · ⌘2 library/versions · ⌘3 homes · ⌘4 profiles · ⌘5 hosts ·
+ *   ⌘, settings
  * Legacy payloads (`/homes`, `/profiles`, `/versions`, `/plugins`) keep
  * working — they land on the matching Library tab.
  */
@@ -15,6 +16,7 @@
 export type ShortcutRoute =
   | 'instances'
   | 'library'
+  | 'hosts'
   | 'library:versions'
   | 'library:homes'
   | 'library:profiles'
@@ -47,6 +49,7 @@ export const SHORTCUT_DOCS: ShortcutDoc[] = [
   { label: '前往 DSH 版本', keys: [MOD, '2'] },
   { label: '前往 DSH_HOME', keys: [MOD, '3'] },
   { label: '前往 Profile', keys: [MOD, '4'] },
+  { label: '前往主机', keys: [MOD, '5'] },
   { label: '打开设置', keys: [MOD, ','] },
   { label: '刷新状态', keys: [MOD, 'R'] },
   { label: '返回上一页（输入框内仅退出输入）', keys: ['Esc'] },
@@ -91,6 +94,8 @@ export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
       return 'library:versions'
     case 'library':
       return 'library'
+    case 'hosts':
+      return 'hosts'
     case 'settings':
       return 'settings'
     default:
@@ -155,6 +160,9 @@ export function handleAppKeydown(
       return true
     case '4':
       actions.go('library:profiles')
+      return true
+    case '5':
+      actions.go('hosts')
       return true
     case ',':
       actions.go('settings')
