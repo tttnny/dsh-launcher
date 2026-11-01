@@ -1367,11 +1367,17 @@ pub fn update_instance(
     {
         return Err("同名实例已存在".to_string());
     }
-    if !cfg.versions.iter().any(|v| v.id == input.version_id) {
+    let Some(version) = cfg.versions.iter().find(|v| v.id == input.version_id) else {
         return Err("DSH 版本不存在".to_string());
+    };
+    if version.host_id != host.id {
+        return Err("DSH 版本不属于该主机".to_string());
     }
-    if !cfg.homes.iter().any(|h| h.id == input.home_id) {
+    let Some(home) = cfg.homes.iter().find(|h| h.id == input.home_id) else {
         return Err("DSH_HOME 不存在".to_string());
+    };
+    if home.host_id != host.id {
+        return Err("DSH_HOME 不属于该主机".to_string());
     }
     let mut updated = input;
     updated.name = name;
@@ -1996,72 +2002,89 @@ pub fn update_settings(
     settings: SettingsPatch,
 ) -> Result<LauncherSettings, String> {
     let mut cfg = state.config.lock().unwrap();
-    if let Some(v) = settings.locale {
-        cfg.settings.locale = v;
-    }
+
+    // Stage every field on a local copy first, so a value the launcher cannot
+    // use returns an error without leaving a half-applied change in `cfg`.
+    let mut next = cfg.settings.clone();
+    let log_level_patch = settings.log_level.is_some();
     if let Some(v) = settings.minimize_to_tray {
-        cfg.settings.minimize_to_tray = v;
-    }
-    if let Some(v) = settings.autostart {
-        let prev = cfg.settings.autostart;
-        cfg.settings.autostart = v;
-        if v != prev {
-            use tauri_plugin_autostart::ManagerExt;
-            let mgr = app.autolaunch();
-            let result = if v { mgr.enable() } else { mgr.disable() };
-            if let Err(e) = result {
-                // Revert the stored flag so the UI stays truthful.
-                cfg.settings.autostart = prev;
-                return Err(format!("设置开机自启失败: {e}"));
-            }
-        }
+        next.minimize_to_tray = v;
     }
     if let Some(v) = settings.last_instance_id {
-        cfg.settings.last_instance_id = Some(v);
+        next.last_instance_id = Some(v);
+    }
+    if let Some(v) = settings.proxy_enabled {
+        next.proxy_enabled = v;
+    }
+    if let Some(v) = settings.proxy_port {
+        next.proxy_port = v;
+    }
+    if let Some(v) = settings.no_proxy {
+        next.no_proxy = v.trim().to_string();
+    }
+    if let Some(v) = settings.proxy_apply_dsh {
+        next.proxy_apply_dsh = v;
     }
     if let Some(v) = settings.theme {
         match v.as_str() {
-            "light" | "dark" | "system" => cfg.settings.theme = v,
+            "light" | "dark" | "system" => next.theme = v,
             _ => return Err(format!("无效的主题: {v}")),
         }
     }
     if let Some(v) = settings.log_level {
-        match crate::applog::parse_level(&v) {
-            Some(level) => {
-                cfg.settings.log_level = v.trim().to_ascii_lowercase();
-                crate::applog::set_level(level);
-                crate::log_info!("日志等级已切换为 {}", level.as_str());
-            }
-            None => return Err(format!("无效的日志等级: {v}")),
+        if crate::applog::parse_level(&v).is_none() {
+            return Err(format!("无效的日志等级: {v}"));
         }
-    }
-    if let Some(v) = settings.proxy_enabled {
-        cfg.settings.proxy_enabled = v;
+        next.log_level = v.trim().to_ascii_lowercase();
     }
     if let Some(v) = settings.proxy_url {
         let v = v.trim().trim_end_matches('/').to_string();
         if !v.is_empty() {
-            cfg.settings.proxy_url = v;
+            next.proxy_url = v;
         }
-    }
-    if let Some(v) = settings.proxy_port {
-        cfg.settings.proxy_port = v;
-    }
-    if let Some(v) = settings.no_proxy {
-        cfg.settings.no_proxy = v.trim().to_string();
-    }
-    if let Some(v) = settings.proxy_apply_dsh {
-        cfg.settings.proxy_apply_dsh = v;
     }
     if let Some(v) = settings.terminal {
         match v.as_str() {
-            "system" | "ghostty" => cfg.settings.terminal = v,
+            "system" | "ghostty" => next.terminal = v,
             _ => return Err(format!("无效的终端: {v}")),
+        }
+    }
+    // An invalid proxy address is refused here, before it can be stored.
+    crate::proxy::validate_settings(&next)?;
+
+    // Stage the autostart flag. Its OS side effect runs only after the settings
+    // are written, so a failed save never leaves the login item changed.
+    let autostart_change = settings.autostart.filter(|v| *v != cfg.settings.autostart);
+    if let Some(v) = settings.autostart {
+        next.autostart = v;
+    }
+
+    // Write the whole settings to disk first, then make it the live state. A
+    // failed save leaves the in-memory settings and the proxy/level switches
+    // untouched, so what the page shows always matches what is on disk.
+    let previous = std::mem::replace(&mut cfg.settings, next);
+    if let Err(e) = save_state(&state, &cfg) {
+        cfg.settings = previous;
+        return Err(e);
+    }
+    if let Some(v) = autostart_change {
+        use tauri_plugin_autostart::ManagerExt;
+        let mgr = app.autolaunch();
+        let result = if v { mgr.enable() } else { mgr.disable() };
+        if let Err(e) = result {
+            cfg.settings.autostart = previous.autostart;
+            let _ = save_state(&state, &cfg);
+            return Err(format!("设置开机自启失败: {e}"));
+        }
+    }
+    if log_level_patch {
+        if let Some(level) = crate::applog::parse_level(&cfg.settings.log_level) {
+            crate::applog::set_level(level);
+            crate::log_info!("日志等级已切换为 {}", level.as_str());
         }
     }
     crate::proxy::sync_from_settings(&cfg.settings);
     let out = cfg.settings.clone();
-    save_state(&state, &cfg)?;
     crate::log_debug!("设置已更新并保存");
     Ok(out)
 }
@@ -2621,10 +2644,47 @@ pub(crate) fn instance_location_for(
 }
 
 /// What a user runs on this Mac to look at a remote directory. The path goes in
-/// single quotes so the login shell at the other end sees it as one word;
+/// single quotes so the login shell at the other end sees it as one word, while
+/// a leading `~` stays outside the quotes so the shell expands it;
 /// [`crate::remote::ssh_command`] owns the rest of the quoting.
 fn directory_recipe(path: &str) -> String {
-    format!("ls -la {}", crate::remote::quote(path))
+    format!("ls -la {}", remote_path(path))
+}
+
+/// Renders a path for the remote login shell. `~` alone is left as is, and a
+/// path starting with `~/` keeps that prefix outside the quotes so the shell
+/// expands the home directory; the rest of the path, and every other path, is
+/// quoted as one word.
+fn remote_path(path: &str) -> String {
+    if path == "~" {
+        return "~".to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("~/{}", crate::remote::quote(rest));
+    }
+    crate::remote::quote(path)
+}
+
+/// The ssh command that lists one directory on another machine, for the
+/// frontend's copy action. The command is put together here so the quoting and
+/// the ssh wrapper live in one place; a local host or a host with no ssh target
+/// is refused instead of returning a command that would run here.
+#[tauri::command]
+pub fn host_directory_command(
+    state: State<'_, AppState>,
+    host_id: Option<String>,
+    path: String,
+) -> Result<String, String> {
+    let cfg = state.config.lock().unwrap();
+    let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
+    if host.builtin {
+        return Err("本机的目录就在这台 Mac 上".to_string());
+    }
+    let target = host.ssh_target.trim();
+    if target.is_empty() {
+        return Err(format!("「{}」还没有 ssh 目标", host.display_name));
+    }
+    Ok(crate::remote::ssh_command(target, &directory_recipe(&path)))
 }
 
 /// Opens the DSH_HOME directory of one instance in the file manager.
@@ -2732,14 +2792,10 @@ mod tests {
     fn list_hosts_reports_the_built_in_local_host_for_an_old_config() {
         let data = ScratchDir::new("list-hosts");
         let config_path = data.path().join("config.json");
-        std::fs::write(
-            &config_path,
-            r#"{"homes":[],"settings":{"locale":"zh-CN"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&config_path, r#"{"homes":[]}"#).unwrap();
 
         // The config `list_hosts` answers from.
-        let cfg = crate::config::load_config(&config_path);
+        let cfg = crate::config::load_config(&config_path).unwrap();
         let hosts = cfg.hosts;
 
         assert_eq!(hosts.len(), 1);

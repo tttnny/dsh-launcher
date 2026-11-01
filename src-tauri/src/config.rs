@@ -264,8 +264,6 @@ impl HostStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LauncherSettings {
-    #[serde(default = "default_locale")]
-    pub locale: String,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
     #[serde(default)]
@@ -358,10 +356,6 @@ fn default_terminal() -> String {
     "system".to_string()
 }
 
-fn default_locale() -> String {
-    "zh-CN".to_string()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -389,7 +383,6 @@ fn default_no_proxy() -> String {
 impl Default for LauncherSettings {
     fn default() -> Self {
         Self {
-            locale: default_locale(),
             minimize_to_tray: default_true(),
             autostart: false,
             last_instance_id: None,
@@ -517,8 +510,6 @@ pub struct RemoteVersion {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SettingsPatch {
     #[serde(default)]
-    pub locale: Option<String>,
-    #[serde(default)]
     pub minimize_to_tray: Option<bool>,
     #[serde(default)]
     pub autostart: Option<bool>,
@@ -579,15 +570,26 @@ pub struct InstanceStatus {
 // Persistence
 // ---------------------------------------------------------------------------
 
-pub fn load_config(path: &Path) -> Config {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Config::default();
+pub fn load_config(path: &Path) -> Result<Config, String> {
+    // A missing file is a first launch, not an error: start from the defaults
+    // and let the migrations and sweeps below produce the document to write. A
+    // file that exists but cannot be read (a permission or I/O failure) is
+    // reported to the caller instead, so a later save never overwrites a file
+    // the launcher failed to understand.
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => Some(raw),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(format!("读取配置失败: {err}")),
     };
     // The document is read as a value before it is read as a `Config`: a config
     // written before each host kept its own toolchain still spells that pair
     // under `settings`, and only the raw document can say what it was.
-    let Ok(document) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return backup_and_reset(path, "配置不是合法的 JSON");
+    let document = match &raw {
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(document) => document,
+            Err(_) => return Ok(backup_and_reset(path, "配置不是合法的 JSON")),
+        },
+        None => serde_json::Value::Object(serde_json::Map::new()),
     };
     match serde_json::from_value::<Config>(document.clone()) {
         Ok(mut cfg) => {
@@ -603,12 +605,12 @@ pub fn load_config(path: &Path) -> Config {
             let changed = hosts_changed
                 || adopted
                 || migrate_instances_to_dedicated_homes(&local, data_dir, &mut cfg);
-            if changed {
+            if changed || raw.is_none() {
                 let _ = save_config(path, &cfg);
             }
-            cfg
+            Ok(cfg)
         }
-        Err(err) => backup_and_reset(path, &err.to_string()),
+        Err(err) => Ok(backup_and_reset(path, &err.to_string())),
     }
 }
 
@@ -774,9 +776,15 @@ pub fn dedupe_homes(host: &Host, cfg: &mut Config) {
     cfg.homes.retain(|h| !redirect.contains_key(&h.id));
 }
 
-/// Enforces the 1-version-1-instance contract and migrates `host`'s instances
-/// to dedicated homes under `<data_dir>/homes/<version>` (issue #3, #4), where
-/// `data_dir` is that host's data directory.
+/// Points `host`'s instances at dedicated homes under
+/// `<data_dir>/homes/<version>` (issue #3, #4), where `data_dir` is that
+/// host's data directory, and drops instances whose version is gone.
+///
+/// Only instances that already exist are touched: a version the user has no
+/// instance for is a legal state and stays that way, and a dedicated HOME the
+/// user removed is not recreated for a version with no instance. An instance
+/// whose recorded HOME no longer exists is pointed at its version's dedicated
+/// HOME, which is created only when that is actually needed.
 pub fn migrate_instances_to_dedicated_homes(
     host: &Host,
     data_dir: &Path,
@@ -792,55 +800,35 @@ pub fn migrate_instances_to_dedicated_homes(
         modified = true;
     }
 
-    // 2. Ensure each version has its dedicated home and 1:1 instance.
+    // 2. Point each existing instance at its version's dedicated home. A
+    //    version without an instance is left alone: nothing is created for it.
     for v in cfg.versions.iter().filter(|v| v.host_id == host.id) {
+        let Some(inst) = cfg.instances.iter_mut().find(|i| i.version_id == v.id) else {
+            continue;
+        };
+        if cfg.homes.iter().any(|h| h.id == inst.home_id) {
+            continue;
+        }
         let expected_home_path = dedicated_home_path(data_dir, &v.version);
-
-        // Find existing home by path or create it.
-        let home_id = if let Some(h) = cfg
+        let home_id = match cfg
             .homes
             .iter()
             .find(|h| h.host_id == host.id && host.paths_equal(&h.path, &expected_home_path))
         {
-            h.id.clone()
-        } else {
-            let hid = new_id("h");
-            cfg.homes.push(DshHome {
-                id: hid.clone(),
-                name: v.version.clone(),
-                path: expected_home_path.clone(),
-                host_id: host.id.clone(),
-            });
-            modified = true;
-            hid
+            Some(h) => h.id.clone(),
+            None => {
+                let hid = new_id("h");
+                cfg.homes.push(DshHome {
+                    id: hid.clone(),
+                    name: v.version.clone(),
+                    path: expected_home_path,
+                    host_id: host.id.clone(),
+                });
+                hid
+            }
         };
-
-        // Find existing instance for this version.
-        if let Some(inst) = cfg.instances.iter_mut().find(|i| i.version_id == v.id) {
-            if inst.name != v.version {
-                inst.name = v.version.clone();
-                modified = true;
-            }
-            // If the instance's home_id is missing or invalid, point it to its dedicated home.
-            if !cfg.homes.iter().any(|h| h.id == inst.home_id) {
-                inst.home_id = home_id;
-                modified = true;
-            }
-        } else {
-            cfg.instances.push(DshInstance {
-                id: new_id("i"),
-                name: v.version.clone(),
-                version_id: v.id.clone(),
-                home_id,
-                host_id: host.id.clone(),
-                env_overrides: BTreeMap::new(),
-                default_profile: Some("web".to_string()),
-                last_profile: None,
-                icon: None,
-                port: None,
-            });
-            modified = true;
-        }
+        inst.home_id = home_id;
+        modified = true;
     }
 
     modified
@@ -1009,7 +997,6 @@ mod tests {
     }
   ],
   "settings": {
-    "locale": "en-US",
     "minimize_to_tray": false,
     "autostart": true,
     "last_instance_id": "i-web",
@@ -1034,7 +1021,7 @@ mod tests {
         let config_path = dir.join("config.json");
         std::fs::write(&config_path, OLD_CONFIG_JSON).unwrap();
 
-        let cfg = load_config(&config_path);
+        let cfg = load_config(&config_path).unwrap();
 
         // The built-in host is there, and it is the only one.
         assert_eq!(cfg.hosts.len(), 1, "只有本机一条");
@@ -1075,7 +1062,6 @@ mod tests {
         assert_eq!(inst.last_profile.as_deref(), Some("demo"));
         assert_eq!(inst.icon.as_deref(), Some("https://example.com/icon.png"));
         assert_eq!(inst.port, Some(34567));
-        assert_eq!(cfg.settings.locale, "en-US");
         assert_eq!(cfg.settings.theme, "dark");
         assert_eq!(cfg.settings.log_level, "debug");
         assert!(cfg.settings.proxy_enabled);
@@ -1128,9 +1114,9 @@ mod tests {
     fn a_config_without_a_hosts_key_still_resolves_the_local_host() {
         let dir = scratch("hosts-missing-key");
         let config_path = dir.join("config.json");
-        std::fs::write(&config_path, r#"{"settings":{"locale":"zh-CN"}}"#).unwrap();
+        std::fs::write(&config_path, r#"{}"#).unwrap();
 
-        let cfg = load_config(&config_path);
+        let cfg = load_config(&config_path).unwrap();
 
         assert_eq!(cfg.hosts.len(), 1);
         assert!(resolve_host(&cfg, Some(LOCAL_HOST_ID)).is_ok());

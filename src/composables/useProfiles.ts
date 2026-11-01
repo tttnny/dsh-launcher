@@ -1,4 +1,4 @@
-import { reactive, watch } from 'vue'
+import { reactive } from 'vue'
 import type { DshInstance } from '@/api/types'
 import { api } from '@/api'
 
@@ -12,6 +12,18 @@ const profilesByHome: Record<string, string[] | undefined> = reactive({})
 const selectionByInstance: Record<string, string | undefined> = reactive({})
 /** In-flight profile fetches per HOME id. */
 const loadingByHome: Record<string, boolean> = reactive({})
+/** Why one HOME's profile list could not be read; undefined when it could. */
+const profilesError: Record<string, string | undefined> = reactive({})
+
+/** The one shared fetch per HOME id, so every caller awaits the same result. */
+const requestsByHome: Record<
+  string,
+  Promise<string[] | undefined> | undefined
+> = {}
+/** Per-HOME load generation: a cache invalidation bumps it, so a request that
+ *  was already in flight when the list changed no longer writes its stale
+ *  result back. */
+const generations: Record<string, number> = {}
 
 /**
  * One cache + one fallback policy for instance profiles. "Which profile does
@@ -21,42 +33,57 @@ const loadingByHome: Record<string, boolean> = reactive({})
  */
 export function useProfiles() {
   /** Fetches (and caches) a HOME's profile list; concurrent calls share the
-   *  in-flight request. Returns the list, or [] on failure. */
-  async function loadForHome(homeId: string): Promise<string[]> {
+   *  in-flight request. Resolves the list, or undefined when the read failed
+   *  (the failure is kept in `profilesError[homeId]`, so it is not the same
+   *  answer as an empty list). */
+  async function loadForHome(homeId: string): Promise<string[] | undefined> {
     const cached = profilesByHome[homeId]
     if (cached) return cached
-    if (loadingByHome[homeId]) {
-      // Someone else is fetching; wait for it to land in the cache.
-      await new Promise<void>((resolve) => {
-        const stop = watch(
-          () => profilesByHome[homeId],
-          () => {
-            stop()
-            resolve()
-          },
-        )
-      })
-      return profilesByHome[homeId] ?? []
-    }
+    const inFlight = requestsByHome[homeId]
+    if (inFlight) return inFlight
     loadingByHome[homeId] = true
-    try {
-      const list = await api.listProfiles(homeId)
-      profilesByHome[homeId] = list
-      return list
-    } catch {
-      return []
-    } finally {
-      loadingByHome[homeId] = false
-    }
+    const generation = generations[homeId] ?? 0
+    const request = api
+      .listProfiles(homeId)
+      .then((list) => {
+        // Only the latest generation may write the cache: a list invalidated
+        // while this request was in flight must not be resurrected.
+        if ((generations[homeId] ?? 0) === generation) {
+          profilesByHome[homeId] = list
+          delete profilesError[homeId]
+        }
+        return list
+      })
+      .catch((e) => {
+        // A read failure is not "this HOME has no profiles": record the reason
+        // and hand back undefined so callers can tell the two apart.
+        if ((generations[homeId] ?? 0) === generation) {
+          profilesError[homeId] = String(e)
+        }
+        return undefined
+      })
+      .finally(() => {
+        if (requestsByHome[homeId] === request) {
+          delete requestsByHome[homeId]
+          loadingByHome[homeId] = false
+        }
+      })
+    requestsByHome[homeId] = request
+    return request
   }
 
   /** Ensures the instance's selection exists and still exists in its HOME's
-   *  list, applying the fallback chain; returns the effective profile. */
+   *  list, applying the fallback chain; returns the effective profile.
+   *
+   *  A failed read keeps whatever selection the instance already had instead of
+   *  running the chain over an empty list — "could not read" must not clear a
+   *  valid choice or read as "no profiles". */
   async function ensureSelection(
     inst: DshInstance,
   ): Promise<string | undefined> {
     const list = await loadForHome(inst.home_id)
     const kept = selectionByInstance[inst.id]
+    if (!list) return kept
     if (kept && list.includes(kept)) return kept
     const fallback =
       (inst.last_profile &&
@@ -74,14 +101,29 @@ export function useProfiles() {
   /** Drops a HOME's cached list (e.g. after the instance switched HOME). */
   function invalidateHome(homeId: string) {
     delete profilesByHome[homeId]
+    delete profilesError[homeId]
+    delete requestsByHome[homeId]
+    generations[homeId] = (generations[homeId] ?? 0) + 1
+  }
+
+  /** Clears any selection still naming `profile` after it was renamed or
+   *  deleted, so the next check picks one that exists. Scope it to the HOME's
+   *  instances when the caller knows them. */
+  function forgetSelection(profile: string, instanceIds?: string[]) {
+    const ids = instanceIds ?? Object.keys(selectionByInstance)
+    for (const id of ids) {
+      if (selectionByInstance[id] === profile) delete selectionByInstance[id]
+    }
   }
 
   return {
     profilesByHome,
     selectionByInstance,
     loadingByHome,
+    profilesError,
     loadForHome,
     ensureSelection,
     invalidateHome,
+    forgetSelection,
   }
 }

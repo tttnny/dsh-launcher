@@ -51,6 +51,9 @@ function onSystemThemeChange() {
 
 onMounted(async () => {
   await store.init()
+  if (store.initErrors.length) {
+    Message.error(`启动时有数据读取失败：${store.initErrors.join('；')}`)
+  }
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
 

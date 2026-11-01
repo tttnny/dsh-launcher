@@ -176,17 +176,18 @@ async fn process_field(pid: i32, field: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Whether a port owner looks like a DSH web server: the launcher spawns
-/// `node <…>/dsh/…/bin.js`, so the listener process is node/DSH's packaged
-/// binary. We match loosely so a packaged executable is recognized too — and
-/// against the **command line** as well as the name, because a DSH shipped as a
-/// single-file executable (a Python-packaged build is one) runs under a name of
-/// its own (`MainThread`) and says `…/dsh/lib/bin.js` only in its argv.
+/// Whether a port owner is a DSH web server. The evidence is DSH-specific —
+/// 「dsh」 in the name or the command line (case-insensitive), or the version
+/// tree's `bin.js` / `--profile` — never the `node` that a plain Node app also
+/// runs as. The command line is read as well as the name because a DSH shipped
+/// as a single-file executable (a Python-packaged build is one) runs under a
+/// name of its own (`MainThread`) and says `…/dsh/lib/bin.js` only in its
+/// argv; an npm install says `…/@deepseek-ai/dsh/…/bin.js` there.
 fn looks_like_dsh(command: &str, args: &str) -> bool {
-    let looks = |text: &str| {
-        let c = text.to_ascii_lowercase();
-        c.contains("node") || c.contains("dsh")
-    };
+    // Only a real DSH marker counts: the literal "dsh" that a DSH's own name or
+    // path carries. "bin.js" and "--profile" alone belong to countless Node
+    // tools, so matching them would adopt an unrelated Node server on the port.
+    let looks = |text: &str| text.to_ascii_lowercase().contains("dsh");
     looks(command) || looks(args)
 }
 
@@ -1616,6 +1617,7 @@ async fn start_remote_instance(
     version: &DshVersion,
     profile: &str,
 ) -> Result<(), String> {
+    let start_claim = claim_start(state, &inst.id).await?;
     emit_status(
         app,
         &InstanceStatus {
@@ -1674,10 +1676,16 @@ async fn start_remote_instance(
                 }
             ));
         }
-        // Nothing is running there, or the machine could not be asked: the
-        // spawn below is what has something to say about the second case, and
-        // it says it better than this preflight could.
-        RemoteVerdict::Stopped | RemoteVerdict::Unreachable(_) => {}
+        // Nothing is running there: the spawn proceeds. A machine that could
+        // not be asked about its port is 不可判断, not 端口空闲 — starting anyway
+        // would risk a second DSH on the same port, so it is reported instead.
+        RemoteVerdict::Stopped => {}
+        RemoteVerdict::Unreachable(reason) => {
+            return Err(format!(
+                "无法确认「{}」上的端口状态，已停止启动：{reason}",
+                host.display_name
+            ));
+        }
     }
 
     let start = match spawn_remote_instance(state, cfg, host, inst, version, profile).await {
@@ -1706,7 +1714,7 @@ async fn start_remote_instance(
         start.run.pid
     );
 
-    register_running(
+    if let Err(e) = register_running(
         app,
         state,
         &inst.id,
@@ -1718,7 +1726,19 @@ async fn start_remote_instance(
             remote: Some(start.run.clone()),
         },
     )
-    .await;
+    .await
+    {
+        crate::log_warn!(
+            "实例 {} 在「{}」上已拉起，但登记运行状态失败：{e}",
+            inst.id,
+            host.display_name
+        );
+        // The remote process is already up; stop it so it does not linger
+        // untracked for the next start to duplicate.
+        let _ = stop_remote_run(state, &start.run).await;
+        return Err(e);
+    }
+    drop(start_claim);
 
     follow_remote_instance(app, &inst.id, profile, start.run, start.offset);
     Ok(())
@@ -2519,6 +2539,50 @@ fn is_web_profile(home_path: &std::path::Path, profile: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Instance ids whose start is in flight. A start claims its id here before it
+/// spawns anything, so two concurrent starts cannot both pass the running check
+/// and leave two processes registered under one id. The claim is released on
+/// every path: it lives in [`StartClaim`], whose `Drop` removes it.
+fn starting_claims() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static STARTING: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        OnceLock::new();
+    STARTING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// A start's exclusive hold on one instance id, kept for the whole start and
+/// released when it is dropped — on success the running entry owns the id
+/// instead, on failure nothing is left behind.
+struct StartClaim {
+    id: String,
+}
+
+impl Drop for StartClaim {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = starting_claims().lock() {
+            starting.remove(&self.id);
+        }
+    }
+}
+
+/// Takes the exclusive right to start `id`. Fails when another start is already
+/// in flight or the instance is already running; on success the caller holds a
+/// [`StartClaim`] until the running entry is registered or the start gives up.
+async fn claim_start(state: &State<'_, AppState>, id: &str) -> Result<StartClaim, String> {
+    {
+        let mut starting = starting_claims()
+            .lock()
+            .map_err(|_| "启动占位已损坏".to_string())?;
+        if !starting.insert(id.to_string()) {
+            return Err("实例正在启动".to_string());
+        }
+    }
+    let claim = StartClaim { id: id.to_string() };
+    if state.running.lock().await.contains_key(id) {
+        return Err("实例已在运行".to_string());
+    }
+    Ok(claim)
+}
+
 /// Spawns a DSH CLI process for the instance/profile and starts the watchers
 /// that parse the web URL, write logs and emit status events.
 pub async fn start_instance_process(
@@ -2546,12 +2610,6 @@ pub async fn start_instance_process(
     // is the wrong half of the world for it.
     let host = crate::config::resolve_host(&cfg, Some(&inst.host_id))?.clone();
     if !host.builtin {
-        {
-            let running = state.running.lock().await;
-            if running.contains_key(instance_id) {
-                return Err("实例已在运行".to_string());
-            }
-        }
         return start_remote_instance(app, state, &cfg, &host, &inst, version, profile).await;
     }
 
@@ -2564,13 +2622,10 @@ pub async fn start_instance_process(
         ));
     }
 
-    // Guard: already running/starting.
-    {
-        let running = state.running.lock().await;
-        if running.contains_key(instance_id) {
-            return Err("实例已在运行".to_string());
-        }
-    }
+    // Claim the id before any of the awaits below: two starts that both saw a
+    // free instance would otherwise spawn two processes, and the second
+    // registration would take over the first's entry.
+    let start_claim = claim_start(state, instance_id).await?;
 
     // Web-app profiles (their bundle list includes @deepseek-ai/dsh-web-app)
     // get a random free port; other profiles are managed purely as processes
@@ -2682,6 +2737,20 @@ pub async fn start_instance_process(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
+    // The instance log is opened before the process exists: a spawn whose
+    // output has nowhere to go is not a launch that can be kept, so a log that
+    // cannot be created is reported instead of papered over.
+    let log_dir = state.data_dir.join("logs");
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("创建实例日志失败: {e}"))?;
+    let log_path = log_dir.join(format!("{instance_id}.log"));
+    let log_file = Arc::new(Mutex::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("创建实例日志失败: {e}"))?,
+    ));
+
     let mut child = cmd.spawn().map_err(|e| format!("启动进程失败: {e}"))?;
     crate::log_info!("实例 {instance_id} 进程已拉起（profile: {profile}）");
 
@@ -2689,23 +2758,6 @@ pub async fn start_instance_process(
     // the child itself).
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-
-    let log_dir = state.data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir).ok();
-    let log_path = log_dir.join(format!("{instance_id}.log"));
-    let log_file = Arc::new(Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .unwrap_or_else(|_| {
-                // Fallback: discard output if logging fails.
-                OpenOptions::new()
-                    .write(true)
-                    .open(std::path::Path::new("NUL"))
-                    .unwrap_or_else(|_| panic!("cannot open log file"))
-            }),
-    ));
 
     let kill_switch = Arc::new(Notify::new());
 
@@ -2722,8 +2774,10 @@ pub async fn start_instance_process(
     );
 
     // Register the running entry (stop_instance reaches it through the map);
-    // the tray menu is a projection of the registry.
-    register_running(
+    // the tray menu is a projection of the registry. A start that reaches this
+    // point alone owns the id, so an existing entry is a race the child must not
+    // survive: it is reaped here and the start reports why.
+    if let Err(e) = register_running(
         app,
         state,
         instance_id,
@@ -2735,7 +2789,24 @@ pub async fn start_instance_process(
             remote: None,
         },
     )
-    .await;
+    .await
+    {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        emit_status(
+            app,
+            &InstanceStatus {
+                id: instance_id.to_string(),
+                state: InstanceState::Stopped,
+                url: None,
+                remote_url: None,
+                profile: Some(profile.to_string()),
+                exit_code: None,
+            },
+        );
+        return Err(e);
+    }
+    drop(start_claim);
 
     // Waiter: owns the child, awaits exit or a kill request, then cleans up
     // and notifies. It is the single place that removes the map entry and
@@ -2759,7 +2830,9 @@ pub async fn start_instance_process(
             };
             // Quiet removal: the terminal status depends on the adoption
             // re-probe below, so projections are deferred until it resolves.
-            remove_entry_quiet(&state, &waiter_id).await;
+            // Only this child's own entry is removed, so a newer start that has
+            // already taken the id keeps its entry.
+            remove_entry_quiet(&state, &waiter_id, &waiter_kill).await;
             if stopped {
                 crate::log_info!("实例 {waiter_id} 已停止（exit code: {code:?}）");
             } else {
@@ -2797,10 +2870,14 @@ pub async fn start_instance_process(
                     }
                 }
             }
-            unregister_running(
+            // Project this child's terminal status only if the registry still
+            // belongs to it. A newer start that took the id over must not be
+            // told the old process exited.
+            unregister_waiter_entry(
                 &waiter_app,
                 &state,
                 &waiter_id,
+                &waiter_kill,
                 InstanceStatus {
                     id: waiter_id.clone(),
                     state: if stopped {
@@ -3280,18 +3357,26 @@ fn emit_status(app: &AppHandle, status: &InstanceStatus) {
 // forget the choreography because there is no choreography.
 // ---------------------------------------------------------------------------
 
-/// Inserts (or replaces) a running entry and refreshes the tray menu. The
-/// caller emits the instance's own status event (Starting / Running) around
-/// it — those carry per-transition detail (url, exit code) this helper
-/// doesn't know.
+/// Binds an in-flight start to its running entry and refreshes the tray menu.
+/// An id that already has an entry is reported as an error rather than replaced,
+/// so a second process can never take over a live instance's registry slot. The
+/// caller emits the instance's own status event (Starting / Running) around it —
+/// those carry per-transition detail (url, exit code) this helper doesn't know.
 async fn register_running(
     app: &AppHandle,
     state: &State<'_, AppState>,
     id: &str,
     entry: RunningInstance,
-) {
-    state.running.lock().await.insert(id.to_string(), entry);
+) -> Result<(), String> {
+    {
+        let mut running = state.running.lock().await;
+        if running.contains_key(id) {
+            return Err("实例已在运行".to_string());
+        }
+        running.insert(id.to_string(), entry);
+    }
     crate::tray::rebuild_tray_menu(app).await;
+    Ok(())
 }
 
 /// Removes a running entry and projects the terminal status (status event +
@@ -3318,10 +3403,52 @@ async fn unregister_running(
     crate::tray::rebuild_tray_menu(app).await;
 }
 
-/// Removes a running entry WITHOUT projections: for the exit waiter, whose
-/// terminal status depends on the adoption re-probe that follows.
-async fn remove_entry_quiet(state: &State<'_, AppState>, id: &str) {
-    state.running.lock().await.remove(id);
+/// Removes this child's running entry WITHOUT projections: for the exit waiter,
+/// whose terminal status depends on the adoption re-probe that follows. Only the
+/// entry that still belongs to `kill` is removed, so a newer entry under the same
+/// id is left untouched.
+async fn remove_entry_quiet(state: &State<'_, AppState>, id: &str, kill: &Arc<Notify>) {
+    let mut running = state.running.lock().await;
+    let ours = running
+        .get(id)
+        .map(|entry| Arc::ptr_eq(&entry.kill, kill))
+        .unwrap_or(false);
+    if ours {
+        running.remove(id);
+    }
+}
+
+/// Projects one child's terminal status, but only while the registry still
+/// belongs to that child (its entry present and matched by `kill`) or is
+/// already empty. A newer start under the same id owns the id and stays silent.
+async fn unregister_waiter_entry(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    id: &str,
+    kill: &Arc<Notify>,
+    status: InstanceStatus,
+) {
+    let (owned, remote) = {
+        let mut running = state.running.lock().await;
+        match running.get(id) {
+            Some(entry) if Arc::ptr_eq(&entry.kill, kill) => {
+                (true, running.remove(id).and_then(|r| r.remote))
+            }
+            None => (true, None),
+            Some(_) => (false, None),
+        }
+    };
+    if !owned {
+        return;
+    }
+    forget_url(&state.data_dir, id);
+    if let Some(run) = remote {
+        if let Err(e) = forget_remote_run(state, id, &run).await {
+            crate::log_warn!("实例 {id} 的远端运行记录没能清掉：{e}");
+        }
+    }
+    emit_status(app, &status);
+    crate::tray::rebuild_tray_menu(app).await;
 }
 
 #[cfg(test)]
@@ -3329,9 +3456,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn looks_like_dsh_matches_node_and_dsh_processes() {
-        assert!(looks_like_dsh("node", ""));
-        assert!(looks_like_dsh("Node.js", ""));
+    fn looks_like_dsh_matches_dsh_processes_only() {
+        assert!(!looks_like_dsh("node", ""));
+        assert!(!looks_like_dsh("Node.js", ""));
+        assert!(!looks_like_dsh("node", "/opt/foo/bin.js"));
+        assert!(!looks_like_dsh("node", "/opt/bar --profile web"));
         assert!(looks_like_dsh("dsh", ""));
         assert!(looks_like_dsh("/path/to/dsh-bin", ""));
         assert!(!looks_like_dsh("Python", ""));
@@ -3350,7 +3479,7 @@ mod tests {
         assert!(looks_like_dsh("MainThread", args));
         assert!(
             !looks_like_dsh("MainThread", "/usr/bin/python3 -m http.server 3099"),
-            "命令行里既没有 node 也没有 dsh 就不算"
+            "命令行里没有 DSH 的证据就不算"
         );
     }
 
@@ -4468,6 +4597,12 @@ mod tests {
         )))
     }
 
+    /// The argv an npm-installed DSH carries: the listener runs as `node`, but
+    /// only the command line says it is DSH.
+    fn npm_dsh_args() -> &'static str {
+        "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.2/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 3099 --no-open"
+    }
+
     /// One machine, one instance, and the record it left behind — the three
     /// things every check needs.
     fn remote_case(
@@ -4567,7 +4702,7 @@ mod tests {
     async fn a_pinned_port_with_a_dsh_like_listener_is_adopted() {
         let fake = FakeTransport::new()
             .answering(FakeAnswer::failed(2, "远端没有这个文件：running.json"))
-            .answering(occupied_answer(4242, "node"))
+            .answering(occupied_answer_with_args(4242, "node", npm_dsh_args()))
             .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)));
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
@@ -4645,7 +4780,7 @@ mod tests {
     async fn a_random_port_is_adopted_when_the_recorded_token_is_accepted_there() {
         let fake = FakeTransport::new()
             .answering(record_answer(Some(READY_URL)))
-            .answering(occupied_answer(4242, "node"))
+            .answering(occupied_answer_with_args(4242, "node", npm_dsh_args()))
             .answering(FakeAnswer::stdout(marked(&format!(
                 r#"{{"status":303,"cookie":"{REMOTE_COOKIE}"}}"#
             ))))
@@ -4685,7 +4820,7 @@ mod tests {
     async fn a_random_port_whose_token_is_refused_is_not_adopted() {
         let fake = FakeTransport::new()
             .answering(record_answer(Some(READY_URL)))
-            .answering(occupied_answer(4242, "node"))
+            .answering(occupied_answer_with_args(4242, "node", npm_dsh_args()))
             .answering(FakeAnswer::stdout(marked(
                 r#"{"status":401,"cookie":null}"#,
             )));

@@ -115,6 +115,13 @@ interface LauncherState {
   runtime: RuntimeStatus | null
   healthLogs: HealthLogItem[]
   loaded: boolean
+  /**
+   * Why one of the six start-up reads failed, one entry each. A failed read
+   * leaves only its own data empty and never stops the rest of start-up; the
+   * list is here so the interface can say what was not read instead of
+   * presenting an empty shelf as the machine's answer.
+   */
+  initErrors: string[]
 }
 
 export const useLauncherStore = defineStore('launcher', {
@@ -149,6 +156,7 @@ export const useLauncherStore = defineStore('launcher', {
     runtime: null,
     healthLogs: [],
     loaded: false,
+    initErrors: [],
   }),
 
   getters: {
@@ -255,7 +263,7 @@ export const useLauncherStore = defineStore('launcher', {
       })
 
       const [hosts, instances, settings, statuses, runtime, tasks] =
-        await Promise.all([
+        await Promise.allSettled([
           api.listHosts(),
           // Every host's instances: the board's 全部 view is the default, and the
           // request says so explicitly (「没说话」 means 本机 everywhere else).
@@ -263,21 +271,52 @@ export const useLauncherStore = defineStore('launcher', {
           api.getSettings(),
           api.listInstanceStatus(),
           api.getRuntimeStatus(),
-          // The task list is the install ledger. It is fetched after the rest
-          // because a task that just finished is an instance that must be in
-          // `this.instances` before its progress row is retired.
+          // The task list is the install ledger.
           api.listTasks(),
         ])
-      this.hosts = hosts
-      if (!hosts.some((h) => h.id === this.currentHostId)) {
-        this.currentHostId =
-          hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
+      // Each read stands on its own: one failing interface leaves only its own
+      // data empty and is recorded, while the rest still arrive. Start-up
+      // always finishes below, so the status stream is never left buffering.
+      const initErrors: string[] = []
+      if (hosts.status === 'fulfilled') {
+        this.hosts = hosts.value
+        if (!hosts.value.some((h) => h.id === this.currentHostId)) {
+          this.currentHostId =
+            hosts.value.find((h) => h.builtin)?.id ??
+            hosts.value[0]?.id ??
+            LOCAL_HOST_ID
+        }
+      } else {
+        initErrors.push(`读取主机列表失败：${String(hosts.reason)}`)
       }
-      this.instances = instances
-      this.settings = settings
-      this.statusById = Object.fromEntries(statuses.map((st) => [st.id, st]))
-      this.runtime = runtime
-      this.installingVersions = installLedger(tasks)
+      if (instances.status === 'fulfilled') {
+        this.instances = instances.value
+      } else {
+        initErrors.push(`读取实例列表失败：${String(instances.reason)}`)
+      }
+      if (settings.status === 'fulfilled') {
+        this.settings = settings.value
+      } else {
+        initErrors.push(`读取设置失败：${String(settings.reason)}`)
+      }
+      if (statuses.status === 'fulfilled') {
+        this.statusById = Object.fromEntries(
+          statuses.value.map((st) => [st.id, st]),
+        )
+      } else {
+        initErrors.push(`读取实例状态失败：${String(statuses.reason)}`)
+      }
+      if (runtime.status === 'fulfilled') {
+        this.runtime = runtime.value
+      } else {
+        initErrors.push(`读取运行环境失败：${String(runtime.reason)}`)
+      }
+      if (tasks.status === 'fulfilled') {
+        this.installingVersions = installLedger(tasks.value)
+      } else {
+        initErrors.push(`读取任务列表失败：${String(tasks.reason)}`)
+      }
+      this.initErrors = initErrors
       this.loaded = true
       live = true
       pending.forEach(applyStatus)

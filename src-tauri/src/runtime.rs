@@ -283,19 +283,30 @@ pub(crate) fn source_of(
     ToolSource::Fallback
 }
 
+/// How long one `--version` probe may take. A tool that never answers — a broken
+/// shim, a program waiting on its own startup — must not hold up the whole
+/// candidate walk, so a probe that outlives this is treated as 「这个候选不行」.
+const PROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Runs `<exe> --version` from a neutral cwd and returns its trimmed stdout, or
-/// `None` when it cannot be run or exits non-zero.
+/// `None` when it cannot be run, exits non-zero, or outlives
+/// [`PROBE_VERSION_TIMEOUT`].
 ///
 /// The cwd matters: pnpm resolves a `packageManager` field from the working
 /// directory and reports *that* version — a corepack shim would even download
 /// it — so [`PROBE_CWD`] is what makes the reported version depend only on the
-/// binary.
+/// binary. `kill_on_drop` is what leaves no probe process behind when the
+/// timeout fires.
 pub(crate) async fn probe_version(exe: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(exe);
     crate::process::hide_console(&mut cmd);
     cmd.current_dir(PROBE_CWD);
     cmd.stdin(std::process::Stdio::null());
-    let out = cmd.arg("--version").output().await.ok()?;
+    cmd.kill_on_drop(true);
+    let out = tokio::time::timeout(PROBE_VERSION_TIMEOUT, cmd.arg("--version").output())
+        .await
+        .ok()?
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1911,7 +1922,7 @@ mod tests {
 
     /// One host's record as a restart would read it back from disk.
     fn persisted(state: &AppState, id: &str) -> crate::config::Host {
-        let cfg = crate::config::load_config(&state.config_path);
+        let cfg = crate::config::load_config(&state.config_path).expect("读取配置失败");
         cfg.hosts
             .iter()
             .find(|host| host.id == id)
@@ -1926,6 +1937,7 @@ mod tests {
             return true;
         }
         crate::config::load_config(&state.config_path)
+            .expect("读取配置失败")
             .hosts
             .iter()
             .find(|host| host.id == id)

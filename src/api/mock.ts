@@ -1704,6 +1704,14 @@ export async function mockCall<T>(
         command: directoryCommand(host.ssh_target, path),
       } as T
     }
+    case 'host_directory_command': {
+      const host = hostOf(db, hostIdArg(cmd, args))
+      if (host.builtin) fail('本机没有可复制的远程命令')
+      const target = host.ssh_target.trim()
+      if (!target) fail(`「${host.display_name}」还没有 ssh 目标`)
+      const path = String(args?.path ?? '')
+      return directoryCommand(target, path) as T
+    }
     case 'open_home_directory': {
       const home = db.homes.find((h) => h.id === String(args?.homeId))
       refuseRemotePathTouches(

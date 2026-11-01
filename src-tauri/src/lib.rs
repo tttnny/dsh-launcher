@@ -170,7 +170,9 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let config_path = data_dir.join("config.json");
-            let cfg = config::load_config(&config_path);
+            // A config the launcher cannot read is fatal: starting with an empty
+            // default would overwrite the user's file on the next save.
+            let cfg = config::load_config(&config_path).map_err(std::io::Error::other)?;
             proxy::sync_from_settings(&cfg.settings);
 
             // Runtime log: rotate the previous latest.log, then apply the
@@ -299,6 +301,7 @@ pub fn run() {
             commands::open_instance_log,
             commands::open_instance_directory,
             commands::instance_remote_location,
+            commands::host_directory_command,
             commands::open_home_directory,
             commands::get_launcher_directory,
             pending_deep_link,

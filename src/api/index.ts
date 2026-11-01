@@ -35,11 +35,6 @@ import {
   subscribeTauriTaskProgress,
   subscribeTauriTaskLog,
 } from './tauri'
-import {
-  subscribeMockInstanceStatus,
-  subscribeMockTaskProgress,
-  subscribeMockTaskLog,
-} from './mock'
 
 // ---------------------------------------------------------------------------
 // Public API — the interface. Transport is selected once in tauri.ts.
@@ -235,6 +230,13 @@ export const api = {
    */
   instanceRemoteLocation: (instanceId: string) =>
     call<InstanceLocation>('instance_remote_location', { instanceId }),
+  /**
+   * One command that reaches a host's data directory from a terminal here.
+   * The backend builds the line (`remote::ssh_command` + `directory_recipe`),
+   * so the launcher and the instance card share a single quoting rule.
+   */
+  hostDirectoryCommand: (hostId: string, path: string) =>
+    call<string>('host_directory_command', { hostId, path }),
   /** Opens a DSH_HOME directory in the file manager. */
   openHomeDirectory: (homeId: string) =>
     call<string>('open_home_directory', { homeId }),
@@ -280,20 +282,23 @@ export const api = {
     call<string>('open_instance_terminal', { instanceId }),
 
   async onInstanceStatus(cb: Listener<InstanceStatus>): Promise<() => void> {
-    return isTauri
-      ? subscribeTauriInstanceStatus(cb)
-      : Promise.resolve(subscribeMockInstanceStatus(cb))
+    if (isTauri) return subscribeTauriInstanceStatus(cb)
+    if (!import.meta.env.DEV) throw new Error('浏览器预览仅在开发模式可用')
+    const { subscribeMockInstanceStatus } = await import('./mock')
+    return subscribeMockInstanceStatus(cb)
   },
 
   async onTaskProgress(cb: Listener<TaskProgress>): Promise<() => void> {
-    return isTauri
-      ? subscribeTauriTaskProgress(cb)
-      : Promise.resolve(subscribeMockTaskProgress(cb))
+    if (isTauri) return subscribeTauriTaskProgress(cb)
+    if (!import.meta.env.DEV) throw new Error('浏览器预览仅在开发模式可用')
+    const { subscribeMockTaskProgress } = await import('./mock')
+    return subscribeMockTaskProgress(cb)
   },
 
   async onTaskLog(cb: Listener<TaskLog>): Promise<() => void> {
-    return isTauri
-      ? subscribeTauriTaskLog(cb)
-      : Promise.resolve(subscribeMockTaskLog(cb))
+    if (isTauri) return subscribeTauriTaskLog(cb)
+    if (!import.meta.env.DEV) throw new Error('浏览器预览仅在开发模式可用')
+    const { subscribeMockTaskLog } = await import('./mock')
+    return subscribeMockTaskLog(cb)
   },
 }

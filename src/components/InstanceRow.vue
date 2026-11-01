@@ -34,6 +34,7 @@ const {
   profilesByHome,
   selectionByInstance,
   loadingByHome,
+  profilesError,
   ensureSelection,
   invalidateHome,
 } = useProfiles()
@@ -214,8 +215,10 @@ watch(
   () => {
     if (unreachable.value) return
     void ensureSelection(props.inst).then((p) => {
-      if (p === undefined)
-        Message.warning(`该实例的 DSH_HOME 下没有可用 Profile`)
+      if (p !== undefined) return
+      const reason = profilesError[props.inst.home_id]
+      if (reason) Message.error(`读取 Profile 列表失败：${reason}`)
+      else Message.warning(`该实例的 DSH_HOME 下没有可用 Profile`)
     })
   },
   { immediate: true },

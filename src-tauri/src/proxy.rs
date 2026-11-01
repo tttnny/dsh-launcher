@@ -17,15 +17,70 @@ struct ProxyConf {
     no_proxy: String,
 }
 
-fn conf_from_settings(s: &LauncherSettings) -> Option<ProxyConf> {
-    let url = s.proxy_url.trim().trim_end_matches('/');
-    if !s.proxy_enabled || url.is_empty() {
+/// Resolves the configured proxy address into the `scheme://host:port` form
+/// reqwest expects. Only `http` and `https` are accepted. The port is taken
+/// from the URL when it carries one, and only filled in from `port` when it
+/// does not, so a full URL is not given a second port. An address that cannot
+/// be parsed returns `None`.
+fn parse_proxy_url(url: &str, port: u16) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
         return None;
     }
+    let explicit_port = has_explicit_port(trimmed);
+    let mut parsed = reqwest::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    // `Url::port()` reports `None` for a scheme's default port even when the
+    // URL spelled it out, so the raw text decides whether a port was given.
+    if !explicit_port {
+        parsed.set_port(Some(port)).ok()?;
+    }
+    // reqwest renders a bare host with a trailing slash; the environment
+    // variables and the proxy server string keep the address without one.
+    Some(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// Whether the URL's authority spells a port out. `Url` normalizes a scheme's
+/// default port away, so this reads the raw text: the authority is what follows
+/// `://` up to the first `/`, `?` or `#`, and a trailing `:digits` is a port.
+fn has_explicit_port(url: &str) -> bool {
+    let Some((_, after_scheme)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    match authority.rsplit_once(':') {
+        Some((_, port)) => !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+fn conf_from_settings(s: &LauncherSettings) -> Option<ProxyConf> {
+    if !s.proxy_enabled {
+        return None;
+    }
+    let server = parse_proxy_url(&s.proxy_url, s.proxy_port)?;
     Some(ProxyConf {
-        server: format!("{url}:{}", s.proxy_port),
+        server,
         no_proxy: s.no_proxy.trim().to_string(),
     })
+}
+
+/// Checks the settings' proxy address before it is saved. An address reqwest
+/// cannot use is refused here so it is reported to the user instead of being
+/// stored and silently ignored.
+pub fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
+    if !settings.proxy_enabled {
+        return Ok(());
+    }
+    match parse_proxy_url(&settings.proxy_url, settings.proxy_port) {
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "代理地址无效: {}（需以 http:// 或 https:// 开头）",
+            settings.proxy_url
+        )),
+    }
 }
 
 /// Snapshot of the active proxy for HTTP client construction sites that have

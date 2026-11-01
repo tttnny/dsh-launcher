@@ -15,7 +15,7 @@ import HealthLogModal from '@/components/HealthLogModal.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useLauncherStore()
-const { selectionByInstance } = useProfiles()
+const { selectionByInstance, ensureSelection, profilesError } = useProfiles()
 
 /** The 全部 option of the host filter: a view, not a host. */
 const HOST_ALL = 'all'
@@ -124,11 +124,17 @@ interface BulkOutcome {
   failed: number
   reason: string
   skipped: number
+  /** Rows that had no usable Profile and were therefore not started. */
+  noProfile: number
+  /** Rows whose Profile list could not be read at all. */
+  readFailed: number
 }
 
 function summarize(
   results: PromiseSettledResult<unknown>[],
   skipped: number,
+  noProfile = 0,
+  readFailed = 0,
 ): BulkOutcome {
   const failed = results.filter(
     (r): r is PromiseRejectedResult => r.status === 'rejected',
@@ -138,6 +144,8 @@ function summarize(
     failed: failed.length,
     reason: failed.length ? String(failed[0].reason) : '',
     skipped,
+    noProfile,
+    readFailed,
   }
 }
 
@@ -145,6 +153,12 @@ function bulkMessage(outcome: BulkOutcome, doneVerb: string): string {
   const parts = [`${doneVerb} ${outcome.done} 个实例`]
   if (outcome.failed) {
     parts.push(`${outcome.failed} 个失败（${outcome.reason}）`)
+  }
+  if (outcome.readFailed) {
+    parts.push(`${outcome.readFailed} 个实例读取 Profile 失败，未启动`)
+  }
+  if (outcome.noProfile) {
+    parts.push(`${outcome.noProfile} 个实例没有可用 Profile，未启动`)
   }
   if (outcome.skipped) {
     parts.push(`${outcome.skipped} 个在不可达的主机上，未动`)
@@ -154,11 +168,27 @@ function bulkMessage(outcome: BulkOutcome, doneVerb: string): string {
 
 const startAllAction = useAction(
   async () => {
-    const targets = bulk.value.start.filter((i) => !!selectionByInstance[i.id])
-    const results = await Promise.allSettled(
-      targets.map((i) => api.startInstance(i.id, selectionByInstance[i.id]!)),
+    // Every startable row gets its Profile resolved first; a row without one is
+    // counted and reported instead of being dropped without a word.
+    const started: Promise<unknown>[] = []
+    let noProfile = 0
+    let readFailed = 0
+    for (const inst of bulk.value.start) {
+      const profile = await ensureSelection(inst)
+      if (!profile) {
+        if (profilesError[inst.home_id]) readFailed++
+        else noProfile++
+        continue
+      }
+      started.push(api.startInstance(inst.id, profile))
+    }
+    const results = await Promise.allSettled(started)
+    return summarize(
+      results,
+      bulk.value.unreachable.length,
+      noProfile,
+      readFailed,
     )
-    return summarize(results, bulk.value.unreachable.length)
   },
   { success: (outcome) => bulkMessage(outcome, '已启动') },
 )

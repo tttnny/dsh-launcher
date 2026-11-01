@@ -7,6 +7,7 @@ import { useLauncherStore } from '@/stores/launcher'
 import { LOCAL_HOST_ID } from '@/api/types'
 import type { DshInstance, DshVersion } from '@/api/types'
 import { useAction } from '@/composables/useAction'
+import { useProfiles } from '@/composables/useProfiles'
 import DlIcon from '@/components/DlIcon.vue'
 import DlEmpty from '@/components/DlEmpty.vue'
 
@@ -18,6 +19,7 @@ import DlEmpty from '@/components/DlEmpty.vue'
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
+const { invalidateHome, forgetSelection } = useProfiles()
 
 const selectedHomeId = ref<string | undefined>(undefined)
 const selectedHome = computed(() => store.homeById(selectedHomeId.value ?? ''))
@@ -170,6 +172,9 @@ async function onCreate() {
   if (!version || !name) return
   const res = await createAction.run(version, name)
   if (!res) return
+  // The shared list cache is what instance rows read, so it has to drop this
+  // HOME's entry for the new Profile to show up away from this pane.
+  invalidateHome(res.homeId)
   newName.value = ''
   adding.value = false
   // The Profile lands in the version's own DSH_HOME; when that is not the one
@@ -207,8 +212,16 @@ async function confirmRename() {
     renaming.value = null
     return
   }
-  const res = await renameAction.run(selectedHomeId.value, old, next)
+  const homeId = selectedHomeId.value
+  const res = await renameAction.run(homeId, old, next)
   if (res === undefined) return
+  // Drop the stale cache and any instance selection still naming the old
+  // Profile, so the rows pick one that exists.
+  invalidateHome(homeId)
+  forgetSelection(
+    res.old,
+    store.instancesOfHome(homeId).map((i) => i.id),
+  )
   await store.refreshInstances()
   await load()
   renaming.value = null
@@ -234,8 +247,10 @@ async function confirmCopy() {
     copying.value = null
     return
   }
-  const res = await copyAction.run(selectedHomeId.value, source, name)
+  const homeId = selectedHomeId.value
+  const res = await copyAction.run(homeId, source, name)
   if (res === undefined) return
+  invalidateHome(homeId)
   await load()
   copying.value = null
 }
@@ -253,8 +268,16 @@ const deleteAction = useAction(
 
 async function confirmDelete(name: string) {
   if (!selectedHomeId.value) return
-  const deleted = await deleteAction.run(selectedHomeId.value, name)
+  const homeId = selectedHomeId.value
+  const deleted = await deleteAction.run(homeId, name)
   if (deleted === undefined) return
+  // A deleted Profile must leave the shared cache and any selection naming it,
+  // so no row keeps offering a Profile that no longer exists.
+  invalidateHome(homeId)
+  forgetSelection(
+    name,
+    store.instancesOfHome(homeId).map((i) => i.id),
+  )
   await store.refreshInstances()
   await load()
 }

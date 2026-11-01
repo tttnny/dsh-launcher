@@ -19,7 +19,6 @@ import type {
 import { useAction } from '@/composables/useAction'
 import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
-import { directoryCommand } from '@/remoteCommand'
 import { SHORTCUT_DOCS } from '@/shortcuts'
 import DlIcon from '@/components/DlIcon.vue'
 
@@ -151,15 +150,22 @@ const testResult = ref<{ hostId: string; test: ConnectionTest } | null>(null)
 
 const { copy } = useCopy()
 
+/** Why the host list could not be read; empty when the last read succeeded. */
+const hostsError = ref('')
+
 async function loadHosts() {
   try {
-    hosts.value = await api.listHosts()
+    const list = await api.listHosts()
+    hosts.value = list
+    hostsError.value = ''
     // The same list is what the Library's host picker and the board's filter
     // read: a host added, renamed or deleted here has to reach those pages, and
     // so does the fallback when the current host is the one that went away.
-    store.setHosts(hosts.value)
-  } catch {
-    hosts.value = []
+    store.setHosts(list)
+  } catch (e) {
+    // A failed read keeps the list already on screen — emptying it would read as
+    // 「没有主机」 and drop the built-in 本机 too — and says why.
+    hostsError.value = String(e)
   }
 }
 
@@ -440,15 +446,29 @@ const hostRunNames = computed(() => hostRunsOnDelete.value.join('、'))
 /** What the user can run on the server to look at what the launcher left
  *  behind. Read-only on purpose: nothing here removes anything there.
  *
- *  The shape is the backend's `remote::ssh_command` + `directory_recipe`, put
- *  together in `directoryCommand` so the two agree — a host whose data directory
- *  has not been read yet falls back to the default spelling `~/.local/share/…`,
- *  and that tilde has to keep expanding on the far side. */
-function inspectCommand(host: HostWithStatus | null): string {
-  if (!host) return ''
+ *  The command is built by the backend (`host_directory_command`, over
+ *  `remote::ssh_command` + `directory_recipe`), so this dialog and the instance
+ *  card use one quoting rule. It is fetched when the confirmation opens, since
+ *  it depends on the host's ssh target and data directory. */
+const inspectCommand = ref('')
+const inspectCommandError = ref('')
+let inspectCommandSeq = 0
+
+watch(hostPendingDelete, async (host) => {
+  const seq = ++inspectCommandSeq
+  inspectCommand.value = ''
+  inspectCommandError.value = ''
+  if (!host) return
   const dir = host.data_dir || '~/.local/share/dsh-launcher'
-  return directoryCommand(host.ssh_target, dir)
-}
+  try {
+    const command = await api.hostDirectoryCommand(host.id, dir)
+    if (seq !== inspectCommandSeq) return
+    inspectCommand.value = command
+  } catch (e) {
+    if (seq !== inspectCommandSeq) return
+    inspectCommandError.value = String(e)
+  }
+})
 
 /**
  * Deleting a host deletes the launcher's records and nothing else. A refusal
@@ -739,6 +759,32 @@ onUnmounted(() => {
             {{ `主机` }}
           </div>
           <div class="dl-surface">
+            <!-- A failed read keeps the list already on screen; the row says the
+                 read failed and offers a retry rather than showing an empty
+                 shelf as if the records were gone. -->
+            <div v-if="hostsError" class="dl-row">
+              <div class="dl-row-info">
+                <div class="host-error">
+                  <DlIcon name="alert" :size="13" class="host-error-icon" />
+                  <div class="host-error-body">
+                    <span class="host-error-reason">{{
+                      `读不到主机列表`
+                    }}</span>
+                    <span class="host-error-advice">{{
+                      `上面是上一次读到的列表；修好之后再试一次。`
+                    }}</span>
+                    <details class="host-error-detail">
+                      <summary>{{ `查看错误详情` }}</summary>
+                      <code class="dl-mono">{{ hostsError }}</code>
+                    </details>
+                  </div>
+                </div>
+              </div>
+              <button class="dl-btn dl-btn--quiet" @click="loadHosts">
+                <DlIcon name="refresh" :size="13" />
+                {{ `重新读取` }}
+              </button>
+            </div>
             <div v-for="h in hosts" :key="h.id" class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">
@@ -1219,10 +1265,15 @@ onUnmounted(() => {
         }}
       </p>
       <div class="cleanup-command">
-        <code class="dl-mono">{{ inspectCommand(hostPendingDelete) }}</code>
+        <code v-if="inspectCommand" class="dl-mono">{{ inspectCommand }}</code>
+        <span v-else-if="inspectCommandError" class="dl-row-desc">{{
+          inspectCommandError
+        }}</span>
+        <span v-else class="dl-row-desc">{{ `正在取回命令…` }}</span>
         <button
           class="dl-btn dl-btn--quiet"
-          @click="copy(inspectCommand(hostPendingDelete), '查看命令已复制')"
+          :disabled="!inspectCommand"
+          @click="copy(inspectCommand, '查看命令已复制')"
         >
           {{ `复制` }}
         </button>

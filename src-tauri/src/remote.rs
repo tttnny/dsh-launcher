@@ -400,7 +400,9 @@ pub struct RemotePortOwner {
     pub args: String,
 }
 
-/// Who holds `port` on that machine. `None` = nothing is listening there.
+/// Who holds `port` on that machine. `None` = nothing is listening there; `Err`
+/// = the machine could not tell (for example it has no `ss`), which the caller
+/// must treat as 不可判断 rather than 端口空闲.
 ///
 /// The probe runs **there**; a local `lsof` would answer about this Mac's
 /// listeners (`crate::process::probe_port_owner` is that half).
@@ -416,11 +418,18 @@ pub async fn port_owner(
         command: String,
         #[serde(default)]
         args: String,
+        #[serde(default)]
+        error: Option<String>,
     }
     let out = transport
         .run(host, RemoteCall::new(port_owner_script(port)))
         .await?;
     let answer: Answer = parse_marked(&out)?;
+    if let Some(error) = answer.error {
+        return Err(HostError::remote_command(format!(
+            "在那台机器上探测端口占用失败：{error}"
+        )));
+    }
     Ok(answer.occupied.then_some(RemotePortOwner {
         pid: answer.pid,
         command: answer.command,
@@ -1889,8 +1898,9 @@ pub struct RemoteProfilePackages {
 }
 
 /// Reads several files in **one** call: each one's bytes base64-encoded, or
-/// `null` when it is not there. The paths travel as a quoted list, so a path with
-/// a space or a quote in it survives.
+/// `null` when it is not there. The whole path list travels as one single-quoted
+/// value, so a path with a space, a quote, `$` or a backtick in it arrives
+/// literally and the loop splits on newlines only.
 ///
 /// This exists for the remote start's preflight, which asks about the version's
 /// `bin.js`, the profile's manifest, the version's bundle and three profile
@@ -1899,8 +1909,9 @@ pub struct RemoteProfilePackages {
 /// a second per file, so they are asked together. Everything about layout stays
 /// the caller's: this only reads what it is told.
 const READ_FILES: &str = r#"set -u
+set -f
 %%ESCAPER%%
-dsh_paths="%%PATHS%%"
+dsh_paths=%%PATHS%%
 dsh_rows=
 dsh_sep=
 dsh_old_ifs=$IFS
@@ -1957,7 +1968,7 @@ pub fn read_files_script(paths: &[String]) -> String {
         READ_FILES,
         &[
             ("%%ESCAPER%%", ESCAPER.to_string()),
-            ("%%PATHS%%", paths.join("\n")),
+            ("%%PATHS%%", quote(&paths.join("\n"))),
         ],
     )
 }
@@ -2071,6 +2082,12 @@ fi
 /// too; a listener this user does not own comes back without a pid, which is
 /// still the answer "occupied, by somebody else".
 ///
+/// `ss` is looked up by name first and then at its usual absolute paths, because
+/// a non-login shell may not have `/usr/sbin` on `PATH`. A machine with no `ss`
+/// at all answers 「无法探测」 in an `error` field instead of 「端口空闲」, so the
+/// caller reports 不可判断 rather than starting a second DSH on a port it never
+/// saw.
+///
 /// The command line is read as well because the name alone cannot say what the
 /// process is: a DSH installed from npm runs as this machine's `node`, but the
 /// same DSH packaged as a Python single-file executable runs as `MainThread` and
@@ -2079,7 +2096,20 @@ fi
 /// ADR-0007 exists to prevent.
 const PORT_OWNER: &str = r#"set -u
 dsh_port=%%PORT%%
-dsh_row=$(ss -ltnp 2>/dev/null | grep -E ":${dsh_port}[[:space:]]" | head -n 1)
+dsh_ss=$(command -v ss 2>/dev/null || true)
+if [ -z "$dsh_ss" ] && [ -x /usr/sbin/ss ]; then dsh_ss=/usr/sbin/ss; fi
+if [ -z "$dsh_ss" ] && [ -x /sbin/ss ]; then dsh_ss=/sbin/ss; fi
+if [ -z "$dsh_ss" ]; then
+  printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":"","args":"","error":"ss-not-found"}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_ss_out=$("$dsh_ss" -ltnp 2>/dev/null)
+dsh_ss_status=$?
+if [ "$dsh_ss_status" -ne 0 ]; then
+  printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":"","args":"","error":"ss-failed"}<<<DSH-END>>>'
+  exit 0
+fi
+dsh_row=$(printf '%s\n' "$dsh_ss_out" | grep -E ":${dsh_port}[[:space:]]" | head -n 1)
 if [ -z "$dsh_row" ]; then
   printf '<<<DSH-JSON>>>{"occupied":false,"pid":null,"command":"","args":""}<<<DSH-END>>>'
   exit 0

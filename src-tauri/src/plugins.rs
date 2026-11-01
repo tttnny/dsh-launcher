@@ -398,11 +398,11 @@ fn read_installed_version(profile_dir: &std::path::Path, name: &str) -> Option<S
         .map(str::to_string)
 }
 
-/// The launcher's own UI language. The service localizes its metadata
-/// (`meta.title` may be a `{en, zh}` map), so the projection needs to know
-/// which language this app is showing.
-pub(crate) fn ui_locale(state: &AppState) -> String {
-    state.config.lock().unwrap().settings.locale.clone()
+/// The launcher's own UI language. The launcher always shows Chinese, so the
+/// service metadata (`meta.title` may be a `{en, zh}` map) is projected with
+/// the `zh-CN` entries.
+pub(crate) fn ui_locale(_state: &AppState) -> String {
+    "zh-CN".to_string()
 }
 
 // ---------------------------------------------------------------------------
