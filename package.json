@@ -13,13 +13,7 @@
     "app:local": "bash ci/build-local-app.sh",
     "format": "prettier --write .",
     "verify": "bash ci/verify.sh",
-    "verify:quick": "bash ci/verify.sh --quick",
-    "test:gate-list": "node --test ci/gate-list.test.mjs",
-    "test:api-contract": "node --test ci/api-contract.test.mjs",
-    "test:setup-guidance": "node --test ci/setup-guidance.test.mjs",
-    "test:instances-bulk": "node --test ci/instances-bulk.test.mjs",
-    "test:remote-command": "node --test ci/remote-command.test.mjs",
-    "test:store-status": "node --test ci/store-status.test.mjs"
+    "verify:quick": "bash ci/verify.sh --quick"
   },
   "dependencies": {
     "@arco-design/web-vue": "^2.57.0",

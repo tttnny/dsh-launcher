@@ -2198,8 +2198,8 @@ mod tests {
         );
     }
 
-    /// Adoption is not a refusal on the read path either
-    /// (`docs/rules/instances.md`): an adopted remote instance the
+    /// Adoption is not a refusal on the read path either:
+    /// an adopted remote instance the
     /// launcher holds a launch token for is listed as managed, over the
     /// address this Mac reaches it at — the same rule the write path follows.
     #[tokio::test]
@@ -2261,8 +2261,8 @@ mod tests {
         );
     }
 
-    /// A write goes exactly where the read goes. And adoption is not a refusal
-    /// (`docs/rules/instances.md`): what decides is the token, so an
+    /// A write goes exactly where the read goes. And adoption is not a refusal:
+    /// what decides is the token, so an
     /// adopted remote instance the launcher holds a launch token for is written
     /// to over the forward and reported truthfully.
     #[tokio::test]
