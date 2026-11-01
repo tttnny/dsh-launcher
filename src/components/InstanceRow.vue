@@ -379,8 +379,6 @@ onMounted(() => {
       'is-focus': highlighted,
     }"
   >
-    <span class="inst-rail" aria-hidden="true" />
-
     <div
       class="inst-line"
       tabindex="0"
@@ -405,17 +403,14 @@ onMounted(() => {
         </div>
         <div class="inst-meta">
           <template v-if="showHost">
-            <span
-              class="dl-chip"
-              :title="host?.ssh_target || host?.display_name"
-            >
-              {{ host?.display_name }}
-            </span>
-            <span class="inst-meta-sep">·</span>
+            <span :title="host?.ssh_target || host?.display_name">{{
+              host?.display_name
+            }}</span>
+            <span class="inst-meta-sep" />
           </template>
           <template v-if="showVersionChip">
-            <span class="dl-chip" :title="versionName">{{ versionName }}</span>
-            <span class="inst-meta-sep">·</span>
+            <span class="dl-mono" :title="versionName">{{ versionName }}</span>
+            <span class="inst-meta-sep" />
           </template>
           <span class="inst-meta-home" :title="homeName">{{ homeName }}</span>
         </div>
@@ -660,15 +655,6 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- What the two addresses above mean, in one line: the row is the
-           control surface, and this is the sentence that keeps a remote
-           instance from reading as if DSH were bound on this Mac. -->
-      <p v-if="remoteUrl" class="facts-note">
-        {{
-          `远端实例的地址经本机的 ssh 转发到达：远端位置是它在那台机器上的地址，本机可达是它在这台 Mac 上的地址（远端端口在本机被占用时两者端口不同）。「打开」用的是本机可达这个。`
-        }}
-      </p>
-
       <!-- The action bar is grouped by what an action acts on, and the groups
            are laid out on their own lines: the machine first, then the binding.
            The process group is not here — a live process is driven from the row
@@ -756,19 +742,20 @@ onMounted(() => {
 .inst-row {
   position: relative;
 
-  // Rows are only separated by a hairline; there is no card per instance.
-  & + .inst-row {
-    border-top: 1px solid var(--dl-line);
+  // Rows are divided by an inset separator, the way macOS draws list rows.
+  & + .inst-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 18px;
+    right: 0;
+    height: 1px;
+    background: var(--dl-line);
   }
 
   // Arriving back from the plugin manager: the row says "here", once.
   &.is-focus .inst-line {
     animation: inst-focus 1.6s var(--dl-ease);
-  }
-
-  &.is-focus .inst-rail {
-    background: var(--dl-signal);
-    opacity: 1;
   }
 }
 
@@ -791,46 +778,10 @@ onMounted(() => {
     background-color: var(--dl-surface-2);
   }
 
-  // Running instances are marked by a rail + a faint wash: state is visible
-  // from across the room without reading a single label.
-  &.is-live {
-    background: linear-gradient(90deg, var(--dl-run-soft), transparent 46%);
-
-    &:hover {
-      background: linear-gradient(
-        90deg,
-        var(--dl-run-soft),
-        var(--dl-surface-2) 46%
-      );
-    }
-
-    .inst-rail {
-      background: var(--dl-run);
-      opacity: 1;
-    }
-  }
-
-  &.is-starting .inst-rail {
-    background: var(--dl-warn);
-    opacity: 1;
-  }
-
   &:focus-visible {
     outline: 2px solid var(--dl-signal-line);
     outline-offset: -3px;
   }
-}
-
-.inst-rail {
-  position: absolute;
-  left: 0;
-  top: 10px;
-  bottom: 10px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: transparent;
-  opacity: 0;
-  transition: opacity var(--dl-slow) var(--dl-ease);
 }
 
 .inst-main {
@@ -1006,7 +957,11 @@ onMounted(() => {
 }
 
 .inst-meta-sep {
-  color: var(--dl-ink-4);
+  width: 3px;
+  height: 3px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--dl-ink-4);
 }
 
 .inst-meta-home {

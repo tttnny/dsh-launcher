@@ -396,8 +396,6 @@ function removeEnvRow(idx: number) {
           }}</span>
           <span class="detail-dot">·</span>
           <span>{{ homeLabel }}</span>
-          <span class="detail-dot">·</span>
-          <span class="dl-mono detail-id" :title="id">{{ id }}</span>
         </p>
         <!-- Both addresses of a remote instance, stated apart: where it really
              is, and where it is reachable from here (ADR-0008). The row above
@@ -537,12 +535,7 @@ function removeEnvRow(idx: number) {
             </template>
 
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ `默认 Profile` }}</span>
-                <span class="dl-row-desc">{{
-                  `与上方 DSH_HOME 联动：切换 HOME 后请重新确认。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `默认 Profile` }}</span>
               <a-select
                 v-model="defaultProfile"
                 style="width: 230px"
@@ -565,9 +558,7 @@ function removeEnvRow(idx: number) {
             <div class="dl-row">
               <div class="dl-row-info">
                 <span class="dl-row-label">{{ `端口号` }}</span>
-                <span class="dl-row-desc">{{
-                  `Web 界面监听的端口；留空表示随机端口。随实例设置一起保存，运行中的实例需重启后生效。`
-                }}</span>
+                <span class="dl-row-desc">{{ `留空使用随机端口。` }}</span>
               </div>
               <div class="detail-inline">
                 <input
@@ -642,11 +633,6 @@ function removeEnvRow(idx: number) {
             <span class="dl-section-count">{{ envRows.length }}</span>
           </div>
           <div class="dl-surface detail-pad">
-            <p class="dl-row-desc env-desc">
-              {{
-                `启动实例时注入的运行时环境变量，覆盖同名系统变量。DSH_HOME 由启动器注入，不可覆写。`
-              }}
-            </p>
             <div v-for="(row, idx) in envRows" :key="idx" class="env-row">
               <input
                 v-model="row.key"
@@ -681,9 +667,6 @@ function removeEnvRow(idx: number) {
           <div class="dl-surface detail-pad danger-card">
             <div class="danger-text">
               <span class="danger-title">{{ `删除这个实例` }}</span>
-              <span class="dl-row-desc">{{
-                `版本与 DSH_HOME 是共享资源，删除实例不会碰到它们。`
-              }}</span>
             </div>
             <button
               class="dl-btn dl-btn--danger"

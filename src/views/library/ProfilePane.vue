@@ -271,7 +271,6 @@ const busy = (name: string) =>
     <section class="dl-section">
       <div class="dl-section-label">
         {{ `Profile` }}
-        <span class="dl-section-count">{{ profiles.length }}</span>
         <span class="profile-label-spacer" />
         <button
           v-if="!adding"
@@ -435,15 +434,6 @@ const busy = (name: string) =>
           </div>
         </template>
       </div>
-
-      <!-- A profile selects patch layers, but it does not own them: the running
-           instance does. Saying so once, under the list, saves the user from
-           hunting for a plugin button that was never here. -->
-      <p class="profile-note">
-        {{
-          `补丁层属于运行中的实例：在实例页展开实例卡片，或进实例设置，点「管理插件」。`
-        }}
-      </p>
     </section>
   </template>
 </template>

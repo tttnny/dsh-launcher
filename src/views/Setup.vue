@@ -277,9 +277,7 @@ onUnmounted(() => window.removeEventListener('focus', onFocus))
       <div class="dl-head-text">
         <h1>{{ `环境检测` }}</h1>
         <p class="dl-head-sub">
-          {{
-            `运行 DSH 实例需要 Node.js，安装版本与管理插件还需要 pnpm。启动器以系统环境变量为准来判断（就是你在终端里用的那一套 PATH），那里没有才去常见安装目录里找；两边都没有时可以自己指定可执行文件。`
-          }}
+          {{ `启动器以系统 PATH 为准检测 Node.js 与 pnpm。` }}
         </p>
       </div>
       <div class="dl-head-actions">

@@ -100,7 +100,6 @@ function viewProfiles(homeId: string) {
   <section class="dl-section">
     <div class="dl-section-label">
       {{ `DSH_HOME 目录` }}
-      <span class="dl-section-count">{{ store.homes.length }}</span>
     </div>
 
     <!-- Adding is an inline row, not a form above the list: the list is the
@@ -130,11 +129,6 @@ function viewProfiles(homeId: string) {
         {{ `添加` }}
       </button>
     </div>
-    <p v-if="remote" class="home-note">
-      {{
-        `这是那台机器上的路径：启动器会在那边把它建出来（不存在的目录会新建），确认可用之后才记下这条记录。`
-      }}
-    </p>
 
     <!-- A DSH_HOME is a record the launcher keeps, so a machine that cannot be
          reached still has its list here; only a failed read of the records

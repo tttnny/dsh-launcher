@@ -408,17 +408,11 @@ async function confirmDeleteHost() {
 
 // --- Update -------------------------------------------------------------------
 
-const launcherVersion = ref('')
 const updateInfo = ref<LauncherUpdateInfo | null>(null)
 const updateChannel = ref<'dev' | 'release'>('dev')
 const dataDir = ref('')
 
 onMounted(async () => {
-  try {
-    launcherVersion.value = await api.getLauncherVersion()
-  } catch {
-    launcherVersion.value = '?'
-  }
   try {
     dataDir.value = await api.getLauncherDirectory()
   } catch {
@@ -569,16 +563,6 @@ onUnmounted(() => {
     <header class="dl-head">
       <div class="dl-head-text">
         <h1>{{ `设置` }}</h1>
-        <p class="dl-head-sub">
-          {{
-            `启动器自身的行为。DSH 版本、DSH_HOME 与 Profile 在资源库里管理。`
-          }}
-        </p>
-      </div>
-      <div class="dl-head-actions">
-        <span class="dl-chip"
-          >DSH Launcher {{ launcherVersion ? `v${launcherVersion}` : '' }}</span
-        >
       </div>
     </header>
 
@@ -638,12 +622,7 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ `日志等级` }}</span>
-                <span class="dl-row-desc">{{
-                  `运行日志写入数据目录 logs/latest.log，每次启动轮转上一份。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `日志等级` }}</span>
               <a-select
                 :model-value="store.settings.log_level"
                 style="width: 190px"
@@ -661,12 +640,7 @@ onUnmounted(() => {
               </a-select>
             </div>
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ `外部终端` }}</span>
-                <span class="dl-row-desc">{{
-                  `实例的「打开终端」按钮调用这里选择的终端，启动时注入 DSH_HOME 与实例环境变量。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `外部终端` }}</span>
               <a-select
                 :model-value="store.settings.terminal"
                 style="width: 220px"
@@ -690,7 +664,6 @@ onUnmounted(() => {
         <section :ref="(el) => setSectionRef('hosts', el)" class="dl-section">
           <div class="dl-section-label">
             {{ `主机` }}
-            <span class="dl-section-count">{{ hosts.length }}</span>
           </div>
           <div class="dl-surface">
             <div v-for="h in hosts" :key="h.id" class="dl-row">
@@ -771,14 +744,6 @@ onUnmounted(() => {
               </button>
             </div>
           </div>
-          <p class="section-note">
-            {{
-              `启动器管理的机器。本机是启动器自己所在的那台 Mac，是内置的一条，不能删除。远程主机经系统 ssh 连接，只支持免密（密钥或 ssh-agent）——启动器不保存密码，也不保存口令。`
-            }}
-          </p>
-          <p v-if="hosts.some((h) => !h.builtin)" class="section-note">
-            {{ `连不上的主机照样存下来：它可能只是现在关机或不在这个网络里。` }}
-          </p>
         </section>
 
         <!-- Environment: a compact readout that links to the full check page. -->
@@ -841,14 +806,12 @@ onUnmounted(() => {
               }}</span>
             </div>
             <div class="dl-row">
-              <span class="dl-row-desc">{{
-                `启动器已识别并绑定的工具链。实例与插件都使用这里的路径。`
-              }}</span>
+              <span class="dl-row-label">{{ `工具链` }}</span>
               <button
                 class="dl-btn dl-btn--quiet"
                 @click="router.push({ name: 'setup' })"
               >
-                {{ `打开环境检测` }}
+                {{ `环境检测` }}
               </button>
             </div>
           </div>
@@ -859,12 +822,7 @@ onUnmounted(() => {
           <div class="dl-section-label">{{ `代理` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ `启用代理` }}</span>
-                <span class="dl-row-desc">{{
-                  `启动器自身的网络请求（版本下载、更新检查等）走该代理。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `启用代理` }}</span>
               <a-switch
                 :model-value="store.settings.proxy_enabled"
                 size="small"
@@ -901,7 +859,7 @@ onUnmounted(() => {
               <div class="dl-row-info">
                 <span class="dl-row-label">{{ `绕过列表` }}</span>
                 <span class="dl-row-desc">{{
-                  `逗号分隔的主机 / 地址，这些地址不经过代理。`
+                  `不走代理的地址，逗号分隔。`
                 }}</span>
               </div>
               <input
@@ -915,12 +873,7 @@ onUnmounted(() => {
               />
             </div>
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{ `在 DSH 中生效` }}</span>
-                <span class="dl-row-desc">{{
-                  `启动实例时注入 HTTP_PROXY / HTTPS_PROXY / NO_PROXY，并覆盖实例的同名环境变量；已启动的实例需重启。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `在 DSH 中生效` }}</span>
               <a-switch
                 :model-value="store.settings.proxy_apply_dsh"
                 :disabled="!store.settings.proxy_enabled"
@@ -936,11 +889,7 @@ onUnmounted(() => {
           <div class="dl-section-label">{{ `启动器更新` }}</div>
           <div class="dl-surface">
             <div class="dl-row">
-              <div class="dl-row-info">
-                <span class="dl-row-label">{{
-                  `dev 渠道包含预发布版本；release 渠道只检查正式版本。`
-                }}</span>
-              </div>
+              <span class="dl-row-label">{{ `更新渠道` }}</span>
               <div class="row-actions">
                 <a-select
                   :model-value="updateChannel"
@@ -1008,11 +957,6 @@ onUnmounted(() => {
                 </button>
               </div>
             </div>
-            <div class="dl-row">
-              <span class="dl-row-desc">{{
-                `启动器自己的数据目录：配置、日志、版本安装目录与专属 DSH_HOME 都在这里。`
-              }}</span>
-            </div>
           </div>
         </section>
 
@@ -1039,11 +983,6 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-          <p class="section-note">
-            {{
-              `macOS 用 ⌘，Windows / Linux 用 Ctrl；⌘/Ctrl+R 只刷新应用内状态，不会重载页面；输入框内的普通编辑按键不会被劫持。标「原生」的行由系统菜单直接处理。`
-            }}
-          </p>
         </section>
       </div>
     </div>
@@ -1277,13 +1216,6 @@ onUnmounted(() => {
   font-family: var(--dl-font-mono);
   font-size: var(--dl-text-xs);
   font-weight: 600;
-}
-
-.section-note {
-  margin: 8px 2px 0;
-  font-size: var(--dl-text-sm);
-  line-height: 1.5;
-  color: var(--dl-ink-3);
 }
 
 // The alias picker shows what an alias points at, as a muted suffix: the alias

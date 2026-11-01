@@ -1,7 +1,8 @@
 // DSH Launcher — global stylesheet.
 //
-// Structure comes from a page grid (title rule → content), hairlines and the
-// type scale. Colour is reserved for state. See tokens.scss for the palette.
+// The visual language is macOS's own: grouped white lists on system gray,
+// spacing and quiet inset separators instead of borders and chrome, one accent
+// blue, and colour reserved for state. See tokens.scss for the palette.
 
 @use './tokens.scss';
 
@@ -12,16 +13,16 @@
 // ---------------------------------------------------------------------------
 
 body {
-  --primary-1: 234, 240, 255;
+  --primary-1: 232, 240, 255;
   --primary-2: 214, 226, 255;
   --primary-3: 183, 200, 254;
   --primary-4: 143, 174, 252;
-  --primary-5: 107, 150, 247;
-  --primary-6: 47, 107, 228;
-  --primary-7: 36, 88, 199;
-  --primary-8: 28, 70, 168;
-  --primary-9: 21, 54, 137;
-  --primary-10: 15, 40, 108;
+  --primary-5: 61, 133, 255;
+  --primary-6: 0, 122, 255;
+  --primary-7: 0, 99, 209;
+  --primary-8: 0, 82, 173;
+  --primary-9: 0, 64, 135;
+  --primary-10: 0, 48, 102;
 
   --color-text-1: var(--dl-ink);
   --color-text-2: var(--dl-ink-2);
@@ -60,7 +61,7 @@ body {
   font-size: var(--dl-text-md);
   background: var(--dl-canvas);
   color: var(--dl-ink);
-  letter-spacing: -0.008em;
+  letter-spacing: -0.01em;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,19 +71,17 @@ body {
 .dl-page {
   max-width: var(--dl-content);
   margin: 0 auto;
-  padding: 26px 30px 60px;
+  padding: 30px 34px 64px;
 }
 
-// Page head: the title is the only large type on the page, and the hairline
-// under it is the page's structural anchor — the same rule on every page.
+// Page head: the title alone carries the top of the page. No rule beneath it —
+// the space between title and first group is the separation.
 .dl-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 20px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--dl-line);
-  margin-bottom: 20px;
+  margin-bottom: 26px;
 
   .dl-head-text {
     min-width: 0;
@@ -91,15 +90,17 @@ body {
   h1 {
     margin: 0;
     font-size: var(--dl-text-2xl);
-    font-weight: 700;
-    letter-spacing: -0.032em;
-    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -0.022em;
+    line-height: 1.2;
     color: var(--dl-ink);
   }
 
+  // Kept for pages that still carry one line of context; it is a single quiet
+  // sentence, never a paragraph.
   .dl-head-sub {
     margin: 5px 0 0;
-    max-width: 72ch;
+    max-width: 66ch;
     font-size: var(--dl-text-md);
     line-height: 1.5;
     color: var(--dl-ink-3);
@@ -114,7 +115,7 @@ body {
   }
 }
 
-// A section within a page: a quiet label over a hairline, then content.
+// A section within a page: a quiet group label, then its surface.
 .dl-section {
   margin-top: 26px;
 
@@ -125,12 +126,13 @@ body {
 
 .dl-section-label {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  margin: 0 0 10px;
+  margin: 0 0 8px;
+  padding-left: 2px;
   font-size: var(--dl-text-sm);
   font-weight: 600;
-  color: var(--dl-ink-2);
+  color: var(--dl-ink-3);
 
   .dl-section-count {
     font-weight: 500;
@@ -140,32 +142,38 @@ body {
 }
 
 // ---------------------------------------------------------------------------
-// Surface: the one card in the app. Grouped content lives in it; a list of rows
-// lives in it too, separated by hairlines rather than nested boxes.
+// Surface: the grouped list. Rows are divided by an inset separator that starts
+// where the text starts, the way macOS draws them.
 // ---------------------------------------------------------------------------
 
 .dl-surface {
   background: var(--dl-surface);
-  border: 1px solid var(--dl-line);
   border-radius: var(--dl-r-card);
+  box-shadow: var(--dl-lift-1);
+  overflow: hidden;
 
   & + .dl-surface {
     margin-top: 14px;
   }
 }
 
-// A row inside a .dl-surface: label (+ optional description) on the left, the
-// control on the right. Defined once so the settings page and the instance
-// form cannot drift into two different ideas of what a form row looks like.
 .dl-row {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 12px 16px;
+  padding: 11px 16px;
+  min-height: 44px;
 
-  & + .dl-row {
-    border-top: 1px solid var(--dl-line);
+  & + .dl-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 16px;
+    right: 0;
+    height: 1px;
+    background: var(--dl-line);
   }
 }
 
@@ -181,13 +189,13 @@ body {
   align-items: center;
   gap: 7px;
   font-size: var(--dl-text-md);
-  font-weight: 550;
+  font-weight: 400;
   color: var(--dl-ink);
 }
 
 .dl-row-desc {
   font-size: var(--dl-text-sm);
-  line-height: 1.5;
+  line-height: 1.45;
   color: var(--dl-ink-3);
 }
 
@@ -200,13 +208,13 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 30px;
+  height: 28px;
   padding: 0 12px;
   border: 1px solid transparent;
   border-radius: var(--dl-r-ctl);
   font-family: inherit;
-  font-size: var(--dl-text-sm);
-  font-weight: 550;
+  font-size: var(--dl-text-md);
+  font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
   transition:
@@ -218,8 +226,12 @@ body {
     flex-shrink: 0;
   }
 
+  &:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
   &:disabled {
-    opacity: 0.42;
+    opacity: 0.4;
     cursor: not-allowed;
   }
 }
@@ -233,35 +245,33 @@ body {
   }
 }
 
-// The live action: opening a running instance is the app's happy path, so it is
-// the only control that ever carries the run colour.
+// The live action: opening a running instance is the happy path, so it is the
+// only control that carries the run colour.
 .dl-btn--live {
   background: var(--dl-run);
   color: #fff;
 
   &:hover:not(:disabled) {
-    filter: brightness(1.08);
+    filter: brightness(1.06);
   }
 }
 
 .dl-btn--quiet {
   background: var(--dl-surface);
   border-color: var(--dl-line-strong);
-  color: var(--dl-ink-2);
+  color: var(--dl-ink);
 
   &:hover:not(:disabled) {
     background: var(--dl-surface-2);
-    border-color: var(--dl-ink-4);
-    color: var(--dl-ink);
   }
 }
 
 .dl-btn--ghost {
   background: transparent;
-  color: var(--dl-ink-3);
+  color: var(--dl-ink-2);
 
   &:hover:not(:disabled) {
-    background: var(--dl-surface-3);
+    background: var(--dl-surface-2);
     color: var(--dl-ink);
   }
 }
@@ -304,8 +314,8 @@ body {
 }
 
 .dl-input {
-  height: 30px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 9px;
   border: 1px solid var(--dl-line-strong);
   border-radius: var(--dl-r-ctl);
   background: var(--dl-surface);
@@ -317,20 +327,16 @@ body {
     border-color var(--dl-fast) var(--dl-ease),
     box-shadow var(--dl-fast) var(--dl-ease);
 
-  // A search field is the input plus a lens and a clear affordance; it is one
-  // control, so it is defined once here rather than once per list that needs it.
   &.dl-search {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 0 8px 0 10px;
+    padding: 0 8px 0 9px;
     color: var(--dl-ink-3);
 
-    // The wrapper is what draws the field, but the input inside it is what
-    // gets focused, so the ring has to come from :focus-within.
     &:focus-within {
       border-color: var(--dl-signal);
-      box-shadow: 0 0 0 3px var(--dl-signal-soft);
+      box-shadow: 0 0 0 3.5px var(--dl-signal-soft);
     }
 
     .dl-search-input {
@@ -360,7 +366,7 @@ body {
 
   &:focus {
     border-color: var(--dl-signal);
-    box-shadow: 0 0 0 3px var(--dl-signal-soft);
+    box-shadow: 0 0 0 3.5px var(--dl-signal-soft);
   }
 
   &:disabled {
@@ -385,7 +391,8 @@ body {
 }
 
 // ---------------------------------------------------------------------------
-// Chips: quiet, monospaced identifiers.
+// Chips: quiet inline metadata. No border, no weight — a chip is a value, not a
+// badge, so it recedes until read.
 // ---------------------------------------------------------------------------
 
 .dl-chip {
@@ -393,30 +400,27 @@ body {
   align-items: center;
   gap: 4px;
   max-width: 100%;
-  padding: 1px 7px;
-  border: 1px solid var(--dl-line);
-  border-radius: var(--dl-r-ctl);
+  padding: 1px 6px;
+  border-radius: 5px;
   background: var(--dl-surface-2);
   color: var(--dl-ink-2);
-  font-family: var(--dl-font-mono);
-  font-size: var(--dl-text-xs);
-  font-weight: 500;
-  line-height: 1.7;
+  font-size: var(--dl-text-sm);
+  font-weight: 400;
+  line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-// A label for the *kind* of a chip (e.g. 共享 DSH_HOME).
 .dl-tag {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 1px 7px;
-  border-radius: var(--dl-r-ctl);
+  border-radius: 5px;
   font-size: var(--dl-text-xs);
-  font-weight: 550;
-  line-height: 1.7;
+  font-weight: 600;
+  line-height: 1.6;
   white-space: nowrap;
 }
 
@@ -441,12 +445,13 @@ body {
 }
 
 .dl-tag--muted {
-  background: var(--dl-surface-3);
+  background: var(--dl-surface-2);
   color: var(--dl-ink-3);
 }
 
 // ---------------------------------------------------------------------------
-// Status lamp: dot + label. State is the only thing that gets colour.
+// Status: dot + label. State is the only thing that gets colour, and the dot
+// is steady — nothing pulses.
 // ---------------------------------------------------------------------------
 
 .dl-status {
@@ -454,13 +459,13 @@ body {
   align-items: center;
   gap: 6px;
   font-size: var(--dl-text-sm);
-  font-weight: 550;
+  font-weight: 500;
   white-space: nowrap;
 
   &::before {
     content: '';
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     flex-shrink: 0;
     border-radius: 50%;
     background: var(--dl-ink-4);
@@ -471,8 +476,6 @@ body {
 
     &::before {
       background: var(--dl-run);
-      box-shadow: 0 0 0 3px var(--dl-run-soft);
-      animation: dl-pulse 2.4s var(--dl-ease) infinite;
     }
   }
 
@@ -481,8 +484,6 @@ body {
 
     &::before {
       background: var(--dl-warn);
-      box-shadow: 0 0 0 3px var(--dl-warn-soft);
-      animation: dl-pulse 1.2s var(--dl-ease) infinite;
     }
   }
 
@@ -499,26 +500,13 @@ body {
   }
 
   // 「主机不可达」 is not 「已停止」: the instance may well be running on a machine
-  // the launcher cannot reach right now, so this carries the attention colour
-  // (and no pulse — nothing is happening here, which is the point).
+  // the launcher cannot reach right now, so it carries the attention colour.
   &.is-unreachable {
     color: var(--dl-warn);
 
     &::before {
       background: var(--dl-warn);
     }
-  }
-}
-
-@keyframes dl-pulse {
-  0% {
-    box-shadow: 0 0 0 0 var(--dl-run-soft);
-  }
-  70% {
-    box-shadow: 0 0 0 6px transparent;
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
   }
 }
 
@@ -530,26 +518,26 @@ body {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--dl-line);
-  border-radius: var(--dl-r-ctl);
-  background: var(--dl-surface-2);
+  border-radius: 8px;
+  background: var(--dl-surface-3);
 
   button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 12px;
+    padding: 3px 12px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     background: transparent;
-    color: var(--dl-ink-3);
+    color: var(--dl-ink-2);
     font-family: inherit;
-    font-size: var(--dl-text-sm);
-    font-weight: 550;
+    font-size: var(--dl-text-md);
+    font-weight: 500;
     cursor: pointer;
     transition:
       background-color var(--dl-fast) var(--dl-ease),
-      color var(--dl-fast) var(--dl-ease);
+      color var(--dl-fast) var(--dl-ease),
+      box-shadow var(--dl-fast) var(--dl-ease);
 
     &:hover:not(.is-active) {
       color: var(--dl-ink);
@@ -558,7 +546,9 @@ body {
     &.is-active {
       background: var(--dl-surface);
       color: var(--dl-ink);
-      box-shadow: var(--dl-lift-1);
+      box-shadow:
+        0 0 0 0.5px rgba(0, 0, 0, 0.06),
+        0 1px 2px rgba(0, 0, 0, 0.06);
     }
   }
 }
@@ -567,21 +557,19 @@ body {
 // Empty state
 // ---------------------------------------------------------------------------
 
-// One line of "there is nothing here" inside a list surface — the three Library
-// panes all need exactly this, so it lives here instead of three times over.
 .dl-row-none {
-  padding: 22px 16px;
+  padding: 20px 16px;
   text-align: center;
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-4);
+  font-size: var(--dl-text-md);
+  color: var(--dl-ink-3);
 }
 
 .dl-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 44px 24px;
+  gap: 12px;
+  padding: 52px 24px;
   text-align: center;
 
   .dl-empty-glyph {
@@ -589,23 +577,21 @@ body {
   }
 
   .dl-empty-title {
-    font-size: var(--dl-text-md);
+    font-size: var(--dl-text-lg);
     font-weight: 600;
-    color: var(--dl-ink-2);
+    color: var(--dl-ink);
   }
 
   .dl-empty-text {
-    max-width: 42ch;
-    font-size: var(--dl-text-sm);
-    line-height: 1.55;
+    max-width: 44ch;
+    font-size: var(--dl-text-md);
+    line-height: 1.5;
     color: var(--dl-ink-3);
   }
 }
 
 // A machine that did not answer: the title says what could not be read, the
-// body is what it said, and the hint is what to do about it. Every Library pane
-// reports a failed read this way, so it is defined here instead of once per
-// pane. Pairs with `.dl-surface` for the card around it.
+// body is what it said. Shared by every Library pane.
 .dl-failure {
   display: flex;
   flex-direction: column;
@@ -639,7 +625,7 @@ body {
 .dl-sheet {
   .arco-modal {
     border-radius: var(--dl-r-panel) !important;
-    border: 1px solid var(--dl-line);
+    border: none;
     background: var(--dl-surface) !important;
     box-shadow: var(--dl-lift-3) !important;
     overflow: hidden;
@@ -647,23 +633,23 @@ body {
 
   .arco-modal-header {
     height: auto;
-    padding: 16px 20px 12px;
-    border-bottom: 1px solid var(--dl-line);
+    padding: 18px 20px 8px;
+    border-bottom: none;
   }
 
   .arco-modal-title {
     font-size: var(--dl-text-lg);
-    font-weight: 650;
-    letter-spacing: -0.02em;
-    text-align: left;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    text-align: center;
   }
 
   .arco-modal-body {
-    padding: 18px 20px;
+    padding: 10px 20px 18px;
   }
 
   .arco-modal-footer {
-    padding: 12px 20px;
+    padding: 10px 20px 16px;
     border-top: 1px solid var(--dl-line);
   }
 }
@@ -687,7 +673,7 @@ body {
 .dl-field-hint {
   margin: 0;
   font-size: var(--dl-text-sm);
-  line-height: 1.5;
+  line-height: 1.45;
   color: var(--dl-ink-3);
 }
 
@@ -718,7 +704,7 @@ body {
 
 .arco-select-view-focus {
   border-color: var(--dl-signal) !important;
-  box-shadow: 0 0 0 3px var(--dl-signal-soft) !important;
+  box-shadow: 0 0 0 3.5px var(--dl-signal-soft) !important;
 }
 
 .arco-select-option-selected {

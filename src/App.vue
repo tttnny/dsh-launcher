@@ -438,26 +438,12 @@ async function onHeaderDoubleClick(e: MouseEvent) {
 
       <div class="dl-sidebar-foot">
         <button
-          v-if="store.healthTotalCount > 0"
-          class="dl-foot-row"
-          :class="store.healthErrorCount > 0 ? 'is-danger' : 'is-warn'"
-          :title="`自检`"
-          @click="navGo('instances')"
-        >
-          <DlIcon name="health" :size="15" />
-          <span v-if="!siderCollapsed" class="dl-foot-label">{{ `自检` }}</span>
-          <span v-if="!siderCollapsed" class="dl-foot-count">{{
-            store.healthTotalCount
-          }}</span>
-        </button>
-
-        <button
           class="dl-foot-row"
           :class="{ 'is-danger': !envOk }"
           :title="`环境检测`"
           @click="router.push({ name: 'setup' })"
         >
-          <DlIcon name="terminal" :size="15" />
+          <span class="dl-foot-dot" />
           <span v-if="!siderCollapsed" class="dl-foot-label">
             {{ envOk ? `环境就绪` : `环境未就绪` }}
           </span>
@@ -489,13 +475,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
           <DlIcon name="back" :size="15" />
         </button>
 
-        <span
-          v-if="!isTauri"
-          class="dl-tag dl-tag--muted"
-          style="margin-left: 4px"
-        >
-          {{ `浏览器预览` }}
-        </span>
+        <span v-if="!isTauri" class="dl-preview">{{ `浏览器预览` }}</span>
 
         <span class="dl-toolbar-spacer" />
       </header>
@@ -526,7 +506,7 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   width: var(--dl-sidebar);
   flex-shrink: 0;
   background: var(--dl-surface);
-  border-right: 1px solid var(--dl-line);
+  box-shadow: 1px 0 0 var(--dl-line);
   transition: width var(--dl-slow) var(--dl-ease);
 
   &.is-collapsed {
@@ -543,8 +523,8 @@ async function onHeaderDoubleClick(e: MouseEvent) {
 .dl-nav {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding: 6px 10px;
+  gap: 2px;
+  padding: 4px 10px;
 }
 
 .dl-nav-item {
@@ -553,14 +533,15 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 7px 10px;
+  height: 32px;
+  padding: 0 9px;
   border: none;
-  border-radius: var(--dl-r-ctl);
+  border-radius: 7px;
   background: transparent;
   color: var(--dl-ink-2);
   font-family: inherit;
   font-size: var(--dl-text-md);
-  font-weight: 550;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
   transition:
@@ -572,22 +553,10 @@ async function onHeaderDoubleClick(e: MouseEvent) {
     color: var(--dl-ink);
   }
 
+  // macOS source-list selection: a filled accent row with the label in white.
   &.is-active {
-    background: var(--dl-signal-soft);
-    color: var(--dl-signal-ink);
-  }
-
-  // The active rail is the app's one structural marker in the sidebar.
-  &.is-active::before {
-    content: '';
-    position: absolute;
-    left: -10px;
-    top: 50%;
-    width: 3px;
-    height: 16px;
-    border-radius: 0 2px 2px 0;
     background: var(--dl-signal);
-    transform: translateY(-50%);
+    color: #fff;
   }
 }
 
@@ -600,22 +569,25 @@ async function onHeaderDoubleClick(e: MouseEvent) {
 }
 
 .dl-nav-badge {
-  padding: 0 6px;
+  min-width: 18px;
+  padding: 0 5px;
   border-radius: 999px;
-  background: var(--dl-run-soft);
-  color: var(--dl-run);
+  background: var(--dl-surface-3);
+  color: var(--dl-ink-2);
   font-size: var(--dl-text-xs);
-  font-weight: 650;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  text-align: center;
+
+  .dl-nav-item.is-active & {
+    background: rgba(255, 255, 255, 0.24);
+    color: #fff;
+  }
 }
 
 .dl-sidebar-foot {
   margin-top: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 10px;
-  border-top: 1px solid var(--dl-line);
+  padding: 8px 10px 10px;
 }
 
 .dl-foot-row {
@@ -623,9 +595,10 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 6px 10px;
+  height: 28px;
+  padding: 0 9px;
   border: none;
-  border-radius: var(--dl-r-ctl);
+  border-radius: 6px;
   background: transparent;
   color: var(--dl-ink-3);
   font-family: inherit;
@@ -642,12 +615,20 @@ async function onHeaderDoubleClick(e: MouseEvent) {
     color: var(--dl-ink);
   }
 
-  &.is-warn {
-    color: var(--dl-warn);
-  }
-
   &.is-danger {
     color: var(--dl-danger);
+  }
+}
+
+.dl-foot-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--dl-run);
+
+  .is-danger & {
+    background: var(--dl-danger);
   }
 }
 
@@ -657,15 +638,6 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.dl-foot-count {
-  padding: 0 6px;
-  border-radius: 6px;
-  background: currentColor;
-  color: var(--dl-surface);
-  font-size: var(--dl-text-xs);
-  font-weight: 650;
 }
 
 // --- Main --------------------------------------------------------------------
@@ -684,14 +656,23 @@ async function onHeaderDoubleClick(e: MouseEvent) {
   gap: 4px;
   height: var(--dl-header);
   flex-shrink: 0;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--dl-line);
-  background: var(--dl-surface);
+  padding: 0 14px;
+  background: var(--dl-canvas);
   user-select: none;
 }
 
 .dl-toolbar-spacer {
   flex: 1;
+}
+
+.dl-preview {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--dl-surface-3);
+  color: var(--dl-ink-3);
+  font-size: var(--dl-text-xs);
+  font-weight: 500;
 }
 
 .dl-content {

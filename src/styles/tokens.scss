@@ -1,52 +1,48 @@
 // DSH Launcher — design tokens.
 //
-// The launcher is a *control surface* for local DSH processes, so the language
-// is a technical readout, not a marketing page: a cool blueprint field, one
-// signal blue borrowed from DSH's own palette, status lamps for state, and a
-// monospace face for every machine identifier (version, port, URL, path, id).
-//
-// Two rules the whole app follows:
-//   * colour means state — it is never decoration;
-//   * structure comes from hairlines and type scale, not from stacked cards.
+// The launcher is a native macOS control surface, so it follows the platform's
+// own language: SF type on system gray, one accent blue, colour reserved for
+// state, and grouping carried by spacing and quiet insets instead of lines and
+// chrome. The palette is Apple's semantic set, named the same way across light
+// and dark so a view never has to know which appearance is on.
 
 :root {
   // --- Surfaces (light) -----------------------------------------------------
-  --dl-canvas: #eef1f6;
-  --dl-surface: #ffffff;
-  --dl-surface-2: #f6f8fb;
-  --dl-surface-3: #eaeef4;
-  --dl-line: #dde3ec;
-  --dl-line-strong: #c7cfdb;
+  --dl-canvas: #f1f1f3; // window background behind the content
+  --dl-surface: #ffffff; // grouped list / card
+  --dl-surface-2: #f5f5f7; // inset fill, row hover
+  --dl-surface-3: #e9e9ec; // pressed / stronger fill
+  --dl-line: rgba(0, 0, 0, 0.07); // inset separator
+  --dl-line-strong: rgba(0, 0, 0, 0.14); // control border
 
-  // --- Ink ------------------------------------------------------------------
-  --dl-ink: #131a24;
-  --dl-ink-2: #4a5568;
-  --dl-ink-3: #78849a;
-  --dl-ink-4: #a3adbd;
+  // --- Ink (Apple label hierarchy) -----------------------------------------
+  --dl-ink: #1d1d1f; // label
+  --dl-ink-2: #48484a; // secondary label
+  --dl-ink-3: #8a8a8e; // tertiary label
+  --dl-ink-4: #b0b0b5; // quaternary / placeholder
 
-  // --- The one accent: DSH's blue ------------------------------------------
-  --dl-signal: #2f6be4;
-  --dl-signal-ink: #1d4bad;
-  --dl-signal-soft: rgba(47, 107, 228, 0.1);
-  --dl-signal-line: rgba(47, 107, 228, 0.3);
+  // --- The one accent: system blue ------------------------------------------
+  --dl-signal: #007aff;
+  --dl-signal-ink: #0063d1;
+  --dl-signal-soft: rgba(0, 122, 255, 0.12);
+  --dl-signal-line: rgba(0, 122, 255, 0.32);
 
-  // --- State ----------------------------------------------------------------
-  --dl-run: #12a150;
-  --dl-run-soft: rgba(18, 161, 80, 0.12);
-  --dl-warn: #b8760f;
-  --dl-warn-soft: rgba(184, 118, 15, 0.14);
-  --dl-danger: #c93c31;
-  --dl-danger-soft: rgba(201, 60, 49, 0.12);
+  // --- State (system colours) ----------------------------------------------
+  --dl-run: #248a3d;
+  --dl-run-soft: rgba(52, 199, 89, 0.15);
+  --dl-warn: #b25000;
+  --dl-warn-soft: rgba(255, 149, 0, 0.15);
+  --dl-danger: #d70015;
+  --dl-danger-soft: rgba(255, 59, 48, 0.12);
 
   // --- Type -----------------------------------------------------------------
-  // UI keeps the macOS system stack (the platform convention for a native
-  // app); machine data switches to mono, which is the vernacular of the thing
-  // being managed — a CLI harness.
+  // UI keeps the macOS system stack; machine identifiers (versions, ports,
+  // URLs, paths) take SF Mono, which is the platform's own monospace face.
   --dl-font-ui:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
-    'Hiragino Sans GB', 'Segoe UI', system-ui, sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'PingFang SC', 'Hiragino Sans GB', 'Segoe UI', system-ui, sans-serif;
   --dl-font-mono:
-    'SF Mono', 'JetBrains Mono', ui-monospace, Menlo, Monaco, 'PingFang SC',
+    'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, Monaco, 'PingFang SC',
     monospace;
 
   --dl-text-xs: 11px;
@@ -54,36 +50,35 @@
   --dl-text-md: 13px;
   --dl-text-lg: 15px;
   --dl-text-xl: 20px;
-  --dl-text-2xl: 26px;
+  --dl-text-2xl: 22px;
 
   // --- Geometry -------------------------------------------------------------
-  // A two-step radius ladder: controls are tight, cards are soft, overlays are
-  // softer. One radius on everything was the old tell.
+  // macOS rounds controls and grouped lists generously; overlays a touch more.
   --dl-r-ctl: 6px;
-  --dl-r-card: 10px;
+  --dl-r-card: 12px;
   --dl-r-panel: 14px;
 
-  --dl-sidebar: 232px;
-  --dl-sidebar-collapsed: 68px;
-  --dl-header: 50px;
-  --dl-content: 1080px;
+  --dl-sidebar: 220px;
+  --dl-sidebar-collapsed: 64px;
+  --dl-header: 52px;
+  --dl-content: 1040px;
 
   // --- Motion ---------------------------------------------------------------
-  --dl-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --dl-fast: 0.14s;
-  --dl-slow: 0.32s;
+  --dl-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dl-fast: 0.16s;
+  --dl-slow: 0.34s;
 
   // --- Elevation ------------------------------------------------------------
   // Flat by default; a raised surface is a real overlay, not a hover decoration.
-  --dl-lift-1: 0 1px 2px rgba(19, 26, 36, 0.06);
+  --dl-lift-1: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   --dl-lift-2:
-    0 8px 24px -6px rgba(19, 26, 36, 0.14), 0 1px 2px rgba(19, 26, 36, 0.05);
-  --dl-lift-3: 0 24px 60px -16px rgba(19, 26, 36, 0.3);
+    0 8px 28px -8px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --dl-lift-3:
+    0 24px 64px -16px rgba(0, 0, 0, 0.32), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
 
   // --- Readout --------------------------------------------------------------
-  // The diagnostics console stays dark under both themes (a readout is a
-  // readout), so it cannot borrow the theme-flipping palette above: it gets its
-  // own fixed set. Nothing else may use these.
+  // The diagnostics console stays dark under both appearances (a readout is a
+  // readout), so it gets its own fixed set. Nothing else may use these.
   --dl-readout-bg: #0f141c;
   --dl-readout-body: #cbd5e1;
   --dl-readout-ink: #e2e8f0;
@@ -96,39 +91,41 @@
 }
 
 body[arco-theme='dark'] {
-  --dl-canvas: #0e131b;
-  --dl-surface: #161c26;
-  --dl-surface-2: #1b2330;
-  --dl-surface-3: #222b39;
-  --dl-line: #26303d;
-  --dl-line-strong: #37455a;
+  --dl-canvas: #1c1c1e;
+  --dl-surface: #2c2c2e;
+  --dl-surface-2: #3a3a3c;
+  --dl-surface-3: #48484a;
+  --dl-line: rgba(255, 255, 255, 0.09);
+  --dl-line-strong: rgba(255, 255, 255, 0.16);
 
-  --dl-ink: #e8ecf3;
-  --dl-ink-2: #a7b2c4;
-  --dl-ink-3: #748196;
-  --dl-ink-4: #556274;
+  --dl-ink: #f5f5f7;
+  --dl-ink-2: #c7c7cc;
+  --dl-ink-3: #8e8e93;
+  --dl-ink-4: #636366;
 
-  --dl-signal: #6c9bff;
-  --dl-signal-ink: #a9c3ff;
-  --dl-signal-soft: rgba(108, 155, 255, 0.16);
-  --dl-signal-line: rgba(108, 155, 255, 0.42);
+  --dl-signal: #0a84ff;
+  --dl-signal-ink: #409cff;
+  --dl-signal-soft: rgba(10, 132, 255, 0.22);
+  --dl-signal-line: rgba(10, 132, 255, 0.5);
 
-  --dl-run: #3dd68c;
-  --dl-run-soft: rgba(61, 214, 140, 0.16);
-  --dl-warn: #e8a33d;
-  --dl-warn-soft: rgba(232, 163, 61, 0.18);
-  --dl-danger: #f0756a;
-  --dl-danger-soft: rgba(240, 117, 106, 0.18);
+  --dl-run: #30d158;
+  --dl-run-soft: rgba(48, 209, 88, 0.2);
+  --dl-warn: #ff9f0a;
+  --dl-warn-soft: rgba(255, 159, 10, 0.2);
+  --dl-danger: #ff453a;
+  --dl-danger-soft: rgba(255, 69, 58, 0.2);
 
-  --dl-lift-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --dl-lift-1:
+    0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5);
   --dl-lift-2:
-    0 10px 28px -8px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4);
-  --dl-lift-3: 0 28px 70px -18px rgba(0, 0, 0, 0.75);
+    0 10px 30px -8px rgba(0, 0, 0, 0.7), 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+  --dl-lift-3:
+    0 28px 72px -18px rgba(0, 0, 0, 0.85), 0 0 0 0.5px rgba(255, 255, 255, 0.1);
 }
 
 // ---------------------------------------------------------------------------
-// Mono: the readout face. Every machine identifier uses it, so a version, a
-// port and a URL read as the same kind of fact.
+// Mono: machine identifiers only — a version, a port, a path, a URL. Nothing
+// else uses it, so a monospaced run always reads as "this is a value".
 // ---------------------------------------------------------------------------
 
 .dl-mono {

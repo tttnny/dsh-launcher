@@ -104,8 +104,6 @@ const bulk = computed(() =>
   bulkScope(filtered.value, (id) => store.statusOf(id)),
 )
 
-const runningCount = computed(() => bulk.value.stop.length)
-
 // --- Start all / stop all -----------------------------------------------------
 
 // They act on the rows the board is showing — a filter that says 「只看这台机器」
@@ -187,11 +185,6 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
     <header class="dl-head">
       <div class="dl-head-text">
         <h1>{{ `实例` }}</h1>
-        <p class="dl-head-sub">
-          {{
-            `每个实例绑定一份 DSH 版本、一个 DSH_HOME 和一个 Profile。启动后，DSH 的 Web 界面会在系统浏览器里打开。`
-          }}
-        </p>
       </div>
       <div class="dl-head-actions">
         <button
@@ -238,9 +231,8 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
     </div>
 
     <template v-else>
-      <!-- Toolbar: search + a live summary. Kept above the list rather than in
-           each row, so the board stays a table of facts. The host filter sits
-           with the search: both narrow what the board shows. -->
+      <!-- Toolbar: search and the host filter narrow what the board shows, so
+           they sit together above the list rather than in each row. -->
       <div class="board-toolbar">
         <div class="dl-input dl-search board-search">
           <DlIcon name="search" :size="14" />
@@ -258,7 +250,6 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
           </button>
         </div>
 
-        <span class="board-host-label">{{ `主机` }}</span>
         <div class="dl-segmented board-hosts">
           <button
             :class="{ 'is-active': hostFilter === HOST_ALL }"
@@ -276,10 +267,6 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
             {{ h.display_name }}
           </button>
         </div>
-
-        <span class="board-summary dl-tnum">
-          {{ `共 ${filtered.length} 个 · 运行中 ${runningCount}` }}
-        </span>
 
         <span class="board-spacer" />
 
@@ -341,21 +328,11 @@ const anyStopped = computed(() => bulk.value.start.length > 0)
   width: 260px;
 }
 
-.board-host-label {
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-3);
-}
-
 // The host filter can carry several machine names; it wraps instead of pushing
 // the summary and the health button off the row.
 .board-hosts {
   flex-wrap: wrap;
   max-width: 46%;
-}
-
-.board-summary {
-  font-size: var(--dl-text-sm);
-  color: var(--dl-ink-3);
 }
 
 .board-spacer {

@@ -187,11 +187,6 @@ function close() {
     </div>
 
     <div v-else class="new-instance-body">
-      <p v-if="host && !host.builtin" class="dl-field-hint">
-        {{
-          `这台机器的资源只属于它自己：下面只能选「${host.display_name}」上的 DSH 版本与 DSH_HOME。`
-        }}
-      </p>
       <div class="dl-field">
         <label class="dl-field-label">{{ `实例名称` }}</label>
         <input
@@ -218,9 +213,6 @@ function close() {
             {{ h.name }} — {{ h.path }}
           </a-option>
         </a-select>
-        <p class="dl-field-hint">
-          {{ `同一版本可以绑定到不同的 DSH_HOME，或与其他实例共用一个。` }}
-        </p>
       </div>
     </div>
 

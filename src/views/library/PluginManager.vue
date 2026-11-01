@@ -396,17 +396,13 @@ async function removeBundle(b: BundleItem) {
       <div class="dl-head-text">
         <h1>{{ `插件管理` }}</h1>
         <p class="dl-head-sub plugin-scope">
-          <span
-            v-if="scopeInstance"
-            class="dl-chip"
-            :title="scopeInstance.name"
-          >
-            {{ scopeInstance.name }}
-          </span>
+          <span v-if="scopeInstance" :title="scopeInstance.name">{{
+            scopeInstance.name
+          }}</span>
           <span v-if="scopeInstance" class="plugin-scope-sep">/</span>
-          <span class="dl-chip">{{ home?.name ?? '—' }}</span>
+          <span>{{ home?.name ?? '—' }}</span>
           <span class="plugin-scope-sep">/</span>
-          <span class="dl-chip dl-mono">{{ profile || '—' }}</span>
+          <span class="dl-mono">{{ profile || '—' }}</span>
         </p>
       </div>
       <div class="dl-head-actions">

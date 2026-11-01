@@ -71,18 +71,6 @@ const visibleInstallable = computed(() => {
 /** The search box is only worth its chrome once the list stops fitting. */
 const searchable = computed(() => installable.value.length > 8)
 
-const channelCounts = computed(() => ({
-  all: installable.value.length,
-  stable: installable.value.filter((v) => !isPrerelease(v.version)).length,
-  prerelease: installable.value.filter((v) => isPrerelease(v.version)).length,
-}))
-
-function formatDate(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString()
-}
-
 // --- Install ------------------------------------------------------------------
 
 const installAction = useAction(
@@ -201,7 +189,6 @@ const pathLinkAction = useAction(
   <section class="dl-section">
     <div class="dl-section-label">
       {{ `已安装` }}
-      <span class="dl-section-count">{{ installedVersions.length }}</span>
       <span class="ver-label-spacer" />
       <DlRefreshButton
         class="dl-icon-btn"
@@ -228,11 +215,8 @@ const pathLinkAction = useAction(
         <div class="ver-main">
           <div class="ver-title">
             <span class="ver-name dl-mono">{{ v.version }}</span>
-            <span v-if="v.bin_ready" class="dl-tag dl-tag--run">{{
-              `已安装`
-            }}</span>
             <span
-              v-else
+              v-if="!v.bin_ready"
               class="dl-tag dl-tag--warn"
               :title="`这个版本的启动文件不在，装一次才算装好。`"
             >
@@ -285,7 +269,6 @@ const pathLinkAction = useAction(
   <section class="dl-section">
     <div class="dl-section-label">
       {{ `可安装` }}
-      <span class="dl-section-count">{{ channelCounts.all }}</span>
       <span class="ver-label-spacer" />
       <div v-if="searchable" class="dl-input dl-search ver-search">
         <DlIcon name="search" :size="13" />
@@ -363,9 +346,6 @@ const pathLinkAction = useAction(
               {{ `源码构建` }}
             </span>
           </div>
-          <span class="ver-sub">
-            {{ `发布于 ${formatDate(v.released_at)}` }}
-          </span>
 
           <!-- An install in flight: its progress, what it is doing, and a way
                out. A failure or a cancellation keeps the row — the reason the

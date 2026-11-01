@@ -37,11 +37,6 @@ const hostId = computed({
     <header class="dl-head">
       <div class="dl-head-text">
         <h1>{{ `资源库` }}</h1>
-        <p class="dl-head-sub">
-          {{
-            `实例由三样东西组成：一份 DSH 版本、一个 DSH_HOME、一个 Profile。这里准备它们。`
-          }}
-        </p>
       </div>
       <div class="dl-head-actions">
         <div class="host-picker">
