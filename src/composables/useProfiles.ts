@@ -1,7 +1,6 @@
-import { reactive, watch, type Ref } from 'vue'
+import { reactive, watch } from 'vue'
 import type { DshInstance } from '@/api/types'
 import { api } from '@/api'
-import { useLauncherStore } from '@/stores/launcher'
 
 // Module-level singleton state: the profile list cache and the per-instance
 // selection live once, shared by instance cards, the health log modal, and
@@ -21,8 +20,6 @@ const loadingByHome: Record<string, boolean> = reactive({})
  * kept selection → last_profile → default_profile → first in list.
  */
 export function useProfiles() {
-  const store = useLauncherStore()
-
   /** Fetches (and caches) a HOME's profile list; concurrent calls share the
    *  in-flight request. Returns the list, or [] on failure. */
   async function loadForHome(homeId: string): Promise<string[]> {
@@ -86,10 +83,5 @@ export function useProfiles() {
     loadForHome,
     ensureSelection,
     invalidateHome,
-    /** Instance status helper for callers that already hold the store. */
-    statusOf: (id: string) => store.statusOf(id),
   }
 }
-
-/** Type re-export for template binding convenience. */
-export type ProfileSelection = Ref<Record<string, string | undefined>>

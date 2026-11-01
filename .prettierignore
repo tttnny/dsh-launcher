@@ -15,5 +15,4 @@ src-tauri/
 
 # YAML is package-manager plumbing: the pnpm workspace and the lockfile. pnpm
 # writes pnpm-lock.yaml — reformatting it is a diff nobody asked for.
-*.yml
 *.yaml

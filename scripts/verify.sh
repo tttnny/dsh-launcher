@@ -9,16 +9,13 @@
 # `scripts/*.test.mjs` 一律按通配符发现，不写死名单：一个新增的测试文件如果还得有人记得
 # 往清单里补一行，它就已经在「被漏跑」的路上了——这正是要结束的那种漂移。
 #
-# 用法: scripts/verify.sh [--quick | --source-only]
+# 用法: scripts/verify.sh [--quick]
 #
 #   （无参数）     全部检查。合并前跑这一次。
 #   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
-#   --source-only 只跑版本同步检查与 scripts/*.test.mjs。这一类只读文件、不需要
-#                 node_modules，也不需要 pnpm 与 Rust 工具链，只装了 node 的机器
-#                 就能跑。
 #
 # 需要的工具：无参数要 cargo（含 rustfmt 与 clippy 组件）、node、pnpm（含 node_modules
-#             里的 prettier）；--quick 要 cargo（含 clippy）；--source-only 只要 node。
+#             里的 prettier）；--quick 要 cargo（含 clippy）。
 #
 # 任何一步失败立即以非零退出码结束，并说出是哪一步失败。
 set -euo pipefail
@@ -29,14 +26,12 @@ MANIFEST="src-tauri/Cargo.toml"
 
 usage() {
   cat <<'TEXT'
-用法: scripts/verify.sh [--quick | --source-only]
+用法: scripts/verify.sh [--quick]
 
   （无参数）     全部检查：cargo fmt --check、clippy、Rust 测试、版本同步、
                  scripts/*.test.mjs（通配符发现）、prettier --check、pnpm build。
                  合并前跑这一次。
   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
-  --source-only 只跑版本同步检查与 scripts/*.test.mjs，不需要 node_modules、
-                 pnpm 与 Rust 工具链（只需要 node）。
 TEXT
 }
 
@@ -44,7 +39,6 @@ MODE="full"
 case "${1:-}" in
   "") ;;
   --quick) MODE="quick" ;;
-  --source-only) MODE="source_only" ;;
   -h | --help)
     usage
     exit 0
@@ -57,8 +51,7 @@ case "${1:-}" in
     ;;
 esac
 
-# 依赖是按模式要的：--source-only 在 CI 的 Linux job 里跑，那里既没有 pnpm 也没有
-# Rust，把不需要的东西也 check 一遍只会让那个 job 永远起不来。
+# 依赖是按模式要的：--quick 只跑 Rust 检查，没必要先确认 node 与 pnpm 在不在。
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "错误：找不到 ${1}（${2}）。" >&2
@@ -75,9 +68,6 @@ case "$MODE" in
   quick)
     require cargo "装 Rust 工具链：https://rustup.rs；还需要 clippy 组件"
     ;;
-  source_only)
-    require node "装 Node.js"
-    ;;
 esac
 
 # 测试文件由通配符发现。仓库已移除 scripts/*.test.mjs，一个都匹配不上时按「无源码级测试」
@@ -90,7 +80,6 @@ fi
 case "$MODE" in
   full) TOTAL=$((5 + ${#SUITES[@]} + 1)) ;;
   quick) TOTAL=2 ;;
-  source_only) TOTAL=$((1 + ${#SUITES[@]})) ;;
 esac
 
 STEPS=0
@@ -131,11 +120,6 @@ case "$MODE" in
       cargo clippy --manifest-path "$MANIFEST" --workspace --all-targets --locked -- -D warnings
     step "Rust 测试" \
       cargo test --manifest-path "$MANIFEST" --workspace --locked
-    ;;
-  source_only)
-    step "版本同步（package.json / Cargo.toml / tauri.conf.json）" \
-      node scripts/check-versions.mjs
-    run_suites
     ;;
   full)
     step "Rust 格式检查（cargo fmt --check）" \
