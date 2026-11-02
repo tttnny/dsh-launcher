@@ -1392,9 +1392,15 @@ pub(crate) async fn ensure_remote_web_profile_template(
         .map_err(|e| format!("读取那台机器上的日志失败（{log_path}）：{e}"))?;
         offset = chunk.offset;
         pending.push_str(&chunk.text);
-        while let Some(cut) = pending.find('\n') {
-            let line = pending[..cut].trim_end_matches('\r').to_string();
-            pending.drain(..=cut);
+        let mut lines = Vec::new();
+        if crate::remote::take_log_lines(&mut pending, &mut lines) {
+            crate::log_warn!(
+                "「{}」上预热 profile 的输出有一行超过 {} 字节，已截断",
+                host.display_name,
+                crate::remote::MAX_LOG_LINE_BYTES
+            );
+        }
+        for line in lines {
             if line.trim().is_empty() {
                 continue;
             }
@@ -1579,12 +1585,17 @@ pub(crate) async fn read_remote_log(
     .map_err(|e| format!("读取那台机器上的日志失败（{}）：{e}", run.log_path))?;
 
     pending.push_str(&chunk.text);
+    let mut lines = Vec::new();
+    if crate::remote::take_log_lines(pending, &mut lines) {
+        crate::log_warn!(
+            "实例 {instance_id} 的输出有一行超过 {} 字节，已截断",
+            crate::remote::MAX_LOG_LINE_BYTES
+        );
+    }
     let mut url = None;
-    while let Some(cut) = pending.find('\n') {
-        let line = pending[..cut].trim_end_matches('\r').to_string();
-        pending.drain(..=cut);
+    for line in &lines {
         if url.is_none() {
-            url = url_in(&line);
+            url = url_in(line);
         }
     }
 
@@ -1787,6 +1798,13 @@ fn follow_remote_instance(
                 .map(|entry| entry.pid == run.pid)
                 .unwrap_or(false);
             if !still_ours {
+                return;
+            }
+            // The record is what names the process: an instance whose record is
+            // gone — deleted, or deleted with its host — is nothing to follow.
+            if !instance_recorded(&state, &id) {
+                crate::log_warn!("实例 {id} 的记录已不存在，不再跟随它的远端日志");
+                forget_running_entry(&state, &id, run.pid).await;
                 return;
             }
 
@@ -2346,6 +2364,13 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
                 .map(|entry| entry.pid == run.pid)
                 .unwrap_or(false);
             if !mine {
+                return;
+            }
+            // The record is what names the process: an instance whose record is
+            // gone — deleted, or deleted with its host — is nothing to watch.
+            if !instance_recorded(&state, &id) {
+                crate::log_warn!("实例 {id} 的记录已不存在，不再观察它的远端进程");
+                forget_running_entry(&state, &id, run.pid).await;
                 return;
             }
             match crate::remote::alive(&*state.host_transport, &run.host, run.pid).await {
@@ -3781,6 +3806,10 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
     let running = state.running.lock().await;
     let mut out: Vec<InstanceStatus> = running
         .iter()
+        // An entry whose record is gone is one the launcher is about to release
+        // (its watcher drops it on the next pass). Projecting it would put a row
+        // on screen that no record can act on.
+        .filter(|(id, _)| instances.iter().any(|inst| &inst.id == *id))
         .map(|(id, entry)| {
             // A live entry whose machine has since stopped answering is not
             // something the launcher can keep asserting: 「运行中」 would be a
@@ -3975,12 +4004,22 @@ async fn unregister_running(
     // Same on the machine that ran it: its own record is where a later session
     // would find the pid and the token, and neither outlives the process.
     if let Some(run) = remote {
+        withdraw_forward(state, &run).await;
         if let Err(e) = forget_remote_run(state, id, &run).await {
             crate::log_warn!("实例 {id} 的远端运行记录没能清掉：{e}");
         }
     }
     emit_status(app, &status);
     crate::tray::rebuild_tray_menu(app).await;
+}
+
+/// Withdraws the forward an address on another machine was reached through.
+/// The forward belongs to this launcher session and holds a local port; with the
+/// process gone there is nothing left on the other end of it.
+async fn withdraw_forward(state: &AppState, run: &RemoteRun) {
+    if let Some(remote_url) = run.remote_url.as_deref() {
+        crate::tunnel::withdraw(state, &run.host_id, remote_url).await;
+    }
 }
 
 /// Removes one remote entry only while it still names a pid this call is about,
@@ -4011,6 +4050,7 @@ async fn unregister_remote_entry(
     };
     forget_url(&state.data_dir, id);
     if let Some(run) = remote {
+        withdraw_forward(state, &run).await;
         if let Err(e) = forget_remote_run(state, id, &run).await {
             crate::log_warn!("实例 {id} 的远端运行记录没能清掉：{e}");
         }
@@ -4018,6 +4058,76 @@ async fn unregister_remote_entry(
     emit_status(app, &status);
     crate::tray::rebuild_tray_menu(app).await;
     true
+}
+
+/// Whether the launcher still holds a record for this instance. A record that
+/// is gone — the instance was deleted, or its host was — leaves nothing to
+/// watch: the record is what names the process, so no later session could stop
+/// it either.
+fn instance_recorded(state: &AppState, instance_id: &str) -> bool {
+    state
+        .config
+        .lock()
+        .unwrap()
+        .instances
+        .iter()
+        .any(|inst| inst.id == instance_id)
+}
+
+/// Drops one running entry whose instance record is gone or going, together
+/// with the reminder it left on this Mac and that machine's record of it.
+///
+/// Nothing is signalled: an instance on another machine keeps running there,
+/// and a deleted record does not change that (ADR-0007). What goes is the
+/// launcher's side of it — the entry, the watcher that would otherwise ask that
+/// machine about it forever, and the bookkeeping that named a process no record
+/// names anymore.
+async fn forget_running_entry(state: &AppState, instance_id: &str, pid: i32) {
+    let run = {
+        let mut running = state.running.lock().await;
+        let ours = running
+            .get(instance_id)
+            .and_then(|entry| entry.remote.as_ref())
+            .map(|run| run.pid == pid)
+            .unwrap_or(false);
+        if !ours {
+            return;
+        }
+        running.remove(instance_id).and_then(|entry| entry.remote)
+    };
+    forget_url(&state.data_dir, instance_id);
+    if let Some(run) = run {
+        withdraw_forward(state, &run).await;
+        if let Err(e) = forget_remote_run(state, instance_id, &run).await {
+            crate::log_warn!("实例 {instance_id} 的远端运行记录没能清掉：{e}");
+        }
+    }
+}
+
+/// Releases every running entry that belongs to one host, for a host whose
+/// records are being deleted. Returns the instances it released.
+///
+/// The processes themselves keep running on that machine (ADR-0006, ADR-0007):
+/// nothing here signals anything. What goes is the launcher's side of them, so
+/// no watcher is left asking a machine the launcher no longer knows about.
+pub(crate) async fn release_host_runs(state: &AppState, host_id: &str) -> Vec<String> {
+    let entries: Vec<(String, i32)> = {
+        let running = state.running.lock().await;
+        running
+            .iter()
+            .filter_map(|(id, entry)| {
+                entry
+                    .remote
+                    .as_ref()
+                    .filter(|run| run.host_id == host_id)
+                    .map(|run| (id.clone(), run.pid))
+            })
+            .collect()
+    };
+    for (id, pid) in &entries {
+        forget_running_entry(state, id, *pid).await;
+    }
+    entries.into_iter().map(|(id, _)| id).collect()
 }
 
 /// Removes this child's running entry WITHOUT projections: for the exit waiter,
@@ -4933,7 +5043,10 @@ mod tests {
     async fn the_status_of_a_remote_instance_carries_both_addresses() {
         let remote_url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
         let local_url = format!("http://127.0.0.1:41000/?token={READY_TOKEN}");
-        let state = app_state(Vec::new(), Vec::new());
+        let state = app_state(
+            vec![remote_home("host-server")],
+            vec![remote_instance("host-server", None)],
+        );
         let mut run = remote_run();
         run.remote_url = Some(remote_url.clone());
         state.running.lock().await.insert(

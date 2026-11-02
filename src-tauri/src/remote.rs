@@ -326,6 +326,12 @@ pub struct TailChunk {
     pub alive: bool,
 }
 
+/// The most one tail read returns. A log that grew past this while the launcher
+/// was not reading it is read from its end: the follower needs the tail, not
+/// every byte in between, and a single read must not carry a whole file's
+/// growth into memory (base64 text, decoded bytes and the final string at once).
+pub const MAX_TAIL_BYTES: usize = 256 * 1024;
+
 /// How much longer than the wait it asks for one remote call may take: the ssh
 /// connection (which may spend [`crate::ssh`'s connect timeout on a machine
 /// that is slow to answer), an interactive login shell starting, the work over
@@ -372,6 +378,43 @@ pub async fn tail(
         offset: chunk.offset,
         alive: chunk.alive,
     })
+}
+
+/// The longest single log line the launcher buffers while it waits for a
+/// newline. A process that redraws a progress bar with `\r` and no newline
+/// would otherwise grow the buffer for as long as it runs.
+pub(crate) const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+
+/// How much of a line that was cut at [`MAX_LOG_LINE_BYTES`] is kept as its
+/// readable stand-in. The cut line is a progress bar or a runaway dump, and what
+/// the reader needs from it is that something was there, not its bytes.
+pub(crate) const CUT_LINE_PREFIX_BYTES: usize = 1024;
+
+/// Moves whole lines out of a pending buffer and leaves at most
+/// [`MAX_LOG_LINE_BYTES`] of an unfinished one behind.
+///
+/// A line that grows past the cap is cut and the rest of it is dropped: the
+/// buffer is a window on the tail of a log, and a progress bar with no newline
+/// in it is not something to hold on to. Only a short prefix of it travels on,
+/// so a single line can never carry the buffer's whole weight into a task log.
+/// Returns whether a line was cut, so the caller can say so.
+pub(crate) fn take_log_lines(pending: &mut String, lines: &mut Vec<String>) -> bool {
+    while let Some(at) = pending.find('\n') {
+        lines.push(pending[..at].trim_end_matches('\r').to_string());
+        pending.drain(..=at);
+    }
+    if pending.len() <= MAX_LOG_LINE_BYTES {
+        return false;
+    }
+    // Cut on a character boundary: the buffer is UTF-8 and a byte index inside
+    // a character would panic.
+    let mut end = CUT_LINE_PREFIX_BYTES.min(pending.len());
+    while !pending.is_char_boundary(end) {
+        end -= 1;
+    }
+    lines.push(pending[..end].to_string());
+    pending.clear();
+    true
 }
 
 /// Whether the process tree one detached spawn started is still there.
@@ -2422,11 +2465,18 @@ esac
 ///
 /// The bytes travel base64-encoded: the channel is text, and pnpm's output
 /// carries whatever its own terminals printed.
+///
+/// One read returns at most [`MAX_TAIL_BYTES`]. A log that grew past that while
+/// nobody was reading it — a slept Mac, a launcher that was not running — is
+/// read from its **end**, and the offset lands on the file's size: the follower
+/// needs the tail (the URL line, the exit line), not every byte in between, and
+/// a single read must not carry a whole file's growth into memory.
 const TAIL: &str = r#"set -u
 dsh_log=%%LOG%%
 dsh_offset=%%OFFSET%%
 dsh_pid=%%PID%%
 dsh_wait=%%WAIT%%
+dsh_max=%%MAX%%
 
 dsh_alive() {
   if [ "$dsh_pid" -le 0 ]; then return 0; fi
@@ -2447,9 +2497,14 @@ while [ "$dsh_i" -lt "$dsh_wait" ] && [ "$dsh_now" -le "$dsh_offset" ] && dsh_al
   dsh_now=$(dsh_size)
 done
 
-dsh_data=$(tail -c "+$((dsh_offset + 1))" "$dsh_log" 2>/dev/null | base64 | tr -d '\n')
+dsh_end=$(dsh_size)
+dsh_from=$((dsh_offset + 1))
+if [ "$dsh_end" -gt "$dsh_offset" ] && [ $((dsh_end - dsh_offset)) -gt "$dsh_max" ]; then
+  dsh_from=$((dsh_end - dsh_max + 1))
+fi
+dsh_data=$(tail -c "+$dsh_from" "$dsh_log" 2>/dev/null | head -c "$dsh_max" | base64 | tr -d '\n')
 if dsh_alive; then dsh_living=true; else dsh_living=false; fi
-printf '<<<DSH-JSON>>>{"offset":%s,"data":"%s","alive":%s}<<<DSH-END>>>' "$dsh_now" "$dsh_data" "$dsh_living"
+printf '<<<DSH-JSON>>>{"offset":%s,"data":"%s","alive":%s}<<<DSH-END>>>' "$dsh_end" "$dsh_data" "$dsh_living"
 "#;
 
 /// Removes one directory tree. A path that is not there is already what the
@@ -2577,6 +2632,7 @@ pub fn tail_script(log_path: &str, offset: u64, pid: i32, wait_secs: u64) -> Str
             ("%%OFFSET%%", offset.to_string()),
             ("%%PID%%", pid.to_string()),
             ("%%WAIT%%", wait_secs.to_string()),
+            ("%%MAX%%", MAX_TAIL_BYTES.to_string()),
         ],
     )
 }
@@ -3529,6 +3585,34 @@ mod tests {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).to_string(),
         }
+    }
+
+    /// A line that never ends is cut at the buffer cap, and only a short prefix
+    /// of it travels on: a progress bar that redraws itself with `\r` must
+    /// neither grow the buffer for as long as the process runs nor carry its
+    /// whole weight into a task log. A half line below the cap is kept for the
+    /// next read.
+    #[test]
+    fn a_line_that_never_ends_is_cut_at_the_buffer_cap() {
+        let mut pending = String::from("完整的一行\n");
+        pending.push_str(&"x".repeat(MAX_LOG_LINE_BYTES + 10));
+        let mut lines = Vec::new();
+
+        assert!(
+            take_log_lines(&mut pending, &mut lines),
+            "超长行要被切掉并说出来"
+        );
+        assert_eq!(
+            lines,
+            vec!["完整的一行".to_string(), "x".repeat(CUT_LINE_PREFIX_BYTES)]
+        );
+        assert!(pending.is_empty(), "超长行的剩余部分不在缓冲里留着");
+
+        let mut pending = String::from("半行");
+        let mut lines = Vec::new();
+        assert!(!take_log_lines(&mut pending, &mut lines));
+        assert!(lines.is_empty());
+        assert_eq!(pending, "半行", "没到上限的半行留着等下一次读取");
     }
 
     /// The happy path: the machine answers, and the page gets its system, its
@@ -5049,6 +5133,42 @@ mod tests {
         let parsed: serde_json::Value = parse_marked(&out).unwrap();
         assert!(!parsed["alive"].as_bool().unwrap());
         assert!(quick.elapsed().as_secs() < 5, "进程没了就不该再等");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A log that grew far past one read while nobody was watching is read from
+    /// its end, and the offset lands on the file's size: the follower needs the
+    /// tail — the URL line, the exit line — and one read must not carry a whole
+    /// file's growth into memory.
+    #[test]
+    fn a_tail_read_that_was_left_behind_returns_only_the_end_of_the_log() {
+        let dir = scratch("dsh-tail-behind");
+        let log = dir.join("install.log");
+        let head = "x".repeat(MAX_TAIL_BYTES);
+        let tail = "line at the end\n";
+        std::fs::write(&log, format!("{head}{tail}")).unwrap();
+        let size = std::fs::metadata(&log).unwrap().len();
+        let path = log.to_string_lossy().to_string();
+
+        let out = local_shell(&tail_script(&path, 0, 0, 0));
+        let parsed: serde_json::Value = parse_marked(&out).unwrap();
+        assert_eq!(
+            parsed["offset"], size,
+            "offset 落在文件末尾，下一轮从那里接着读"
+        );
+        let read = base64::engine::general_purpose::STANDARD
+            .decode(parsed["data"].as_str().unwrap())
+            .unwrap();
+        let text = String::from_utf8_lossy(&read);
+        assert_eq!(text.len(), MAX_TAIL_BYTES, "一次读取有上限：{}", text.len());
+        assert!(text.ends_with(tail), "读到的是尾部：{text:?}");
+
+        // Caught up: nothing to read, and the offset does not move back.
+        let again = local_shell(&tail_script(&path, size, 0, 0));
+        let parsed: serde_json::Value = parse_marked(&again).unwrap();
+        assert_eq!(parsed["offset"], size);
+        assert_eq!(parsed["data"], "");
 
         std::fs::remove_dir_all(&dir).ok();
     }

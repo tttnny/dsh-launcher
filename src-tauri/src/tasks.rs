@@ -1,6 +1,7 @@
 use crate::config::{new_id, DshInstance, DshVersion, Host};
 use crate::AppState;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,6 +13,15 @@ pub const TASK_PROGRESS_EVENT: &str = "task://progress";
 pub const TASK_LOG_EVENT: &str = "task://log";
 
 const MAX_LOG_LINES: usize = 1000;
+
+/// How many lines of a finished task's log stay readable after it ends: the
+/// lines that explain how it ended are the last ones.
+const TERMINAL_LOG_LINES: usize = 50;
+
+/// How many finished tasks the launcher keeps. A task record is a progress
+/// report, not a history: the install's own log is on the machine that ran it,
+/// and the page reads the live stream from `task://log`.
+const MAX_FINISHED_TASKS: usize = 20;
 
 /// How long one read of a remote install's log parks on that machine waiting
 /// for output. The wait happens there, so a quiet install costs one ssh call per
@@ -308,41 +318,71 @@ async fn start_create_instance_task(
 /// Writes a task body's result into the task record and emits the terminal
 /// progress. `on_done` maps the success payload to extra bookkeeping (e.g.
 /// the created instance id, HOME reservation release).
-pub(crate) async fn finish_task<T>(
-    app: &AppHandle,
+///
+/// A task that reaches a terminal state is settled: its log is cut down to its
+/// tail, and the finished tasks beyond the newest few are dropped. A running
+/// task is never dropped — its record is what the cancel button names.
+pub(crate) async fn finish_task<R: tauri::Runtime, T>(
+    app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
     result: Result<T, String>,
     on_done: impl FnOnce(&mut TaskInfo, T),
 ) {
     let mut tasks = state.tasks.lock().await;
-    let Some(task) = tasks.get_mut(task_id) else {
-        return;
+    let terminal = {
+        let Some(task) = tasks.get_mut(task_id) else {
+            return;
+        };
+        if task.state == TaskState::Cancelled {
+            return;
+        }
+        let terminal = match result {
+            Ok(payload) => {
+                task.state = TaskState::Done;
+                task.percent = 100;
+                on_done(task, payload);
+                (TaskState::Done, 100, None, task.instance_id.clone())
+            }
+            Err(msg) => {
+                task.state = TaskState::Error;
+                task.message = Some(msg.clone());
+                push_log_locked(task, &format!("error: {msg}"));
+                (TaskState::Error, task.percent, Some(msg), None)
+            }
+        };
+        trim_terminal_log(task);
+        terminal
     };
-    if task.state == TaskState::Cancelled {
+    prune_finished_tasks(&mut tasks);
+    drop(tasks);
+    emit_progress(app, task_id, terminal.0, terminal.1, terminal.2, terminal.3);
+}
+
+/// Cuts a finished task's log down to its tail: the lines that explain how it
+/// ended are the last ones, and the rest is a progress report nobody reads once
+/// the task is over.
+fn trim_terminal_log(task: &mut TaskInfo) {
+    if task.logs.len() > TERMINAL_LOG_LINES {
+        let cut = task.logs.len() - TERMINAL_LOG_LINES;
+        task.logs.drain(..cut);
+    }
+}
+
+/// Keeps the newest few finished tasks and drops the rest, oldest first.
+fn prune_finished_tasks(tasks: &mut HashMap<String, TaskInfo>) {
+    let mut finished: Vec<(i64, String)> = tasks
+        .values()
+        .filter(|task| task.state != TaskState::Running)
+        .map(|task| (task.created_at, task.id.clone()))
+        .collect();
+    if finished.len() <= MAX_FINISHED_TASKS {
         return;
     }
-    match result {
-        Ok(payload) => {
-            task.state = TaskState::Done;
-            task.percent = 100;
-            on_done(task, payload);
-            emit_progress(
-                app,
-                task_id,
-                TaskState::Done,
-                100,
-                None,
-                task.instance_id.clone(),
-            );
-        }
-        Err(msg) => {
-            task.state = TaskState::Error;
-            task.message = Some(msg.clone());
-            push_log_locked(task, &format!("error: {msg}"));
-            let pct = task.percent;
-            emit_progress(app, task_id, TaskState::Error, pct, Some(msg), None);
-        }
+    finished.sort_by_key(|(created_at, _)| *created_at);
+    let excess = finished.len() - MAX_FINISHED_TASKS;
+    for (_, id) in finished.into_iter().take(excess) {
+        tasks.remove(&id);
     }
 }
 
@@ -350,6 +390,15 @@ pub(crate) async fn finish_task<T>(
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskInfo>, String> {
     let tasks = state.tasks.lock().await;
     let mut out: Vec<TaskInfo> = tasks.values().cloned().collect();
+    // A finished task's log is not carried in the list: it is a progress report
+    // that has already reached the page as `task://log` events, and the list
+    // must not grow with the launcher's history. A running task's tail still
+    // travels, so a page opened mid-install shows what has been said so far.
+    for task in &mut out {
+        if task.state != TaskState::Running {
+            task.logs.clear();
+        }
+    }
     out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
     Ok(out)
 }
@@ -400,7 +449,9 @@ pub async fn cancel_task(
                 task.message = Some("已取消".to_string());
             }
             task.remote = None;
+            trim_terminal_log(task);
         }
+        prune_finished_tasks(&mut tasks);
     }
     if let Some(child) = child {
         let taken = child.lock().await.take();
@@ -1687,8 +1738,10 @@ async fn clear_remote_run(state: &State<'_, AppState>, task_id: &str) {
 }
 
 /// Splits newly read log text into whole lines, logging each one: a chunk can
-/// end mid-line, and half a line is not something anyone can read. Returns the
-/// exit status if the wrapper's status line was among them.
+/// end mid-line, and half a line is not something anyone can read. A line that
+/// grows past [`crate::remote::MAX_LOG_LINE_BYTES`] is cut and said so, so a
+/// progress bar with no newline in it cannot grow the buffer without end.
+/// Returns the exit status if the wrapper's status line was among them.
 async fn drain_log_lines<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
@@ -1696,14 +1749,26 @@ async fn drain_log_lines<R: tauri::Runtime>(
     pending: &mut String,
 ) -> Option<i32> {
     let mut status = None;
-    while let Some(cut) = pending.find('\n') {
-        let line = pending[..cut].trim_end_matches('\r').to_string();
-        pending.drain(..=cut);
+    let mut lines = Vec::new();
+    let cut = crate::remote::take_log_lines(pending, &mut lines);
+    for line in lines {
         if let Some(code) = crate::remote::exit_status_of(&line) {
             status = Some(code);
         } else if !line.trim().is_empty() {
             push_task_log(app, state, task_id, &line).await;
         }
+    }
+    if cut {
+        push_task_log(
+            app,
+            state,
+            task_id,
+            &format!(
+                "输出有一行超过 {} 字节，已截断",
+                crate::remote::MAX_LOG_LINE_BYTES
+            ),
+        )
+        .await;
     }
     status
 }
@@ -2486,39 +2551,124 @@ impl tokio::io::AsyncRead for StreamPipe {
     }
 }
 
-async fn stream_pipe<R: tauri::Runtime>(
+/// Streams one child's output into the task log, one line at a time.
+///
+/// A line is whatever the child wrote up to its next newline, and a child that
+/// redraws a progress bar with `\r` may not write one for minutes: the
+/// unfinished line is held up to [`crate::remote::MAX_LOG_LINE_BYTES`], past
+/// which it is cut and said so. A pipe therefore cannot grow the launcher's
+/// memory without end, however long the child runs.
+async fn stream_pipe<R: tauri::Runtime, P: tokio::io::AsyncRead + Unpin>(
     app: tauri::AppHandle<R>,
     task_id: String,
-    pipe: StreamPipe,
+    pipe: P,
 ) {
     let state = app.state::<AppState>();
-    let mut lines = BufReader::new(pipe).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let line = line.trim_end_matches(['\r', '\n']).to_string();
-        if line.is_empty() {
-            continue;
-        }
-        let percent = {
-            let mut tasks = state.tasks.lock().await;
-            match tasks.get_mut(&task_id) {
-                Some(task) if task.state == TaskState::Running => {
-                    push_log_locked(task, &line);
-                    let pct = (task.percent + 1).min(90);
-                    task.percent = pct;
-                    // Throttle: emit progress roughly every 20 log lines.
-                    if task.logs.len() % 20 == 0 {
-                        Some(pct)
-                    } else {
-                        None
+    let mut reader = BufReader::new(pipe);
+    let mut pending: Vec<u8> = Vec::new();
+    // Set while the rest of a line that was already cut is being dropped: its
+    // bytes are not this launcher's to keep, and its newline ends the line.
+    let mut discarding = false;
+    loop {
+        // Where this buffered read ends the line, and how much of it is spent.
+        let (whole_line, taken) = {
+            let available = match reader.fill_buf().await {
+                Ok([]) => break,
+                Ok(bytes) => bytes,
+                Err(_) => break,
+            };
+            match available.iter().position(|byte| *byte == b'\n') {
+                Some(at) => {
+                    if !discarding {
+                        pending.extend_from_slice(&available[..at]);
                     }
+                    (true, at + 1)
                 }
-                _ => None,
+                None => {
+                    if !discarding {
+                        pending.extend_from_slice(available);
+                    }
+                    (false, available.len())
+                }
             }
         };
-        emit_log(&app, &task_id, &line);
-        if let Some(pct) = percent {
-            emit_progress(&app, &task_id, TaskState::Running, pct, None, None);
+        reader.consume(taken);
+        if pending.len() > crate::remote::MAX_LOG_LINE_BYTES {
+            let cut = cut_line_prefix(&pending);
+            pending.clear();
+            record_stream_line(&app, &state, &task_id, cut).await;
+            record_stream_line(
+                &app,
+                &state,
+                &task_id,
+                format!(
+                    "输出有一行超过 {} 字节，已截断",
+                    crate::remote::MAX_LOG_LINE_BYTES
+                ),
+            )
+            .await;
+            discarding = !whole_line;
+            continue;
         }
+        if whole_line {
+            if !discarding {
+                let line = String::from_utf8_lossy(&pending).to_string();
+                record_stream_line(&app, &state, &task_id, line).await;
+            }
+            pending.clear();
+            discarding = false;
+        }
+    }
+    if !pending.is_empty() {
+        let line = String::from_utf8_lossy(&pending).to_string();
+        record_stream_line(&app, &state, &task_id, line).await;
+    }
+}
+
+/// The readable stand-in for a line cut at the cap: a short prefix of it, long
+/// enough to say what the child was in the middle of writing.
+fn cut_line_prefix(pending: &[u8]) -> String {
+    let mut end = crate::remote::CUT_LINE_PREFIX_BYTES.min(pending.len());
+    // The buffer is UTF-8 and a byte index inside a character would be lost.
+    while end > 0 && std::str::from_utf8(&pending[..end]).is_err() {
+        end -= 1;
+    }
+    String::from_utf8_lossy(&pending[..end]).to_string()
+}
+
+/// Puts one line of a child's output into the task log and on the wire. An
+/// empty line is not something anyone reads, and a task that is no longer
+/// running takes neither the line nor the progress nudge.
+async fn record_stream_line<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &State<'_, AppState>,
+    task_id: &str,
+    line: String,
+) {
+    let line = line.trim_end_matches(['\r', '\n']).to_string();
+    if line.is_empty() {
+        return;
+    }
+    let percent = {
+        let mut tasks = state.tasks.lock().await;
+        match tasks.get_mut(task_id) {
+            Some(task) if task.state == TaskState::Running => {
+                push_log_locked(task, &line);
+                let pct = (task.percent + 1).min(90);
+                task.percent = pct;
+                // Throttle: emit progress roughly every 20 log lines.
+                if task.logs.len() % 20 == 0 {
+                    Some(pct)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    emit_log(app, task_id, &line);
+    if let Some(pct) = percent {
+        emit_progress(app, task_id, TaskState::Running, pct, None, None);
     }
 }
 
@@ -2948,6 +3098,157 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
                 child: None,
                 remote: None,
             },
+        );
+    }
+
+    /// A finished task is settled: its log keeps only the tail that explains how
+    /// it ended, and the finished tasks beyond the newest few are dropped. The
+    /// task map is a progress report, not a history, and the list the page reads
+    /// carries no logs for a finished task — those arrive as `task://log`
+    /// events. A running task's tail still travels, so a page opened mid-install
+    /// shows what has been said so far.
+    #[tokio::test]
+    async fn a_finished_task_keeps_only_its_tail_and_the_newest_few_are_kept() {
+        let app = install_app(state_with(crate::remote::testing::idle()));
+        let state = app.state::<AppState>();
+        let total = MAX_FINISHED_TASKS + 5;
+        {
+            let mut tasks = state.tasks.lock().await;
+            for index in 0..total {
+                let id = format!("t-{index}");
+                tasks.insert(
+                    id.clone(),
+                    TaskInfo {
+                        id,
+                        kind: "install-version".to_string(),
+                        label: "下载 DSH 并创建实例".to_string(),
+                        version: "0.1.0-rc.6".to_string(),
+                        host_id: "host-lab".to_string(),
+                        state: TaskState::Running,
+                        percent: 10,
+                        created_at: index as i64,
+                        message: None,
+                        instance_id: None,
+                        instance_name: None,
+                        reserved_home_path: None,
+                        logs: (0..MAX_LOG_LINES)
+                            .map(|line| format!("第 {line} 行"))
+                            .collect(),
+                        child: None,
+                        remote: None,
+                    },
+                );
+            }
+        }
+
+        for index in 0..total {
+            let id = format!("t-{index}");
+            finish_task(app.handle(), &state, &id, Ok::<(), String>(()), |_, _| {}).await;
+        }
+
+        // One install still in flight, with a log of its own.
+        {
+            let mut tasks = state.tasks.lock().await;
+            tasks.insert(
+                "t-running".to_string(),
+                TaskInfo {
+                    id: "t-running".to_string(),
+                    kind: "install-version".to_string(),
+                    label: "下载 DSH 并创建实例".to_string(),
+                    version: "0.2.0-rc.2".to_string(),
+                    host_id: "host-lab".to_string(),
+                    state: TaskState::Running,
+                    percent: 40,
+                    created_at: total as i64,
+                    message: None,
+                    instance_id: None,
+                    instance_name: None,
+                    reserved_home_path: None,
+                    logs: vec!["正在下载".to_string(), "正在解包".to_string()],
+                    child: None,
+                    remote: None,
+                },
+            );
+        }
+
+        {
+            let tasks = state.tasks.lock().await;
+            assert_eq!(
+                tasks.len(),
+                MAX_FINISHED_TASKS + 1,
+                "终态任务只保留最近的那些，运行中的那条一直在"
+            );
+            assert!(
+                !tasks.contains_key("t-0"),
+                "最旧的终态任务该被淘汰：{:?}",
+                tasks.keys().collect::<Vec<_>>()
+            );
+            let newest = tasks
+                .get(&format!("t-{}", total - 1))
+                .expect("最新的那条要留下");
+            assert_eq!(
+                newest.logs.len(),
+                TERMINAL_LOG_LINES,
+                "终态任务的日志只留尾巴"
+            );
+            let last_line = format!("第 {} 行", MAX_LOG_LINES - 1);
+            assert_eq!(newest.logs.last(), Some(&last_line));
+        }
+
+        let listed = list_tasks(app.state::<AppState>()).await.unwrap();
+        assert!(
+            listed
+                .iter()
+                .filter(|task| task.state != TaskState::Running)
+                .all(|task| task.logs.is_empty()),
+            "终态任务的日志不随列表下发"
+        );
+        let running = listed
+            .iter()
+            .find(|task| task.id == "t-running")
+            .expect("运行中的任务也在列表里");
+        assert_eq!(
+            running.logs,
+            vec!["正在下载".to_string(), "正在解包".to_string()],
+            "运行中的任务保留日志尾巴，页面打开时能看到"
+        );
+    }
+
+    /// A child that redraws a progress bar with `\r` and writes no newline for
+    /// minutes must not grow the launcher's memory: the unfinished line is held
+    /// up to the cap, cut there, and said so. What follows it still arrives as
+    /// its own line.
+    #[tokio::test]
+    async fn a_pipe_line_that_never_ends_is_cut_at_the_cap() {
+        let app = install_app(state_with(crate::remote::testing::idle()));
+        running_install_task(&app, "t-1").await;
+        let state = app.state::<AppState>();
+
+        let mut output = "x"
+            .repeat(crate::remote::MAX_LOG_LINE_BYTES + 4096)
+            .into_bytes();
+        output.extend_from_slice("\n最后一行\n".as_bytes());
+        stream_pipe(app.handle().clone(), "t-1".to_string(), &output[..]).await;
+
+        let tasks = state.tasks.lock().await;
+        let logs = &tasks.get("t-1").unwrap().logs;
+        assert!(
+            logs.iter()
+                .all(|line| line.len() <= crate::remote::MAX_LOG_LINE_BYTES),
+            "任何一行都不该超过上限：{:?}",
+            logs.iter().map(String::len).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            logs.len(),
+            3,
+            "被切断的那一行只留下替身和一句说明，其余全部丢弃：{logs:?}"
+        );
+        assert_eq!(logs[0].len(), crate::remote::CUT_LINE_PREFIX_BYTES);
+        assert!(logs[1].contains("已截断"), "截断要说明：{logs:?}");
+        assert_eq!(
+            logs.last().map(String::as_str),
+            Some("最后一行"),
+            "截断之后的行照常记录"
         );
     }
 

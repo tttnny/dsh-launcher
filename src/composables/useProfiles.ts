@@ -116,6 +116,22 @@ export function useProfiles() {
     }
   }
 
+  /** Drops everything cached for one HOME — its profile list, the read in
+   *  flight, the failure reason and its generation — once the HOME is removed.
+   *  A read still in flight keeps its generation, so its result cannot write a
+   *  list back for a HOME that no longer exists. */
+  function forgetHome(homeId: string) {
+    const inFlight = requestsByHome[homeId]
+    invalidateHome(homeId)
+    delete loadingByHome[homeId]
+    if (!inFlight) delete generations[homeId]
+  }
+
+  /** Drops one instance's kept selection once the instance is removed. */
+  function forgetInstance(instanceId: string) {
+    delete selectionByInstance[instanceId]
+  }
+
   return {
     profilesByHome,
     selectionByInstance,
@@ -125,5 +141,7 @@ export function useProfiles() {
     ensureSelection,
     invalidateHome,
     forgetSelection,
+    forgetHome,
+    forgetInstance,
   }
 }

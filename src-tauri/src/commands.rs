@@ -147,18 +147,40 @@ pub(crate) fn update_host_record(
 /// Removes a host and the records filed under it — **only** the launcher's own
 /// records. Nothing on that machine is touched, and the instances that were
 /// running there keep running (ADR-0006, ADR-0007). What stays behind on that
-/// machine — its data directory, versions, DSH_HOMEs and running record — is
-/// what the page's confirmation names, with a command to go and look.
-pub(crate) fn delete_host_record(state: &AppState, id: &str) -> Result<(), String> {
-    let mut cfg = state.config.lock().unwrap();
-    let pos = cfg
-        .hosts
-        .iter()
-        .position(|h| h.id == id)
-        .ok_or_else(|| format!("主机不存在: {id}"))?;
-    if cfg.hosts[pos].builtin {
-        return Err("本机是内置的，不能删除".to_string());
+/// machine — its data directory, versions and DSH_HOMEs — is what the page's
+/// confirmation names, with a command to go and look.
+///
+/// Everything the launcher held for that machine goes with the record: the
+/// running entries and the watchers that would otherwise keep asking a machine
+/// it no longer knows about, the port forwards it opened, the icon and
+/// environment caches keyed by it, and its last observed status.
+pub(crate) async fn delete_host_record(state: &AppState, id: &str) -> Result<(), String> {
+    {
+        let cfg = state.config.lock().unwrap();
+        let pos = cfg
+            .hosts
+            .iter()
+            .position(|h| h.id == id)
+            .ok_or_else(|| format!("主机不存在: {id}"))?;
+        if cfg.hosts[pos].builtin {
+            return Err("本机是内置的，不能删除".to_string());
+        }
     }
+
+    let released = crate::process::release_host_runs(state, id).await;
+    crate::tunnel::withdraw_host(state, id).await;
+    for instance_id in &released {
+        crate::icons::forget_icon(instance_id);
+    }
+    crate::runtime::forget_host_env(id);
+    state.forget_host_status(id);
+
+    let mut cfg = state.config.lock().unwrap();
+    let Some(pos) = cfg.hosts.iter().position(|h| h.id == id) else {
+        // Another delete got there first: the host and everything under it are
+        // already gone.
+        return Ok(());
+    };
     cfg.hosts.remove(pos);
 
     let dropped: Vec<String> = cfg
@@ -179,14 +201,18 @@ pub(crate) fn delete_host_record(state: &AppState, id: &str) -> Result<(), Strin
         cfg.settings.last_instance_id = None;
     }
     crate::config::save_config(&state.config_path, &cfg)?;
-    drop(cfg);
-    state.forget_host_status(id);
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_host(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    delete_host_record(&state, &id)
+pub async fn delete_host(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    delete_host_record(&state, &id).await?;
+    crate::tray::rebuild_tray_menu(&app).await;
+    Ok(())
 }
 
 /// The connection test: what that machine is, where its home and the launcher's
@@ -1342,6 +1368,9 @@ pub async fn delete_instance(
         save_state(&state, &cfg.clone())?;
         icon_scope
     };
+    // The record is the only thing that names the icon: with it gone, the bytes
+    // this session read off that machine are nobody's answer anymore.
+    crate::icons::forget_icon(&id);
     if let Some((host, home)) = icon_scope {
         crate::icons::remove_icon_file(&state, &host, &home, &id).await;
     }
@@ -4276,7 +4305,7 @@ mod tests {
         cfg.settings.last_instance_id = Some("i-lab".into());
         let state = host_state(&data, cfg, crate::remote::testing::idle());
 
-        delete_host_record(&state, "host-lab").unwrap();
+        block_on(delete_host_record(&state, "host-lab")).unwrap();
 
         let cfg = state.config.lock().unwrap();
         assert_eq!(cfg.hosts.len(), 1, "只剩本机");
@@ -4300,8 +4329,68 @@ mod tests {
         );
         drop(cfg);
 
-        let err = delete_host_record(&state, crate::config::LOCAL_HOST_ID).unwrap_err();
+        let err = block_on(delete_host_record(&state, crate::config::LOCAL_HOST_ID)).unwrap_err();
         assert!(err.contains("本机"), "{err}");
+    }
+
+    /// Deleting a host takes the launcher's side of that host's running
+    /// instances with it: the entries, and with them the watchers that would
+    /// otherwise keep asking a machine the launcher no longer knows about. The
+    /// processes themselves keep running there (ADR-0007) — nothing is
+    /// signalled — so the record is what has to go.
+    #[test]
+    fn deleting_a_host_releases_the_running_entries_it_left_behind() {
+        let data = ScratchDir::new("host-delete-running");
+        let lab = remote_host("host-lab", "lab");
+        let cfg = crate::config::Config {
+            hosts: vec![Host::local(), lab.clone()],
+            instances: vec![crate::config::DshInstance {
+                id: "i-lab".into(),
+                name: "服务器实例".into(),
+                version_id: "v-lab".into(),
+                home_id: "h-lab".into(),
+                host_id: lab.id.clone(),
+                env_overrides: Default::default(),
+                default_profile: None,
+                last_profile: None,
+                icon: None,
+                port: None,
+            }],
+            ..Default::default()
+        };
+        let state = host_state(&data, cfg, crate::remote::testing::idle());
+        let run = crate::process::RemoteRun {
+            host_id: lab.id.clone(),
+            host: crate::ssh::RemoteHost::of(&lab, data.path()).unwrap(),
+            remote_url: Some("http://127.0.0.1:41234/?token=LauncherTokenForTests".into()),
+            pid: 4242,
+            started_at: Some(1),
+            data_dir: std::path::PathBuf::from("/home/demo/.local/share/dsh-launcher"),
+            log_path: "/home/demo/.local/share/dsh-launcher/logs/i-lab.log".into(),
+        };
+        block_on(async {
+            state.running.lock().await.insert(
+                "i-lab".into(),
+                crate::process::RunningInstance {
+                    kill: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    profile: "web".into(),
+                    url: Some("http://127.0.0.1:41234/?token=LauncherTokenForTests".into()),
+                    adopted: None,
+                    remote: Some(run),
+                },
+            );
+        });
+
+        block_on(delete_host_record(&state, "host-lab")).unwrap();
+
+        assert!(
+            block_on(async { state.running.lock().await.is_empty() }),
+            "删除主机后不该还留着它的运行条目"
+        );
+        assert!(
+            state.config.lock().unwrap().instances.is_empty(),
+            "那条实例记录跟着主机走"
+        );
     }
 
     /// The three refusals that keep the records honest: no name, no target, and

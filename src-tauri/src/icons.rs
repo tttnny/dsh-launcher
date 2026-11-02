@@ -132,7 +132,9 @@ fn remember_icon(instance_id: &str, icon: &str, data: Option<String>) {
     });
 }
 
-fn forget_icon(instance_id: &str) {
+/// Drops one instance's cached icon. Called wherever the bytes it was read
+/// under change or the instance itself goes.
+pub(crate) fn forget_icon(instance_id: &str) {
     REMOTE_ICON_CACHE
         .lock()
         .unwrap()

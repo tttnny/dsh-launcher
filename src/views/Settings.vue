@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
 import type { LauncherUpdateInfo, ThemeMode } from '@/api/types'
@@ -205,6 +205,15 @@ async function openLog() {
 onMounted(() => {
   void loadVersion()
   void loadLauncherDir()
+})
+
+onUnmounted(() => {
+  // 离开设置页时把还没写回的改动立即写回：定时器不再在组件卸载后触发，
+  // 刚改的选项也不会丢。
+  if (!saveTimer) return
+  clearTimeout(saveTimer)
+  saveTimer = undefined
+  void flushSave()
 })
 </script>
 

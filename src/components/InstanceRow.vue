@@ -7,6 +7,7 @@ import type { DshInstance } from '@/api/types'
 import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
 import { useCopy } from '@/composables/useCopy'
+import { useProfiles } from '@/composables/useProfiles'
 import DlIcon from '@/components/DlIcon.vue'
 import InstanceAvatar from '@/components/InstanceAvatar.vue'
 
@@ -28,6 +29,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const store = useLauncherStore()
 const { copy } = useCopy()
+const { forgetInstance } = useProfiles()
 const highlighted = ref(props.focus ?? false)
 
 watch(
@@ -137,6 +139,7 @@ async function copyAddress() {
 
 const deleteAction = useAction(async () => {
   await api.deleteInstance(props.inst.id, props.inst.host_id)
+  forgetInstance(props.inst.id)
   await store.refreshInstances()
   return true
 })

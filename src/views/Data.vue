@@ -18,8 +18,13 @@ import HomeFormDialog from '@/components/HomeFormDialog.vue'
 
 const store = useLauncherStore()
 const { copy } = useCopy()
-const { profilesError, loadForHome, invalidateHome, forgetSelection } =
-  useProfiles()
+const {
+  profilesError,
+  loadForHome,
+  invalidateHome,
+  forgetSelection,
+  forgetHome,
+} = useProfiles()
 
 const hostLabel = computed(() => {
   const host = store.currentHost
@@ -88,6 +93,7 @@ const dirAction = useAction((id: string) => api.openHomeDirectory(id), {
 const removeAction = useAction(
   async (id: string, name: string) => {
     await api.removeHome(id, store.currentHostId)
+    forgetHome(id)
     await store.refreshHomes(store.currentHostId)
     return name
   },

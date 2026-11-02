@@ -228,6 +228,7 @@ onUnmounted(() => {
   unlistenDeepLink?.()
   unlistenMenu.forEach((un) => un())
   unlistenMenu = []
+  store.dispose()
 })
 
 watch(

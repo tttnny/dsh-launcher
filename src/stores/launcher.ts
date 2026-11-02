@@ -40,6 +40,15 @@ export function installKey(
   return `${hostId ?? LOCAL_HOST_ID}:${version}`
 }
 
+/**
+ * The event subscriptions `init()` opened, so they can be released again.
+ * Module-level rather than store state: they are host handles, not data the
+ * views render, and Vue must not proxy them.
+ */
+let disposers: (() => void)[] = []
+/** The one start-up run in flight, so a second `init()` joins it. */
+let initRun: Promise<void> | null = null
+
 interface LauncherState {
   /** Every machine the launcher manages, with the status last seen for it. */
   hosts: HostWithStatus[]
@@ -224,7 +233,30 @@ export const useLauncherStore = defineStore('launcher', {
   },
 
   actions: {
-    async init() {
+    /**
+     * The one start-up: the snapshot, then the event stream. A second call
+     * joins the run already in flight instead of opening a second set of
+     * subscriptions; a run that failed releases what it opened and leaves the
+     * next call to start over.
+     */
+    async init(): Promise<void> {
+      if (!initRun) {
+        initRun = this.startup().catch((e) => {
+          this.dispose()
+          throw e
+        })
+      }
+      return initRun
+    },
+
+    /** Releases the event subscriptions `init()` opened. */
+    dispose() {
+      for (const un of disposers) un()
+      disposers = []
+      initRun = null
+    },
+
+    async startup() {
       // Attach the status listener BEFORE the initial snapshot fetch, and
       // buffer events until the snapshot is applied. Otherwise an exit event
       // fired between fetch and listener attach is lost, leaving the UI
@@ -239,10 +271,11 @@ export const useLauncherStore = defineStore('launcher', {
           this.statusById[st.id] = st
         }
       }
-      await api.onInstanceStatus((st) => {
+      const unInstanceStatus = await api.onInstanceStatus((st) => {
         if (live) applyStatus(st)
         else pending.push(st)
       })
+      disposers.push(unInstanceStatus)
 
       const [hosts, instances, settings, statuses, runtime, tasks] =
         await Promise.allSettled([
@@ -317,7 +350,7 @@ export const useLauncherStore = defineStore('launcher', {
       // whose event never arrived is recovered by `watchInstallTask` when the
       // Versions page starts one, and one that finished without an event is
       // retired on the next refresh.
-      await api.onTaskProgress((p) => {
+      const unTaskProgress = await api.onTaskProgress((p) => {
         // The row this event belongs to: the install this page just started
         // (the claim `watchInstallTask` left), or the task the backend listed
         // under that id.
@@ -329,9 +362,14 @@ export const useLauncherStore = defineStore('launcher', {
         const hostId = known?.host_id ?? claim?.hostId
         const version = known?.version ?? claim?.version
         if (hostId == null || version == null) {
-          // Not ours to show, but the backend knows it by id: keep watching so
-          // it lands here if the row ever appears.
-          if (claim === undefined) this.pendingInstallTasks[p.id] = null
+          // Not ours to show. A running task is kept by id so it lands here if
+          // its row ever appears; a finished one has no row to land on, and
+          // nothing would ever clear a placeholder left behind for it.
+          if (p.state === 'running') {
+            if (claim === undefined) this.pendingInstallTasks[p.id] = null
+          } else {
+            delete this.pendingInstallTasks[p.id]
+          }
           // An install this page never saw still creates an instance and a
           // version directory somewhere: the lists have to catch up with it.
           if (p.state !== 'running' && p.instance_id) {
@@ -380,6 +418,9 @@ export const useLauncherStore = defineStore('launcher', {
             percent: p.percent,
             message: p.message,
             instance_id: p.instance_id ?? previous?.instance_id ?? null,
+            // The log tail belongs to the run that just ended: the row keeps
+            // the backend's reason and the time, not a thousand lines of it.
+            logs: [],
           }
         }
         // It may have created an instance and a version directory — on the host
@@ -387,8 +428,9 @@ export const useLauncherStore = defineStore('launcher', {
         void this.loadHostResources(hostId)
         if (p.instance_id) void this.refreshInstances()
       })
+      disposers.push(unTaskProgress)
 
-      await api.onTaskLog((l) => {
+      const unTaskLog = await api.onTaskLog((l) => {
         const existing = Object.values(this.installingVersions).find(
           (t) => t.id === l.id,
         )
@@ -396,6 +438,7 @@ export const useLauncherStore = defineStore('launcher', {
         if (existing.logs.length >= 1000) existing.logs.shift()
         existing.logs.push(l.line)
       })
+      disposers.push(unTaskLog)
     },
 
     /**
@@ -452,6 +495,21 @@ export const useLauncherStore = defineStore('launcher', {
     },
 
     /**
+     * Drops every cached answer for one host: its DSH_HOMEs, its installed and
+     * installable versions, and the reasons its reads failed. Called when the
+     * machine leaves the list, and when a field that decides its answers
+     * changes — a cache must not outlive the machine it describes.
+     */
+    dropHostCache(hostId: string) {
+      delete this.homesByHost[hostId]
+      delete this.versionsByHost[hostId]
+      delete this.remoteVersionsByHost[hostId]
+      delete this.homeErrors[hostId]
+      delete this.versionErrors[hostId]
+      delete this.remoteErrors[hostId]
+    },
+
+    /**
      * Replaces the host list the Library's picker and the board's filter read.
      * Editing hosts belongs to the Settings page; this is how an add, a rename
      * or a delete reaches the pages that use them — including the fall back
@@ -460,6 +518,21 @@ export const useLauncherStore = defineStore('launcher', {
     setHosts(hosts: HostWithStatus[]) {
       let currentWentStale = false
       let hostListChanged = hosts.length !== this.hosts.length
+      // A machine that left the list takes every answer cached for it — its
+      // HOMEs, versions, installable list, the reasons its reads failed — and
+      // the states of the instances filed under it: nothing would ever report
+      // those again.
+      const kept = new Set(hosts.map((h) => h.id))
+      for (const before of this.hosts) {
+        if (kept.has(before.id)) continue
+        this.dropHostCache(before.id)
+        for (const inst of this.instances) {
+          if ((inst.host_id ?? LOCAL_HOST_ID) === before.id) {
+            delete this.statusById[inst.id]
+          }
+        }
+        hostListChanged = true
+      }
       for (const host of hosts) {
         const before = this.hosts.find((h) => h.id === host.id)
         if (!before) {
@@ -475,11 +548,7 @@ export const useLauncherStore = defineStore('launcher', {
           before.data_dir !== host.data_dir ||
           before.registry !== host.registry
         if (!changed) continue
-        delete this.versionsByHost[host.id]
-        delete this.remoteVersionsByHost[host.id]
-        delete this.homeErrors[host.id]
-        delete this.versionErrors[host.id]
-        delete this.remoteErrors[host.id]
+        this.dropHostCache(host.id)
         if (host.id === this.currentHostId) currentWentStale = true
       }
       this.hosts = hosts
@@ -498,6 +567,12 @@ export const useLauncherStore = defineStore('launcher', {
 
     async refreshInstances() {
       this.instances = await api.listInstances(null, true)
+      // The board is the list of instances the launcher has: a state kept for
+      // one that is gone is a record nothing can ever update again.
+      const ids = new Set(this.instances.map((i) => i.id))
+      for (const id of Object.keys(this.statusById)) {
+        if (!ids.has(id)) delete this.statusById[id]
+      }
     },
     async refreshVersions(hostId?: string) {
       await this.loadHostResources(hostId ?? this.currentHostId)

@@ -133,6 +133,72 @@ pub(crate) async fn reachable_url(
     local_url(remote_url, local_port)
 }
 
+/// Withdraws the forward to one address on one host, if this session opened it.
+///
+/// The address is the one in the run record, and a forward is keyed by its far
+/// end: two instances that share an address share the withdrawal. The
+/// connection stays up — other forwards may be riding it.
+pub(crate) async fn withdraw(state: &AppState, host_id: &str, remote_url: &str) {
+    let Ok((remote_host, remote_port)) = target_of(remote_url) else {
+        return;
+    };
+    let key = ForwardKey {
+        host_id: host_id.to_string(),
+        remote_host,
+        remote_port,
+    };
+    let Some(entry) = state.forwards.open.lock().await.remove(&key) else {
+        return;
+    };
+    if let Err(e) = state
+        .host_transport
+        .close_forward(&entry.host, entry.forward)
+        .await
+    {
+        crate::log_warn!("撤销到 {} 的端口转发失败：{e}", entry.host.target);
+    }
+}
+
+/// Withdraws every forward this session opened to one host and ends the
+/// connection they ride on. For a host whose records are going: nothing that
+/// connection carried is the launcher's to reach anymore, and a forward left
+/// behind would hold a local port for a machine it no longer knows.
+pub(crate) async fn withdraw_host(state: &AppState, host_id: &str) {
+    let open: Vec<OpenForward> = {
+        let mut map = state.forwards.open.lock().await;
+        let keys: Vec<ForwardKey> = map
+            .keys()
+            .filter(|key| key.host_id == host_id)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| map.remove(&key))
+            .collect()
+    };
+    if open.is_empty() {
+        return;
+    }
+
+    let mut hosts: Vec<RemoteHost> = Vec::new();
+    for entry in open {
+        if let Err(e) = state
+            .host_transport
+            .close_forward(&entry.host, entry.forward)
+            .await
+        {
+            crate::log_warn!("撤销到 {} 的端口转发失败：{e}", entry.host.target);
+        }
+        if !hosts.iter().any(|host| host.socket == entry.host.socket) {
+            hosts.push(entry.host);
+        }
+    }
+    for host in hosts {
+        if let Err(e) = state.host_transport.close_connection(&host).await {
+            crate::log_warn!("关闭到 {} 的连接失败：{e}", host.target);
+        }
+    }
+}
+
 /// Withdraws every forward this launcher opened and ends the connections it
 /// opened them on. Called on the way out: the ssh connection is the launcher's
 /// own (its own socket), so nothing the user configured is touched, and a

@@ -20,7 +20,7 @@ const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
 const { copy } = useCopy()
-const { loadForHome } = useProfiles()
+const { loadForHome, forgetInstance } = useProfiles()
 
 const id = computed(() => String(route.params.id ?? ''))
 const inst = computed(() => store.instanceById(id.value))
@@ -465,6 +465,7 @@ watch(tab, (t) => {
 
 const deleteAction = useAction(async () => {
   await api.deleteInstance(id.value, inst.value?.host_id)
+  forgetInstance(id.value)
   await store.refreshInstances()
   return true
 })
