@@ -101,7 +101,7 @@ function openDetail(host: HostWithStatus) {
       <EmptyState
         icon="machine"
         title="还没有机器"
-        description="添加一台远程主机，或直接使用内置的本机。"
+        description="添加一台远程主机，或直接使用本机。"
       >
         <button class="btn btn--primary" @click="addHost">添加主机</button>
       </EmptyState>
@@ -119,7 +119,7 @@ function openDetail(host: HostWithStatus) {
             <span class="host-dot" :class="'is-' + badgeState(host)" />
             <span>{{ host.display_name }}</span>
             <span class="tag tag--muted">{{
-              host.builtin ? '内置' : '远程'
+              host.builtin ? '本地' : '远程'
             }}</span>
             <span
               v-if="!host.builtin && host.status?.state === 'unreachable'"

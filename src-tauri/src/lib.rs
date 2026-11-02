@@ -243,10 +243,28 @@ pub fn run() {
                     crate::process::adopt_surviving_instances(&handle).await;
                 });
             }
+            // The remote half is a pass at startup and then the same pass on a
+            // timer: a DSH on another machine can replace itself later (its own
+            // restart helper starts a new process on the same port), and an
+            // instance can be started there outside the launcher. Both must end
+            // up as 运行中 on the board without a launcher restart or a manual
+            // retry — the alternative reading is 「已停止」, the one word that
+            // leads to a second DSH on the server (ADR-0007 后果).
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     crate::process::adopt_surviving_remote_instances(&handle).await;
+                });
+            }
+            // The timer is its own task, not the tail of the pass above: one
+            // slow machine in that pass must not hold the periodic check back,
+            // or an instance started while it runs goes unnoticed for as long
+            // as the pass takes. The two share one lock, so they never ask the
+            // same machine at the same time.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::process::watch_remote_instances(&handle).await;
                 });
             }
 

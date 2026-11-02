@@ -62,7 +62,7 @@ function badgeLabel(value: HostWithStatus): string {
 
 const headDesc = computed(() => {
   if (!host.value) return ''
-  return host.value.builtin ? '这台 Mac · 内置机器' : '远程主机'
+  return host.value.builtin ? '本地机器' : '远程主机'
 })
 
 const extraEnvEntries = computed(() =>
@@ -302,7 +302,7 @@ function askDelete() {
           <div class="field-row-info">
             <span class="field-label">位置</span>
           </div>
-          <span v-if="host.builtin" class="conn-value">这台 Mac（内置）</span>
+          <span v-if="host.builtin" class="conn-value">这台 Mac</span>
           <span v-else class="conn-value mono" :title="host.ssh_target">{{
             host.ssh_target
           }}</span>

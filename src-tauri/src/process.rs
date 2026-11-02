@@ -1654,13 +1654,20 @@ async fn start_remote_instance(
             let run_host =
                 crate::ssh::RemoteHost::of(host, &state.data_dir).map_err(|e| e.message)?;
             let data_dir = host.data_dir(&state.data_dir)?;
-            adopt_remote_process(
+            // This adoption *is* the start: the start holds the id, and the
+            // instance it found on that machine is the one it would have
+            // started. Registering it here is what makes 「启动」 on an
+            // instance that is already running answer with 运行中 instead of
+            // leaving it 启动中 with nothing in the running table.
+            adopt_remote_process_with(
                 app,
                 state,
                 &inst.id,
                 &running_profile,
                 RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at),
                 url,
+                None,
+                true,
             )
             .await;
             return Ok(());
@@ -1828,21 +1835,34 @@ fn follow_remote_instance(
             }
 
             if !read.alive {
+                // DSH can replace itself in place: the pid the launcher was
+                // following goes, and a successor of the same instance takes
+                // the same port. Adopt it instead of reporting the instance
+                // stopped — see [`adopt_remote_successor`].
+                match adopt_remote_successor(&app, &state, &id).await {
+                    RemoteSuccessor::Adopted => return,
+                    RemoteSuccessor::Unknown => {
+                        // The machine stopped answering while the successor
+                        // was looked for. Keep the entry: 「已停止」 is not
+                        // available, and a later pass may still find it.
+                        tokio::time::sleep(REMOTE_WATCH_BACKOFF).await;
+                        continue;
+                    }
+                    RemoteSuccessor::Absent => {}
+                }
+                if !remote_entry_matches(&state, &id, run.pid).await {
+                    return;
+                }
                 crate::log_info!("实例 {id} 在那台机器上已退出（pid {}）", run.pid);
-                unregister_running(
-                    &app,
-                    &state,
-                    &id,
-                    InstanceStatus {
-                        id: id.clone(),
-                        state: InstanceState::Exited,
-                        url: None,
-                        remote_url: None,
-                        profile: Some(profile.clone()),
-                        exit_code: None,
-                    },
-                )
-                .await;
+                let status = InstanceStatus {
+                    id: id.clone(),
+                    state: InstanceState::Exited,
+                    url: None,
+                    remote_url: None,
+                    profile: Some(profile.clone()),
+                    exit_code: None,
+                };
+                unregister_remote_entry(&app, &state, &id, &[run.pid], status).await;
                 return;
             }
         }
@@ -1876,6 +1896,23 @@ const REMOTE_STOP_WAIT_SECS: u64 = 20;
 /// much longer the interval gets while that machine cannot answer.
 const REMOTE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const REMOTE_WATCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a remote instance's exit is watched for the successor DSH may have
+/// started on the same port, and how often that port is asked. The restart
+/// helper DSH ships starts its replacement within a second or two; ten tries
+/// at half a second each leave the same margin 本机's waiter leaves.
+const REMOTE_SUCCESSOR_ATTEMPTS: usize = 10;
+const REMOTE_SUCCESSOR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How many replacements a stop may chase on the instance's port. DSH's restart
+/// helper starts one; a second round covers a stop that raced the helper's own
+/// start, and the bound is what keeps a restart loop from holding the click.
+///
+/// What is left after the last round is a replacement that started between the
+/// last look and the click's return: no polling stop can close that window, and
+/// the periodic pass adopts it, so the row returns to 运行中 rather than claiming
+/// a stop that did not hold.
+const REMOTE_STOP_REPLACEMENT_ROUNDS: usize = 2;
 
 /// What one look at a remote instance found: the conclusion the page needs, not
 /// the steps that produced it.
@@ -2138,37 +2175,81 @@ pub(crate) async fn check_remote_instance(
 /// address —「远端位置」, and the forward's target — while the entry is given the
 /// address this Mac can reach: the same one on a loopback forward (ADR-0008),
 /// which is what 「打开」, the tray and the plugins page read.
+///
+/// `replacing` names the pid of the entry this adoption replaces. It is set by
+/// the successor path — a DSH that restarted itself leaves an entry whose pid is
+/// gone while its replacement listens on the same port — and the two registry
+/// writes happen in one step so no reader ever sees an empty slot. `None`
+/// refuses to overwrite an entry a start registered first. Returns whether the
+/// entry was installed.
 async fn adopt_remote_process(
     app: &AppHandle,
-    state: &State<'_, AppState>,
+    state: &AppState,
+    instance_id: &str,
+    profile: &str,
+    run: RemoteRun,
+    remote_url: Option<String>,
+    replacing: Option<i32>,
+) -> bool {
+    adopt_remote_process_with(
+        app,
+        state,
+        instance_id,
+        profile,
+        run,
+        remote_url,
+        replacing,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn adopt_remote_process_with(
+    app: &AppHandle,
+    state: &AppState,
     instance_id: &str,
     profile: &str,
     mut run: RemoteRun,
     remote_url: Option<String>,
-) {
-    let local_url = match remote_url.as_deref() {
+    replacing: Option<i32>,
+    by_start: bool,
+) -> bool {
+    if let Some(remote) = remote_url.as_deref() {
+        run.remote_url = Some(remote.to_string());
+    }
+    {
+        let mut running = state.running.lock().await;
+        let entry = RunningInstance {
+            kill: Arc::new(Notify::new()),
+            profile: profile.to_string(),
+            url: None,
+            adopted: None,
+            remote: Some(run.clone()),
+        };
+        if !install_remote_entry(&mut running, instance_id, entry, replacing, by_start) {
+            return false;
+        }
+    }
+    // The forward is built only after the entry is ours: one opened for an
+    // adoption that lost its slot would be a connection nobody reads.
+    let local_url = match run.remote_url.clone() {
         Some(remote) => {
-            run.remote_url = Some(remote.to_string());
-            local_address_for(state, instance_id, &run.host, remote).await
+            let url = local_address_for(state, instance_id, &run.host, &remote).await;
+            let mut running = state.running.lock().await;
+            if let Some(entry) = running.get_mut(instance_id) {
+                if entry.remote.as_ref().map(|run| run.pid) == Some(run.pid) {
+                    entry.url = url.clone();
+                }
+            }
+            url
         }
         None => None,
     };
-    {
-        let mut running = state.running.lock().await;
-        if running.contains_key(instance_id) {
-            return; // A start registered first; it wins.
-        }
-        running.insert(
-            instance_id.to_string(),
-            RunningInstance {
-                kill: Arc::new(Notify::new()),
-                profile: profile.to_string(),
-                url: local_url.clone(),
-                adopted: None,
-                remote: Some(run.clone()),
-            },
-        );
-    }
+    // This adoption just talked to that machine, so it is reachable now —
+    // including when an earlier look at it failed and left the host marked
+    // unreachable.
+    state.set_host_status(&run.host_id, HostStatus::reachable());
     match remote_url.as_deref() {
         Some(remote) => crate::log_info!(
             "实例 {instance_id} 在「{}」上仍在运行（pid {}），已认领，沿用记下的启动 token（{remote}）",
@@ -2194,6 +2275,46 @@ async fn adopt_remote_process(
     );
     crate::tray::rebuild_tray_menu(app).await;
     watch_remote_process(app, instance_id, profile, run);
+    true
+}
+
+/// Puts an adopted remote entry in the running table, in one step under the
+/// caller's lock. A start that holds the id wins over any adoption, and a
+/// successor may replace only the entry whose pid has gone. Returns whether the
+/// entry was installed.
+fn install_remote_entry(
+    running: &mut std::collections::HashMap<String, RunningInstance>,
+    instance_id: &str,
+    entry: RunningInstance,
+    replacing: Option<i32>,
+    by_start: bool,
+) -> bool {
+    // A start holds the id until its entry is registered. Every other adoption
+    // must give way to it; the start's own preflight adoption — the one that
+    // recognises an instance already running on that machine — is that start,
+    // and it is the one case allowed through.
+    if !by_start && start_is_in_flight(instance_id) {
+        return false;
+    }
+    if !can_adopt_remote_entry(running.get(instance_id), replacing) {
+        return false;
+    }
+    running.remove(instance_id);
+    running.insert(instance_id.to_string(), entry);
+    true
+}
+
+/// Whether an adoption may install its running entry: the slot is empty for a
+/// fresh adoption, or the entry there belongs to the pid this adoption replaces.
+/// A different entry means a start (or another adoption) owns the id and wins.
+fn can_adopt_remote_entry(existing: Option<&RunningInstance>, replacing: Option<i32>) -> bool {
+    match existing {
+        None => replacing.is_none(),
+        Some(entry) => match replacing {
+            Some(old_pid) => entry.remote.as_ref().map(|run| run.pid) == Some(old_pid),
+            None => false,
+        },
+    }
 }
 
 /// Watches an adopted remote instance: the machine is asked whether the process
@@ -2256,25 +2377,36 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
                     interval = REMOTE_WATCH_INTERVAL;
                 }
                 Ok(false) => {
+                    // The watched pid is gone, but DSH may have replaced itself
+                    // and left a successor on the same port; that successor is
+                    // still this instance, so it is adopted before the terminal
+                    // status is decided.
+                    match adopt_remote_successor(&app, &state, &id).await {
+                        RemoteSuccessor::Adopted => return,
+                        RemoteSuccessor::Unknown => {
+                            interval = REMOTE_WATCH_BACKOFF;
+                            reported_lost = true;
+                            continue;
+                        }
+                        RemoteSuccessor::Absent => {}
+                    }
+                    if !remote_entry_matches(&state, &id, run.pid).await {
+                        return;
+                    }
                     crate::log_info!(
                         "实例 {id} 在「{}」上已退出（pid {}）",
                         run.host.target,
                         run.pid
                     );
-                    unregister_running(
-                        &app,
-                        &state,
-                        &id,
-                        InstanceStatus {
-                            id: id.clone(),
-                            state: InstanceState::Exited,
-                            url: None,
-                            remote_url: None,
-                            profile: Some(profile.clone()),
-                            exit_code: None,
-                        },
-                    )
-                    .await;
+                    let status = InstanceStatus {
+                        id: id.clone(),
+                        state: InstanceState::Exited,
+                        url: None,
+                        remote_url: None,
+                        profile: Some(profile.clone()),
+                        exit_code: None,
+                    };
+                    unregister_remote_entry(&app, &state, &id, &[run.pid], status).await;
                     return;
                 }
                 Err(e) => {
@@ -2302,6 +2434,323 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
     });
 }
 
+/// What the short probe after a remote pid disappeared concluded.
+enum RemoteSuccessor {
+    /// A replacement of the same instance was found and installed.
+    Adopted,
+    /// The machine answered, throughout, that no DSH process holds the port.
+    Absent,
+    /// The machine could not be asked, or its answer could not identify the
+    /// process: the caller keeps the entry and reports the instance unreachable.
+    Unknown,
+}
+
+/// The successor a restarted DSH left on an instance's port, if there is one.
+///
+/// Only a process on the port the instance was using is considered — its pinned
+/// port, or the one in the address it last printed. A **pinned** port is
+/// evidence by itself (ADR-0007 §2); a random one has to prove itself with the
+/// address the replacement printed and that machine accepted.
+///
+/// `Ok(None)` is the machine's definite 「那个端口上没有 DSH」. `Err` is 「问不到」
+/// or 「看到了但认不出」 — the caller must not turn either into 「已停止」
+/// (ADR-0007 后果).
+async fn await_remote_successor(
+    state: &AppState,
+    inst: &DshInstance,
+    host: &Host,
+    run: &RemoteRun,
+) -> Result<Option<(i32, Option<u64>, Option<String>)>, String> {
+    let (run_host, data_dir) = remote_parts(host, &state.data_dir)?;
+    // No address to probe: a non-web profile has no port, and an instance that
+    // never printed one left nothing to look at. That is 「无从探测」 rather than
+    // 「确认不在」 — but the caller has already seen the process go, so the exit
+    // stands.
+    let Some(port) = inst
+        .port
+        .or_else(|| run.remote_url.as_deref().and_then(port_of_url))
+    else {
+        return Ok(None);
+    };
+    let transport = &*state.host_transport;
+    let mut saw_dsh_without_address = false;
+    for attempt in 0..REMOTE_SUCCESSOR_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(REMOTE_SUCCESSOR_INTERVAL).await;
+        }
+        let owner = crate::remote::port_owner(transport, &run_host, port)
+            .await
+            .map_err(|e| {
+                format!(
+                    "在「{}」上查端口 {port} 的占用者失败：{e}",
+                    host.display_name
+                )
+            })?;
+        let Some(owner) = owner else { continue };
+        let Some(pid) = owner.pid else {
+            return Err(format!(
+                "「{}」上端口 {port} 被占用，但读不到占用者的 pid",
+                host.display_name
+            ));
+        };
+        if pid == run.pid || !looks_like_dsh(&owner.command, &owner.args) {
+            continue;
+        }
+        let started_at = crate::remote::process_start_time(transport, &run_host, pid)
+            .await
+            .ok()
+            .flatten();
+        let successor = RemoteRun::of(
+            host,
+            run_host.clone(),
+            data_dir.clone(),
+            &inst.id,
+            pid,
+            started_at,
+        );
+        // The replacement prints its own launch address. For a random port that
+        // address is also the proof this listener is the instance: a port number
+        // alone says nothing, and the old launch token died with the old process.
+        let found = find_remote_address(state, &successor).await;
+        if found.is_some() || inst.port.is_some() {
+            return Ok(Some((pid, started_at, found)));
+        }
+        saw_dsh_without_address = true;
+    }
+    if saw_dsh_without_address {
+        Err(format!(
+            "「{}」上端口 {port} 有 DSH 进程，但没能确认它的启动地址",
+            host.display_name
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Stops any DSH process that took over the instance's port while a stop was
+/// in flight, and returns the pids it stopped.
+///
+/// DSH's own restart helper starts the replacement within a second or two of the
+/// old process going. A 停止 that only signalled the pid it read before the
+/// signal would leave that replacement running — the row says 「已停止」 while the
+/// instance answers on its port, and the periodic pass would put it back on the
+/// board minutes later, undoing the user's click. So the port is asked once more
+/// after the stop is confirmed, and a replacement there is stopped too.
+///
+/// A replacement whose start time cannot be read is not signalled: that is the
+/// one mistake on another machine that cannot be undone. The caller reports it
+/// instead of saying 「已停止」.
+async fn stop_remote_replacements(
+    state: &AppState,
+    instance_id: &str,
+    run: &RemoteRun,
+) -> Result<Vec<i32>, String> {
+    let (inst, host) = {
+        let cfg = state.config.lock().unwrap();
+        let Some(inst) = cfg
+            .instances
+            .iter()
+            .find(|inst| inst.id == instance_id)
+            .cloned()
+        else {
+            return Ok(Vec::new());
+        };
+        let Ok(host) = crate::config::resolve_host(&cfg, Some(&inst.host_id)).cloned() else {
+            return Ok(Vec::new());
+        };
+        (inst, host)
+    };
+    if host.builtin {
+        return Ok(Vec::new());
+    }
+    let (run_host, _data_dir) = remote_parts(&host, &state.data_dir)?;
+    let Some(port) = inst
+        .port
+        .or_else(|| run.remote_url.as_deref().and_then(port_of_url))
+    else {
+        return Ok(Vec::new());
+    };
+    let transport = &*state.host_transport;
+    let mut stopped = Vec::new();
+    for _ in 0..REMOTE_STOP_REPLACEMENT_ROUNDS {
+        let owner = crate::remote::port_owner(transport, &run_host, port)
+            .await
+            .map_err(|e| {
+                format!(
+                    "在「{}」上查端口 {port} 的占用者失败：{e}",
+                    host.display_name
+                )
+            })?;
+        let Some(owner) = owner else { break };
+        let Some(pid) = owner.pid else { break };
+        if pid == run.pid || stopped.contains(&pid) || !looks_like_dsh(&owner.command, &owner.args)
+        {
+            break;
+        }
+        let started_at = crate::remote::process_start_time(transport, &run_host, pid)
+            .await
+            .ok()
+            .flatten();
+        let Some(started_at) = started_at else {
+            return Err(format!(
+                "实例在停止过程中被 DSH 重启了（「{}」上端口 {port} 现在是 pid {pid}），但读不到这个进程的启动时间，没有发信号。请在那台机器上核对后自行停止：ssh {} 'kill -TERM -- -{pid}'",
+                host.display_name, run.host.target
+            ));
+        };
+        match stop_remote_run(
+            state,
+            &RemoteRun::of(
+                &host,
+                run_host.clone(),
+                run.data_dir.clone(),
+                instance_id,
+                pid,
+                Some(started_at),
+            ),
+        )
+        .await
+        {
+            RemoteStop::Stopped => {
+                crate::log_info!(
+                    "实例 {instance_id} 停止期间 DSH 重启出的进程（pid {pid}）也停掉了"
+                );
+                stopped.push(pid);
+            }
+            RemoteStop::Unreachable(reason) => return Err(reason),
+            RemoteStop::NotSignalled(reason)
+            | RemoteStop::StillRunning(reason)
+            | RemoteStop::Reused(reason) => return Err(reason),
+        }
+    }
+    Ok(stopped)
+}
+
+/// Recognises a remote instance whose DSH replaced itself and puts the
+/// successor in the running table before the exit is projected.
+///
+/// The caller has just observed the watched pid gone. A short re-probe is enough
+/// for the usual case — DSH's restart helper starts the replacement on the same
+/// port within a second or two — and the old entry is replaced in one step, so a
+/// concurrent 停止 or 启动, which both look at that entry, cannot be silently
+/// overridden.
+async fn adopt_remote_successor(
+    app: &AppHandle,
+    state: &AppState,
+    instance_id: &str,
+) -> RemoteSuccessor {
+    let (inst, host) = {
+        let cfg = state.config.lock().unwrap();
+        let Some(inst) = cfg
+            .instances
+            .iter()
+            .find(|inst| inst.id == instance_id)
+            .cloned()
+        else {
+            return RemoteSuccessor::Absent;
+        };
+        let Ok(host) = crate::config::resolve_host(&cfg, Some(&inst.host_id)).cloned() else {
+            return RemoteSuccessor::Absent;
+        };
+        (inst, host)
+    };
+    if host.builtin {
+        return RemoteSuccessor::Absent;
+    }
+    let (gone, profile) = {
+        let running = state.running.lock().await;
+        match running.get(instance_id) {
+            Some(entry) => match entry.remote.clone() {
+                Some(run) => (run, entry.profile.clone()),
+                None => return RemoteSuccessor::Absent,
+            },
+            None => return RemoteSuccessor::Absent,
+        }
+    };
+    let (pid, started_at, remote_url) =
+        match await_remote_successor(state, &inst, &host, &gone).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return RemoteSuccessor::Absent,
+            Err(reason) => {
+                state.set_host_status(&host.id, HostStatus::unreachable(reason.clone()));
+                emit_status(
+                    app,
+                    &InstanceStatus {
+                        id: instance_id.to_string(),
+                        state: InstanceState::Unreachable,
+                        url: None,
+                        remote_url: gone.remote_url.clone(),
+                        profile: Some(profile),
+                        exit_code: None,
+                    },
+                );
+                return RemoteSuccessor::Unknown;
+            }
+        };
+    let (run_host, data_dir) = match remote_parts(&host, &state.data_dir) {
+        Ok(parts) => parts,
+        Err(reason) => {
+            // Same rule as a failed probe: the machine was not understood, so
+            // nothing may be said about the instance's process either way.
+            state.set_host_status(&host.id, HostStatus::unreachable(reason));
+            return RemoteSuccessor::Unknown;
+        }
+    };
+    let run = RemoteRun::of(&host, run_host, data_dir, instance_id, pid, started_at);
+    let adopted = adopt_remote_process(
+        app,
+        state,
+        instance_id,
+        &profile,
+        run.clone(),
+        remote_url.clone(),
+        Some(gone.pid),
+    )
+    .await;
+    if !adopted {
+        return RemoteSuccessor::Absent;
+    }
+    // The record names the replacement even when its address is not known yet:
+    // leaving the old pid and token there would hand the next launcher session
+    // a dead address as if it were this process's.
+    let record = RemoteRunRecord {
+        url: remote_url.clone(),
+        token: remote_url.as_deref().and_then(token_of),
+        profile: profile.clone(),
+        pid,
+        started_at,
+    };
+    if let Err(e) = remember_remote_run(state, instance_id, &record, &run).await {
+        crate::log_warn!("实例 {instance_id} 的远端运行记录没写上（{e}）");
+    }
+    crate::log_info!(
+        "实例 {instance_id} 在「{}」上换了新进程（pid {pid}），已自动认领",
+        host.display_name
+    );
+    if remote_url.is_none()
+        && repair_remote_address(state, instance_id, &profile, &run)
+            .await
+            .is_some()
+    {
+        emit_address_found(app, state, instance_id, &profile).await;
+    }
+    RemoteSuccessor::Adopted
+}
+
+/// Whether the running table still holds `pid` as this instance's remote
+/// process. A watcher that spent seconds looking for a successor must ask this
+/// again before projecting a terminal status: the user may have pressed 停止
+/// while it was looking, and that transition already has its own status.
+async fn remote_entry_matches(state: &AppState, instance_id: &str, pid: i32) -> bool {
+    state
+        .running
+        .lock()
+        .await
+        .get(instance_id)
+        .and_then(|entry| entry.remote.as_ref())
+        .map(|run| run.pid == pid)
+        .unwrap_or(false)
+}
+
 /// Establishes — or re-establishes — one remote instance's state, and projects
 /// it: an adopted process becomes a running entry, and a machine that answered
 /// 「没有」 says so, so a card left over from an earlier session converges.
@@ -2314,6 +2763,13 @@ pub(crate) async fn settle_remote_instance(
     inst: &DshInstance,
     host: &Host,
 ) -> InstanceState {
+    // A start owns the id until it registers its entry: asking the machine
+    // now would race the process it is already launching, and a 「已停止」
+    // taken before that registration must not be projected over 「启动中」.
+    if start_is_in_flight(&inst.id) {
+        finish_remote_scan(state, &host.id);
+        return InstanceState::Starting;
+    }
     // Already running as far as this session is concerned. Two things are worth
     // re-reading here, and both are 重试's answer: the process start time (a stop
     // refuses without it, and this is how a record that missed it gets repaired)
@@ -2347,6 +2803,10 @@ pub(crate) async fn settle_remote_instance(
             {
                 emit_address_found(app, state, &inst.id, &profile).await;
             }
+            // 重试 asks this machine again, and it just answered: a host that
+            // was marked unreachable before is reachable now, so the running
+            // entry stops being reported as 「主机不可达」.
+            state.set_host_status(&host.id, HostStatus::reachable());
         }
         finish_remote_scan(state, &host.id);
         return InstanceState::Running;
@@ -2367,9 +2827,26 @@ pub(crate) async fn settle_remote_instance(
             url,
             profile,
         } => {
+            if start_is_in_flight(&inst.id) {
+                return InstanceState::Starting;
+            }
             state.set_host_status(&host.id, HostStatus::reachable());
             let run = RemoteRun::of(host, run_host, data_dir, &inst.id, pid, started_at);
-            adopt_remote_process(app, state, &inst.id, &profile, run.clone(), url.clone()).await;
+            let adopted = adopt_remote_process(
+                app,
+                state,
+                &inst.id,
+                &profile,
+                run.clone(),
+                url.clone(),
+                None,
+            )
+            .await;
+            if !adopted {
+                // Something took the id between the machine's answer and this
+                // write: that owner is the truth, and this answer is stale.
+                return InstanceState::Running;
+            }
             // Adopted without an address: the record that machine keeps had
             // none (DSH replaced itself and the exit path dropped it), so the
             // card would be 「运行中」 with a 打开 that cannot say where. The
@@ -2388,6 +2865,15 @@ pub(crate) async fn settle_remote_instance(
         // running; the occupant is the start path's business, not the card's.
         RemoteVerdict::Stopped | RemoteVerdict::Occupied { .. } => {
             state.set_host_status(&host.id, HostStatus::reachable());
+            // A start may have claimed the instance while the machine was
+            // answering: the process it just launched is the current truth,
+            // and an older 「已停止」 must not be projected over it.
+            if state.running.lock().await.contains_key(&inst.id) {
+                return InstanceState::Running;
+            }
+            if start_is_in_flight(&inst.id) {
+                return InstanceState::Starting;
+            }
             emit_status(
                 app,
                 &InstanceStatus {
@@ -2461,19 +2947,60 @@ fn finish_remote_scan(state: &AppState, host_id: &str) {
     state.remote_scan.lock().unwrap().remove(host_id);
 }
 
+/// How often the periodic pass re-asks every remote host about the instances
+/// this session does not hold.
+///
+/// The pass is a backstop, not the main path: a DSH that restarts itself while
+/// the launcher is open is caught by its own watcher within seconds. What is
+/// left for this pass is the instance started on a server outside the launcher,
+/// and the machine that was unreachable and came back. A minute is soon enough
+/// for both, and keeps a machine with stopped instances to a few calls a minute.
+const REMOTE_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One scan at a time: the launch-time pass and the periodic pass ask the same
+/// question, and two answers racing on one instance would let a later
+/// 「已停止」 overwrite a 「运行中」 that was just adopted.
+static REMOTE_SCAN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Adopts the instances a previous launcher session left running on remote
 /// hosts — the remote half of [`adopt_surviving_instances`], which stays local
 /// on purpose: this Mac's port probe can only ask about this Mac, and a local
 /// process wearing the same port number is not somebody else's instance.
 ///
-/// One pass per host, in the background, so a slow or unreachable machine holds
-/// up neither the launcher nor the other machines.
+/// One pass per host, so a slow or unreachable machine holds up neither the
+/// launcher nor the other machines; the pass returns once every host has
+/// answered, which is what lets [`watch_remote_instances`] run it on a timer
+/// without stacking passes on top of each other.
 pub async fn adopt_surviving_remote_instances(app: &AppHandle) {
+    scan_remote_instances(app).await;
+}
+
+/// Keeps asking every remote host whether an instance this session does not hold
+/// is running there.
+///
+/// The launch-time pass only answers for the moment the launcher starts. DSH
+/// can replace itself later — its own restart helper starts a new process on the
+/// same port — and an instance can start on a server long after the launcher was
+/// opened. Without this pass the card would keep saying 「已停止」 while the
+/// instance answers on its port, and pressing 启动 would start a second DSH.
+pub async fn watch_remote_instances(app: &AppHandle) {
+    loop {
+        tokio::time::sleep(REMOTE_RECONCILE_INTERVAL).await;
+        scan_remote_instances(app).await;
+    }
+}
+
+/// One pass over the remote hosts: every instance this session does not already
+/// hold is settled against its own machine. A host's answers are one task, so an
+/// unreachable machine costs its own timeout and not the other hosts'.
+async fn scan_remote_instances(app: &AppHandle) {
+    let _scan = REMOTE_SCAN_LOCK.lock().await;
     let state = app.state::<AppState>();
     let (hosts, instances) = {
         let cfg = state.config.lock().unwrap();
         (cfg.hosts.clone(), cfg.instances.clone())
     };
+    let mut tasks = Vec::new();
     for host in hosts.into_iter().filter(|host| !host.builtin) {
         let mine: Vec<DshInstance> = instances
             .iter()
@@ -2481,17 +3008,21 @@ pub async fn adopt_surviving_remote_instances(app: &AppHandle) {
             .cloned()
             .collect();
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
+        tasks.push(tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
             for inst in &mine {
                 // A start (or a previous session's entry) owns it already.
-                if state.running.lock().await.contains_key(&inst.id) {
+                if state.running.lock().await.contains_key(&inst.id) || start_is_in_flight(&inst.id)
+                {
                     continue;
                 }
                 settle_remote_instance(&app, &state, inst, &host).await;
             }
             finish_remote_scan(&state, &host.id);
-        });
+        }));
+    }
+    for task in tasks {
+        let _ = task.await;
     }
 }
 
@@ -2565,6 +3096,17 @@ impl Drop for StartClaim {
             starting.remove(&self.id);
         }
     }
+}
+
+/// Whether a start for `id` is in flight, held by [`claim_start`] until the
+/// running entry is registered or the start gives up. Read by the remote scan
+/// so a status it took before the start registered cannot be projected over
+/// the start's own status.
+fn start_is_in_flight(id: &str) -> bool {
+    starting_claims()
+        .lock()
+        .map(|starting| starting.contains(id))
+        .unwrap_or(false)
 }
 
 /// Takes the exclusive right to start `id`. Fails when another start is already
@@ -3036,21 +3578,39 @@ pub async fn stop_instance_process(
         );
         return match stop_remote_run(state, &run).await {
             RemoteStop::Stopped => {
-                unregister_running(
-                    app,
-                    state,
-                    instance_id,
-                    InstanceStatus {
-                        id: instance_id.to_string(),
-                        state: InstanceState::Stopped,
-                        url: None,
-                        remote_url: None,
-                        profile: Some(profile),
-                        exit_code: None,
-                    },
-                )
-                .await;
-                Ok(())
+                // The pid the click was about is gone. DSH may have restarted
+                // itself while this ran, so the port is asked once more before
+                // 「已停止」 is claimed: a replacement still there is stopped
+                // too, and one that cannot be identified is reported instead.
+                let mut pids = vec![run.pid];
+                match stop_remote_replacements(state, instance_id, &run).await {
+                    Ok(replacements) => pids.extend(replacements),
+                    Err(reason) => {
+                        // The port could not be re-read after the stop: whether
+                        // a replacement took over is unknown, so the row says
+                        // 「主机不可达」 rather than 「已停止」.
+                        state
+                            .set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
+                        return Err(reason);
+                    }
+                }
+                let status = InstanceStatus {
+                    id: instance_id.to_string(),
+                    state: InstanceState::Stopped,
+                    url: None,
+                    remote_url: None,
+                    profile: Some(profile),
+                    exit_code: None,
+                };
+                if unregister_remote_entry(app, state, instance_id, &pids, status).await
+                    || !state.running.lock().await.contains_key(instance_id)
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "实例「{instance_id}」在停止过程中被 DSH 重启了，新的进程仍在运行；请再点一次「停止」"
+                    ))
+                }
             }
             // The machine could not answer, so 「已停止」 is not available: the
             // instance is reported as what it is — undetermined — and the page
@@ -3077,21 +3637,38 @@ pub async fn stop_instance_process(
             // It exited, so the record is forgotten and the row says so.
             RemoteStop::Reused(reason) => {
                 crate::log_warn!("实例 {instance_id} 的 pid 已被系统复用，按已退出处理：{reason}");
-                unregister_running(
-                    app,
-                    state,
-                    instance_id,
-                    InstanceStatus {
-                        id: instance_id.to_string(),
-                        state: InstanceState::Stopped,
-                        url: None,
-                        remote_url: None,
-                        profile: Some(profile),
-                        exit_code: None,
-                    },
-                )
-                .await;
-                Ok(())
+                // The recorded pid is somebody else's now, so the instance's own
+                // process — if any — is whatever holds its port; a stop asks for
+                // none of it to survive the click.
+                let mut pids = vec![run.pid];
+                match stop_remote_replacements(state, instance_id, &run).await {
+                    Ok(replacements) => pids.extend(replacements),
+                    Err(reason) => {
+                        // The port could not be re-read after the stop: whether
+                        // a replacement took over is unknown, so the row says
+                        // 「主机不可达」 rather than 「已停止」.
+                        state
+                            .set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
+                        return Err(reason);
+                    }
+                }
+                let status = InstanceStatus {
+                    id: instance_id.to_string(),
+                    state: InstanceState::Stopped,
+                    url: None,
+                    remote_url: None,
+                    profile: Some(profile),
+                    exit_code: None,
+                };
+                if unregister_remote_entry(app, state, instance_id, &pids, status).await
+                    || !state.running.lock().await.contains_key(instance_id)
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "实例「{instance_id}」在停止过程中被 DSH 重启了，新的进程仍在运行；请再点一次「停止」"
+                    ))
+                }
             }
         };
     }
@@ -3404,6 +3981,43 @@ async fn unregister_running(
     }
     emit_status(app, &status);
     crate::tray::rebuild_tray_menu(app).await;
+}
+
+/// Removes one remote entry only while it still names a pid this call is about,
+/// then projects the terminal status. An adoption can replace the entry between
+/// the look that saw the old pid gone and this call: deleting the replacement
+/// would leave a live process unregistered, and its record would be dropped
+/// while it still runs. `pids` is the process this call stopped or saw go, plus
+/// any replacement it stopped on the way. Returns whether this call removed the
+/// entry.
+async fn unregister_remote_entry(
+    app: &AppHandle,
+    state: &AppState,
+    id: &str,
+    pids: &[i32],
+    status: InstanceStatus,
+) -> bool {
+    let remote = {
+        let mut running = state.running.lock().await;
+        let ours = running
+            .get(id)
+            .and_then(|entry| entry.remote.as_ref())
+            .map(|run| pids.contains(&run.pid))
+            .unwrap_or(false);
+        if !ours {
+            return false;
+        }
+        running.remove(id).and_then(|entry| entry.remote)
+    };
+    forget_url(&state.data_dir, id);
+    if let Some(run) = remote {
+        if let Err(e) = forget_remote_run(state, id, &run).await {
+            crate::log_warn!("实例 {id} 的远端运行记录没能清掉：{e}");
+        }
+    }
+    emit_status(app, &status);
+    crate::tray::rebuild_tray_menu(app).await;
+    true
 }
 
 /// Removes this child's running entry WITHOUT projections: for the exit waiter,
@@ -4514,6 +5128,114 @@ mod tests {
         );
     }
 
+    /// The registry write an adoption performs: a fresh adoption fills an empty
+    /// slot, a successor replaces only the entry whose pid has gone, and a start
+    /// that holds the id wins over both.
+    #[test]
+    fn installing_a_remote_entry_respects_the_pid_it_replaces() {
+        let entry_for = |pid: i32, profile: &str| {
+            let mut run = remote_run();
+            run.pid = pid;
+            RunningInstance {
+                kill: Arc::new(Notify::new()),
+                profile: profile.to_string(),
+                url: None,
+                adopted: None,
+                remote: Some(run),
+            }
+        };
+
+        let mut running = std::collections::HashMap::new();
+        assert!(
+            install_remote_entry(
+                &mut running,
+                "i-remote",
+                entry_for(4343, "web"),
+                None,
+                false
+            ),
+            "空槽位上的认领要装进去"
+        );
+        assert!(
+            !install_remote_entry(
+                &mut running,
+                "i-remote",
+                entry_for(4444, "bot"),
+                None,
+                false
+            ),
+            "已经有条目时不能再装一条"
+        );
+        assert!(
+            install_remote_entry(
+                &mut running,
+                "i-remote",
+                entry_for(4444, "web"),
+                Some(4343),
+                false
+            ),
+            "后继进程替换的是那个已经消失的 pid"
+        );
+        assert_eq!(
+            running["i-remote"].remote.as_ref().map(|run| run.pid),
+            Some(4444)
+        );
+        assert!(
+            !install_remote_entry(
+                &mut running,
+                "i-remote",
+                entry_for(5555, "web"),
+                Some(4343),
+                false
+            ),
+            "pid 对不上说明这条已经被别人接管，不能再改"
+        );
+
+        // A start holds the id while it launches: another adoption gives way,
+        // while the start's own preflight adoption is that start and goes in.
+        let claim = StartClaim {
+            id: "i-claim".to_string(),
+        };
+        starting_claims()
+            .lock()
+            .unwrap()
+            .insert("i-claim".to_string());
+        let mut empty = std::collections::HashMap::new();
+        assert!(
+            !install_remote_entry(&mut empty, "i-claim", entry_for(6666, "web"), None, false),
+            "启动占位在，别的认领要让路"
+        );
+        assert!(
+            install_remote_entry(&mut empty, "i-claim", entry_for(6666, "web"), None, true),
+            "启动自己的预检认领要装进去，否则「启动」会把已经在跑的实例丢在启动中"
+        );
+        drop(claim);
+    }
+
+    /// A successor may take over only the entry whose pid has just gone.
+    /// Nothing there means a user stopped it while the probe ran; a different
+    /// pid means a start or another adoption owns the id — both must win.
+    #[test]
+    fn a_remote_successor_replaces_only_the_entry_whose_pid_is_gone() {
+        let mut run = remote_run();
+        run.pid = 4242;
+        let entry = RunningInstance {
+            kill: Arc::new(Notify::new()),
+            profile: "web".into(),
+            url: None,
+            adopted: None,
+            remote: Some(run),
+        };
+        assert!(can_adopt_remote_entry(Some(&entry), Some(4242)));
+        assert!(!can_adopt_remote_entry(Some(&entry), Some(999)));
+        assert!(!can_adopt_remote_entry(Some(&entry), None));
+        assert!(can_adopt_remote_entry(None, None));
+        assert!(
+            !can_adopt_remote_entry(None, Some(4242)),
+            "用户已经停止之后不要再把它拉回运行中"
+        );
+    }
+
     /// ⌘Q stops this Mac's instances and nothing else (ADR-0007 §1-2): a remote
     /// instance is meant to still be running on that machine the next time the
     /// launcher starts.
@@ -4775,6 +5497,72 @@ mod tests {
             RemoteVerdict::Running { pid, .. } => assert_eq!(pid, 4242),
             other => panic!("命令行说明它是 DSH 就该认领：{other:?}"),
         }
+    }
+
+    /// DSH's own restart helper replaces the process but keeps the port: the old
+    /// pid is gone and a new DSH-like listener is on the same address. The
+    /// successor probe has to wait for it to bind and name the new process —
+    /// reading the first look as 「已停止」 is what leaves the card dead while the
+    /// instance answers on its port.
+    #[tokio::test]
+    async fn a_restarted_remote_instance_is_found_on_its_pinned_port() {
+        let printed = format!("dsh web: {READY_URL}\n");
+        let fake = FakeTransport::new()
+            // The replacement is not there on the first look (the old process
+            // has gone, the new one has not bound yet).
+            .answering(FakeAnswer::stdout(marked(
+                r#"{"occupied":false,"pid":null,"command":"","args":""}"#,
+            )))
+            .answering(occupied_answer_with_args(4343, "node", npm_dsh_args()))
+            .answering(FakeAnswer::stdout(marked(r#"{"started_at":117384999}"#)))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"path":"/tmp/dsh-market-restart.out.log","data":"{}"}}"#,
+                base64_of(&printed)
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"exists":false,"data":"{}"}}"#,
+                base64_of("")
+            ))))
+            .answering(FakeAnswer::stdout(marked(&format!(
+                r#"{{"status":303,"cookie":"{REMOTE_COOKIE}"}}"#
+            ))));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+        let mut gone = remote_run();
+        gone.host_id = host.id.clone();
+        gone.pid = 4242;
+        gone.remote_url = Some(READY_URL.to_string());
+
+        let found = await_remote_successor(&state, &inst, &host, &gone)
+            .await
+            .expect("那台机器要回答");
+
+        let (pid, started_at, url) = found.expect("重生的进程要被找到");
+        assert_eq!(pid, 4343, "认领的是新 pid，不是已经消失的那个");
+        assert_eq!(started_at, Some(117384999));
+        assert_eq!(url.as_deref(), Some(READY_URL), "新进程打印的地址要带回来");
+    }
+
+    /// A machine that cannot be asked during the successor probe is not a
+    /// machine with no successor: 「问不到」 must not turn into 「已停止」.
+    #[tokio::test]
+    async fn a_successor_probe_that_cannot_ask_the_machine_says_unknown() {
+        let fake = FakeTransport::new().answering(FakeAnswer::fail(
+            crate::ssh::HostErrorKind::Unreachable,
+            "ssh 连不上",
+        ));
+        let host_id = format!("host-{}", uuid::Uuid::new_v4());
+        let (state, inst, host) = remote_case(&fake, &host_id, Some(3080));
+        let mut gone = remote_run();
+        gone.host_id = host.id.clone();
+        gone.pid = 4242;
+
+        let result = await_remote_successor(&state, &inst, &host, &gone).await;
+
+        assert!(
+            result.is_err(),
+            "问不到那台机器时不能把「没有后继」当成结论：{result:?}"
+        );
     }
 
     /// The other half of the pinned-port rule: an occupant that is not DSH is
