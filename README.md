@@ -48,6 +48,8 @@ pnpm tauri build   # 打出桌面安装包（dmg）
 pnpm app:local     # 本机构建并用开发证书签名，安装到 /Applications 供自测
 ```
 
+发版走 GitHub Actions 的「Release dmg」工作流：在 Actions 页手动触发，选架构与是否草稿，它会跑完整门禁、打包 dmg 并创建 Release。签名与公证由 `APPLE_*` secrets 决定；未配置时产出未签名 dmg，并在 Release 说明里写明首次打开方式。
+
 ## 合并前检查
 
 ```bash

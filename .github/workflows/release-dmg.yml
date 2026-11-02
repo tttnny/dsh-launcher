@@ -1,0 +1,197 @@
+name: Release dmg
+
+# 手动触发：打包 macOS dmg 并创建 GitHub Release。
+# 不挂在 push / tag 上 —— 发布是人的决定，不是提交的副作用。
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 构建架构
+        type: choice
+        options:
+          - universal
+          - aarch64
+          - x86_64
+        default: universal
+      draft:
+        description: 创建草稿 Release（确认后再公开）
+        type: boolean
+        default: true
+      prerelease:
+        description: 标记为预发布
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-dmg
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: dmg (${{ inputs.arch }})
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Verify
+        run: pnpm verify
+
+      - name: Resolve version
+        id: version
+        run: |
+          version=$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # 签名材料是可选的一组 secrets：配了 APPLE_CERTIFICATE 就签名并按 APPLE_ID 公证，
+      # 没配就产出未签名 dmg，并在 Release 说明里写清首次打开的方式。
+      - name: Configure signing
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERTIFICATE" ]; then
+            echo "未配置 APPLE_CERTIFICATE：本次产物不签名、不公证。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "::error::配置了 APPLE_CERTIFICATE，但缺少 APPLE_SIGNING_IDENTITY。"
+            exit 1
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_ID" ]; then
+            {
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Build dmg
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          case "$ARCH" in
+            universal) target=universal-apple-darwin ;;
+            aarch64) target=aarch64-apple-darwin ;;
+            x86_64) target=x86_64-apple-darwin ;;
+            *) echo "::error::未知架构 $ARCH"; exit 1 ;;
+          esac
+          pnpm tauri build --target "$target" --bundles dmg
+          echo "TARGET=$target" >> "$GITHUB_ENV"
+
+      - name: Collect artifacts
+        run: |
+          dmg=$(find "src-tauri/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name '*.dmg' | head -1)
+          if [ -z "$dmg" ]; then
+            echo "::error::没有找到 dmg 产物。"
+            exit 1
+          fi
+          name=$(basename "$dmg")
+          mkdir -p release-assets
+          cp "$dmg" release-assets/
+          ( cd release-assets && shasum -a 256 "$name" > SHA256SUMS.txt )
+          echo "DMG=release-assets/$name" >> "$GITHUB_ENV"
+          echo "SHA256SUMS=release-assets/SHA256SUMS.txt" >> "$GITHUB_ENV"
+
+          app="src-tauri/target/$TARGET/release/bundle/macos/dsh-launcher.app"
+          authority=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+          if [ -n "$authority" ]; then
+            echo "SIGNED=$authority" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-launcher-${{ steps.version.outputs.tag }}-${{ inputs.arch }}
+          path: release-assets/
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::error::Release $TAG 已存在。先提升版本号（package.json、Cargo.toml、tauri.conf.json 需同步），再运行本工作流。"
+            exit 1
+          fi
+
+          notes=$(mktemp)
+          {
+            echo "## 安装"
+            echo
+            echo "下载 \`$(basename "$DMG")\`，打开后把 dsh-launcher 拖进「应用程序」。"
+            if [ -z "${SIGNED:-}" ]; then
+              echo
+              echo "> 本次构建未签名、未公证。首次打开需在访达里右键 →「打开」，或执行 \`xattr -dr com.apple.quarantine /Applications/dsh-launcher.app\`。"
+            fi
+            echo
+            echo "## 变更"
+            echo
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body \
+              || echo "（未能自动生成变更说明，见提交历史。）"
+          } > "$notes"
+
+          args=(--title "$TAG" --notes-file "$notes" --target "$GITHUB_SHA")
+          if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "$DMG" "$SHA256SUMS" "${args[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### dsh-launcher ${{ steps.version.outputs.tag }} (${{ inputs.arch }})"
+            echo
+            if [ -n "${SIGNED:-}" ]; then
+              echo "- 签名：$SIGNED"
+            else
+              echo "- 签名：未签名、未公证"
+            fi
+            if [ -n "${DMG:-}" ]; then
+              echo "- 产物：\`$(basename "$DMG")\`"
+              echo "- 校验：\`$(cat "$SHA256SUMS")\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
