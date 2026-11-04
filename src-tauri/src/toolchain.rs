@@ -302,6 +302,22 @@ pub(crate) async fn ensure_pnpm_for_task<R: tauri::Runtime>(
     }
 }
 
+/// The pnpm one background task drives on one host, and the directories every
+/// command it runs there needs in front of `PATH`.
+///
+/// The directories are not a convenience: a pnpm that is a standalone binary
+/// (pnpm 12 ships as one) runs without node, so the lifecycle scripts it starts
+/// inherit whatever `PATH` the ssh session has — and an install that runs
+/// `node scripts/postinstall` then fails with exit status 127. The probe
+/// resolved node through an interactive login shell, which is not the shell a
+/// detached install runs in, so its directory has to travel with the command.
+pub(crate) struct PnpmForTask {
+    pub path: PathBuf,
+    /// Empty for 本机, whose process `PATH` already carries the tools the
+    /// launcher resolved.
+    pub path_dirs: Vec<String>,
+}
+
 /// [`ensure_pnpm_for_task`] for one host: 本机 resolves exactly as it always
 /// has, and a remote host through that machine's own probe, so the binary a
 /// task runs there is the one the environment page reported.
@@ -314,13 +330,17 @@ pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
     state: &State<'_, AppState>,
     task_id: &str,
     host_id: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<PnpmForTask, String> {
     let host = {
         let cfg = state.config.lock().unwrap();
         crate::config::resolve_host(&cfg, host_id)?.clone()
     };
     if host.builtin {
-        return ensure_pnpm_for_task(app, state, task_id).await;
+        let path = ensure_pnpm_for_task(app, state, task_id).await?;
+        return Ok(PnpmForTask {
+            path,
+            path_dirs: Vec::new(),
+        });
     }
 
     let tools = crate::runtime::remote_host_tools(state, &host).await?;
@@ -333,8 +353,21 @@ pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
         )
         .await;
     }
+    let path_dirs = crate::runtime::tool_path_dirs(
+        tools.env.node.path.as_deref().map(Path::new),
+        tools.pnpm.as_ref().map(|bound| bound.path.as_path()),
+    );
     match tools.pnpm {
         Some(bound) => {
+            if let Some(node) = tools.env.node.path.as_deref() {
+                crate::tasks::push_task_log(
+                    app,
+                    state,
+                    task_id,
+                    &format!("依赖构建脚本使用那台机器上的 node（{node}）"),
+                )
+                .await;
+            }
             crate::tasks::push_task_log(
                 app,
                 state,
@@ -346,7 +379,10 @@ pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
                 ),
             )
             .await;
-            Ok(bound.path)
+            Ok(PnpmForTask {
+                path: bound.path,
+                path_dirs,
+            })
         }
         None => Err(crate::runtime::remote_pnpm_missing_error(
             &host,

@@ -907,19 +907,31 @@ pub(crate) async fn remote_spawn_tools(
         return Err(node_missing_error());
     };
 
-    let mut dirs: Vec<String> = Vec::new();
-    for tool in [Some(&node), binding.pnpm.as_ref().map(|bound| &bound.path)]
-        .into_iter()
-        .flatten()
-    {
-        if let Some(dir) = tool.parent() {
-            let text = dir.to_string_lossy().to_string();
-            if !text.is_empty() && !dirs.contains(&text) {
-                dirs.push(text);
-            }
-        }
-    }
+    let dirs = tool_path_dirs(
+        Some(node.as_path()),
+        binding.pnpm.as_ref().map(|bound| bound.path.as_path()),
+    );
     Ok((node, dirs))
+}
+
+/// The directories one remote command needs in front of its `PATH`: the
+/// resolved tool's own directory, for a pnpm that is a Node script, and node's,
+/// for the lifecycle scripts pnpm runs. A directory that would break the joined
+/// `PATH` (one containing the delimiter) is left out rather than silently
+/// splitting another entry.
+pub(crate) fn tool_path_dirs(node: Option<&Path>, pnpm: Option<&Path>) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for tool in [node, pnpm].into_iter().flatten() {
+        let Some(dir) = tool.parent() else {
+            continue;
+        };
+        let text = dir.to_string_lossy().to_string();
+        if text.is_empty() || text.contains(':') || dirs.contains(&text) {
+            continue;
+        }
+        dirs.push(text);
+    }
+    dirs
 }
 
 /// The status the setup page renders for one host — 本机 when the caller names
@@ -2397,5 +2409,41 @@ mod tests {
             "失效的指定要如实带回，页面才好说「你指定的路径用不了了」"
         );
         assert_eq!(status.skipped_candidates[0].reason, "unusable");
+    }
+
+    /// The directories a remote command gets in front of its `PATH`: node's
+    /// first (lifecycle scripts run `node`), pnpm's next (a Node-script pnpm
+    /// needs its interpreter), each once, and never one that would split the
+    /// joined value.
+    #[test]
+    fn tool_path_dirs_puts_node_first_and_keeps_the_join_safe() {
+        assert_eq!(
+            tool_path_dirs(
+                Some(Path::new("/home/demo/.nvm/versions/node/v22.14.0/bin/node")),
+                Some(Path::new("/home/demo/.local/share/pnpm/pnpm")),
+            ),
+            vec![
+                "/home/demo/.nvm/versions/node/v22.14.0/bin".to_string(),
+                "/home/demo/.local/share/pnpm".to_string(),
+            ]
+        );
+
+        // Both tools in one directory: one entry, and it is node's spelling.
+        assert_eq!(
+            tool_path_dirs(
+                Some(Path::new("/opt/bin/node")),
+                Some(Path::new("/opt/bin/pnpm")),
+            ),
+            vec!["/opt/bin".to_string()]
+        );
+
+        // A machine without node still gets pnpm's directory.
+        assert_eq!(
+            tool_path_dirs(None, Some(Path::new("/opt/pnpm/pnpm"))),
+            vec!["/opt/pnpm".to_string()]
+        );
+
+        // A directory holding the PATH delimiter cannot be joined safely.
+        assert!(tool_path_dirs(Some(Path::new("/a:b/node")), None).is_empty());
     }
 }
