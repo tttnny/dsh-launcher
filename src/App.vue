@@ -12,6 +12,8 @@ import {
   type ShortcutRoute,
 } from '@/shortcuts'
 import AppRail from '@/components/AppRail.vue'
+import DlIcon from '@/components/DlIcon.vue'
+import { useLauncherUpdate } from '@/composables/useLauncherUpdate'
 import launcherIcon from '@/assets/launcher-icon.png'
 
 const route = useRoute()
@@ -19,6 +21,8 @@ const router = useRouter()
 const store = useLauncherStore()
 const isTauri = api.isTauri
 const contentEl = ref<HTMLElement | null>(null)
+const { updateInfo, checkUpdate, startUpdate, downloadPercent, updateLabel } =
+  useLauncherUpdate()
 
 watch(
   () => route.fullPath,
@@ -60,6 +64,7 @@ onMounted(async () => {
   }
   applyTheme(store.settings.theme || 'system')
   themeMedia.addEventListener('change', onSystemThemeChange)
+  void checkUpdate(false)
 
   await setupLaunchDeepLink()
   window.addEventListener('keydown', onAppKeydown)
@@ -119,31 +124,10 @@ async function setupMenuListeners() {
       })
       unlistenMenu.push(un)
     }
-    unlistenMenu.push(
-      await listen('check-update', () => void onMenuCheckUpdate()),
-    )
+    unlistenMenu.push(await listen('check-update', () => void checkUpdate()))
     unlistenMenu.push(await listen('open-help', () => void onMenuOpenHelp()))
   } catch {
     // 事件桥不可用时（浏览器预览）快捷键仍然可用。
-  }
-}
-
-let checkingMenuUpdate = false
-
-async function onMenuCheckUpdate() {
-  if (checkingMenuUpdate) return
-  checkingMenuUpdate = true
-  try {
-    const info = await api.checkLauncherUpdate('dev')
-    if (info.up_to_date) Message.success('当前已是最新版本')
-    else {
-      Message.info(`发现新版本 v${info.latest ?? ''}`)
-      if (info.url) await api.openExternal(info.url)
-    }
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    checkingMenuUpdate = false
   }
 }
 
@@ -307,7 +291,29 @@ async function onTitlebarDoubleClick(e: MouseEvent) {
         class="app-titlebar"
         @mousedown="onTitlebarMouseDown"
         @dblclick="onTitlebarDoubleClick"
-      ></div>
+      >
+        <template v-if="updateInfo?.latest">
+          <button
+            v-if="downloadPercent === null"
+            type="button"
+            class="btn btn--sm titlebar-update"
+            :title="'v' + updateInfo.latest"
+            @click="startUpdate"
+          >
+            <DlIcon name="download" :size="13" />
+            {{ updateLabel }}
+          </button>
+          <div v-else class="titlebar-progress" data-no-drag>
+            <progress
+              v-if="downloadPercent < 100"
+              :value="downloadPercent"
+              max="100"
+              aria-label="启动器更新下载进度"
+            />
+            {{ updateLabel }}
+          </div>
+        </template>
+      </div>
       <div ref="contentEl" class="app-scroll">
         <router-view :key="String(route.name)" />
       </div>
@@ -370,6 +376,28 @@ async function onTitlebarDoubleClick(e: MouseEvent) {
   flex-shrink: 0;
   padding: 0 16px;
   user-select: none;
+}
+
+.titlebar-update {
+  height: 22px;
+  padding: 0 8px;
+  color: var(--dl-accent-ink);
+  background: var(--dl-accent-soft);
+}
+
+.titlebar-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dl-accent-ink);
+  font-size: var(--dl-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.titlebar-progress progress {
+  width: 42px;
+  height: 6px;
+  accent-color: var(--dl-accent);
 }
 
 .app-scroll {

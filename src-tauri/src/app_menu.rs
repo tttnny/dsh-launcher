@@ -199,6 +199,18 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &items)
 }
 
+/// Newly created windows check on startup. An existing window can refresh
+/// immediately and show its result in the title bar.
+pub(crate) fn request_update_check(app: &AppHandle) {
+    let had_window = app.get_webview_window("main").is_some();
+    crate::windows::show_or_create_main(app);
+    if had_window {
+        if let Err(e) = app.emit(EVT_CHECK_UPDATE, ()) {
+            crate::log_warn!("菜单事件 `check-update` 转发失败: {e}");
+        }
+    }
+}
+
 /// 原生菜单事件分发——窗口操作直接在后端处理，
 /// 导航/功能类 emit 事件给前端。不认识的 id 忽略
 /// (predefined 项如 About/隐藏/剪切等由系统原生处理)。
@@ -217,11 +229,7 @@ pub fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         ID_VIEW_DATA => show_and_emit(app, "/data"),
         ID_VIEW_MACHINES => show_and_emit(app, "/machines"),
         ID_VIEW_SETTINGS | ID_PREFERENCES => show_and_emit(app, "/settings"),
-        ID_CHECK_UPDATE => {
-            if let Err(e) = app.emit(EVT_CHECK_UPDATE, ()) {
-                crate::log_warn!("菜单事件 `check-update` 转发失败: {e}");
-            }
-        }
+        ID_CHECK_UPDATE => request_update_check(app),
         ID_OPEN_HELP => {
             if let Err(e) = app.emit(EVT_OPEN_HELP, ()) {
                 crate::log_warn!("菜单事件 `open-help` 转发失败: {e}");

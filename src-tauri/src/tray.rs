@@ -88,7 +88,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             } else if id == MENU_OPEN_LOG {
                 open_launcher_log(app);
             } else if id == MENU_CHECK_UPDATE {
-                check_update_from_tray(app);
+                crate::app_menu::request_update_check(app);
             } else if id == MENU_OPEN_SETTINGS {
                 show_and_navigate(app, "/settings");
             } else if id == MENU_RESTART {
@@ -653,37 +653,6 @@ fn open_launcher_log(app: &AppHandle) {
             crate::log_warn!("打开日志目录失败: {e}");
         }
     }
-}
-
-/// Checks the dev channel for a newer launcher release: opens the release
-/// page when an update exists, otherwise shows the launcher. Failures only
-/// log and show the launcher so the tray never looks dead.
-fn check_update_from_tray(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        match crate::update::check_launcher_update(Some("dev".to_string())).await {
-            Ok(info) if !info.up_to_date => {
-                if let Some(url) = info.url.as_deref() {
-                    crate::log_info!(
-                        "托盘：发现新版本 {}，在浏览器中打开 {url}",
-                        info.latest.unwrap_or_default()
-                    );
-                    if open::that(url).is_ok() {
-                        return;
-                    }
-                }
-                show_launcher(&app);
-            }
-            Ok(_) => {
-                crate::log_info!("托盘：已是最新版本");
-                show_launcher(&app);
-            }
-            Err(e) => {
-                crate::log_warn!("托盘检查更新失败: {e}");
-                show_launcher(&app);
-            }
-        }
-    });
 }
 
 fn quit(app: &AppHandle) {

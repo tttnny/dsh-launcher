@@ -8,34 +8,63 @@
 //! (`error sending request for url ...`). Passing the public client id raises
 //! the unauth quota to 5000 req/h, exactly as the plugin marketplace does.
 //!
-//! Channel is chosen by the user in the launcher settings: the `release`
-//! channel only considers releases without a semver pre-release segment,
-//! while `dev` (default) also looks at prereleases and treats any published
-//! stable newer than the running build as an update.
+//! By default, prerelease builds follow the preview channel and stable
+//! builds follow the stable channel.
 
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::time::Duration;
+use tauri::{ipc::Channel, AppHandle, Manager};
+use tokio::io::AsyncWriteExt;
 
 /// Self-update follows *this* repository's releases only.
 const RELEASES_API: &str = "/repos/tttnny/dsh-launcher/releases?per_page=100";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+static INSTALLER_DOWNLOAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LauncherUpdateInfo {
     pub current: String,
-    /// "dev" when the running build is a -dev.N prerelease, else "stable".
+    /// "dev" for the preview channel, otherwise "stable".
     pub channel: String,
     pub up_to_date: bool,
     pub latest: Option<String>,
     pub url: Option<String>,
     pub published_at: Option<String>,
+    pub has_installer: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Deserialize)]
 struct ReleaseEntry {
     tag_name: String,
     html_url: String,
     published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    size: u64,
+    digest: Option<String>,
+}
+
+fn mac_installer<'a>(release: &'a ReleaseEntry, arch: &str) -> Option<(&'a ReleaseAsset, &'a str)> {
+    let version = parse_tag(&release.tag_name)?;
+    ["universal", arch].into_iter().find_map(|arch| {
+        let name = format!("dsh-launcher_{version}_{arch}.dmg");
+        let asset = release.assets.iter().find(|asset| asset.name == name)?;
+        let hash = asset.digest.as_deref()?.strip_prefix("sha256:")?;
+        (hash.len() == 64
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && (1..=MAX_INSTALLER_BYTES).contains(&asset.size))
+        .then_some((asset, hash))
+    })
 }
 
 /// Parses a release tag ("v0.2.0" / "v0.2.0-dev.12") as semver.
@@ -43,29 +72,8 @@ fn parse_tag(tag: &str) -> Option<semver::Version> {
     semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
 
-/// Minimal shape of a GitHub REST `/releases` list item.
-#[derive(Clone, Debug, Deserialize)]
-struct ApiRelease {
-    tag_name: String,
-    html_url: String,
-    published_at: Option<String>,
-}
-
-/// Normalises API items into `ReleaseEntry`es, newest first (the API returns
-/// releases in reverse-chronological order, but order must not be relied on).
 fn parse_releases_json(body: &[u8]) -> Result<Vec<ReleaseEntry>, String> {
-    let api: Vec<ApiRelease> =
-        serde_json::from_slice(body).map_err(|e| format!("解析 GitHub Releases JSON 失败: {e}"))?;
-    let mut out: Vec<ReleaseEntry> = api
-        .into_iter()
-        .map(|r| ReleaseEntry {
-            tag_name: r.tag_name,
-            html_url: r.html_url,
-            published_at: r.published_at,
-        })
-        .collect();
-    out.sort_by(|a, b| b.tag_name.cmp(&a.tag_name));
-    Ok(out)
+    serde_json::from_slice(body).map_err(|e| format!("解析 GitHub Releases JSON 失败: {e}"))
 }
 
 /// Picks the newest published release strictly newer than `current`.
@@ -78,6 +86,7 @@ fn pick_latest<'a>(
 ) -> Option<&'a ReleaseEntry> {
     releases
         .iter()
+        .filter(|r| !r.draft)
         .filter_map(|r| parse_tag(&r.tag_name).map(|v| (v, r)))
         .filter(|(v, _)| dev_channel || v.pre.is_empty())
         .filter(|(v, _)| v > current)
@@ -85,33 +94,34 @@ fn pick_latest<'a>(
         .map(|(_, r)| r)
 }
 
-/// The update-check channel: "dev" (default) also sees prereleases,
-/// "release" only considers stable releases.
-fn parse_channel(raw: Option<&str>) -> Result<bool, String> {
-    match raw.unwrap_or("dev").trim().to_ascii_lowercase().as_str() {
-        "dev" => Ok(true),
-        "release" => Ok(false),
-        other => Err(format!("无效的更新渠道: {other}")),
+fn parse_channel(raw: Option<&str>, current: &semver::Version) -> Result<bool, String> {
+    match raw
+        .map(|channel| channel.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None => Ok(!current.pre.is_empty()),
+        Some("dev") => Ok(true),
+        Some("release") => Ok(false),
+        Some(other) => Err(format!("无效的更新渠道: {other}")),
     }
 }
 
-#[tauri::command]
-pub async fn check_launcher_update(channel: Option<String>) -> Result<LauncherUpdateInfo, String> {
-    let current_raw = env!("CARGO_PKG_VERSION");
-    let current = semver::Version::parse(current_raw)
-        .map_err(|e| format!("当前版本号无效 {current_raw}: {e}"))?;
-    let dev_channel = parse_channel(channel.as_deref())?;
+fn current_version() -> Result<semver::Version, String> {
+    let version = env!("CARGO_PKG_VERSION");
+    semver::Version::parse(version).map_err(|e| format!("当前版本号无效 {version}: {e}"))
+}
 
-    let url = crate::plugins::github_api_url(RELEASES_API);
-    let client = crate::proxy::apply(reqwest::Client::builder())
-        .timeout(std::time::Duration::from_secs(15))
+fn http_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    crate::proxy::apply(reqwest::Client::builder())
+        .timeout(timeout)
         .user_agent("dsh-launcher")
         .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
-    crate::log_debug!(
-        "检查启动器更新（{channel} 渠道）：{url}",
-        channel = if dev_channel { "dev" } else { "release" }
-    );
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
+}
+
+async fn fetch_releases() -> Result<Vec<ReleaseEntry>, String> {
+    let url = crate::plugins::github_api_url(RELEASES_API);
+    let client = http_client(Duration::from_secs(15))?;
     let resp = client
         .get(&url)
         .send()
@@ -127,7 +137,15 @@ pub async fn check_launcher_update(channel: Option<String>) -> Result<LauncherUp
     if bytes.len() > MAX_BYTES {
         return Err("GitHub Releases 响应过大".to_string());
     }
-    let releases = parse_releases_json(&bytes)?;
+    parse_releases_json(&bytes)
+}
+
+#[tauri::command]
+pub async fn check_launcher_update(channel: Option<String>) -> Result<LauncherUpdateInfo, String> {
+    let current = current_version()?;
+    let current_raw = env!("CARGO_PKG_VERSION");
+    let dev_channel = parse_channel(channel.as_deref(), &current)?;
+    let releases = fetch_releases().await?;
     crate::log_debug!("GitHub Releases API 解析出 {} 条发布记录", releases.len());
 
     let latest = pick_latest(&current, dev_channel, &releases);
@@ -146,7 +164,115 @@ pub async fn check_launcher_update(channel: Option<String>) -> Result<LauncherUp
         latest: latest.map(|r| r.tag_name.trim_start_matches('v').to_string()),
         url: latest.map(|r| r.html_url.clone()),
         published_at: latest.and_then(|r| r.published_at.clone()),
+        has_installer: cfg!(target_os = "macos")
+            && latest
+                .and_then(|r| mac_installer(r, std::env::consts::ARCH))
+                .is_some(),
     })
+}
+
+#[tauri::command]
+pub async fn download_launcher_update(
+    app: AppHandle,
+    version: String,
+    on_progress: Channel<u8>,
+) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("当前平台没有可用的启动器安装包".into());
+    }
+    let _download = INSTALLER_DOWNLOAD
+        .try_lock()
+        .map_err(|_| "启动器安装包正在下载".to_string())?;
+    let current = current_version()?;
+    let version = semver::Version::parse(&version).map_err(|e| format!("无效的版本号: {e}"))?;
+    if version <= current || (current.pre.is_empty() && !version.pre.is_empty()) {
+        return Err("该版本不适用于当前启动器".into());
+    }
+    let releases = fetch_releases().await?;
+    let release = releases
+        .iter()
+        .find(|r| !r.draft && parse_tag(&r.tag_name).as_ref() == Some(&version))
+        .ok_or("找不到该版本，请重新检查更新")?;
+    let (asset, hash) = mac_installer(release, std::env::consts::ARCH)
+        .ok_or("该版本没有适用于本机且可校验的安装包")?;
+    // The tag and filename were matched against SemVer and our bundle naming
+    // scheme. The webview never supplies a URL, checksum, or local path.
+    let url = format!(
+        "https://github.com/tttnny/dsh-launcher/releases/download/{}/{}",
+        release.tag_name, asset.name
+    );
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("launcher-update");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("创建下载目录失败: {e}"))?;
+    let path = dir.join(&asset.name);
+    let partial = dir.join(format!("{}.part", uuid::Uuid::new_v4()));
+    let result = download_installer(&url, asset.size, hash, &partial, &on_progress).await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(error);
+    }
+    if let Err(error) = tokio::fs::rename(&partial, &path).await {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(format!("保存安装包失败: {error}"));
+    }
+    open::that(&path).map_err(|e| format!("打开安装包失败: {e}"))?;
+    Ok(())
+}
+
+async fn download_installer(
+    url: &str,
+    size: u64,
+    hash: &str,
+    path: &Path,
+    progress: &Channel<u8>,
+) -> Result<(), String> {
+    let client = http_client(Duration::from_secs(600))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("请求安装包失败: {e}"))?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|e| format!("创建下载文件失败: {e}"))?;
+    let mut received = 0;
+    let mut last_percent = 0;
+    let mut digest = Sha256::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("下载中断: {e}"))?
+    {
+        received += chunk.len() as u64;
+        if received > size {
+            return Err("安装包大小与 GitHub 发布信息不符".into());
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("写入安装包失败: {e}"))?;
+        digest.update(&chunk);
+        let percent = (received * 100 / size).min(99) as u8;
+        if percent > last_percent {
+            let _ = progress.send(percent);
+            last_percent = percent;
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("写入安装包失败: {e}"))?;
+    if received != size || !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(hash) {
+        return Err("安装包校验失败，请重新下载".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -158,6 +284,8 @@ mod tests {
             tag_name: tag.to_string(),
             html_url: format!("https://example.com/releases/tag/{tag}"),
             published_at: None,
+            draft: false,
+            assets: Vec::new(),
         }
     }
 
@@ -218,11 +346,40 @@ mod tests {
 
     #[test]
     fn parse_channel_accepts_dev_and_release() {
-        assert!(parse_channel(None).unwrap());
-        assert!(parse_channel(Some("dev")).unwrap());
-        assert!(parse_channel(Some("DEV")).unwrap());
-        assert!(!parse_channel(Some("release")).unwrap());
-        assert!(parse_channel(Some("stable")).is_err());
+        let current = semver::Version::parse("0.2.0").unwrap();
+        assert!(parse_channel(Some("dev"), &current).unwrap());
+        assert!(parse_channel(Some("DEV"), &current).unwrap());
+        assert!(!parse_channel(Some("release"), &current).unwrap());
+        assert!(parse_channel(Some("stable"), &current).is_err());
+    }
+
+    #[test]
+    fn installed_rc_checks_for_the_next_rc_by_default() {
+        let current = semver::Version::parse("0.0.1-rc.1").unwrap();
+        let releases = parse_releases_json(
+            br#"[
+          {
+            "tag_name": "v0.0.1-rc.2",
+            "html_url": "https://github.com/tttnny/dsh-launcher/releases/tag/v0.0.1-rc.2",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+              "name": "dsh-launcher_0.0.1-rc.2_universal.dmg",
+              "size": 10664909,
+              "digest": "sha256:56b1efbbab39b8f4a25b69b2d79b1860f089ec49029d8826b5f7afc5e1581683"
+            }]
+          }
+        ]"#,
+        )
+        .unwrap();
+        let channel = parse_channel(None, &current).unwrap();
+        let latest = pick_latest(&current, channel, &releases).unwrap();
+        assert_eq!(latest.tag_name, "v0.0.1-rc.2");
+        for arch in ["aarch64", "x86_64"] {
+            assert_eq!(mac_installer(latest, arch).unwrap().0.size, 10664909);
+        }
+        let stable = semver::Version::parse("0.0.1").unwrap();
+        assert!(!parse_channel(None, &stable).unwrap());
     }
 
     #[test]

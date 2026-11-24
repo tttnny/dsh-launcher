@@ -2,7 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { LauncherUpdateInfo, ThemeMode } from '@/api/types'
+import type { ThemeMode } from '@/api/types'
+import { useLauncherUpdate } from '@/composables/useLauncherUpdate'
 import { useLauncherStore } from '@/stores/launcher'
 import { useCopy } from '@/composables/useCopy'
 import PageHeader from '@/components/PageHeader.vue'
@@ -113,15 +114,21 @@ function onPortChange(e: Event) {
 const launcherVersion = ref('')
 const versionLoading = ref(true)
 const versionError = ref('')
-const checking = ref(false)
-const updateInfo = ref<LauncherUpdateInfo | null>(null)
-
-// 渠道由当前安装的版本决定：带 -dev 的构建跟预览版，其余跟正式版。
-const updateChannel = computed<'dev' | 'release'>(() =>
-  launcherVersion.value.includes('-dev') ? 'dev' : 'release',
+const {
+  updateInfo,
+  checking,
+  checkUpdate,
+  startUpdate,
+  downloadPercent,
+  updateLabel,
+} = useLauncherUpdate()
+const previewChannel = computed(() =>
+  updateInfo.value
+    ? updateInfo.value.channel === 'dev'
+    : launcherVersion.value.split('+')[0]?.includes('-'),
 )
 const channelLabel = computed(() =>
-  updateChannel.value === 'dev' ? '预览版' : '正式版',
+  previewChannel.value ? '预览版' : '正式版',
 )
 
 async function loadVersion() {
@@ -133,31 +140,6 @@ async function loadVersion() {
     versionError.value = String(e)
   } finally {
     versionLoading.value = false
-  }
-}
-
-async function checkUpdate() {
-  if (checking.value) return
-  checking.value = true
-  try {
-    const info = await api.checkLauncherUpdate(updateChannel.value)
-    updateInfo.value = info
-    if (info.up_to_date) Message.success('当前已是最新版本')
-    else Message.info(`发现新版本 v${info.latest ?? ''}`)
-  } catch (e) {
-    Message.error(String(e))
-  } finally {
-    checking.value = false
-  }
-}
-
-async function openUpdate() {
-  const url = updateInfo.value?.url
-  if (!url) return
-  try {
-    await api.openExternal(url)
-  } catch (e) {
-    Message.error(String(e))
   }
 }
 
@@ -449,7 +431,7 @@ onUnmounted(() => {
             </div>
             <span
               class="tag"
-              :class="updateChannel === 'dev' ? 'tag--warn' : 'tag--muted'"
+              :class="previewChannel ? 'tag--warn' : 'tag--muted'"
             >
               {{ channelLabel }}
             </span>
@@ -464,7 +446,7 @@ onUnmounted(() => {
             <button
               class="btn btn--quiet"
               :disabled="checking"
-              @click="checkUpdate"
+              @click="checkUpdate()"
             >
               <span v-if="checking" class="spinner" />
               {{ checking ? '检查中…' : '检查更新' }}
@@ -482,12 +464,17 @@ onUnmounted(() => {
                 <span class="mono">v{{ updateInfo.latest ?? '' }}</span>
               </span>
               <button
-                v-if="updateInfo.url"
+                v-if="updateInfo.has_installer || updateInfo.url"
                 class="btn btn--primary btn--sm"
-                @click="openUpdate"
+                :disabled="downloadPercent !== null"
+                @click="startUpdate"
               >
-                <DlIcon name="download" :size="14" />
-                下载
+                <DlIcon
+                  v-if="downloadPercent === null"
+                  name="download"
+                  :size="14"
+                />
+                {{ updateLabel }}
               </button>
             </template>
           </div>

@@ -208,9 +208,21 @@ export const api = {
   updateSettings: (settings: Partial<LauncherSettings>) =>
     call<LauncherSettings>('update_settings', { settings }),
 
-  /** Checks GitHub for a newer launcher release on the given channel. */
-  checkLauncherUpdate: (channel: 'dev' | 'release' = 'dev') =>
-    call<LauncherUpdateInfo>('check_launcher_update', { channel }),
+  checkLauncherUpdate: () => call<LauncherUpdateInfo>('check_launcher_update'),
+  async downloadLauncherUpdate(version: string, onProgress: Listener<number>) {
+    if (!isTauri) {
+      for (const percent of [20, 45, 70, 99]) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        onProgress(percent)
+      }
+      return
+    }
+    const { Channel } = await import('@tauri-apps/api/core')
+    await call<void>('download_launcher_update', {
+      version,
+      onProgress: new Channel<number>(onProgress),
+    })
+  },
   /** The launcher's own data directory (shown next to the open button). */
   getLauncherDirectory: () => call<string>('get_launcher_directory'),
   /** Opens the launcher data directory in the system file manager. */
@@ -246,7 +258,7 @@ export const api = {
       const { getVersion } = await import('@tauri-apps/api/app')
       return getVersion()
     }
-    return '0.2.0-dev.1'
+    return '0.0.1-rc.1'
   },
 
   // Profile plugins (scoped by HOME + profile): list / enable / disable / uninstall.

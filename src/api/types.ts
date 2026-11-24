@@ -211,12 +211,13 @@ export interface DoctorReport {
 /** Result of checking GitHub for a newer launcher release. */
 export interface LauncherUpdateInfo {
   current: string
-  /** "dev" for -dev.N builds, otherwise "stable". */
+  /** "dev" for prerelease builds, otherwise "stable". */
   channel: 'dev' | 'stable'
   up_to_date: boolean
   latest: string | null
   url: string | null
   published_at: string | null
+  has_installer: boolean
 }
 
 /**

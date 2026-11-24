@@ -1769,17 +1769,14 @@ export async function mockCall<T>(
       return db.settings as T
     }
     case 'check_launcher_update': {
-      // Browser preview: honor the channel; the release channel reports the
-      // same fake dev build as up-to-date so the filter is observable.
-      const channel = (args?.channel as string | undefined) ?? 'dev'
-      const dev = channel !== 'release'
       return {
-        current: '0.2.0-dev.1',
-        channel: dev ? 'dev' : 'stable',
-        up_to_date: !dev,
-        latest: dev ? '0.2.0-dev.2' : null,
-        url: dev ? 'https://github.com/tttnny/dsh-launcher/releases' : null,
-        published_at: dev ? new Date().toISOString() : null,
+        current: '0.0.1-rc.1',
+        channel: 'dev',
+        up_to_date: false,
+        latest: '0.0.1-rc.2',
+        url: 'https://github.com/tttnny/dsh-launcher/releases/tag/v0.0.1-rc.2',
+        published_at: new Date().toISOString(),
+        has_installer: true,
       } as T
     }
     case 'list_plugins': {

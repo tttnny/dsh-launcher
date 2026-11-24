@@ -330,6 +330,7 @@ pub fn run() {
             commands::update_settings,
             commands::open_instance_terminal,
             update::check_launcher_update,
+            update::download_launcher_update,
             plugins::list_plugins,
             plugins::set_bundle_enabled,
             plugins::remove_bundle,
