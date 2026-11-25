@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-// 一个状态灯加一句话。运行中、启动中、已停止、主机不可达的语义必须一眼分清，
-// 主机不可达永远不能显示成已停止。
-
 type Tone = 'run' | 'warn' | 'danger' | 'idle' | 'busy'
 
 const props = defineProps<{

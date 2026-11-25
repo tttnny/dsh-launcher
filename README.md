@@ -53,10 +53,12 @@ pnpm app:local     # 本机构建并用开发证书签名，安装到 /Applicati
 ## 合并前检查
 
 ```bash
-pnpm verify          # 全部检查：格式化、clippy、Rust 测试、版本同步、单元测试、prettier、前端构建
+pnpm verify          # 全部检查：格式化、clippy、Rust 测试、版本同步、单元测试、注释基线、prettier、前端构建
 pnpm verify:quick    # 只跑 clippy 与 Rust 测试
 pnpm format          # 用 prettier 格式化代码
 ```
+
+注释基线（`scripts/comment-baseline.json`）按文件记录允许保留的注释行数，只降不升：删了注释要用 `pnpm check:comments -- --update` 下调基线，新增注释会让 `pnpm verify` 失败，新文件默认零注释。一轮清理的做法写在 `/delete-comment` 技能（`.agents/skills/delete-comment`）里，决策记录在 `docs/adr/`。
 
 ## 目录结构
 
@@ -64,4 +66,5 @@ pnpm format          # 用 prettier 格式化代码
 src/          Vue 前端（页面、组件、状态、接口）
 src-tauri/    Tauri 桌面端（Rust 后端与打包配置）
 scripts/      构建、校验等辅助脚本
+docs/adr/     架构决策记录（ADR）与术语表 GLOSSARY.md
 ```

@@ -10,9 +10,6 @@ import EmptyState from '@/components/EmptyState.vue'
 import DlIcon from '@/components/DlIcon.vue'
 import DlRefreshButton from '@/components/DlRefreshButton.vue'
 
-// 安装页只回答一件事：在这台机器上装哪个版本。左边是已经装好的，右边是还能装的；
-// 一次安装的进度就长在它自己的版本行上，装完自动从可安装区移到已安装区。
-
 const store = useLauncherStore()
 
 const collator = new Intl.Collator('en', { numeric: true })
@@ -22,8 +19,6 @@ const currentHostLabel = computed(() => {
   const host = store.currentHost
   return host?.builtin ? '本机' : (host?.display_name ?? store.currentHostId)
 })
-
-// --- 读取状态 ---------------------------------------------------------------
 
 const pendingInstalled = ref(true)
 const refreshingInstalled = ref(false)
@@ -54,7 +49,6 @@ async function pickHost(id: string) {
 }
 
 onMounted(async () => {
-  // 可安装列表自己带 loading 标记，先发出去，已安装列表单独等它自己的读取。
   void store.refreshRemoteVersions()
   void store.refreshInstallTasks()
   try {
@@ -64,15 +58,11 @@ onMounted(async () => {
   }
 })
 
-// --- 已安装 -----------------------------------------------------------------
-
 const installedRows = computed(() =>
   [...store.versions]
     .sort((a, b) => collator.compare(b.version, a.version))
     .map((v) => ({ ...v, used: store.instancesOfVersion(v.id).length })),
 )
-
-// --- 可安装 -----------------------------------------------------------------
 
 const installedSet = computed(
   () => new Set(store.versions.map((v) => v.version)),
@@ -118,8 +108,6 @@ const emptyDesc = computed(() =>
     ? '这台机器上已经没有可再安装的版本。'
     : '换一个关键词或筛选条件再试。',
 )
-
-// --- 安装 -------------------------------------------------------------------
 
 const installAction = useAction(
   async (version: string) => {
@@ -180,8 +168,6 @@ function latestLog(task: TaskInfo): string {
   return task.logs[task.logs.length - 1] ?? task.message ?? '正在准备…'
 }
 
-// --- 删除 -------------------------------------------------------------------
-
 const removeAction = useAction(
   async (id: string, version: string) => {
     const hostId = store.currentHostId
@@ -215,8 +201,6 @@ function onRemove(v: DshVersion) {
     onOk: () => removeAction.run(v.id, v.version),
   })
 }
-
-// --- dsh 命令 ---------------------------------------------------------------
 
 const pathLinkAction = useAction(
   async (v: DshVersion) => {
@@ -258,7 +242,6 @@ function onTogglePathLink(v: DshVersion) {
       description="安装后会创建该版本专用的数据目录和一个实例。"
     />
 
-    <!-- 机器 chips：安装永远发生在一台具体的机器上。 -->
     <div class="host-bar">
       <button
         v-for="host in store.hosts"
@@ -271,7 +254,6 @@ function onTogglePathLink(v: DshVersion) {
       </button>
     </div>
 
-    <!-- 已安装 -->
     <section class="section">
       <div class="section-head">
         <span class="section-title">已安装</span>
@@ -355,7 +337,6 @@ function onTogglePathLink(v: DshVersion) {
       </div>
     </section>
 
-    <!-- 可安装 -->
     <section class="section">
       <div class="section-head">
         <span class="section-title">可安装</span>

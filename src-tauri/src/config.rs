@@ -3,17 +3,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Persistent configuration models
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DshHome {
     pub id: String,
     pub name: String,
     pub path: PathBuf,
-    /// The host this DSH_HOME lives on. Empty in a config written before hosts
-    /// existed; [`migrate_hosts`] fills it in at load time.
     #[serde(default)]
     pub host_id: String,
 }
@@ -23,8 +17,6 @@ pub struct DshVersion {
     pub id: String,
     pub version: String,
     pub dir: PathBuf,
-    /// The host this version is installed on. Empty in a config written before
-    /// hosts existed; [`migrate_hosts`] fills it in at load time.
     #[serde(default)]
     pub host_id: String,
 }
@@ -35,8 +27,6 @@ pub struct DshInstance {
     pub name: String,
     pub version_id: String,
     pub home_id: String,
-    /// The host this instance runs on. Empty in a config written before hosts
-    /// existed; [`migrate_hosts`] fills it in at load time.
     #[serde(default)]
     pub host_id: String,
     #[serde(default)]
@@ -46,11 +36,8 @@ pub struct DshInstance {
     #[serde(default)]
     pub last_profile: Option<String>,
     /// Instance icon: an http(s) URL, or "local" for a cropped PNG stored at
-    /// `<home>/icons/<id>.png`. `None` falls back to the launcher icon.
     #[serde(default)]
     pub icon: Option<String>,
-    /// Preferred web port (issue #21): `Some(1-65535)` pins it; `None` binds
-    /// a random free port (`--port 0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }
@@ -60,16 +47,9 @@ pub struct DshInstance {
 /// would differ on every machine.
 pub const LOCAL_HOST_ID: &str = "host-local";
 
-/// The record the launcher keeps for a host's own `~/.dsh` (the folder DSH
-/// uses when nobody names one). 本机's is added at load time by
-/// [`ensure_user_dsh_home`]; a remote host's is added the first time that
-/// machine is asked for its DSH_HOMEs.
 pub const USER_DSH_HOME_ID: &str = "home-user-dsh";
 pub const USER_DSH_HOME_NAME: &str = "用户默认 (~/.dsh)";
 
-/// The id of one host's user-default `~/.dsh` record. A remote host gets its
-/// own: `~/.dsh` is a path on *that* machine, and one literal cannot stand for
-/// two machines' home directories.
 pub fn user_dsh_home_id(host: &Host) -> String {
     if host.builtin {
         USER_DSH_HOME_ID.to_string()
@@ -78,57 +58,27 @@ pub fn user_dsh_home_id(host: &Host) -> String {
     }
 }
 
-/// One machine the launcher manages. The local host is the built-in one; every
-/// other host is reached over ssh. A host owns its versions, DSH_HOMEs,
-/// profiles and instances, and knows where its own data directory is —
-/// because those are paths on *that* machine's filesystem and processes in
-/// *its* process table, not entries in the launcher's records (ADR-0006).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Host {
     pub id: String,
-    /// The name the UI shows. The built-in host's is 本机.
     pub display_name: String,
-    /// The ssh target handed to the system `ssh` as it is typed: an alias from
-    /// `~/.ssh/config`, or a free string such as `user@host -p 2222`. Empty for
-    /// the local host, which nothing is dialed for.
     #[serde(default)]
     pub ssh_target: String,
-    /// The npm registry this host's versions are listed from, when it has its
-    /// own. `None` = the launcher's registry.
     #[serde(default)]
     pub registry: Option<String>,
-    /// Environment variables injected into everything the launcher runs on this
-    /// host, installs and instances alike.
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
-    /// The launcher's data directory *on this host*: installed versions,
-    /// dedicated DSH_HOMEs, logs, the pnpm store and the running record all
-    /// live under it. `None` for the local host — that is the launcher's own
-    /// data directory — and for a remote host whose default has not been read
-    /// off that machine yet.
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
-    /// Built-in hosts cannot be deleted. True for 本机 only, and what the
-    /// settings page reads to leave out the delete control.
     #[serde(default)]
     pub builtin: bool,
-    /// Where this host's toolchain resolution last landed: the absolute paths of
-    /// the `node` and `pnpm` the launcher will drive DSH with *there*. A probe
-    /// cache — rewritten by every probe, never a user preference — and one per
-    /// host, because a path is a fact about one machine's filesystem (ADR-0005
-    /// 追加).
     #[serde(default)]
     pub toolchain: ToolchainBinding,
-    /// Executables the user picked by hand for *this* host, on the environment
-    /// page. A chosen path wins over detection there, and only the override
-    /// command writes it.
     #[serde(default)]
     pub toolchain_overrides: ToolchainOverrides,
 }
 
 impl Host {
-    /// The built-in local host: this Mac, the machine the launcher itself runs
-    /// on.
     pub fn local() -> Self {
         Self {
             id: LOCAL_HOST_ID.to_string(),
@@ -143,14 +93,6 @@ impl Host {
         }
     }
 
-    /// Where this host keeps the launcher's own data (installed versions,
-    /// dedicated DSH_HOMEs, logs, the pnpm store, its running record).
-    ///
-    /// The local host's is the launcher's own data directory. A remote host
-    /// states its own, because its default (that machine's home directory plus
-    /// `~/.local/share/dsh-launcher`) can only be resolved on that machine — and
-    /// the connection test is what settles what the user typed there and writes
-    /// the absolute answer down.
     pub fn data_dir(&self, launcher_data_dir: &Path) -> Result<PathBuf, String> {
         if self.builtin {
             return Ok(launcher_data_dir.to_path_buf());
@@ -159,11 +101,6 @@ impl Host {
             .data_dir
             .clone()
             .ok_or_else(|| format!("主机「{}」还没有远端数据目录", self.display_name))?;
-        // A value that is not absolute has not been settled on that machine yet
-        // (`~/dsh` typed into the form, before the first connection test). No
-        // script may be handed it: quoted for the remote shell it is a literal
-        // `~`, resolved against whatever directory that shell starts in — an
-        // empty version list that reads like an answer.
         if !dir.is_absolute() {
             return Err(format!(
                 "主机「{}」的远端数据目录还没在那台机器上确定（现在记的是 {}）：在设置里对它点一次「测试连接」，或填一个绝对路径",
@@ -174,8 +111,6 @@ impl Host {
         Ok(dir)
     }
 
-    /// This host's dedicated DSH_HOME for a version:
-    /// `<该主机的数据目录>/homes/<版本名>` (ADR-0002).
     pub fn dedicated_home_path(
         &self,
         launcher_data_dir: &Path,
@@ -187,9 +122,6 @@ impl Host {
         ))
     }
 
-    /// Path equality *on this host*: the local APFS volume folds case, a remote
-    /// Linux filesystem does not. [`paths_equal`] is the local half of this
-    /// rule, for the call sites that have no host in hand yet.
     pub fn paths_equal(&self, a: &Path, b: &Path) -> bool {
         if self.builtin {
             paths_equal(a, b)
@@ -198,12 +130,6 @@ impl Host {
         }
     }
 
-    /// Whether the launcher may create or remove `what` **with this machine's
-    /// own filesystem calls**: only 本机's paths live here. A remote host's paths
-    /// are paths on that server, and a local `fs` call aimed at one of them
-    /// hits whatever this Mac happens to have at the same spelling — a stray
-    /// directory where the user asked for a remote one, or a deleted local file
-    /// standing in for a remote one.
     pub fn local_paths_only(&self, what: &str) -> Result<(), String> {
         if self.builtin {
             Ok(())
@@ -233,8 +159,6 @@ pub enum HostState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostStatus {
     pub state: HostState,
-    /// Why, when `Unreachable`: the readable sentence of one of the four
-    /// failure classes.
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -270,36 +194,26 @@ pub struct LauncherSettings {
     pub autostart: bool,
     #[serde(default)]
     pub last_instance_id: Option<String>,
-    /// UI theme: "light" | "dark" | "system" (follow the OS setting).
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// Runtime log level: "debug" | "info" | "warn" | "error".
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    /// Route the launcher's own HTTP requests through a proxy.
     #[serde(default)]
     pub proxy_enabled: bool,
-    /// Proxy URL without port, e.g. `http://127.0.0.1`.
     #[serde(default = "default_proxy_url")]
     pub proxy_url: String,
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
-    /// Comma-separated hosts that bypass the proxy (NO_PROXY).
     #[serde(default = "default_no_proxy")]
     pub no_proxy: String,
     /// Also inject the proxy into launched dsh instances, overriding the
     /// instance's own environment variables (applies on next start).
     #[serde(default)]
     pub proxy_apply_dsh: bool,
-    /// External terminal for instance shells: "system" (Terminal.app) or
-    /// "ghostty". The embedded PTY is gone; the launcher opens a real
-    /// terminal window with DSH_HOME set and cwd at the HOME directory.
     #[serde(default = "default_terminal")]
     pub terminal: String,
 }
 
-/// The user's hand-picked `node` / `pnpm` executables. Each is `None` until the
-/// user points the setup page at one.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolchainOverrides {
     #[serde(default)]
@@ -308,7 +222,6 @@ pub struct ToolchainOverrides {
     pub pnpm: Option<PathBuf>,
 }
 
-/// The resolved toolchain. Each entry is `None` until a probe finds it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ToolchainBinding {
     #[serde(default)]
@@ -317,8 +230,6 @@ pub struct ToolchainBinding {
     pub pnpm: Option<BoundTool>,
 }
 
-/// One bound tool: the absolute path the launcher will execute, plus the
-/// version it reported when it was probed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoundTool {
     pub path: PathBuf,
@@ -326,13 +237,6 @@ pub struct BoundTool {
 }
 
 impl ToolchainBinding {
-    /// Whether a bound tool is still usable as recorded. A path that vanished
-    /// (a deleted nvm version, an uninstalled brew formula) makes the binding
-    /// stale, which the resolver treats as "probe again".
-    ///
-    /// A tool the user pointed at is fresh only while the binding is still that
-    /// very file: any other recorded path means the choice has not been applied
-    /// yet, so the resolver has to run again.
     fn is_fresh(&self, tool: &Option<BoundTool>, manual: Option<&Path>) -> bool {
         match tool {
             Some(bound) => match manual {
@@ -408,15 +312,11 @@ pub struct Config {
     pub instances: Vec<DshInstance>,
     #[serde(default)]
     pub settings: LauncherSettings,
-    /// The machines the launcher manages. The built-in local host is always in
-    /// here — a config written before hosts existed gains it on load.
     #[serde(default)]
     pub hosts: Vec<Host>,
 }
 
 impl Default for Config {
-    /// A launcher that has never written a config still has one host: the
-    /// machine it is running on.
     fn default() -> Self {
         Self {
             homes: Vec::new(),
@@ -429,14 +329,11 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The built-in local host, when the config carries one.
     pub fn local_host(&self) -> Option<&Host> {
         self.hosts.iter().find(|h| h.builtin)
     }
 }
 
-/// The host a command acts on: the one the caller named, or 本机 when it named
-/// none — which is what every call site written before hosts existed does.
 pub fn resolve_host<'a>(cfg: &'a Config, host_id: Option<&str>) -> Result<&'a Host, String> {
     match host_id.map(str::trim).filter(|id| !id.is_empty()) {
         None => cfg
@@ -458,8 +355,6 @@ pub fn resolve_host<'a>(cfg: &'a Config, host_id: Option<&str>) -> Result<&'a Ho
 pub fn migrate_hosts(cfg: &mut Config) -> bool {
     let mut changed = false;
 
-    // The built-in host is the one the frontend reads (`builtin`); the literal
-    // id is what migrations and tests reference.
     if !cfg.hosts.iter().any(|h| h.builtin) {
         match cfg.hosts.iter_mut().find(|h| h.id == LOCAL_HOST_ID) {
             Some(local) => local.builtin = true,
@@ -491,10 +386,6 @@ pub fn migrate_hosts(cfg: &mut Config) -> bool {
     changed
 }
 
-// ---------------------------------------------------------------------------
-// API / event payloads (mirrored by the frontend)
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteVersion {
     pub version: String,
@@ -506,7 +397,6 @@ pub struct RemoteVersion {
     pub source: Option<String>,
 }
 
-/// Partial settings update: only present fields are applied.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SettingsPatch {
     #[serde(default)]
@@ -540,39 +430,21 @@ pub enum InstanceState {
     Starting,
     Running,
     Exited,
-    /// The launcher cannot say what this instance's state is: the machine that
-    /// runs it did not answer. It is deliberately **not** `Stopped` — reading it
-    /// as 已停止 is what makes a user press 启动 and end up with a second DSH on
-    /// a server that was running one all along (ADR-0007 后果).
     Unreachable,
 }
 
-/// One instance's state, as the board reads it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstanceStatus {
     pub id: String,
     pub state: InstanceState,
-    /// Where the instance can be opened **from this Mac**. For a remote instance
-    /// that is the forwarded loopback address, not the one DSH printed on its
-    /// own machine (ADR-0008).
     pub url: Option<String>,
-    /// Where the instance really is, for a remote one: the address DSH printed
-    /// on its own machine. `None` for 本机's instances. Stated separately from
-    /// `url` because the two differ whenever the remote port was taken here, and
-    /// a reader must not think DSH is bound on this Mac.
     #[serde(default)]
     pub remote_url: Option<String>,
     pub profile: Option<String>,
     pub exit_code: Option<i32>,
 }
 
-// ---------------------------------------------------------------------------
-// Persistence
-// ---------------------------------------------------------------------------
-
 pub fn load_config(path: &Path) -> Result<Config, String> {
-    // A missing file is a first launch, not an error: start from the defaults
-    // and let the migrations and sweeps below produce the document to write. A
     // file that exists but cannot be read (a permission or I/O failure) is
     // reported to the caller instead, so a later save never overwrites a file
     // the launcher failed to understand.
@@ -581,7 +453,6 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(format!("读取配置失败: {err}")),
     };
-    // The document is read as a value before it is read as a `Config`: a config
     // written before each host kept its own toolchain still spells that pair
     // under `settings`, and only the raw document can say what it was.
     let document = match &raw {
@@ -614,7 +485,6 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
     }
 }
 
-/// Keeps the broken file and starts fresh.
 fn backup_and_reset(path: &Path, reason: &str) -> Config {
     let _ = fs::copy(path, path.with_extension("json.bak"));
     eprintln!("dsh-launcher: config corrupted, backed up: {reason}");
@@ -654,19 +524,6 @@ fn adopt_legacy_toolchain(document: &serde_json::Value, cfg: &mut Config) -> boo
     true
 }
 
-/// Removes one host's HOME records whose directory no longer exists AND that
-/// are not referenced by any instance (a stale placeholder from an interrupted
-/// task or a manually deleted folder). Directories that still exist are kept
-/// even if unreferenced (they may be user-managed).
-///
-/// **Only 本机 is swept.** "The directory does not exist" is a statement about a
-/// machine's filesystem, and the launcher can only make it about its own — the
-/// only way to ask a remote host is over the transport, which the load path
-/// where this runs does not have. A remote host's records are therefore left
-/// alone: a record whose directory the user deleted by hand survives a restart,
-/// which is the price of never judging another machine's disk by this Mac's. The
-/// judgement that *can* be asked of a remote host — 「你那台机器上有没有
-/// `~/.dsh`」 — is asked there, the first time that host's DSH_HOMEs are read.
 pub fn cleanup_orphan_homes(host: &Host, cfg: &mut Config) {
     if !host.builtin {
         return;
@@ -684,14 +541,6 @@ pub fn cleanup_orphan_homes(host: &Host, cfg: &mut Config) {
     cfg.homes.retain(|h| !orphans.contains(&h.id));
 }
 
-/// If the user's home directory contains a `.dsh` folder, make sure a HOME
-/// record points at it so it can be picked as a DSH_HOME and referenced by
-/// instances. Idempotent.
-///
-/// This sweep is 本机's only: `~` here is expanded against the launcher's own
-/// HOME, so the question can only be asked of this Mac. A remote host's
-/// `~/.dsh` is asked of that machine, the first time it is read
-/// ([`crate::commands::list_homes`]).
 pub fn ensure_user_dsh_home(host: &Host, cfg: &mut Config) {
     if !host.builtin {
         return;
@@ -720,10 +569,6 @@ pub fn ensure_user_dsh_home(host: &Host, cfg: &mut Config) {
     });
 }
 
-/// Path equality. APFS volumes are case-insensitive by default, so the
-/// comparison folds case on macOS (matching how the filesystem itself
-/// resolves paths); elsewhere plain equality is used. This is the local host's
-/// rule — see [`Host::paths_equal`] for the per-host one.
 pub fn paths_equal(a: &Path, b: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -735,24 +580,10 @@ pub fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The dedicated DSH_HOME of a version under one data directory:
-/// `<数据目录>/homes/<版本名>`.
-///
-/// One version, one directory — the contract the installer enforces
-/// (`migrate_instances_to_dedicated_homes`, `start_create_instance_task`). The
-/// derivation must stay identical to theirs (including [`sanitize_name`]) so
-/// that the path a deletion removes is provably the path the launcher created,
-/// and can never resolve to `~/.dsh` or a user-specified HOME (ADR-0002).
 pub(crate) fn dedicated_home_path(data_dir: &Path, version: &str) -> PathBuf {
     data_dir.join("homes").join(sanitize_name(version))
 }
 
-/// Merge one host's HOME records that point at the same path, keeping the
-/// first and redirecting instance references to the surviving home id (cleans
-/// up duplicates created before path-based reuse existed).
-///
-/// Two hosts may both have a HOME at `/home/me/.dsh`: same spelling, two
-/// machines, two records.
 pub fn dedupe_homes(host: &Host, cfg: &mut Config) {
     let mut redirect: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     {
@@ -776,15 +607,6 @@ pub fn dedupe_homes(host: &Host, cfg: &mut Config) {
     cfg.homes.retain(|h| !redirect.contains_key(&h.id));
 }
 
-/// Points `host`'s instances at dedicated homes under
-/// `<data_dir>/homes/<version>` (issue #3, #4), where `data_dir` is that
-/// host's data directory, and drops instances whose version is gone.
-///
-/// Only instances that already exist are touched: a version the user has no
-/// instance for is a legal state and stays that way, and a dedicated HOME the
-/// user removed is not recreated for a version with no instance. An instance
-/// whose recorded HOME no longer exists is pointed at its version's dedicated
-/// HOME, which is created only when that is actually needed.
 pub fn migrate_instances_to_dedicated_homes(
     host: &Host,
     data_dir: &Path,
@@ -792,7 +614,6 @@ pub fn migrate_instances_to_dedicated_homes(
 ) -> bool {
     let mut modified = false;
 
-    // 1. Remove instances whose version no longer exists.
     let old_inst_len = cfg.instances.len();
     cfg.instances
         .retain(|i| cfg.versions.iter().any(|v| v.id == i.version_id));
@@ -800,8 +621,6 @@ pub fn migrate_instances_to_dedicated_homes(
         modified = true;
     }
 
-    // 2. Point each existing instance at its version's dedicated home. A
-    //    version without an instance is left alone: nothing is created for it.
     for v in cfg.versions.iter().filter(|v| v.host_id == host.id) {
         let Some(inst) = cfg.instances.iter_mut().find(|i| i.version_id == v.id) else {
             continue;
@@ -863,19 +682,6 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4())
 }
 
-/// Normalizes a user-entered directory path into an absolute one.
-///
-/// The launcher's path inputs are free-text: without this, `~/.dsh` was taken
-/// literally and `create_dir_all` built a directory named `~` under whatever
-/// cwd the app happened to have. Rules, applied to every such input:
-///
-/// * a leading `~` (alone, `~/…`, or `~user/…`) expands to `$HOME`;
-/// * `.` / `..` segments are resolved textually;
-/// * trailing separators are dropped (`/a/b/` and `/a/b` are one HOME);
-/// * a relative path is rejected — its meaning would depend on the app's cwd.
-///
-/// The result is not canonicalized: symlinks are intentionally preserved so a
-/// user-managed `/Volumes/data/dsh` stays spelled that way.
 pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -898,8 +704,6 @@ pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
         PathBuf::from(trimmed)
     };
 
-    // Resolve `.`/`..` and drop trailing separators without touching the
-    // filesystem (the path may not exist yet).
     let mut out = PathBuf::new();
     for comp in expanded.components() {
         match comp {
@@ -923,13 +727,10 @@ pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// These tests need a stable HOME; the expansion target only has to be
-    /// absolute and match whatever HOME says.
     fn home() -> PathBuf {
         std::env::var_os("HOME").map(PathBuf::from).unwrap()
     }
 
-    /// A remote host with its own data directory (or none yet).
     fn remote_host(id: &str, data_dir: Option<&str>) -> Host {
         Host {
             id: id.to_string(),
@@ -950,11 +751,6 @@ mod tests {
         dir
     }
 
-    /// The launcher's own filesystem calls belong to 本机. A remote host's paths
-    /// are on that server, so asking to create or remove one from here has to
-    /// be refused — the alternative is a stray directory on this Mac where the
-    /// user asked for one on the server, or a deleted local file standing in
-    /// for a remote one.
     #[test]
     fn only_the_local_hosts_paths_may_be_touched_from_here() {
         assert!(Host::local().local_paths_only("DSH_HOME 目录").is_ok());
@@ -966,8 +762,6 @@ mod tests {
         assert!(err.contains("不在本机"), "{err}");
     }
 
-    /// The config this launcher wrote before hosts existed, byte for byte: one
-    /// version, its dedicated DSH_HOME, one instance and a pile of settings.
     const OLD_CONFIG_JSON: &str = r#"{
   "homes": [
     {
@@ -1013,8 +807,6 @@ mod tests {
   }
 }"#;
 
-    /// Opening a config that predates hosts gives every record the local host
-    /// and adds the built-in one — without touching anything else in it.
     #[test]
     fn old_config_records_join_the_local_host() {
         let dir = scratch("hosts-migrate");
@@ -1023,14 +815,12 @@ mod tests {
 
         let cfg = load_config(&config_path).unwrap();
 
-        // The built-in host is there, and it is the only one.
         assert_eq!(cfg.hosts.len(), 1, "只有本机一条");
         let local = cfg.local_host().expect("本机必须在");
         assert_eq!(local.id, LOCAL_HOST_ID);
         assert!(local.builtin, "本机是内置的那一条，不能删除");
         assert_eq!(local.display_name, "本机");
 
-        // Every record now has an owner...
         for h in &cfg.homes {
             assert_eq!(h.host_id, LOCAL_HOST_ID, "DSH_HOME {} 归本机", h.id);
         }
@@ -1041,7 +831,6 @@ mod tests {
             assert_eq!(i.host_id, LOCAL_HOST_ID, "实例 {} 归本机", i.id);
         }
 
-        // ...and nothing else moved.
         let home = cfg.homes.iter().find(|h| h.id == "h-dedicated").unwrap();
         assert_eq!(home.name, "0.1.0-rc.6");
         assert_eq!(home.path, PathBuf::from("/data/launcher/homes/0.1.0-rc.6"));
@@ -1070,9 +859,6 @@ mod tests {
         assert!(cfg.settings.autostart);
         assert_eq!(cfg.settings.terminal, "ghostty");
 
-        // The toolchain pair this config spells under `settings` belonged to the
-        // local host all along; it moves onto that host's record, so the user's
-        // hand-picked executables are not dropped by the move.
         assert_eq!(
             local.toolchain.node.as_ref().map(|b| b.path.clone()),
             Some(PathBuf::from("/opt/node/bin/node"))
@@ -1083,8 +869,6 @@ mod tests {
         );
         assert_eq!(cfg.settings.last_instance_id.as_deref(), Some("i-web"));
 
-        // The migration is persisted, so the next launch starts from a config
-        // that already names the host.
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(written["hosts"][0]["id"], LOCAL_HOST_ID);
@@ -1097,7 +881,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A launcher that has never written a config is still on one host.
     #[test]
     fn a_fresh_config_already_has_the_local_host() {
         let cfg = Config::default();
@@ -1107,9 +890,6 @@ mod tests {
         assert!(resolve_host(&cfg, None).is_ok(), "不指定主机时解析到本机");
     }
 
-    /// A config file that has no `hosts` key at all (every file written before
-    /// this change) still comes back with the built-in host, and naming it by
-    /// its literal id works.
     #[test]
     fn a_config_without_a_hosts_key_still_resolves_the_local_host() {
         let dir = scratch("hosts-missing-key");
@@ -1125,8 +905,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The dedicated DSH_HOME is `<该主机的数据目录>/homes/<版本名>`: the same
-    /// rule as before, applied to the host that owns the version.
     #[test]
     fn dedicated_home_paths_are_computed_on_their_host() {
         let local = Host::local();
@@ -1136,7 +914,6 @@ mod tests {
                 .unwrap(),
             Path::new("/data/launcher/homes/0.1.0-rc.6"),
         );
-        // Sanitized with the same rule the installer uses.
         assert_eq!(
             local
                 .dedicated_home_path(Path::new("/data/launcher"), "a/b c")
@@ -1144,8 +921,6 @@ mod tests {
             Path::new("/data/launcher/homes/a_b c"),
         );
 
-        // A remote host's version lives under *its* data directory, and the
-        // launcher's own is not involved.
         let remote = remote_host("host-server", Some("/home/u/.local/share/dsh-launcher"));
         assert_eq!(
             remote
@@ -1158,23 +933,17 @@ mod tests {
             PathBuf::from("/home/u/.local/share/dsh-launcher"),
         );
 
-        // The local host uses the launcher's own directory, whatever the record
-        // says.
         assert_eq!(
             local.data_dir(Path::new("/data/launcher")).unwrap(),
             PathBuf::from("/data/launcher"),
         );
 
-        // A remote host whose data directory has not been read off that machine
-        // yet has none — paths must not be guessed from the launcher's own.
         let unresolved = remote_host("host-server", None);
         assert!(unresolved
             .dedicated_home_path(Path::new("/data/launcher"), "0.1.0")
             .is_err());
     }
 
-    /// The bare rule, for a caller that already knows which data directory it
-    /// means.
     #[test]
     fn dedicated_home_path_uses_homes_dir_and_sanitized_name() {
         let data_dir = Path::new("/data/launcher");
@@ -1182,16 +951,12 @@ mod tests {
             dedicated_home_path(data_dir, "0.1.0-rc.6"),
             Path::new("/data/launcher/homes/0.1.0-rc.6"),
         );
-        // The name is sanitized with the SAME rule the installer used, so the
-        // path deleted is provably the path created.
         assert_eq!(
             dedicated_home_path(data_dir, "a/b c"),
             Path::new("/data/launcher/homes/a_b c"),
         );
     }
 
-    /// Case folding is the local volume's rule. A remote host is Linux: two
-    /// paths that differ in case are two different paths.
     #[test]
     fn a_remote_host_does_not_fold_case_in_paths() {
         let remote = remote_host("host-server", Some("/data"));
@@ -1208,8 +973,6 @@ mod tests {
         }
     }
 
-    /// The same spelling on two hosts is two HOME records: `/home/u/.dsh`
-    /// exists on both machines and only one of them is the local one.
     #[test]
     fn homes_on_two_hosts_are_not_merged_by_dedupe() {
         let mut cfg = Config::default();
@@ -1246,7 +1009,6 @@ mod tests {
         assert_eq!(cfg.instances[0].home_id, "h-remote", "实例的归属不被改写");
     }
 
-    /// Deduping the local host still works the way it always did.
     #[test]
     fn duplicate_homes_on_the_local_host_still_merge() {
         let mut cfg = Config::default();
@@ -1283,8 +1045,6 @@ mod tests {
         );
     }
 
-    /// "This directory does not exist" is a statement about one machine's
-    /// filesystem, so the sweep only judges the host it was asked about.
     #[test]
     fn the_orphan_sweep_leaves_another_hosts_records_alone() {
         let mut cfg = Config::default();
@@ -1311,10 +1071,6 @@ mod tests {
             "远端那条记录不能拿本机的文件系统去判"
         );
 
-        // And it stays that way when a caller names the remote host: the sweep
-        // skips it, because `exists()` here answers about *this* Mac and a path
-        // that happens to share a spelling with a path over there would decide
-        // the record's fate on the wrong machine's evidence.
         let remote = cfg.hosts[0].clone();
         cleanup_orphan_homes(&remote, &mut cfg);
         assert_eq!(
@@ -1335,8 +1091,6 @@ mod tests {
 
     #[test]
     fn normalize_drops_trailing_separator_and_dot_segments() {
-        // `/a/b/` and `/a/b` must be one HOME, and `./` segments must not
-        // produce a path with `~` or `.` baked in.
         assert_eq!(
             normalize_dir_path("/tmp/dsh-home/").unwrap(),
             PathBuf::from("/tmp/dsh-home")
@@ -1367,8 +1121,6 @@ mod tests {
 
     #[test]
     fn normalize_tilde_and_explicit_home_are_the_same_path() {
-        // So that the ~/.dsh record and a typed /Users/me/.dsh dedupe to one
-        // HOME instead of showing up twice.
         let explicit = home().join(".dsh");
         let via_tilde = normalize_dir_path("~/.dsh").unwrap();
         assert!(paths_equal(&explicit, &via_tilde));
@@ -1376,9 +1128,6 @@ mod tests {
 
     #[test]
     fn bound_tool_is_stale_when_its_path_disappears() {
-        // The binding is a resolution, not a preference: a path that no longer
-        // exists must read as stale so the resolver re-probes instead of
-        // failing to spawn. This is the nvm-switched-versions case.
         let dir = std::env::temp_dir().join(format!("bound-tool-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("node");
@@ -1423,13 +1172,9 @@ mod tests {
             pnpm: None,
         };
 
-        // The user's choice is what the config must end up with, so a binding
-        // that points anywhere else is stale and forces a re-resolve.
         assert!(bound(&manual).node_is_fresh(Some(&manual)));
         assert!(!bound(&detected).node_is_fresh(Some(&manual)));
 
-        // A choice that stopped working falls back to detection — but the
-        // binding it left behind is stale either way.
         std::fs::remove_file(&manual).unwrap();
         assert!(!bound(&manual).node_is_fresh(Some(&manual)));
 
@@ -1438,8 +1183,6 @@ mod tests {
 
     #[test]
     fn toolchain_binding_defaults_are_absent() {
-        // A config written before the binding existed must deserialize with
-        // both tools unbound rather than failing to load.
         let binding = ToolchainBinding::default();
         assert!(binding.node.is_none());
         assert!(binding.pnpm.is_none());
@@ -1452,10 +1195,6 @@ mod tests {
 
     #[test]
     fn a_host_record_without_toolchain_fields_still_loads() {
-        // Forward compatibility of the config file itself: both fields are
-        // `#[serde(default)]`, so a host record written before per-host
-        // toolchains existed loads with nothing probed and nothing chosen —
-        // rather than failing and taking the whole config with it.
         let raw = r#"{"id":"host-lab","display_name":"服务器","ssh_target":"lab"}"#;
         let host: Host = serde_json::from_str(raw).unwrap();
         assert!(host.toolchain.node.is_none());
@@ -1466,9 +1205,6 @@ mod tests {
 
     #[test]
     fn a_legacy_toolchain_pair_moves_onto_the_local_host() {
-        // The pair used to live under `settings`, and it was the local host's.
-        // Loading such a config has to keep it: a hand-picked executable is the
-        // user's choice, and nothing can re-derive it.
         let mut cfg = Config::default();
         migrate_hosts(&mut cfg);
         let document: serde_json::Value = serde_json::from_str(
@@ -1486,8 +1222,6 @@ mod tests {
             Some(PathBuf::from("/opt/pnpm/bin/pnpm"))
         );
 
-        // A record that already carries its own pair is newer than the legacy
-        // one, and is left exactly as it is.
         assert!(!adopt_legacy_toolchain(&document, &mut cfg));
     }
 }

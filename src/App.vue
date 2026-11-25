@@ -32,8 +32,6 @@ watch(
   },
 )
 
-// --- 主题 -------------------------------------------------------------------
-
 const themeMedia = window.matchMedia('(prefers-color-scheme: dark)')
 
 function applyTheme(mode: ThemeMode) {
@@ -71,8 +69,6 @@ onMounted(async () => {
   await setupMenuListeners()
 })
 
-// --- 快捷键 -----------------------------------------------------------------
-
 function goShortcut(name: ShortcutRoute) {
   const target: Record<ShortcutRoute, string> = {
     instances: '/',
@@ -109,8 +105,6 @@ function backShortcut() {
   router.back()
 }
 
-// --- 原生菜单 -----------------------------------------------------------------
-
 let unlistenMenu: (() => void)[] = []
 
 async function setupMenuListeners() {
@@ -139,8 +133,6 @@ async function onMenuOpenHelp() {
   }
 }
 
-// --- 启动深链接 ---------------------------------------------------------------
-
 let unlistenDeepLink: (() => void) | undefined
 
 async function setupLaunchDeepLink() {
@@ -158,9 +150,7 @@ function handleDeepLink(raw: string) {
     const u = new URL(raw)
     if (u.protocol !== 'dsh-launcher:') return
     if (u.host === 'launch') void launchFromDeepLink(u)
-  } catch {
-    // 忽略无效链接
-  }
+  } catch {}
 }
 
 function launchTarget(ref: string): DshInstance | undefined {
@@ -222,8 +212,6 @@ watch(
   },
 )
 
-// --- 窗口拖动 -----------------------------------------------------------------
-
 const appWindow = (() => {
   return (window as unknown as { __TAURI_INTERNALS__?: unknown })
     .__TAURI_INTERNALS__
@@ -271,9 +259,7 @@ async function onTitlebarDoubleClick(e: MouseEvent) {
     if (!w) return
     if (await w.isMaximized()) await w.unmaximize()
     else await w.maximize()
-  } catch {
-    // 仅影响窗口缩放，忽略。
-  }
+  } catch {}
 }
 </script>
 

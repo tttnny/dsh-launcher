@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import type { DshInstance } from '@/api/types'
 
-// 启动前的一次性选择：实例没有默认配置、而数据目录里有多个配置时，
-// 直接问清楚这次用哪一个，不把选择藏在列表行里。
-
 const props = defineProps<{
   visible: boolean
   instance: DshInstance | null

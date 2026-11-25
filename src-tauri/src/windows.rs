@@ -2,11 +2,6 @@ use tauri::{AppHandle, Manager, WebviewUrl, WindowEvent};
 
 use crate::AppState;
 
-/// Attaches the main window's close behavior: with `minimize_to_tray` the
-/// close button hides the window instead of closing it; otherwise the window
-/// is really destroyed, but the app itself stays alive (see the
-/// `ExitRequested` handler in lib.rs) so instances keep running and the
-/// window can be recreated from the Dock or the tray.
 pub fn attach_close_behavior(app: &AppHandle, win: &tauri::WebviewWindow) {
     let handle = app.clone();
     let win2 = win.clone();
@@ -27,8 +22,6 @@ pub fn attach_close_behavior(app: &AppHandle, win: &tauri::WebviewWindow) {
     });
 }
 
-/// Recreates the main launcher window (with its close handler) after it was
-/// destroyed by closing with `minimize_to_tray` off.
 fn create_main_window(app: &AppHandle) -> Result<(), String> {
     let win = tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("DSH Launcher")
@@ -46,8 +39,6 @@ fn create_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Shows the main launcher window, recreating it when it no longer exists.
-/// Used by the Dock `Reopen` event and the tray's "打开启动器" entry.
 pub fn show_or_create_main(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();

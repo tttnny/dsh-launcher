@@ -46,31 +46,14 @@ export function installKey(
  * views render, and Vue must not proxy them.
  */
 let disposers: (() => void)[] = []
-/** The one start-up run in flight, so a second `init()` joins it. */
 let initRun: Promise<void> | null = null
 
 interface LauncherState {
-  /** Every machine the launcher manages, with the status last seen for it. */
   hosts: HostWithStatus[]
-  /**
-   * 当前主机 — the **one** current host (ADR-0006 §3): the Library's three tabs
-   * always show it, and the instances page falls back to it when its 全部 view
-   * is off. Never `'all'`: the Library has no such shelf, and a second place
-   * keeping its own idea of "which machine am I looking at" is what the ADR
-   * forbids.
-   */
   currentHostId: string
-  /** The instances page's 全部 view switch (on by default): every host at once. */
   allHosts: boolean
-  /** DSH_HOMEs per host. Records, so reading them never touches the machine. */
   homesByHost: Record<string, DshHome[]>
-  /**
-   * Why one host's DSH_HOMEs could not be read, by host id. A DSH_HOME is a
-   * record the launcher keeps itself (ADR-0006 §2), so a machine that is merely
-   * unreachable leaves this empty and its records stay on screen.
-   */
   homeErrors: Record<string, string>
-  /** Installed versions per host, as that host's own `/versions` answered. */
   versionsByHost: Record<string, DshVersion[]>
   /**
    * Why one host's installed versions could not be read (「连不上」 and friends),
@@ -79,11 +62,6 @@ interface LauncherState {
    * yesterday's answer as today's.
    */
   versionErrors: Record<string, string>
-  /**
-   * Instances of every host. The board labels each row with its machine, so two
-   * instances called the same thing on two hosts stay two rows; nothing else
-   * reads this list except through the getters below.
-   */
   instances: DshInstance[]
   settings: LauncherSettings
   statusById: Record<string, InstanceStatus>
@@ -103,11 +81,7 @@ interface LauncherState {
     string,
     { hostId: string; version: string } | null
   >
-  /** The installable list per host, so switching back to a host does not ask
-   *  again; the refresh button is what asks again. */
   remoteVersionsByHost: Record<string, RemoteVersion[]>
-  /** Why one host's installable list could not be read. Same rule as
-   *  `versionErrors`: no list is served from a failed call. */
   remoteErrors: Record<string, string>
   remoteLoading: boolean
   runtime: RuntimeStatus | null
@@ -156,23 +130,16 @@ export const useLauncherStore = defineStore('launcher', {
   }),
 
   getters: {
-    /** The machine the Library is showing. */
     currentHost: (s): HostWithStatus | null =>
       s.hosts.find((h) => h.id === s.currentHostId) ?? s.hosts[0] ?? null,
     hostById: (s) => (id?: string | null) =>
       s.hosts.find((h) => h.id === id) ?? null,
     instanceById: (s) => (id: string) => s.instances.find((i) => i.id === id),
-    /** The current host's versions — what the Library's first tab shows. */
     versions: (s) => s.versionsByHost[s.currentHostId] ?? [],
-    /** The current host's DSH_HOMEs. */
     homes: (s) => s.homesByHost[s.currentHostId] ?? [],
-    /** Why the current host's DSH_HOMEs could not be read; `''` when they could. */
     homeError: (s) => s.homeErrors[s.currentHostId] ?? '',
-    /** Why the current host's installed versions could not be read; `''` when they could. */
     versionError: (s) => s.versionErrors[s.currentHostId] ?? '',
-    /** The current host's installable versions (cached per host). */
     remoteVersions: (s) => s.remoteVersionsByHost[s.currentHostId] ?? [],
-    /** Why the current host's installable list could not be read. */
     remoteError: (s) => s.remoteErrors[s.currentHostId] ?? '',
     /**
      * Look-ups by id search every host's cache: a row on the board may belong
@@ -188,11 +155,6 @@ export const useLauncherStore = defineStore('launcher', {
         .find((h) => h.id === id),
     instancesOfHost: (s) => (hostId: string) =>
       s.instances.filter((i) => (i.host_id ?? LOCAL_HOST_ID) === hostId),
-    /**
-     * The instances the board is scoped to: every host's, or the current
-     * host's when 全部 is off. One definition, so the filter, the summary and
-     * the bulk actions cannot disagree about what the user is looking at.
-     */
     visibleInstances: (s) =>
       s.allHosts
         ? s.instances
@@ -209,17 +171,6 @@ export const useLauncherStore = defineStore('launcher', {
     isHomeShared: (s) => (homeId: string) =>
       s.instances.some((i) => i.home_id === homeId) &&
       s.instances.filter((i) => i.home_id === homeId).length > 1,
-    /**
-     * The state of one instance. Absence from `statusById` means 「已停止」.
-     *
-     * That reading is only safe because the backend never leaves a remote
-     * instance undecided: its launch-time scan pushes 「启动中」 for every remote
-     * instance it has not asked about yet, and 「主机不可达」 for one whose machine
-     * did not answer (`process::list_statuses`). Neither of those ever reaches
-     * here as an absent record, which is what keeps 「已停止」 from being guessed
-     * at — the one word that leads a user to start a second DSH on a server
-     * (ADR-0007 后果).
-     */
     statusOf:
       (s) =>
       (id: string): InstanceStatus =>
@@ -233,12 +184,6 @@ export const useLauncherStore = defineStore('launcher', {
   },
 
   actions: {
-    /**
-     * The one start-up: the snapshot, then the event stream. A second call
-     * joins the run already in flight instead of opening a second set of
-     * subscriptions; a run that failed releases what it opened and leaves the
-     * next call to start over.
-     */
     async init(): Promise<void> {
       if (!initRun) {
         initRun = this.startup().catch((e) => {
@@ -249,7 +194,6 @@ export const useLauncherStore = defineStore('launcher', {
       return initRun
     },
 
-    /** Releases the event subscriptions `init()` opened. */
     dispose() {
       for (const un of disposers) un()
       disposers = []
@@ -280,13 +224,10 @@ export const useLauncherStore = defineStore('launcher', {
       const [hosts, instances, settings, statuses, runtime, tasks] =
         await Promise.allSettled([
           api.listHosts(),
-          // Every host's instances: the board's 全部 view is the default, and the
-          // request says so explicitly (「没说话」 means 本机 everywhere else).
           api.listInstances(null, true),
           api.getSettings(),
           api.listInstanceStatus(),
           api.getRuntimeStatus(),
-          // The task list is the install ledger.
           api.listTasks(),
         ])
       // Each read stands on its own: one failing interface leaves only its own
@@ -336,11 +277,6 @@ export const useLauncherStore = defineStore('launcher', {
       live = true
       pending.forEach(applyStatus)
 
-      // The current host's resources first — the Library may be on screen — and
-      // the other hosts' after, so a board row belonging to another machine can
-      // still name its version. A host that cannot be reached records why and
-      // keeps no list; nothing here raises a toast for a machine the user is
-      // not even looking at.
       await this.loadHostResources(this.currentHostId)
       for (const host of this.hosts) {
         if (host.id !== this.currentHostId) void this.loadHostResources(host.id)
@@ -351,9 +287,6 @@ export const useLauncherStore = defineStore('launcher', {
       // Versions page starts one, and one that finished without an event is
       // retired on the next refresh.
       const unTaskProgress = await api.onTaskProgress((p) => {
-        // The row this event belongs to: the install this page just started
-        // (the claim `watchInstallTask` left), or the task the backend listed
-        // under that id.
         const claim = this.pendingInstallTasks[p.id]
         if (claim !== undefined) delete this.pendingInstallTasks[p.id]
         const known = Object.values(this.installingVersions).find(
@@ -418,13 +351,9 @@ export const useLauncherStore = defineStore('launcher', {
             percent: p.percent,
             message: p.message,
             instance_id: p.instance_id ?? previous?.instance_id ?? null,
-            // The log tail belongs to the run that just ended: the row keeps
-            // the backend's reason and the time, not a thousand lines of it.
             logs: [],
           }
         }
-        // It may have created an instance and a version directory — on the host
-        // it ran on, which is not necessarily the one on screen.
         void this.loadHostResources(hostId)
         if (p.instance_id) void this.refreshInstances()
       })
@@ -441,16 +370,6 @@ export const useLauncherStore = defineStore('launcher', {
       disposers.push(unTaskLog)
     },
 
-    /**
-     * One host's DSH_HOMEs and installed versions, cached by host.
-     *
-     * The two are read independently, because they are not the same kind of
-     * fact: a DSH_HOME is a record the launcher keeps itself (ADR-0006 §2), so
-     * a machine that cannot be reached still has its HOMEs on screen, while
-     * 「装了哪些版本」 is a claim only that machine can make and fails with it.
-     * Each list gets its own outcome, and a list that failed keeps no answer:
-     * the previous one would be yesterday's result presented as today's.
-     */
     async loadHostResources(hostId: string) {
       const [homes, versions] = await Promise.allSettled([
         api.listHomes(hostId),
@@ -460,9 +379,6 @@ export const useLauncherStore = defineStore('launcher', {
         this.homesByHost[hostId] = homes.value
         delete this.homeErrors[hostId]
       } else {
-        // The failed list is dropped, not kept: a stale list would be the
-        // previous answer presented as today's — in the Library's own tabs and
-        // in the two sheets that fill their selects from this cache.
         delete this.homesByHost[hostId]
         this.homeErrors[hostId] = String(homes.reason)
       }
@@ -475,12 +391,6 @@ export const useLauncherStore = defineStore('launcher', {
       }
     },
 
-    /**
-     * Sets the one 当前主机 — from the Library's picker or from the instances
-     * page's filter, it is the same state either way (ADR-0006 §3). Its
-     * resources are read the first time (or after a failed read); switching
-     * back and forth does not re-ask a machine that already answered.
-     */
     async selectHost(hostId: string) {
       this.currentHostId = hostId
       if (!this.versionsByHost[hostId] || !this.homesByHost[hostId]) {
@@ -489,17 +399,10 @@ export const useLauncherStore = defineStore('launcher', {
       void this.refreshRemoteVersions()
     },
 
-    /** The instances page's 全部 view switch. */
     setAllHosts(value: boolean) {
       this.allHosts = value
     },
 
-    /**
-     * Drops every cached answer for one host: its DSH_HOMEs, its installed and
-     * installable versions, and the reasons its reads failed. Called when the
-     * machine leaves the list, and when a field that decides its answers
-     * changes — a cache must not outlive the machine it describes.
-     */
     dropHostCache(hostId: string) {
       delete this.homesByHost[hostId]
       delete this.versionsByHost[hostId]
@@ -509,12 +412,6 @@ export const useLauncherStore = defineStore('launcher', {
       delete this.remoteErrors[hostId]
     },
 
-    /**
-     * Replaces the host list the Library's picker and the board's filter read.
-     * Editing hosts belongs to the Settings page; this is how an add, a rename
-     * or a delete reaches the pages that use them — including the fall back
-     * when the host that went away is the current one.
-     */
     setHosts(hosts: HostWithStatus[]) {
       let currentWentStale = false
       let hostListChanged = hosts.length !== this.hosts.length
@@ -536,7 +433,6 @@ export const useLauncherStore = defineStore('launcher', {
       for (const host of hosts) {
         const before = this.hosts.find((h) => h.id === host.id)
         if (!before) {
-          // A machine the launcher had not listed before.
           hostListChanged = true
           continue
         }
@@ -553,22 +449,16 @@ export const useLauncherStore = defineStore('launcher', {
       }
       this.hosts = hosts
       if (!hosts.some((h) => h.id === this.currentHostId)) {
-        // The current host was deleted. 本机 is the one machine that is always
-        // there, and every page can show it.
         this.currentHostId =
           hosts.find((h) => h.builtin)?.id ?? hosts[0]?.id ?? LOCAL_HOST_ID
         currentWentStale = true
       }
       if (currentWentStale) void this.loadHostResources(this.currentHostId)
-      // Deleting a host takes its instance records with it: a board that kept
-      // the rows would offer actions on records the launcher no longer has.
       if (hostListChanged) void this.refreshInstances()
     },
 
     async refreshInstances() {
       this.instances = await api.listInstances(null, true)
-      // The board is the list of instances the launcher has: a state kept for
-      // one that is gone is a record nothing can ever update again.
       const ids = new Set(this.instances.map((i) => i.id))
       for (const id of Object.keys(this.statusById)) {
         if (!ids.has(id)) delete this.statusById[id]
@@ -580,7 +470,6 @@ export const useLauncherStore = defineStore('launcher', {
     async refreshHomes(hostId?: string) {
       await this.loadHostResources(hostId ?? this.currentHostId)
     },
-    /** Re-reads the install ledger the Versions page renders. */
     async refreshInstallTasks() {
       this.installingVersions = installLedger(await api.listTasks())
     },
@@ -605,11 +494,6 @@ export const useLauncherStore = defineStore('launcher', {
       this.runtime = await api.getRuntimeStatus(force)
     },
 
-    /**
-     * The installable versions of the current host: asked of that host's own
-     * registry when it has one, and of this Mac's npm when it does not. The
-     * answer is cached per host — the refresh button is what asks again.
-     */
     async refreshRemoteVersions(force = false) {
       const hostId = this.currentHostId
       if (!force && this.remoteVersionsByHost[hostId]) return
@@ -619,8 +503,6 @@ export const useLauncherStore = defineStore('launcher', {
         this.remoteVersionsByHost[hostId] = list
         if (this.currentHostId === hostId) delete this.remoteErrors[hostId]
       } catch (e) {
-        // A failed fetch leaves no list behind: the page says why instead of
-        // showing the last one it managed to read.
         delete this.remoteVersionsByHost[hostId]
         this.remoteErrors[hostId] = String(e)
       } finally {

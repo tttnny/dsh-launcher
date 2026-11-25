@@ -1,27 +1,12 @@
-//! Launcher proxy support (settings → network clients and instance env).
-//!
-//! The `proxy_enabled` settings toggle routes the launcher's own HTTP
-//! requests (market, registry, downloads, news, update checks) through the
-//! configured proxy; `proxy_apply_dsh` additionally injects the proxy into
-//! launched dsh instances as HTTP(S)_PROXY / NO_PROXY environment variables,
-//! overriding the instance's own overrides on the next start.
-
 use crate::config::LauncherSettings;
 use std::sync::RwLock;
 
 #[derive(Clone, Debug)]
 struct ProxyConf {
-    /// `scheme://host:port` passed to `reqwest::Proxy::all`.
     server: String,
-    /// Comma-separated NO_PROXY list.
     no_proxy: String,
 }
 
-/// Resolves the configured proxy address into the `scheme://host:port` form
-/// reqwest expects. Only `http` and `https` are accepted. The port is taken
-/// from the URL when it carries one, and only filled in from `port` when it
-/// does not, so a full URL is not given a second port. An address that cannot
-/// be parsed returns `None`.
 fn parse_proxy_url(url: &str, port: u16) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -38,13 +23,9 @@ fn parse_proxy_url(url: &str, port: u16) -> Option<String> {
         parsed.set_port(Some(port)).ok()?;
     }
     // reqwest renders a bare host with a trailing slash; the environment
-    // variables and the proxy server string keep the address without one.
     Some(parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// Whether the URL's authority spells a port out. `Url` normalizes a scheme's
-/// default port away, so this reads the raw text: the authority is what follows
-/// `://` up to the first `/`, `?` or `#`, and a trailing `:digits` is a port.
 fn has_explicit_port(url: &str) -> bool {
     let Some((_, after_scheme)) = url.split_once("://") else {
         return false;
@@ -67,9 +48,6 @@ fn conf_from_settings(s: &LauncherSettings) -> Option<ProxyConf> {
     })
 }
 
-/// Checks the settings' proxy address before it is saved. An address reqwest
-/// cannot use is refused here so it is reported to the user instead of being
-/// stored and silently ignored.
 pub fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
     if !settings.proxy_enabled {
         return Ok(());
@@ -88,13 +66,10 @@ pub fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
 /// update.
 static CURRENT: RwLock<Option<ProxyConf>> = RwLock::new(None);
 
-/// Refreshes the global snapshot from (possibly new) settings.
 pub fn sync_from_settings(settings: &LauncherSettings) {
     *CURRENT.write().unwrap() = conf_from_settings(settings);
 }
 
-/// Applies the configured proxy (if enabled) to a reqwest client builder.
-/// Invalid proxy configuration is ignored rather than breaking the request.
 pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     let guard = CURRENT.read().unwrap();
     let Some(conf) = guard.as_ref() else {
@@ -109,7 +84,6 @@ pub fn apply(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     }
 }
 
-/// Proxy environment variable names managed by [`override_env`].
 const PROXY_KEYS: [&str; 6] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -134,13 +108,6 @@ pub fn override_env(env: &mut Vec<(String, String)>, settings: &LauncherSettings
     env.push(("no_proxy".to_string(), conf.no_proxy));
 }
 
-/// Applies the configured proxy (if enabled) to a child command's
-/// environment, so network-heavy children spawned by the launcher (npm view,
-/// pnpm install, git clone, npm install -g) follow the same proxy as its own
-/// reqwest requests. Without this, a proxy user gets a working version list
-/// (reqwest is proxied) but direct-connect installs that fail opaquely.
-/// Mirrors the `proxy_enabled` settings toggle: when disabled, the inherited
-/// environment is left untouched.
 pub fn apply_to_command(cmd: &mut tokio::process::Command) {
     let guard = CURRENT.read().unwrap();
     let Some(conf) = guard.as_ref() else {

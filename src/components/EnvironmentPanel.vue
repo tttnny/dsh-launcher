@@ -8,10 +8,6 @@ import { useCopy } from '@/composables/useCopy'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 一台机器的运行环境：Node.js 与 pnpm 从哪来、装在哪个路径、缺了怎么装，
-// 以及把启动器指向用户自己的可执行文件。结论按主机读取，切换主机时旧的
-// 答案先清空，避免把上一台机器的结论当成这一台的。
-
 type ToolId = 'node' | 'pnpm'
 
 const TOOL_IDS: ToolId[] = ['node', 'pnpm']

@@ -2,20 +2,11 @@ import { reactive } from 'vue'
 import type { DshInstance } from '@/api/types'
 import { api } from '@/api'
 
-// Module-level singleton state: the profile list cache and the per-instance
-// selection live once, shared by instance cards, the health log modal, and
-// any launcher flow that needs "which profile does this instance run".
-
-/** Profile lists per HOME id (undefined = not loaded yet). */
 const profilesByHome: Record<string, string[] | undefined> = reactive({})
-/** Selected profile per instance id (undefined = not chosen yet). */
 const selectionByInstance: Record<string, string | undefined> = reactive({})
-/** In-flight profile fetches per HOME id. */
 const loadingByHome: Record<string, boolean> = reactive({})
-/** Why one HOME's profile list could not be read; undefined when it could. */
 const profilesError: Record<string, string | undefined> = reactive({})
 
-/** The one shared fetch per HOME id, so every caller awaits the same result. */
 const requestsByHome: Record<
   string,
   Promise<string[] | undefined> | undefined
@@ -25,17 +16,7 @@ const requestsByHome: Record<
  *  result back. */
 const generations: Record<string, number> = {}
 
-/**
- * One cache + one fallback policy for instance profiles. "Which profile does
- * this instance run" used to be re-derived five times with three different
- * fallback orders; the chain lives here now:
- * kept selection → last_profile → default_profile → first in list.
- */
 export function useProfiles() {
-  /** Fetches (and caches) a HOME's profile list; concurrent calls share the
-   *  in-flight request. Resolves the list, or undefined when the read failed
-   *  (the failure is kept in `profilesError[homeId]`, so it is not the same
-   *  answer as an empty list). */
   async function loadForHome(homeId: string): Promise<string[] | undefined> {
     const cached = profilesByHome[homeId]
     if (cached) return cached
@@ -46,8 +27,6 @@ export function useProfiles() {
     const request = api
       .listProfiles(homeId)
       .then((list) => {
-        // Only the latest generation may write the cache: a list invalidated
-        // while this request was in flight must not be resurrected.
         if ((generations[homeId] ?? 0) === generation) {
           profilesByHome[homeId] = list
           delete profilesError[homeId]
@@ -55,8 +34,6 @@ export function useProfiles() {
         return list
       })
       .catch((e) => {
-        // A read failure is not "this HOME has no profiles": record the reason
-        // and hand back undefined so callers can tell the two apart.
         if ((generations[homeId] ?? 0) === generation) {
           profilesError[homeId] = String(e)
         }
@@ -98,7 +75,6 @@ export function useProfiles() {
     return fallback
   }
 
-  /** Drops a HOME's cached list (e.g. after the instance switched HOME). */
   function invalidateHome(homeId: string) {
     delete profilesByHome[homeId]
     delete profilesError[homeId]
@@ -127,7 +103,6 @@ export function useProfiles() {
     if (!inFlight) delete generations[homeId]
   }
 
-  /** Drops one instance's kept selection once the instance is removed. */
   function forgetInstance(instanceId: string) {
     delete selectionByInstance[instanceId]
   }

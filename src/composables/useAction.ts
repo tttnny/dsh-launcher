@@ -2,20 +2,12 @@ import { reactive } from 'vue'
 import { Message } from '@arco-design/web-vue'
 
 export interface UseActionOptions<T, TArgs extends unknown[]> {
-  /** Groups the busy flag per invocation target (e.g. an instance id);
-   *  omit for a single global bucket. */
   key?: (...args: TArgs) => string
-  /** Produces the success toast text from the result; omit for silent
-   *  success. */
   success?: (result: T) => string
 }
 
 export interface Action<T, TArgs extends unknown[]> {
-  /** Busy per key — bind as `busy[inst.id]` in templates. The '*' bucket is
-   *  the single (unkeyed) one. */
   busy: Record<string, boolean>
-  /** Runs the operation; a no-op while its key is already busy. Returns the
-   *  result, or undefined on failure. */
   run: (...args: TArgs) => Promise<T | undefined>
 }
 

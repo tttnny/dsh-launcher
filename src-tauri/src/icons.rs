@@ -1,8 +1,3 @@
-//! Instance icons (issue #8): an instance may carry a custom icon — an
-//! http(s) URL or a local image copied into `<home>/icons/<id>.png`. Local
-//! images are center-cropped to a 1:1 square and re-encoded as PNG. The
-//! launcher icon stays the default and is never copied or exported.
-
 use std::path::{Path, PathBuf};
 
 use crate::config::Host;
@@ -12,12 +7,10 @@ use tauri::State;
 const ICON_MAX_BYTES: usize = 16 * 1024 * 1024;
 const ICON_SIZE: u32 = 256;
 
-/// Where a local icon lives inside the instance's HOME.
 pub(crate) fn local_icon_path(home: &Path, instance_id: &str) -> PathBuf {
     home.join("icons").join(format!("{instance_id}.png"))
 }
 
-/// Crops the image to a centered 1:1 square and encodes it as PNG.
 pub(crate) fn crop_square_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(bytes).map_err(|e| format!("解析图像失败: {e}"))?;
     let (w, h) = (img.width(), img.height());
@@ -35,7 +28,6 @@ pub(crate) fn crop_square_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out.into_inner())
 }
 
-/// Downloads an icon URL with a size cap.
 async fn fetch_icon(url: &str) -> Result<Vec<u8>, String> {
     let client = crate::proxy::apply(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(60))
@@ -60,16 +52,12 @@ async fn fetch_icon(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-/// Validates that bytes decode as an image (used to sanity-check remote URLs
-/// that stay remote).
 fn ensure_decodable(bytes: &[u8]) -> Result<(), String> {
     image::load_from_memory(bytes)
         .map(|_| ())
         .map_err(|e| format!("不是有效的图像文件: {e}"))
 }
 
-/// Which machine an instance's icon lives on, and the HOME directory it lives
-/// inside: a path on 本机, or a path on that server.
 fn instance_scope(state: &AppState, instance_id: &str) -> Result<(Host, PathBuf), String> {
     let cfg = state.config.lock().unwrap();
     let inst = cfg
@@ -86,7 +74,6 @@ fn instance_scope(state: &AppState, instance_id: &str) -> Result<(Host, PathBuf)
     Ok((host, home.path.clone()))
 }
 
-/// How one PNG reaches the page.
 fn png_data_url(bytes: &[u8]) -> String {
     format!(
         "data:image/png;base64,{}",
@@ -94,21 +81,10 @@ fn png_data_url(bytes: &[u8]) -> String {
     )
 }
 
-/// The icons this session has already read off another machine, with the
-/// instance's own `icon` field as the key into them.
-///
-/// The avatar calls [`read_instance_icon`] once per render and a board has a
-/// dozen rows: without this, every row would be an ssh round trip, every time
-/// the list is redrawn. The entry is dropped the moment the icon is set or
-/// cleared for that instance — the two ways its bytes can change — so a hit is
-/// the same answer as the machine would give, never a stale one. Runtime only:
-/// what this session has seen, not a record.
 static REMOTE_ICON_CACHE: std::sync::Mutex<Vec<CachedIcon>> = std::sync::Mutex::new(Vec::new());
 
 struct CachedIcon {
     instance_id: String,
-    /// The `icon` field this was read under, so an entry cannot answer for a
-    /// different icon.
     icon: String,
     data: Option<String>,
 }
@@ -184,8 +160,6 @@ pub(crate) async fn set_instance_icon_for(
             }
             std::fs::write(&dest, png).map_err(|e| format!("写入图标失败: {e}"))?;
         } else {
-            // The same file, at the same place inside that instance's HOME —
-            // only the filesystem on the other end of it is different.
             let remote =
                 crate::ssh::RemoteHost::of(&host, &state.data_dir).map_err(|e| e.message)?;
             state
@@ -211,8 +185,6 @@ pub(crate) async fn set_instance_icon_for(
     Ok(())
 }
 
-/// Restores the default launcher icon and removes any local icon file — from
-/// this Mac, or from the machine the instance runs on.
 #[tauri::command]
 pub async fn clear_instance_icon(
     state: State<'_, AppState>,
@@ -245,12 +217,6 @@ pub(crate) async fn clear_instance_icon_for(
     Ok(())
 }
 
-/// Removes one instance's local icon file — from this Mac, or from the machine
-/// the instance runs on. The only place that rule lives: a path under a remote
-/// HOME is a path on that server, so this Mac's `fs` must not be pointed at it.
-///
-/// Best effort on both sides: the record is what the page reads, and a machine
-/// that is off must not block the removal.
 pub(crate) async fn remove_icon_file(
     state: &AppState,
     host: &Host,
@@ -266,11 +232,6 @@ pub(crate) async fn remove_icon_file(
     }
 }
 
-/// Resolves an instance icon for display: remote URLs pass through, local
-/// files become a `data:` URL, and `None` means the launcher default.
-///
-/// For an instance on another machine the file is read over the transport and
-/// kept in [`REMOTE_ICON_CACHE`], so a redrawn board costs no further calls.
 #[tauri::command]
 pub async fn read_instance_icon(
     state: State<'_, AppState>,
@@ -321,7 +282,6 @@ pub(crate) async fn read_instance_icon_for(
 mod tests {
     use super::*;
 
-    /// 4x2 red rectangle PNG, generated once for the crop test.
     fn rect_png() -> Vec<u8> {
         let img = image::RgbImage::from_pixel(4, 2, image::Rgb([255, 0, 0]));
         let mut out = std::io::Cursor::new(Vec::new());
@@ -338,10 +298,6 @@ mod tests {
         assert_eq!(img.width(), img.height());
         assert_eq!(img.width(), 2);
     }
-
-    // -----------------------------------------------------------------------
-    // Icons on another machine
-    // -----------------------------------------------------------------------
 
     struct ScratchDir(std::path::PathBuf);
     impl ScratchDir {
@@ -384,7 +340,6 @@ mod tests {
         }
     }
 
-    /// One instance, in a HOME on `host`, with the transport a test chose.
     fn state_with(
         data: &ScratchDir,
         transport: std::sync::Arc<dyn crate::ssh::HostTransport>,
@@ -426,9 +381,6 @@ mod tests {
         }
     }
 
-    /// The image is picked and cropped on this Mac and only the finished PNG
-    /// travels: it lands at the same place inside the instance's HOME — on the
-    /// machine that owns the HOME (user story 35).
     #[test]
     fn a_remote_instances_icon_is_uploaded_to_that_machine() {
         use crate::remote::testing::{FakeAnswer, FakeCall, FakeTransport};
@@ -468,10 +420,6 @@ mod tests {
         );
     }
 
-    /// A row reads its icon on every render, and a board has a dozen rows: the
-    /// bytes are kept, so the machine is asked once rather than once per
-    /// redraw — and dropped the moment the icon changes, so a hit is never a
-    /// stale answer.
     #[test]
     fn a_remote_icons_bytes_are_read_once_and_then_cached() {
         use crate::remote::testing::{FakeAnswer, FakeCall, FakeTransport};
@@ -518,8 +466,6 @@ mod tests {
         };
         assert_eq!(reads(&fake), 1, "两次渲染只问那台机器一次");
 
-        // Choosing a new image drops the cached copy: the next render asks for
-        // the new file instead of showing the old one.
         block_on(set_instance_icon_for(
             &state,
             "i-icon-cache",
@@ -530,8 +476,6 @@ mod tests {
         assert_eq!(reads(&fake), 2, "换了图标就要重新读");
     }
 
-    /// 本机's icon stays exactly what it was: the file inside its own HOME,
-    /// read directly, with no ssh in a row that lives on this Mac.
     #[test]
     fn a_local_instances_icon_is_still_the_file_in_its_own_home() {
         use crate::remote::testing::FakeTransport;

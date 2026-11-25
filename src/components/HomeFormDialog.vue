@@ -5,9 +5,6 @@ import { api } from '@/api'
 import { useAction } from '@/composables/useAction'
 import { useLauncherStore } from '@/stores/launcher'
 
-// 新建数据目录：名称加路径。本机可以从磁盘上挑一个目录，远程机器只能手写
-// 那台机器上的路径——这台 Mac 的文件选择器看不到别人的磁盘。
-
 const props = defineProps<{
   visible: boolean
   hostId: string

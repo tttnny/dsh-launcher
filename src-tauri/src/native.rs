@@ -1,43 +1,17 @@
-//! HTTP client for a running DSH instance's **native plugin management**
-//! service (`POST /api/pluginManager/<method>`) — the one seam every launcher
-//! plugin operation hangs on (ADR-0001: the running DSH owns plugin state).
-//!
-//! The network boundary sits behind [`NativeTransport`], so a test drives the
-//! page states through a fake instance: it asserts on the request that *would*
-//! be sent (envelope fields, endpoint, cookie) instead of needing a live DSH.
-//! T2–T4 append write methods to [`NativeClient`]; the wire shapes and the two
-//! list methods are frozen here.
-//!
-//! The facts encoded below are empirically verified — see the probe notes
-//! (`native-api-probe.md`); do not "fix" them from memory.
-
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Methods are addressed under the fixed `pluginManager/` envelope prefix;
-/// the service rejects any `method` without it (`gateway/bad-request`).
 const METHOD_PREFIX: &str = "pluginManager";
 
-/// Endpoint prefix on the instance's HTTP surface.
 const ENDPOINT_PREFIX: &str = "/api/pluginManager";
 
 /// A boxed future, so [`NativeTransport`] stays object-safe (`Arc<dyn …>`)
 /// without pulling in an async-trait dependency.
 pub type NativeFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-// ---------------------------------------------------------------------------
-// Wire shapes
-// ---------------------------------------------------------------------------
-
-/// One **row** of a bundle: the composition-tree node a bundle contributes.
-///
-/// The page manages patch layers, not rows, so this exists to *count* them —
-/// what a layer brings in is a fact about the layer. Everything but the count
-/// is optional: the service omits `entryId` for rows that are not
-/// individually addressable, and a local build may ship rows without metadata.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeBundleRow {
@@ -64,8 +38,6 @@ pub enum NativeText {
 }
 
 impl NativeText {
-    /// The text for `locale` (`zh-CN` also matches a plain `zh` key), then the
-    /// service's own `en` fallback, then whatever the map happens to hold.
     pub fn pick(&self, locale: &str) -> String {
         match self {
             Self::Plain(text) => text.clone(),
@@ -81,15 +53,12 @@ impl NativeText {
         }
     }
 
-    /// [`pick`](Self::pick), with an empty result reading as "no text" so a
-    /// blank translation does not become a blank line in the list.
     pub fn pick_opt(&self, locale: &str) -> Option<String> {
         let text = self.pick(locale);
         (!text.trim().is_empty()).then_some(text)
     }
 }
 
-/// Localized display metadata carried on a bundle or one of its rows.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeMeta {
     #[serde(default)]
@@ -98,12 +67,9 @@ pub struct NativeMeta {
     pub description: Option<NativeText>,
 }
 
-/// A native **bundle** (a patch layer), narrowed to the fields the launcher
-/// renders.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeBundle {
-    /// The `name` argument of `setBundleEnabled` / `removeBundle`.
     pub name: String,
     #[serde(default)]
     pub official: bool,
@@ -124,7 +90,6 @@ pub struct NativeBundle {
     pub installed: bool,
     #[serde(default)]
     pub source: Option<String>,
-    /// The rows this layer contributes to the composition tree.
     #[serde(default)]
     pub rows: Vec<NativeBundleRow>,
     /// Shipped with the install, offered as a user toggle.
@@ -139,7 +104,6 @@ pub struct NativeBundle {
     pub error: Option<NativeBundleError>,
 }
 
-/// A bundle-level failure as reported by the service.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeBundleError {
@@ -157,8 +121,6 @@ pub struct NativeBundleError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeChangeResult {
     pub changed: bool,
-    /// `applied` | `restart-required` | `overridden` | `failed` | `cancelled`.
-    /// Carried through as a string: the set has five members, not three.
     pub application: String,
     /// `install` | `enable` | `remove`.
     pub stage: String,
@@ -171,8 +133,6 @@ pub struct NativeChangeResult {
     pub warnings: Vec<String>,
 }
 
-/// Why a write was refused (`ManagementError`): the `code` (`management-required`
-/// | `unaddressable` | `not-removable` | …) plus an optional `diagnostic`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeChangeError {
     pub code: String,
@@ -180,8 +140,6 @@ pub struct NativeChangeError {
     pub diagnostic: Option<NativeText>,
 }
 
-/// One unary request the service strictly validates: **every field is
-/// required**; extra or missing fields are rejected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NativeEnvelope {
     #[serde(rename = "type")]
@@ -192,16 +150,12 @@ pub struct NativeEnvelope {
     pub payload: NativePayload,
 }
 
-/// The `payload` wrapper of a request envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NativePayload {
     pub args: serde_json::Value,
 }
 
 impl NativeEnvelope {
-    /// Builds the `client-request` envelope for one method. `method` is the
-    /// bare name (`listPlugins`); the `pluginManager/` prefix is added here
-    /// because the service requires it in the envelope.
     pub fn request(method: &str, args: serde_json::Value) -> Self {
         Self {
             kind: "client-request".to_string(),
@@ -212,51 +166,27 @@ impl NativeEnvelope {
     }
 }
 
-/// A fully-formed request handed to the transport. A fake asserts on these
-/// fields directly — no HTTP machinery in the test.
 #[derive(Clone, Debug)]
 pub struct NativeRequest {
-    /// Full endpoint URL, e.g. `http://127.0.0.1:34567/api/pluginManager/listPlugins`.
     pub url: String,
-    /// The `Cookie` header value carrying the minted session.
     pub cookie: String,
-    /// The validated request body.
     pub envelope: NativeEnvelope,
 }
 
-/// The raw HTTP response, interpreted by [`NativeClient`].
 #[derive(Clone, Debug)]
 pub struct NativeResponse {
     pub status: u16,
     pub body: String,
 }
 
-/// The network boundary, injectable so tests substitute a fake instance.
-/// `connect` mints the session cookie through [`mint`](Self::mint); `send`
-/// performs one unary RPC. Both default to real HTTP via
-/// [`ReqwestTransport`].
 pub trait NativeTransport: Send + Sync {
-    /// Exchanges a running-table URL's one-time token for the session cookie
     /// (`GET /?token=<token>`, `redirect: manual` — the `Set-Cookie` lives on
     /// the 303, so following it would fail). Returns the full `Cookie` header
-    /// value to send on every RPC.
-    ///
-    /// The cookie is bound to `host:port`, so it is minted per instance per
-    /// start and is never reused across ports.
     fn mint<'a>(&'a self, url: &'a str) -> NativeFuture<'a, Result<String, String>>;
 
-    /// Sends one unary RPC and returns the raw HTTP response.
     fn send(&self, req: NativeRequest) -> NativeFuture<'_, Result<NativeResponse, String>>;
 }
 
-/// The real transport: `reqwest` over `rustls`, deliberately **not** proxied.
-///
-/// Instance traffic is always local (`127.0.0.1` / the bound host); a
-/// user-configured proxy would swallow a localhost request — and
-/// `proxy_enabled` defaults on, so routing through [`crate::proxy::apply`]
-/// would break every instance call for proxy users. The `Host` header is left
-/// to `reqwest` (it derives the correct one) and no `Origin` is sent (a wrong
-/// `Origin` is a 403).
 pub struct ReqwestTransport {
     client: reqwest::Client,
 }
@@ -342,11 +272,6 @@ pub(crate) fn rpc_headers(cookie: &str) -> reqwest::header::HeaderMap {
     headers
 }
 
-// ---------------------------------------------------------------------------
-// The client
-// ---------------------------------------------------------------------------
-
-/// A connected instance: base URL, minted session cookie, and the transport.
 pub struct NativeClient {
     base_url: String,
     cookie: String,
@@ -354,22 +279,15 @@ pub struct NativeClient {
 }
 
 impl NativeClient {
-    /// Connects to a running instance whose URL carries the one-time token
-    /// (the `RunningInstance.url` value). The launcher reads credentials only
-    /// from here — never `<DSH_HOME>/.credentials.yaml`.
     pub async fn connect(url: &str) -> Result<Self, String> {
         Self::connect_with(Arc::new(ReqwestTransport::new()?), url).await
     }
 
-    /// The injectable form: tests pass a fake [`NativeTransport`].
     pub async fn connect_with(
         transport: Arc<dyn NativeTransport>,
         url: &str,
     ) -> Result<Self, String> {
         let base_url = base_url_of(url)?;
-        // The token is the only credential source; a URL without one (an
-        // adopted instance's bare URL) cannot be connected and must be
-        // refused here rather than falling back to a credentials file.
         token_of(url)?;
         let cookie = transport.mint(url).await?;
         Ok(Self {
@@ -379,9 +297,6 @@ impl NativeClient {
         })
     }
 
-    /// Sends one unary RPC and returns the unwrapped `result.value`.
-    ///
-    /// `method` is the bare name (`listPlugins`); the `pluginManager/` prefix
     /// is added to the envelope. HTTP status and `result.ok` are **both**
     /// checked: the service answers HTTP 200 even when it refuses.
     pub async fn call(
@@ -398,19 +313,13 @@ impl NativeClient {
         parse_value(resp)
     }
 
-    /// Lists the instance's bundles (patch layers).
     pub async fn list_bundles(&self) -> Result<Vec<NativeBundle>, String> {
         let value = self.call("listBundles", serde_json::json!({})).await?;
         serde_json::from_value(value).map_err(|e| format!("解析 Bundle 列表失败: {e}"))
     }
 
-    /// Enables/disables one whole **Bundle（补丁层）** by `name` (the native
     /// argument is `name`, not `id`). Re-enabling appends the bundle to the
     /// **end** of the profile's ordered bundle list, so its priority shifts.
-    ///
-    /// A refused operation (e.g. `removable:false` → `management-required`) is
-    /// returned as a [`NativeChangeResult`], not an `Err`; only transport-layer
-    /// failures and `ok:false` are errors.
     pub async fn set_bundle_enabled(
         &self,
         name: &str,
@@ -425,16 +334,6 @@ impl NativeClient {
         serde_json::from_value(value).map_err(|e| format!("解析改动结果失败: {e}"))
     }
 
-    /// Removes one whole **Bundle（补丁层）** by `name` (the native
-    /// `removeBundle` argument is `name` only — no `enabled`). This is the
-    /// native removal path the Web UI uses, so a plugin the Web UI can remove
-    /// the launcher can too.
-    ///
-    /// A bundle that ships with DSH (`removable:false`) is **refused** as
-    /// HTTP 200 + `result.ok:true` with `changed:false` +
-    /// `error.code:"not-removable"` — returned as a [`NativeChangeResult`] so
-    /// the page can show the reason, not raised as an `Err` (design §4b). Only
-    /// transport-layer failures and `ok:false` are errors.
     pub async fn remove_bundle(&self, name: &str) -> Result<NativeChangeResult, String> {
         let value = self
             .call("removeBundle", serde_json::json!({ "name": name }))
@@ -491,12 +390,6 @@ fn parse_value(resp: NativeResponse) -> Result<serde_json::Value, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// URL / credential helpers
-// ---------------------------------------------------------------------------
-
-/// The instance origin from a running-table URL, dropping the query (which
-/// carries the one-time token), e.g. `http://127.0.0.1:34567`.
 fn base_url_of(url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("实例 URL 无效: {e}"))?;
     match parsed.scheme() {
@@ -507,7 +400,6 @@ fn base_url_of(url: &str) -> Result<String, String> {
     Ok(format!("{}://{authority}", parsed.scheme()))
 }
 
-/// The `host:port` authority, which the session cookie is bound to.
 fn authority_of(parsed: &reqwest::Url) -> Result<String, String> {
     let host = parsed
         .host_str()
@@ -518,8 +410,6 @@ fn authority_of(parsed: &reqwest::Url) -> Result<String, String> {
     Ok(format!("{host}:{port}"))
 }
 
-/// The token from the running-table URL's `?token=` query. This is the only
-/// credential source; `<DSH_HOME>/.credentials.yaml` is never read.
 fn token_of(url: &str) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("实例 URL 无效: {e}"))?;
     parsed
@@ -530,15 +420,6 @@ fn token_of(url: &str) -> Result<String, String> {
         .ok_or_else(|| "实例 URL 缺少启动 token".to_string())
 }
 
-/// Whether one `Set-Cookie` pair is this URL's own session cookie — i.e. the
-/// instance accepted the URL's launch token (and, for a remote instance, that
-/// the exchange happened on the machine the URL belongs to).
-///
-/// The cookie name is derived from the authority, so the same rule decides a
-/// cookie read back from a request made on that machine
-/// ([`crate::remote::mint_headers`]) and one [`ReqwestTransport::mint`] read
-/// here: a token that was not accepted mints no cookie at all, and a cookie
-/// minted for another authority is not this instance's.
 pub(crate) fn cookie_pair_matches(url: &str, pair: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
         return false;
@@ -553,49 +434,25 @@ pub(crate) fn cookie_pair_matches(url: &str, pair: &str) -> bool {
         .starts_with(&format!("{}=", cookie_name(&authority)))
 }
 
-/// The auth cookie name the instance mints:
-/// `dsh-auth-<base64url(sha256("<host>:<port>"))>` with no padding.
 fn cookie_name(authority: &str) -> String {
     let digest = Sha256::digest(authority.as_bytes());
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
     format!("dsh-auth-{encoded}")
 }
 
-// ---------------------------------------------------------------------------
-// The view model handed to the Plugins page
-// ---------------------------------------------------------------------------
-
-/// Why the page is managing (or not): determines managed vs read-only UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PluginViewMode {
-    /// Instance reachable and a session cookie was minted: operations allowed.
     Managed,
-    /// No instance is running this profile.
     NotRunning,
-    /// An instance runs this profile, but the launcher has no launch token for
-    /// it, so there is nothing to authenticate with: the process was adopted
-    /// from one the launcher did not start and its URL was not remembered. What
-    /// decides is the **token** ([`crate::process::manageable_url`]), not how the
-    /// entry came to exist — an adopted instance whose token was remembered is
-    /// `Managed`, and this mode is not reachable for it.
     Adopted,
-    /// An instance is running, and the launcher could not reach it: the
-    /// connection failed, or — for a remote instance — the machine it runs on
-    /// did not answer, so nothing about it could be read at all. The reason
-    /// says which, and the page offers the retry that asks again.
     Unreachable,
 }
 
-/// A **Bundle（补丁层）** — the native `BundleInfo`'s stable subset.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleItem {
-    /// The `name` argument of `setBundleEnabled` / `removeBundle`.
     pub name: String,
-    /// How many composition-tree rows this layer contributes. The rows are not
-    /// a control surface here; the count is what makes "one whole layer" — the
-    /// unit this page manages — concrete.
     pub row_count: usize,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -611,14 +468,6 @@ pub struct BundleItem {
     pub error_code: Option<String>,
 }
 
-/// One snapshot of the Plugins page: `mode` says whether operations are
-/// allowed, `reason` is the localized read-only explanation the UI shows
-/// verbatim.
-///
-/// The bundles（补丁层）are the whole page: a bundle is the unit the profile
-/// selects and DSH mounts, and it is what carries a version, an availability
-/// and a removal rule. The rows inside it are DSH's own composition detail, not
-/// a control surface the launcher should hand out one switch at a time.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
@@ -632,8 +481,6 @@ pub struct PluginView {
 }
 
 impl PluginView {
-    /// A managed snapshot, projected from the instance's own bundle list.
-    /// `instance_id` is the instance that answered (see [`Self::instance_id`]).
     pub fn managed(bundles: Vec<NativeBundle>, locale: &str, instance_id: &str) -> Self {
         Self {
             mode: PluginViewMode::Managed,
@@ -646,12 +493,6 @@ impl PluginView {
         }
     }
 
-    /// A read-only snapshot: no instance is running that profile (or the one
-    /// that is cannot be authenticated), so there is nothing to manage and the
-    /// localization-ready `reason` says why. `bundles` is what the profile's
-    /// own files say it holds — a best-effort projection that the page labels
-    /// as such (design §4: it never writes, and it differs from the live list
-    /// on purpose).
     pub fn readonly(
         mode: PluginViewMode,
         reason: impl Into<String>,
@@ -667,12 +508,6 @@ impl PluginView {
 }
 
 impl BundleItem {
-    /// One layer as the profile's own files declare it — the read-only
-    /// projection used when no instance can answer. It carries only what a
-    /// file says: that the profile selects this layer, that it installs that
-    /// package, and (when the package is on disk) its version. Live state,
-    /// availability, removal rules and row counts are the instance's business,
-    /// so they stay empty here rather than being guessed.
     pub fn from_profile_files(
         name: String,
         selected: bool,
@@ -687,8 +522,6 @@ impl BundleItem {
             version,
             enabled: selected,
             installed,
-            // We cannot see the installation's manifest from here, so we never
-            // claim a layer is removable: the page is read-only anyway.
             removable: false,
             optional: false,
             availability: None,
@@ -697,8 +530,6 @@ impl BundleItem {
         }
     }
 
-    /// Projects one native bundle; its own `description` wins over the one
-    /// carried in `meta`, exactly as before localization existed.
     pub fn from_native(b: NativeBundle, locale: &str) -> Self {
         let meta = b.meta.unwrap_or_default();
         Self {
@@ -722,9 +553,6 @@ impl BundleItem {
     }
 }
 
-/// The fake instance the plugin client's tests drive, shared with the modules
-/// that talk to an instance through it (`plugins.rs`): the page's states are
-/// asserted on the request that *would* be sent, never on a live DSH.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -736,7 +564,6 @@ pub(crate) mod testing {
     pub(crate) const COOKIE: &str =
         "dsh-auth-6x_m4cbVo7y_dJvM1GEEE82y47XOJvfDgntZoIfis6E=v1.payload.sig";
 
-    /// The one queued answer the service would give for a JSON payload.
     pub(crate) fn ok_response(value: serde_json::Value) -> NativeResponse {
         NativeResponse {
             status: 200,
@@ -757,7 +584,6 @@ pub(crate) mod testing {
             .block_on(f)
     }
 
-    /// A fake instance: records every request, replies from a queue.
     pub(crate) struct FakeTransport {
         cookie: String,
         minted: Mutex<Vec<String>>,
@@ -775,14 +601,10 @@ pub(crate) mod testing {
             })
         }
 
-        /// Every URL the client minted a session against — the address it was
-        /// handed, which is what a remote instance's forwarded address has to
-        /// show up as.
         pub(crate) fn minted(&self) -> Vec<String> {
             self.minted.lock().unwrap().clone()
         }
 
-        /// The last request the client sent.
         pub(crate) fn last_sent(&self) -> NativeRequest {
             self.sent.lock().unwrap().last().cloned().unwrap()
         }
@@ -808,7 +630,6 @@ pub(crate) mod testing {
         }
     }
 
-    /// A connected client over the fake, and the fake itself.
     pub(crate) fn client_with(
         responses: Vec<NativeResponse>,
     ) -> (NativeClient, Arc<FakeTransport>) {
@@ -824,9 +645,6 @@ mod tests {
     use super::testing::{block_on, client_with, ok_response, FakeTransport, COOKIE, INSTANCE_URL};
     use super::*;
 
-    /// The one request the service strictly validates: envelope shape, the
-    /// `pluginManager/` prefix, endpoint path, and the session cookie — with
-    /// no `Origin` header possible.
     #[test]
     fn list_bundles_sends_the_verified_envelope() {
         let (client, fake) = client_with(vec![ok_response(serde_json::json!([]))]);
@@ -843,7 +661,6 @@ mod tests {
         assert_eq!(req.envelope.payload.args, serde_json::json!({}));
         assert!(!req.envelope.rpc_id.is_empty(), "rpcId must be present");
 
-        // Exactly the four wire fields, nothing extra that the service rejects.
         let body = serde_json::to_value(&req.envelope).unwrap();
         let keys: Vec<&str> = body
             .as_object()
@@ -858,8 +675,6 @@ mod tests {
         assert!(body.get("payload").is_some());
     }
 
-    /// Minting uses the running-table URL itself (token included); the cookie
-    /// name is derived from `host:port`, verified against the probe's value.
     #[test]
     fn mint_uses_the_instance_url_and_binds_cookie_to_host_port() {
         let (_, fake) = client_with(vec![]);
@@ -870,10 +685,6 @@ mod tests {
         );
     }
 
-    /// The service localizes its own copy: a bundle's `meta.title` is a plain
-    /// string for most layers and a `{en, zh}` map for the ones it translated.
-    /// Both shapes have to parse — reading the map as a string is what made one
-    /// translated title fail the *whole* list, and with it the page.
     #[test]
     fn a_localized_title_does_not_fail_the_bundle_list() {
         let payload = serde_json::json!([
@@ -920,11 +731,9 @@ mod tests {
         assert_eq!(zh[1].title.as_deref(), Some("任务调度"));
         assert_eq!(zh[1].description.as_deref(), Some("保存任务"));
         assert_eq!(zh[2].title, None, "no meta at all stays absent");
-        // The layer's size is a fact about the layer.
         assert_eq!(zh[0].row_count, 2);
         assert_eq!(zh[2].row_count, 0);
 
-        // The same list, shown in English.
         let en: Vec<BundleItem> = bundles
             .into_iter()
             .map(|b| BundleItem::from_native(b, "en-US"))
@@ -932,9 +741,6 @@ mod tests {
         assert_eq!(en[1].title.as_deref(), Some("Task scheduling"));
     }
 
-    /// Locale resolution: exact tag, then the tag's base language, then the
-    /// service's own `en`, then whatever the map holds — and an empty result
-    /// reads as "no text" rather than a blank line.
     #[test]
     fn native_text_picks_a_locale_with_fallbacks() {
         let plain: NativeText = serde_json::from_value(serde_json::json!("Text")).unwrap();
@@ -987,8 +793,6 @@ mod tests {
         );
     }
 
-    /// Transport-layer failures are errors; an operation refusal (200 +
-    /// `ok:false`) is too.
     #[test]
     fn transport_and_envelope_failures_surface_as_err() {
         let cases = vec![
@@ -1036,8 +840,6 @@ mod tests {
         assert!(base_url_of("not a url").is_err());
     }
 
-    /// A bare URL (an adopted instance) has no token and must be refused
-    /// before any traffic — the credential never comes from a file.
     #[test]
     fn connect_refuses_a_url_without_a_token() {
         let fake = FakeTransport::new(COOKIE, vec![]);
@@ -1053,8 +855,6 @@ mod tests {
         assert!(fake.minted().is_empty());
     }
 
-    /// No `Origin` (a wrong one is 403) and no manual `Host`; the cookie and
-    /// content type are the only headers we set.
     #[test]
     fn rpc_headers_carry_cookie_without_origin_or_host() {
         let headers = rpc_headers(COOKIE);
@@ -1067,9 +867,6 @@ mod tests {
         assert!(headers.get(reqwest::header::HOST).is_none());
     }
 
-    /// `setBundleEnabled` sends the verified envelope: the bare method name
-    /// (the `pluginManager/` prefix is added in the envelope) and the flat
-    /// `{name, enabled}` args — the parameter is `name`, **not** `id`.
     #[test]
     fn set_bundle_enabled_sends_name_and_enabled() {
         let (client, fake) = client_with(vec![ok_response(serde_json::json!({
@@ -1097,9 +894,6 @@ mod tests {
         assert_eq!(outcome.target, "@deepseek-ai/dsh-web-app");
     }
 
-    /// A refused operation is HTTP 200 + `ok:true` with the refusal inside
-    /// `value`: it deserializes into a result (not an `Err`), carrying
-    /// `changed:false` and the `error.code` the UI translates.
     #[test]
     fn set_bundle_enabled_parses_a_refusal_as_a_result_not_an_error() {
         let (client, _) = client_with(vec![ok_response(serde_json::json!({
@@ -1117,9 +911,6 @@ mod tests {
         assert_eq!(outcome.warnings, vec!["随 DSH 发布".to_string()]);
     }
 
-    /// The read-only snapshot carries the mode + localized reason, no instance
-    /// id, and whatever the profile's files said (the caller passes the
-    /// projection; the shape only has to survive serialization).
     #[test]
     fn readonly_view_carries_the_mode_reason_and_file_projection() {
         let view = PluginView::readonly(
@@ -1147,9 +938,6 @@ mod tests {
         assert!(json["instanceId"].is_null());
         assert_eq!(json["bundles"][0]["version"], "0.9.4");
     }
-    /// Projection: a bundle's `meta.title` becomes `title` (resolved to one
-    /// language), its own `description` outranks the meta one, and its error
-    /// code — not its diagnostic — becomes `errorCode`.
     #[test]
     fn managed_view_projects_meta_and_bundle_error() {
         let bundles = serde_json::from_value(serde_json::json!([{
@@ -1176,7 +964,6 @@ mod tests {
         assert_eq!(json["bundles"][0]["rowCount"], 0);
     }
 
-    /// A native `ChangeResult` value as the service answers it.
     fn change_result(
         application: &str,
         changed: bool,
@@ -1195,9 +982,6 @@ mod tests {
         value
     }
 
-    /// `application` has five values, not three: each is carried through
-    /// verbatim so the page can tell 已生效 / 需重启 / 被覆盖 / 失败 / 取消
-    /// apart. Driven through the bundle toggle, the write path that remains.
     #[test]
     fn set_bundle_enabled_keeps_every_application_value() {
         for application in [
@@ -1217,9 +1001,6 @@ mod tests {
         }
     }
 
-    /// `removeBundle` sends the verified envelope: the bare method name (the
-    /// `pluginManager/` prefix is added in the envelope) and the flat `{name}`
-    /// args — removal takes only the bundle name.
     #[test]
     fn remove_bundle_sends_the_name_argument() {
         let (client, fake) = client_with(vec![ok_response(serde_json::json!({
@@ -1246,10 +1027,6 @@ mod tests {
         assert_eq!(outcome.target, "ds-bot");
     }
 
-    /// Removing a bundle that ships with DSH (`removable:false`) is refused as
-    /// HTTP 200 + `result.ok:true` with `changed:false` and
-    /// `error.code:"not-removable"` — an ordinary result the page explains,
-    /// never an `Err`. This is the common case, not an edge case.
     #[test]
     fn remove_bundle_parses_a_not_removable_refusal_as_a_result() {
         let (client, _) = client_with(vec![ok_response(serde_json::json!({

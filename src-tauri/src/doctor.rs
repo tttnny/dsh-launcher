@@ -1,23 +1,3 @@
-//! Dependency-tree preflight for an instance + profile.
-//!
-//! DSH's core packages are provided by the CLI's own dependency tree; a
-//! profile must never carry its own copy. Two states are therefore treated as
-//! faults:
-//!
-//! 1. the profile's `node_modules` contains any `@deepseek-ai/*` core package;
-//! 2. two generations of core are mixed (the copy inside the profile has a
-//!    different version than the core in the CLI tree).
-//!
-//! (2) is the silent failure mode: two copies of a core package mint two
-//! unequal module-local `Symbol()`s, the agent loop's scheduler lookup on
-//! ToolRuntime returns `undefined`, and every tool call in that profile dies
-//! in `.prepare` with no load-time error and no hint about which package was
-//! duplicated. A launcher that creates many instances/versions is the most
-//! likely producer of that state, so it checks for it before starting.
-//!
-//! The report is advisory: findings are logged and surfaced in the UI, never
-//! used to block a launch.
-
 use serde::Serialize;
 use std::path::Path;
 
@@ -33,7 +13,6 @@ pub enum FindingLevel {
 #[derive(Clone, Debug, Serialize)]
 pub struct DoctorFinding {
     pub level: FindingLevel,
-    /// Stable machine-readable code (also used as the i18n key suffix).
     pub code: String,
     pub message: String,
 }
@@ -45,15 +24,12 @@ pub struct DoctorReport {
     pub findings: Vec<DoctorFinding>,
 }
 
-/// Reads a package's version from `<dir>/package.json`.
 fn package_version(pkg_dir: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
     doc.get("version")?.as_str().map(|s| s.to_string())
 }
 
-/// Version of the DSH CLI package inside an installed version tree. Source
-/// checkouts (GitHub-only tags) keep it at the workspace path.
 fn cli_core_version(version_dir: &Path) -> Option<String> {
     package_version(
         &version_dir
@@ -72,11 +48,9 @@ fn is_core_package(name: &str) -> bool {
     short == "dsh" || short.starts_with("dsh-") || short == "cordis" || short.starts_with("cordis-")
 }
 
-/// Version of a package inside the CLI's dependency tree.
 fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
     let short = pkg_name.strip_prefix("@deepseek-ai/").unwrap_or(pkg_name);
 
-    // 1. Direct path in node_modules/@deepseek-ai/<name>
     if let Some(v) = package_version(
         &version_dir
             .join("node_modules")
@@ -86,7 +60,6 @@ fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
         return Some(v);
     }
 
-    // 2. Monorepo source checkout: packages/<name> or apps/<name>
     if let Some(v) = package_version(&version_dir.join("packages").join(short)) {
         return Some(v);
     }
@@ -94,7 +67,6 @@ fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
         return Some(v);
     }
 
-    // 3. pnpm virtual store: node_modules/.pnpm/@deepseek-ai+<short>@<version>...
     let pnpm_dir = version_dir.join("node_modules").join(".pnpm");
     if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
         let prefix = format!("@deepseek-ai+{short}@");
@@ -113,7 +85,6 @@ fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
         }
     }
 
-    // 4. Fallback for dsh / dsh-* monorepo packages that share the dsh CLI version:
     if short == "dsh" || short.starts_with("dsh-") {
         return cli_core_version(version_dir);
     }
@@ -121,9 +92,6 @@ fn cli_package_version(version_dir: &Path, pkg_name: &str) -> Option<String> {
     None
 }
 
-/// Every `@deepseek-ai/*` package that has a copy inside the profile's
-/// node_modules, as (package id, version) pairs. Normally empty: core comes
-/// from the CLI tree, and the launcher never adds core packages to a profile.
 fn profile_core_copies(profile_dir: &Path) -> Vec<(String, Option<String>)> {
     let scope = profile_dir.join("node_modules").join("@deepseek-ai");
     let Ok(entries) = std::fs::read_dir(&scope) else {
@@ -142,8 +110,6 @@ fn profile_core_copies(profile_dir: &Path) -> Vec<(String, Option<String>)> {
     out
 }
 
-/// Runs both checks. `selected_version` is the version string the instance is
-/// configured to run (as recorded by the launcher).
 pub fn inspect(
     instance_id: &str,
     profile: &str,
@@ -154,7 +120,6 @@ pub fn inspect(
     let mut findings = Vec::new();
     let cli_core = cli_core_version(version_dir);
 
-    // 1. The CLI tree's core version must match what the user selected.
     match &cli_core {
         Some(actual) if actual != selected_version => findings.push(DoctorFinding {
             level: FindingLevel::Warn,
@@ -174,8 +139,6 @@ pub fn inspect(
         _ => {}
     }
 
-    // 2. A profile must not carry core copies; a version-mismatched copy is
-    //    the two-generations state and gets escalated to an error.
     for (pkg, version) in profile_core_copies(profile_dir) {
         let cli_pkg_ver = cli_package_version(version_dir, &pkg);
         let mixed = match (&version, &cli_pkg_ver) {
@@ -212,7 +175,6 @@ pub fn inspect(
     }
 }
 
-/// Logs a report through the runtime log (errors as error, rest as warn).
 pub fn log_report(report: &DoctorReport) {
     for f in &report.findings {
         match f.level {
@@ -341,8 +303,6 @@ mod tests {
 
     #[test]
     fn mixed_generation_profile_copy_is_an_error() {
-        // The #4640 signature: CLI on 0.1.1-rc.2, a stale core copy in the
-        // profile on 0.1.0-rc.8.
         let fx = Fixture::new();
         fx.cli_core("0.1.1-rc.2");
         fx.profile_core("dsh-tools", "0.1.0-rc.8");

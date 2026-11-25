@@ -13,9 +13,6 @@ import MachineFormDialog from '@/components/MachineFormDialog.vue'
 import EnvironmentPanel from '@/components/EnvironmentPanel.vue'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 一台机器的详情：它在哪里、连不连得上、运行环境是否就绪、带着多少资源，
-// 以及怎么把这条记录删掉。删除只动启动器自己的记录，机器上的东西一样不碰。
-
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
@@ -134,8 +131,6 @@ async function testConnection() {
   }
 }
 
-// --- 资源 -------------------------------------------------------------------
-
 const instanceCount = computed(() => {
   if (!host.value) return 0
   return store.instancesOfHost(host.value.id).length
@@ -186,8 +181,6 @@ function goData() {
   void store.selectHost(host.value.id)
   void router.push({ name: 'data' })
 }
-
-// --- 编辑 / 删除 -------------------------------------------------------------
 
 function editHost() {
   formVisible.value = true

@@ -2,8 +2,6 @@
 import { useRouter } from 'vue-router'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 页面统一的标题区：标题、可选说明、可选返回链接，右侧放页面动作。
-
 const props = defineProps<{
   title: string
   description?: string

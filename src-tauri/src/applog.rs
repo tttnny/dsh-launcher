@@ -1,10 +1,3 @@
-//! Launcher runtime log.
-//!
-//! Writes timestamped, level-filtered lines to `<data_dir>/logs/latest.log`.
-//! On startup the previous `latest.log` is rotated next to it as
-//! `<yyyy>-<MM>-<dd>-<hh>-<mm>-<ss>-<ms>-<num>.log` (the timestamp is the old
-//! file's mtime; `num` disambiguates same-millisecond collisions).
-
 use chrono::{DateTime, Local};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -31,8 +24,6 @@ impl Level {
     }
 }
 
-/// Parses a level name ("debug" | "info" | "warn" | "error"),
-/// case-insensitive. Returns `None` for anything else.
 pub fn parse_level(raw: &str) -> Option<Level> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "debug" => Some(Level::Debug),
@@ -50,8 +41,6 @@ pub fn set_level(level: Level) {
     LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
-/// Rotates any previous `latest.log` inside `log_dir`, then opens a fresh
-/// one and applies the level. Safe to call once at startup.
 pub fn init(log_dir: &Path, level: Level) -> Result<(), String> {
     std::fs::create_dir_all(log_dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
     rotate_latest(log_dir)?;
@@ -85,7 +74,6 @@ fn rotate_latest(log_dir: &Path) -> Result<(), String> {
     std::fs::rename(&latest, &target).map_err(|e| format!("轮转日志失败 {}: {e}", target.display()))
 }
 
-/// Picks the first free `<base>-<num>.log` path (num starts at 1).
 fn pick_target(log_dir: &Path, base: &str) -> Option<std::path::PathBuf> {
     for num in 1..1000u32 {
         let target = log_dir.join(format!("{base}-{num}.log"));
@@ -96,8 +84,6 @@ fn pick_target(log_dir: &Path, base: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Writes one line when `level` passes the configured filter. Always mirrors
-/// to stderr so `tauri dev` sessions see the log without opening the file.
 pub fn write(level: Level, msg: &str) {
     if (level as u8) < LOG_LEVEL.load(Ordering::Relaxed) {
         return;

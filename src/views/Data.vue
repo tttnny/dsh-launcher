@@ -12,10 +12,6 @@ import EmptyState from '@/components/EmptyState.vue'
 import DlIcon from '@/components/DlIcon.vue'
 import HomeFormDialog from '@/components/HomeFormDialog.vue'
 
-// 数据与配置：左边管 DSH_HOME（数据目录），右边管选中目录里的 Profile。
-// DSH_HOME 是启动器保存的一条记录，所以机器连不上时记录仍在；Profile 必须
-// 从目录里读，读不到就说读不到，不能把「没读到」显示成「没有」。
-
 const store = useLauncherStore()
 const { copy } = useCopy()
 const {
@@ -68,8 +64,6 @@ watch(
   { immediate: true },
 )
 
-// --- 数据目录 ----------------------------------------------------------------
-
 const homeDialogVisible = ref(false)
 
 function openCreateHome() {
@@ -116,8 +110,6 @@ function confirmRemoveHome(home: DshHome) {
     onOk: () => removeAction.run(home.id, home.name),
   })
 }
-
-// --- Profile -----------------------------------------------------------------
 
 const profiles = ref<string[]>([])
 const profilesLoading = ref(false)

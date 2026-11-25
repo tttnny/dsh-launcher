@@ -1,8 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
-// 五个目的地对应五件真实的事：跑实例、装版本、管数据、管机器、改设置。
-// 旧路径保留为跳转，历史链接和原生菜单都不会断。
-
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -42,7 +39,6 @@ const router = createRouter({
       component: () => import('@/views/Settings.vue'),
     },
 
-    // 旧地址
     {
       path: '/library',
       redirect: (to) => (to.query.tab === 'versions' ? '/install' : '/data'),
