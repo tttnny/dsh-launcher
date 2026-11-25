@@ -46,9 +46,7 @@ async function applyNativeTheme(mode: ThemeMode) {
   try {
     const win = await appWindow
     await win.setTheme(mode === 'system' ? null : mode)
-  } catch {
-    // 浏览器预览或旧运行时：页面主题仍然生效。
-  }
+  } catch {}
 }
 
 function onSystemThemeChange() {
@@ -120,9 +118,7 @@ async function setupMenuListeners() {
     }
     unlistenMenu.push(await listen('check-update', () => void checkUpdate()))
     unlistenMenu.push(await listen('open-help', () => void onMenuOpenHelp()))
-  } catch {
-    // 事件桥不可用时（浏览器预览）快捷键仍然可用。
-  }
+  } catch {}
 }
 
 async function onMenuOpenHelp() {

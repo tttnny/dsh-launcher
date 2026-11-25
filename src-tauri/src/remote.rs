@@ -57,10 +57,6 @@ pub async fn json<T: DeserializeOwned>(
     parse_marked(&out)
 }
 
-/// How long a version listing may take. `npm view` on a mirror that has never
-/// answered this machine before is slower than any script whose answer is
-/// already local, and it is the one remote call whose result the user waits
-/// for standing still.
 const NPM_VIEW_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,12 +72,6 @@ pub struct RemoteTool {
     pub version: String,
 }
 
-/// What 「测试连接」 found on a host.
-///
-/// A failure is a **result**, not an error: the user may save a machine that is
-/// simply switched off right now, and the page then says 「不可达」 rather than
-/// treating the host record as broken (ADR-0006). `kind` carries the class, so
-/// the page can tell 连不上 / 认证失败 / 超时 / 远端命令失败 apart.
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnectionTest {
     pub ok: bool,
@@ -217,8 +207,6 @@ pub async fn available_versions(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TailChunk {
     pub text: String,
-    /// Where to read from next. Always the log's current size, so the next call
-    /// asks only for what was written after this one.
     pub offset: u64,
     pub alive: bool,
 }
@@ -227,12 +215,6 @@ pub const MAX_TAIL_BYTES: usize = 256 * 1024;
 
 const WAIT_OVERHEAD_SECS: u64 = 30;
 
-/// The budget for a call whose script waits `wait_secs` **on that machine**.
-///
-/// A call that runs out of time has to mean the launcher could not hear back,
-/// not that a quiet install plus a loaded server happened to exceed a budget
-/// chosen somewhere else — that mistake turned a late log read into 「安装失败」
-/// and threw away a version that had just finished (issue #14 验收).
 fn budget_for(wait_secs: u64) -> Duration {
     Duration::from_secs(wait_secs + WAIT_OVERHEAD_SECS)
 }
@@ -267,9 +249,6 @@ pub async fn tail(
     })
 }
 
-/// The longest single log line the launcher buffers while it waits for a
-/// newline. A process that redraws a progress bar with `\r` and no newline
-/// would otherwise grow the buffer for as long as it runs.
 pub(crate) const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
 
 pub(crate) const CUT_LINE_PREFIX_BYTES: usize = 1024;
@@ -370,12 +349,6 @@ pub async fn mint_headers(
     })
 }
 
-/// How many bytes one remote log already holds.
-///
-/// Read *before* a detached spawn: the log is appended to across runs (a stopped
-/// instance's log is not truncated), and the launcher has to follow this run's
-/// output only. Starting at zero would re-read the previous run's URL line and
-/// adopt a token that belongs to a process which is no longer there.
 pub async fn log_size(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -421,13 +394,6 @@ pub async fn process_start_time(
     Ok(parse_marked::<Started>(&out)?.started_at)
 }
 
-/// Reads one file, or answers `None` when that machine says the file is not
-/// there.
-///
-/// [`READ_FILE`] exits 2 for exactly that case, and it is a normal answer for
-/// the files the launcher reads before it has ever written them (a host's
-/// running record, a profile's patch document). Every other failure — an
-/// unreachable machine, unreadable bytes — is still an `Err`.
 pub async fn read_file_optional(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -577,11 +543,6 @@ pub fn ssh_command(target: &str, recipe: &str) -> String {
     )
 }
 
-/// The Node install recipe for the machine the probe found these managers on:
-/// extend the one the user already uses, so they end up with one Node in the
-/// place they expect. With no manager at all it installs nvm and then loads it
-/// into the same shell — a freshly installed `~/.bashrc` only takes effect in
-/// the *next* shell, so the recipe has to source it itself.
 pub fn node_install_recipe(managers: &[String]) -> &'static str {
     let has = |m: &str| managers.iter().any(|x| x == m);
     if has("nvm") {
@@ -670,21 +631,6 @@ dsh_json=$(printf '{"os":"%s","release":"%s","arch":"%s","home":"%s",%s,"data_di
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
 
-/// What `dsh` on one machine's PATH currently is, as that machine can see it —
-/// the remote half of [`crate::pathlink::inspect`], and the one place the two
-/// remote scripts get it from.
-///
-/// The marker travels **quoted into a variable** (`dsh_marker=%%MARKER%%` would
-/// be a shell comment: everything after `#` is discarded, and `set -u` then
-/// rejects the unset variable). A wrapper script is recognised only by a line
-/// that starts with the marker and ends with a version directory, so a marker
-/// a user happened to paste into their own script is not taken for ours.
-///
-/// The caller sets `dsh_versions` first (newline-separated version directories)
-/// and passes it through `%%VERSIONS%%`. Sets `dsh_state` (`absent` / `symlink`
-/// / `script` / `foreign`), `dsh_target` (the version directory a symlink leads
-/// into, or the directory a wrapper names) and `dsh_ours` (true when
-/// `dsh_target` is one of those directories).
 const LINK_STATE: &str = r#"dsh_marker=%%MARKER%%
 dsh_link="${HOME:-}/.local/bin/dsh"
 
@@ -1132,18 +1078,6 @@ fi
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Makes a new profile on that machine by copying a `__temp__` template, the
-/// same three-step choice [`crate::commands::create_profile`] makes here:
-///
-/// 1. this HOME already has `profiles/__temp__` — copy it;
-/// 2. it has a `profiles/web` — copy that to `__temp__` (and scrub the port pin
-///    in the copy, [`crate::profile::scrub_port_pin`]'s rule), then copy it on;
-/// 3. neither — take a `__temp__` from another HOME under that machine's own
-///    data directory, which is where the installer leaves one.
-///
-/// Never builds a `__temp__` in `~/.dsh`: that HOME is the user's, and the
-/// template machinery is the launcher's (issue #5). `%%USER_DEFAULT%%` says
-/// whether this HOME is that one.
 const CREATE_PROFILE: &str = r#"set -u
 %%ESCAPER%%
 dsh_profiles=%%PROFILES%%
@@ -1210,23 +1144,6 @@ cp -R "$dsh_template" "$dsh_target" || dsh_refuse '创建 Profile 失败'
 printf '<<<DSH-JSON>>>{"ok":true,"name":"%s"}<<<DSH-END>>>' "$(printf '%s' "$dsh_name" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 "#;
 
-/// The `dsh` command on that machine's PATH: one link at `~/.local/bin/dsh`
-/// that runs one version's CLI, the same rule [`crate::pathlink`] applies on
-/// this Mac.
-///
-/// It has to be a script run **there** because the three facts it needs live on
-/// that machine and nowhere else: what the link currently is, whether the
-/// version's own entry file is executable, and what `~` means in that shell.
-/// The rules are the local ones exactly — an entry that is a real file or a link
-/// belonging to someone else is refused, never overwritten and never removed;
-/// one version at a time, so registering another replaces the launcher's own
-/// link; a CLI that is not executable gets a wrapper script carrying the marker
-/// ([`crate::pathlink::MARKER`]) instead.
-///
-/// `%%ACTION%%` is `register`, `unregister` or `unlink`. `register` takes
-/// `%%VERSION%%` (the version directory); `unlink` takes `%%VERSION%%` and is
-/// the withdrawal a version deletion performs; `unregister` takes neither. Both
-/// get `%%VERSIONS%%` — every version the launcher knows on that machine.
 const PATH_LINK: &str = r#"set -u
 dsh_action=%%ACTION%%
 dsh_version=%%VERSION%%
@@ -1704,9 +1621,6 @@ else
 fi
 "#;
 
-/// Whether the process tree one detached spawn started is still there. The same
-/// predicate [`STOP_GROUP`] signals with, so 「停了」 and 「真的没了」 cannot
-/// disagree.
 const ALIVE: &str = r#"set -u
 dsh_pid=%%PID%%
 if kill -0 -- "-$dsh_pid" 2>/dev/null || kill -0 "$dsh_pid" 2>/dev/null; then
@@ -1900,20 +1814,6 @@ if [ -s %%PATH%% ]; then dsh_ready=true; else dsh_ready=false; fi
 printf '<<<DSH-JSON>>>{"ready":%s}<<<DSH-END>>>' "$dsh_ready"
 "#;
 
-/// Where one process's standard output goes **now**, and the last stretch of
-/// that file.
-///
-/// A DSH that replaces itself keeps the pid the launcher is watching but not the
-/// file it was started with: the replacement writes to whatever its own starter
-/// gave it (DSH's restart helper hands it a fresh file under `/tmp`), so the
-/// log the launcher has been following falls silent while the instance prints
-/// its new launch address somewhere else. `/proc/<pid>/fd/1` is that fact asked
-/// of the process itself, so the launcher can follow the address instead of the
-/// filename it remembered.
-///
-/// A target that is not a regular file (a pipe, a terminal) has no bytes to
-/// read: `path` is then null and `data` empty, which is a fact and not a
-/// failure.
 const STDOUT_TAIL: &str = r#"set -u
 %%ESCAPER%%
 dsh_pid=%%PID%%
@@ -1959,14 +1859,6 @@ pub async fn stdout_tail(
     })
 }
 
-/// When one pid started, in clock ticks since boot: field 22 of
-/// `/proc/<pid>/stat`, which puts a pid number back together with the process it
-/// names.
-///
-/// The fields are counted from after the parenthesised command name: that name
-/// is free text and may contain spaces, so `$22` of the whole line would drift.
-/// Anything that is not a number (the process is gone, `/proc` is not mounted)
-/// reads as null — the caller's 「查不了」.
 const START_TIME: &str = r#"set -u
 dsh_pid=%%PID%%
 dsh_stat=$(cat "/proc/$dsh_pid/stat" 2>/dev/null || true)
@@ -1978,25 +1870,6 @@ case "$dsh_started" in
 esac
 "#;
 
-/// The tail of one remote log from a byte offset, waiting on that machine until
-/// there is something to report.
-///
-/// A remote install has no pipe to read: it runs detached so it outlives the
-/// ssh session, and its only output is a log file. Reading that file once per
-/// poll would open an ssh per second for the ten minutes an install takes, so
-/// the wait happens **there** — this script returns as soon as the log has grown
-/// past the offset, the process is gone, or the budget runs out. Live output
-/// therefore arrives about a second after it is written, and a quiet install
-/// costs one call per `%%WAIT%%` seconds.
-///
-/// The bytes travel base64-encoded: the channel is text, and pnpm's output
-/// carries whatever its own terminals printed.
-///
-/// One read returns at most [`MAX_TAIL_BYTES`]. A log that grew past that while
-/// nobody was reading it — a slept Mac, a launcher that was not running — is
-/// read from its **end**, and the offset lands on the file's size: the follower
-/// needs the tail (the URL line, the exit line), not every byte in between, and
-/// a single read must not carry a whole file's growth into memory.
 const TAIL: &str = r#"set -u
 dsh_log=%%LOG%%
 dsh_offset=%%OFFSET%%
@@ -2051,20 +1924,6 @@ if [ -n "$dsh_said" ]; then dsh_has=true; fi
 printf '<<<DSH-JSON>>>{"exists":%s}<<<DSH-END>>>' "$dsh_has"
 "#;
 
-/// Starts a process that outlives the ssh session (ADR-0007): its own session
-/// (`setsid`), stdin from `/dev/null`, output appended to the remote log file,
-/// and the pid printed for the remote running record.
-///
-/// `%%PATH_PREPEND%%` puts the caller's tool directories in front of the session's
-/// own `PATH` (empty when there are none). A remote DSH is handed an absolute
-/// `node`, but it invokes `pnpm` by name for plugin management, and an ssh
-/// session's minimal `PATH` does not reach a version-manager install — so the
-/// directories the launcher resolved there go in front, and `"$PATH"` keeps
-/// whatever the session already had.
-///
-/// The pid is `$!` as the shell saw it. Our sessions have no job control (bash
-/// says so on stderr), so the background child is not a process-group leader and
-/// `setsid` does not need to fork — `$!` is the process itself.
 const SPAWN: &str = r#"set -u
 dsh_log=%%LOG%%
 mkdir -p "$(dirname "$dsh_log")" || exit 2
@@ -2204,20 +2063,6 @@ pub fn spawn_script(argv: &[String], log_path: &str, path_dirs: &[String]) -> St
     )
 }
 
-/// The argv for a detached command whose **outcome** the launcher needs, run in
-/// `cwd` (which is created if it is not there).
-///
-/// [`spawn_script`] detaches the process with `setsid` so it outlives the ssh
-/// session — which also means it is not the launcher's child and nobody can
-/// `wait` for it. So the command runs under a small `sh -c` wrapper that appends
-/// its exit status to the same log the launcher is already reading
-/// ([`EXIT_MARK`], read back by [`exit_status_of`]). A missing status line is
-/// then meaningful in itself: the wrapper never got to write one, so the command
-/// was killed rather than having exited.
-///
-/// `cwd` is where pnpm and git want to run: both read the tree they are working
-/// on from the working directory, and `pnpm install --prefix` is not a
-/// substitute for being in the directory for everything else pnpm resolves.
 pub fn measured_argv(argv: &[String], cwd: &str) -> Vec<String> {
     let command = argv
         .iter()
@@ -2239,15 +2084,6 @@ pub fn exit_status_of(line: &str) -> Option<i32> {
     rest.strip_suffix(END)?.trim().parse().ok()
 }
 
-/// The shell text a terminal on this Mac runs on the other machine: land in the
-/// instance's DSH_HOME with the same variables and PATH the local instance
-/// terminal gets.
-///
-/// A local session is a `scripts/term_<id>.sh` file the launcher writes and the
-/// terminal executes; there is nothing to write on another machine, so the
-/// terminal is handed one command line instead ([`terminal_command`], which
-/// carries this script over). The interpreter is the one the user gets in a
-/// terminal on that machine — their login shell, on a pty.
 pub fn terminal_script(home: &str, env: &[(String, String)], path_dirs: &[String]) -> String {
     let mut script = String::new();
     if !path_dirs.is_empty() {
@@ -2271,10 +2107,6 @@ pub fn terminal_command(target: &str, script: &str) -> String {
     format!("ssh -t {target} {}", quote(script))
 }
 
-/// How much of a remote log the launcher copies home before opening it. A DSH
-/// log grows without limit; the last stretch is the part anyone reads, and
-/// bounding it keeps one click to a few hundred kilobytes regardless of how
-/// long the instance has been printing.
 pub const LOG_TAIL_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2571,9 +2403,6 @@ pub(crate) mod testing {
         FakeTransport::new()
     }
 
-    /// The stdout a **successful** connection test prints — the sample every
-    /// test that needs a reachable machine shares. It mirrors what
-    /// [`connection_test_script`] builds, field for field.
     pub(crate) fn connection_stdout(
         node: Option<(&str, &str)>,
         pnpm: Option<(&str, &str)>,
@@ -2927,11 +2756,6 @@ mod tests {
             .block_on(future)
     }
 
-    /// Runs one script on **this** machine's shell, in the same shape the
-    /// transport runs it on a remote one. The scripts know nothing about which
-    /// machine they are on, so what a real shell prints here is what a real
-    /// shell prints there — the only thing in the suite that exercises the
-    /// shell text itself.
     fn local_shell(script: &str) -> RemoteOutput {
         let out = std::process::Command::new("/bin/bash")
             .arg("-ilc")
@@ -3520,8 +3344,6 @@ mod tests {
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert!(!link.exists(), "删掉的那个版本自己的登记要撤掉");
 
-        // A link naming no version at all must not match an absolute path:
-        // the pattern would otherwise degenerate to `"" | "/*"`.
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
         let out = local_shell_as(&path_link_script("unlink", None, &dirs), &home);
@@ -3746,12 +3568,6 @@ mod tests {
         home
     }
 
-    /// Runs the probe script in a real shell and parses its answer.
-    /// `-c` rather than the `-ilc` the launcher dials with: what is under test is
-    /// the walk over the candidate list, and the fixtures have to own `PATH` and
-    /// `HOME` for the answer to be about them instead of about this Mac. The
-    /// interactive login shape is pinned by `script_command` and by the
-    /// connection test.
     fn run_probe(
         home: &Path,
         path: &str,
@@ -4418,10 +4234,6 @@ mod tests {
         dir
     }
 
-    /// The launcher follows **this run's** output only. A log that a previous run
-    /// wrote to is still there when the next one starts (nothing truncates it),
-    /// and its URL line carries a token that belongs to a process which is gone;
-    /// reading the size first is what keeps the follower from adopting it.
     #[test]
     fn the_log_size_script_counts_an_absent_file_as_zero_and_a_real_one_as_its_bytes() {
         let dir = scratch("dsh-remote-log-size");
@@ -4829,10 +4641,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// The one thing no fake can show: that a real machine's own shell reads a
-    /// real profile — GNU `base64`, `grep -o`, `cut`, the `@scope/pkg` walk and
-    /// the marker envelope — and answers in one call with what the page
-    /// projects from.
     #[tokio::test]
     #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
     async fn a_real_profile_read_answers_from_that_machine() {

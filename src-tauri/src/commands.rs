@@ -72,9 +72,6 @@ pub(crate) fn create_host_record(state: &AppState, input: HostInput) -> Result<H
     Ok(host)
 }
 
-/// Rewrites one host's editable fields. The record keeps its id and its
-/// `builtin` flag: the form must not be able to turn 本机 into a remote machine,
-/// or the other way round.
 #[tauri::command]
 pub fn update_host(
     state: State<'_, AppState>,
@@ -318,8 +315,6 @@ async fn adopt_user_dsh_home(
         path: std::path::PathBuf::from(&answer.dsh_home),
         host_id: host.id.clone(),
     };
-    // The check and the write share one lock: two reads of the same host racing
-    // each other must not leave two records for one directory.
     let mut cfg = state.config.lock().unwrap();
     if cfg
         .homes
@@ -405,10 +400,6 @@ pub fn default_dedicated_home_path(
         .to_string())
 }
 
-/// Removes one version's dedicated DSH_HOME, judged by path alone. A path that
-/// no longer exists (already cleaned by hand) is not an error. Removal is
-/// best-effort: a failure is logged but never aborts the version deletion —
-/// the version record and its instances are already gone by then.
 pub(crate) fn remove_dedicated_home(
     data_dir: &std::path::Path,
     version: &str,
@@ -469,10 +460,6 @@ pub struct DshVersionView {
     pub dir: std::path::PathBuf,
     pub dedicated_home: String,
     pub host_id: String,
-    /// Whether the version's bin is there and not empty. A directory an install
-    /// left half-finished is a record the user can see and delete, but not a
-    /// version anyone can start — and only the machine that owns the directory
-    /// can say which it is ([`crate::launch::version_bin`] is the layout).
     pub bin_ready: bool,
     pub path_linked: bool,
 }
@@ -491,9 +478,6 @@ pub async fn set_version_path_link(
     id: Option<String>,
     host_id: Option<String>,
 ) -> Result<(), String> {
-    // Read here rather than inside: only the 本机 branch needs this Mac's home,
-    // and a Mac whose home cannot be read should still be able to register a
-    // version on a server.
     let home = crate::pathlink::home_dir().ok();
     set_version_path_link_at(&state, home.as_deref(), id, host_id.as_deref()).await
 }
@@ -718,9 +702,6 @@ pub fn versions_source(host: &Host) -> VersionsSource {
     }
 }
 
-/// Turns npm's two `--json` answers into the list the page shows. npm >= 9
-/// returns `time` as `[{ ... }]` (an array wrapping one object); older npm
-/// returned the object directly.
 pub(crate) fn versions_from_npm(
     versions_json: &str,
     time_json: &str,
@@ -812,9 +793,6 @@ async fn fetch_github_tag_versions() -> Result<Vec<RemoteVersion>, String> {
         let Some(version) = tag.strip_prefix("dsh-v") else {
             continue;
         };
-        // A Git tag may legally contain `/`, `..`, and other characters that
-        // are unsafe as the version-directory path segment the installer
-        // joins it into — only accept well-formed version strings.
         if !crate::tasks::valid_version_string(version) {
             crate::log_warn!("忽略格式异常的 GitHub 标签: {tag}");
             continue;
@@ -1014,9 +992,6 @@ pub(crate) async fn create_instance_in(
     if name.is_empty() {
         return Err("实例名称不能为空".to_string());
     }
-    // The three records are read, checked and cloned out under one lock, so the
-    // priming below (which is ssh, and must never run under a `std::sync` guard)
-    // cannot hold the config while it waits on another machine.
     let (host, version, home) = {
         let cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id)?.clone();
@@ -1085,8 +1060,6 @@ pub async fn delete_instance(
             .map_err(|e| format!("实例没能停下来，记录没有删：{e}"))?;
     }
 
-    // Resolve where the icon file is — which machine, and which HOME — before
-    // saving: the record is the only thing that names the file.
     let icon_scope = {
         let mut cfg = state.config.lock().unwrap();
         let host = crate::config::resolve_host(&cfg, host_id.as_deref())?.clone();
@@ -1112,8 +1085,6 @@ pub async fn delete_instance(
         save_state(&state, &cfg.clone())?;
         icon_scope
     };
-    // The record is the only thing that names the icon: with it gone, the bytes
-    // this session read off that machine are nobody's answer anymore.
     crate::icons::forget_icon(&id);
     if let Some((host, home)) = icon_scope {
         crate::icons::remove_icon_file(&state, &host, &home, &id).await;
@@ -1160,13 +1131,8 @@ pub fn update_instance(
     if cfg.instances[pos].host_id != host.id {
         return Err("实例不属于该主机".to_string());
     }
-    // The icon is managed by set/clear_instance_icon and the owning host by the
-    // host a record was created on, not by this form payload; preserve whatever
-    // is currently stored (the frontend spreads a possibly stale instance).
     updated.icon = cfg.instances[pos].icon.clone();
     updated.host_id = cfg.instances[pos].host_id.clone();
-    // Empty / out-of-range input (0, negative, > 65535, non-integer) means
-    // "random" — stored as `None`, so launch passes `--port 0`.
     updated.port = updated.port.filter(|p| (1..=65535).contains(p));
     cfg.instances[pos] = updated.clone();
     save_state(&state, &cfg)?;
@@ -1205,9 +1171,6 @@ impl HomeOn {
         crate::profile::profiles_dir(&self.home.path)
     }
 
-    /// `<profiles>/<name>` on that machine. The name has to be one path segment
-    /// (see [`crate::profile::profile_dir`]), so no caller can join a path that
-    /// escapes `profiles/` — on this Mac or over ssh.
     fn profile_dir(&self, name: &str) -> Result<std::path::PathBuf, String> {
         crate::profile::profile_dir(&self.home.path, name)
     }
@@ -1606,9 +1569,6 @@ pub async fn stop_instance(
     process::stop_instance_process(&app, &state, &id).await
 }
 
-/// Restarts a running instance on the profile it was running. One lifecycle
-/// transition backend-side; the frontend used to compose stop + start itself,
-/// which raced the stop's reap window against the start's preflight.
 #[tauri::command]
 pub async fn restart_instance(
     app: AppHandle,
@@ -1681,8 +1641,6 @@ pub fn update_settings(
 ) -> Result<LauncherSettings, String> {
     let mut cfg = state.config.lock().unwrap();
 
-    // Stage every field on a local copy first, so a value the launcher cannot
-    // use returns an error without leaving a half-applied change in `cfg`.
     let mut next = cfg.settings.clone();
     let log_level_patch = settings.log_level.is_some();
     if let Some(v) = settings.minimize_to_tray {
@@ -1729,16 +1687,11 @@ pub fn update_settings(
     }
     crate::proxy::validate_settings(&next)?;
 
-    // Stage the autostart flag. Its OS side effect runs only after the settings
-    // are written, so a failed save never leaves the login item changed.
     let autostart_change = settings.autostart.filter(|v| *v != cfg.settings.autostart);
     if let Some(v) = settings.autostart {
         next.autostart = v;
     }
 
-    // Write the whole settings to disk first, then make it the live state. A
-    // failed save leaves the in-memory settings and the proxy/level switches
-    // untouched, so what the page shows always matches what is on disk.
     let previous = std::mem::replace(&mut cfg.settings, next);
     if let Err(e) = save_state(&state, &cfg) {
         cfg.settings = previous;
@@ -1766,8 +1719,6 @@ pub fn update_settings(
     Ok(out)
 }
 
-/// Opens an http(s) URL in the system browser. The Tauri webview ignores
-/// `target="_blank"` anchors, so external links must go through here.
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
     let url = url.trim().to_string();
@@ -1889,13 +1840,6 @@ pub(crate) struct TerminalSession {
     pub line: String,
 }
 
-/// The remote twin of a local instance terminal (user story 33): one ssh
-/// command line that lands in the instance's DSH_HOME **on that machine**.
-///
-/// The machine is asked once, up front, so a host that is down is a readable
-/// sentence in the page — and a DSH_HOME that is gone there is reported before
-/// the terminal tries to `cd` into it. Nothing is written on this Mac: unlike
-/// the local session, there is no script file to hand over.
 pub(crate) async fn remote_terminal_session(
     state: &AppState,
     host: &Host,
@@ -2091,10 +2035,6 @@ pub fn open_launcher_log(
     reveal_log_file(&app, log_dir.join("latest.log"))
 }
 
-/// Reveals one instance's runtime log in the file manager with the file
-/// selected: `<data_dir>/logs/<instance_id>.log` for an instance on this Mac,
-/// and a copy of the tail of that machine's log for one elsewhere (user story
-/// 34). `open -R` needs a local file, so the remote log is fetched first.
 #[tauri::command]
 pub async fn open_instance_log(
     app: tauri::AppHandle,
@@ -2114,14 +2054,6 @@ pub async fn open_instance_log(
     }
 }
 
-/// Where one instance's log is read from: the launcher's own log directory for
-/// an instance on this Mac, or the log file that instance writes **on its own
-/// machine** for one elsewhere.
-///
-/// The path is the one the remote run carries in
-/// [`crate::process::RemoteRun::log_path`] when the instance is running, and the
-/// same derivation when it is not — a stopped instance's log is still there to
-/// read, exactly as a local one's is.
 pub(crate) enum InstanceLog {
     Local(std::path::PathBuf),
     Remote { host: Box<Host>, log_path: String },
@@ -2169,12 +2101,6 @@ pub(crate) async fn instance_log_source(
     })
 }
 
-/// Fetches the last stretch of one remote instance's log into a local file and
-/// answers with where it landed, so the file manager can reveal it the way it
-/// reveals a local log.
-///
-/// The copy is written under the launcher's own log directory and overwritten on
-/// every open: it is a copy of the tail, not a second log to follow.
 pub(crate) async fn fetch_remote_log(
     state: &AppState,
     host: &Host,
@@ -2215,12 +2141,6 @@ pub struct InstanceLocation {
     pub command: String,
 }
 
-/// The remote instance's location, for the card's copy actions.
-///
-/// A remote DSH_HOME cannot be opened in this Mac's file manager, and a button
-/// that reaches nothing is worse than none (ADR-0006): the path and a command
-/// are what the user can actually use. This answers from the launcher's records
-/// alone, so it works while that machine is off.
 #[tauri::command]
 pub fn instance_remote_location(
     state: State<'_, AppState>,
@@ -2262,10 +2182,6 @@ pub(crate) fn instance_location_for(
     })
 }
 
-/// What a user runs on this Mac to look at a remote directory. The path goes in
-/// single quotes so the login shell at the other end sees it as one word, while
-/// a leading `~` stays outside the quotes so the shell expands it;
-/// [`crate::remote::ssh_command`] owns the rest of the quoting.
 fn directory_recipe(path: &str) -> String {
     format!("ls -la {}", remote_path(path))
 }
@@ -2402,12 +2318,6 @@ mod tests {
         host
     }
 
-    /// Which machine's npm answers the installable-version question, and with
-    /// which registry: 本机 with its own record's registry, a remote host with
-    /// its own registry asked **there** (a mirror that only that machine can
-    /// reach would otherwise offer a list it cannot install), and a remote host
-    /// without one asked here — the same registry, so no ssh and no second way
-    /// to fail.
     #[test]
     fn a_hosts_installable_list_is_queried_from_its_own_registry() {
         assert_eq!(
@@ -2445,10 +2355,6 @@ mod tests {
         );
     }
 
-    /// npm's two `--json` answers become the list the page shows: the version
-    /// list decides the entries, the timing map fills in the dates it knows.
-    /// npm >= 9 wraps `time` in a one-element array; older npm returned the
-    /// object directly — both shapes are read, because both are in the field.
     #[test]
     fn npm_listings_become_versions_with_their_dates() {
         let flat = versions_from_npm(
@@ -2479,8 +2385,6 @@ mod tests {
         );
     }
 
-    /// ready — it is a record the user has to be able to see and delete, not a
-    /// version anyone can start.
     #[test]
     fn a_remote_hosts_installed_versions_carry_their_path_and_bin_readiness() {
         let data = ScratchDir::new("remote-versions");
@@ -2555,10 +2459,6 @@ mod tests {
         assert!(!listed[1].path_linked, "别的版本没有被登记");
     }
 
-    /// A machine the launcher cannot reach is an error, never an empty list:
-    /// 「这台机器上没有版本」 is a claim only the machine can make, and a page that
-    /// shows it after a failed call is telling the user something it does not
-    /// know.
     #[test]
     fn an_unreachable_hosts_version_list_is_an_error_not_an_empty_list() {
         let data = ScratchDir::new("remote-versions-down");
@@ -2722,11 +2622,6 @@ mod tests {
         );
     }
 
-    /// The board shows every host's instances by default, and that is an
-    /// **explicit** request: no host named still means 本机, so a caller that
-    /// never says which machine it wants never quietly gets two of them merged.
-    /// Two instances called the same thing on two hosts stay two rows, each
-    /// carrying its own host — that is what keeps them apart on the board.
     #[test]
     fn the_all_hosts_request_lists_every_host_and_silence_still_means_local() {
         let data = ScratchDir::new("all-instances");
@@ -2823,8 +2718,6 @@ mod tests {
         );
     }
 
-    /// 「重新读取 Profile」 is this read asked again: nothing is cached in the
-    /// launcher, so a profile edited on the server shows up on the second look.
     #[test]
     fn rereading_a_remote_homes_profiles_asks_that_machine_again() {
         let data = ScratchDir::new("remote-profiles-reread");
@@ -2944,8 +2837,6 @@ mod tests {
         assert_eq!(cfg.instances[0].last_profile, None);
     }
 
-    /// The traversal guard holds on the far side too: a name that is not one
-    /// path segment never becomes a path, and nothing is dialed to find out.
     #[test]
     fn a_remote_profile_name_that_would_escape_is_refused_before_any_ssh() {
         let data = ScratchDir::new("remote-profile-escape");
@@ -3174,8 +3065,6 @@ mod tests {
         assert_eq!(second[0].id, first[0].id);
     }
 
-    /// A machine without a `~/.dsh` is a machine, not an error: nothing is
-    /// recorded, and the rest of its DSH_HOMEs still come back.
     #[test]
     fn a_remote_machine_without_a_user_dsh_home_records_nothing() {
         let data = ScratchDir::new("remote-no-user-home");
@@ -3388,9 +3277,6 @@ mod tests {
         }
     }
 
-    /// The point of the whole ticket: a machine that cannot be reached is still
-    /// a machine the user may keep. Saving it works, the page shows 「不可达」, and
-    /// the reason is one of the four classes.
     #[test]
     fn a_host_that_cannot_be_reached_is_still_saved_and_shows_as_unreachable() {
         let data = ScratchDir::new("host-unreachable");
@@ -3419,7 +3305,6 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Connection refused"));
-        // 本机 never gets a status: it is not a machine to reach.
         let local = views.iter().find(|v| v.host.builtin).unwrap();
         assert!(local.status.is_none());
     }
@@ -3622,8 +3507,6 @@ mod tests {
         );
     }
 
-    /// The form must not be able to change what a host *is*: editing 本机 leaves
-    /// it 本机, with no ssh target.
     #[test]
     fn editing_a_host_keeps_its_id_and_its_builtin_flag() {
         let data = ScratchDir::new("host-edit");
@@ -3856,8 +3739,6 @@ mod tests {
         );
     }
 
-    /// The built-in host is this Mac: there is nothing to connect to, and saying
-    /// so is better than a dial that cannot work.
     #[test]
     fn the_local_host_has_no_connection_to_test() {
         let data = ScratchDir::new("host-local-test");
@@ -4216,9 +4097,6 @@ mod tests {
         };
         let session = block_on(remote_terminal_session(&state, &host, &inst, &home, None)).unwrap();
 
-        // The machine is asked once, about that instance's own DSH_HOME: a host
-        // that is down, or a HOME that is gone there, is a sentence in the page
-        // instead of a window that opens and dies.
         assert_eq!(
             fake.calls(),
             vec![crate::remote::testing::FakeCall::ListDir(
@@ -4252,8 +4130,6 @@ mod tests {
         );
     }
 
-    /// A host that is not reachable says so in the page, rather than opening a
-    /// terminal that prints ssh's error and closes.
     #[test]
     fn the_machine_actions_report_an_unreachable_host() {
         use crate::remote::testing::{FakeAnswer, FakeTransport};
@@ -4291,9 +4167,6 @@ mod tests {
         assert!(err.contains("Connection refused"), "原因来自 ssh：{err}");
     }
 
-    /// The local terminal is the file it always was (and the remote one is not
-    /// a file at all): one path rule, pinned here so a remote branch cannot
-    /// quietly move the local session.
     #[test]
     fn the_local_terminal_session_is_still_a_script_in_the_data_directory() {
         let data = ScratchDir::new("local-terminal-path");
@@ -4301,10 +4174,6 @@ mod tests {
         assert_eq!(path, data.path().join("scripts").join("term_i1.sh"));
     }
 
-    /// The directory action for an instance on another machine (issue #20): the
-    /// path to copy and one command that reaches it. It answers from the
-    /// records, so copying works while that machine is off — there is nothing
-    /// about a copy that a dead host could refuse.
     #[test]
     fn a_remote_instances_location_is_a_path_and_a_runnable_command() {
         let data = ScratchDir::new("remote-location");
@@ -4331,8 +4200,6 @@ mod tests {
             location.command
         );
 
-        // The path holds a single quote, so the proof that it survived is the
-        // shape the user's own shell parses: three words, then no more.
         let handed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("printf '%s@@@' {}", location.command))
@@ -4373,10 +4240,6 @@ mod tests {
         assert!(err.contains("打开目录"), "{err}");
     }
 
-    /// An instance's log: 本机's is read where it is written, and another
-    /// machine's is copied home — the last stretch of it, into the launcher's
-    /// own log directory, so the file manager can reveal it exactly as it
-    /// reveals a local one (user story 34).
     #[test]
     fn a_remote_instances_log_is_copied_home_and_a_local_one_is_read_in_place() {
         let data = ScratchDir::new("remote-log");
@@ -4428,23 +4291,6 @@ mod tests {
         );
     }
 
-    /// The whole gap on a real machine: a DSH_HOME that DSH has never run in
-    /// must come out of instance creation with a Profile the page can launch
-    /// with. This is what the acceptance walk could not do on `zjq_aliyun` — an
-    /// empty Profile list and a 启动 that does nothing — driven through the two
-    /// commands the page calls, over real ssh, against real DSH.
-    ///
-    /// It needs a version **already installed on that machine** under that
-    /// machine's own data directory (`<远端数据目录>/versions/<版本>`); it does
-    /// not install one, because installing is nobody's business here. What it
-    /// creates — a fresh DSH_HOME and the DSH boot that fills it — it removes
-    /// again, except the log of that boot, which is named in the failure output
-    /// if anything goes wrong.
-    ///
-    /// ```text
-    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
-    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_fresh_home
-    /// ```
     #[test]
     #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST），且那台机器上装有版本"]
     fn a_real_fresh_remote_home_comes_back_with_a_profile() {
@@ -4513,8 +4359,6 @@ mod tests {
         let profiles = block_on(list_profiles_for(&state, &home.id))
             .unwrap_or_else(|e| panic!("列 Profile 失败：{e}"));
 
-        // What the page needs: something to select, and 「启动」 with a profile
-        // to launch with.
         assert!(
             profiles.contains(&"web".to_string()),
             "那台机器上 {} 下的 Profile 是 {profiles:?}",
@@ -4535,10 +4379,6 @@ mod tests {
             temp.display()
         );
 
-        // And the end of the walk it could not take: launch it there and see the
-        // URL it prints. The port is the launcher's own choice (`--port 0` for an
-        // unpinned instance), so this also says the first start on a fresh HOME
-        // does not land on DSH's default 3080.
         let cfg = state.config.lock().unwrap().clone();
         let version = cfg.versions[0].clone();
         let start = block_on(crate::process::spawn_remote_instance(
@@ -4580,8 +4420,6 @@ mod tests {
                 break;
             }
         }
-        // Stop it before asserting anything about the URL: a failure must not
-        // leave a DSH running on somebody's server.
         let stopped = block_on(crate::process::stop_remote_run(&state, &start.run));
         assert_eq!(
             stopped,
@@ -4596,8 +4434,6 @@ mod tests {
         let url = url.unwrap();
         assert!(url.contains("token="), "URL 要带 token：{url}");
 
-        // Leave that machine as it was found: the probe HOME, the copy of the
-        // boot's log, the instance's log and the run record — nothing else.
         block_on(crate::remote::remove_dir(
             &*transport,
             &run_host,

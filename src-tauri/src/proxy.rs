@@ -17,12 +17,9 @@ fn parse_proxy_url(url: &str, port: u16) -> Option<String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    // `Url::port()` reports `None` for a scheme's default port even when the
-    // URL spelled it out, so the raw text decides whether a port was given.
     if !explicit_port {
         parsed.set_port(Some(port)).ok()?;
     }
-    // reqwest renders a bare host with a trailing slash; the environment
     Some(parsed.as_str().trim_end_matches('/').to_string())
 }
 
@@ -61,9 +58,6 @@ pub fn validate_settings(settings: &LauncherSettings) -> Result<(), String> {
     }
 }
 
-/// Snapshot of the active proxy for HTTP client construction sites that have
-/// no access to the config mutex. Synced at startup and on every settings
-/// update.
 static CURRENT: RwLock<Option<ProxyConf>> = RwLock::new(None);
 
 pub fn sync_from_settings(settings: &LauncherSettings) {
@@ -93,9 +87,6 @@ const PROXY_KEYS: [&str; 6] = [
     "no_proxy",
 ];
 
-/// Injects the proxy into an instance environment, replacing any proxy
-/// variables the instance already defines (both cases). Callers check
-/// `proxy_enabled && proxy_apply_dsh` first.
 pub fn override_env(env: &mut Vec<(String, String)>, settings: &LauncherSettings) {
     let Some(conf) = conf_from_settings(settings) else {
         return;

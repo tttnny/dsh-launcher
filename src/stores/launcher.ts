@@ -13,12 +13,6 @@ import type {
   TaskInfo,
 } from '@/api/types'
 
-/**
- * The install ledger: versions an install task is currently fetching, keyed by
- * **host + version** — two machines can install the same version at the same
- * time, and each of them shows its own progress on its own row. Accepts the
- * full task list, so both the initial fetch and a re-read build it the same way.
- */
 function installLedger(tasks: TaskInfo[]): Record<string, TaskInfo> {
   return Object.fromEntries(
     tasks
@@ -27,12 +21,6 @@ function installLedger(tasks: TaskInfo[]): Record<string, TaskInfo> {
   )
 }
 
-/**
- * How one install is identified on the Versions page: the machine, then the
- * version. Neither can contain `:` (a version is semver plus tag characters,
- * a host id is a uuid or the local literal), so one string identifies one
- * install.
- */
 export function installKey(
   hostId: string | undefined,
   version: string,
@@ -40,11 +28,6 @@ export function installKey(
   return `${hostId ?? LOCAL_HOST_ID}:${version}`
 }
 
-/**
- * The event subscriptions `init()` opened, so they can be released again.
- * Module-level rather than store state: they are host handles, not data the
- * views render, and Vue must not proxy them.
- */
 let disposers: (() => void)[] = []
 let initRun: Promise<void> | null = null
 
@@ -55,28 +38,11 @@ interface LauncherState {
   homesByHost: Record<string, DshHome[]>
   homeErrors: Record<string, string>
   versionsByHost: Record<string, DshVersion[]>
-  /**
-   * Why one host's installed versions could not be read (「连不上」 and friends),
-   * by host id. 「装了哪些」 is a claim only that machine can make, so a host that
-   * failed has **no** list here: showing the previous one would present
-   * yesterday's answer as today's.
-   */
   versionErrors: Record<string, string>
   instances: DshInstance[]
   settings: LauncherSettings
   statusById: Record<string, InstanceStatus>
-  /**
-   * Installs in flight, keyed by host + version (`installKey`), so the Versions
-   * page shows the progress where the version itself lives — on the machine it
-   * is being installed on. A failed install stays here with the reason the
-   * backend gave, until the ledger is re-read.
-   */
   installingVersions: Record<string, TaskInfo>
-  /**
-   * Installs this page started, by task id, until the backend lists the task:
-   * the claim says which host and version a progress event belongs to. `null`
-   * means a task that was never claimed here.
-   */
   pendingInstallTasks: Record<
     string,
     { hostId: string; version: string } | null
@@ -86,12 +52,6 @@ interface LauncherState {
   remoteLoading: boolean
   runtime: RuntimeStatus | null
   loaded: boolean
-  /**
-   * Why one of the six start-up reads failed, one entry each. A failed read
-   * leaves only its own data empty and never stops the rest of start-up; the
-   * list is here so the interface can say what was not read instead of
-   * presenting an empty shelf as the machine's answer.
-   */
   initErrors: string[]
 }
 
@@ -141,10 +101,6 @@ export const useLauncherStore = defineStore('launcher', {
     versionError: (s) => s.versionErrors[s.currentHostId] ?? '',
     remoteVersions: (s) => s.remoteVersionsByHost[s.currentHostId] ?? [],
     remoteError: (s) => s.remoteErrors[s.currentHostId] ?? '',
-    /**
-     * Look-ups by id search every host's cache: a row on the board may belong
-     * to a machine other than the current one, and it still has a name.
-     */
     versionById: (s) => (id: string) =>
       Object.values(s.versionsByHost)
         .flat()
@@ -161,9 +117,6 @@ export const useLauncherStore = defineStore('launcher', {
         : s.instances.filter(
             (i) => (i.host_id ?? LOCAL_HOST_ID) === s.currentHostId,
           ),
-    // Referential integrity: "who uses this HOME / version" is answered here,
-    // once, instead of being re-derived per view. Ids are unique across hosts,
-    // so these need no host of their own.
     instancesOfHome: (s) => (homeId: string) =>
       s.instances.filter((i) => i.home_id === homeId),
     instancesOfVersion: (s) => (versionId: string) =>
@@ -201,11 +154,6 @@ export const useLauncherStore = defineStore('launcher', {
     },
 
     async startup() {
-      // Attach the status listener BEFORE the initial snapshot fetch, and
-      // buffer events until the snapshot is applied. Otherwise an exit event
-      // fired between fetch and listener attach is lost, leaving the UI
-      // showing "running" for a process the backend already forgot (stop then
-      // reported "实例未在运行").
       const pending: InstanceStatus[] = []
       let live = false
       const applyStatus = (st: InstanceStatus) => {
@@ -230,9 +178,6 @@ export const useLauncherStore = defineStore('launcher', {
           api.getRuntimeStatus(),
           api.listTasks(),
         ])
-      // Each read stands on its own: one failing interface leaves only its own
-      // data empty and is recorded, while the rest still arrive. Start-up
-      // always finishes below, so the status stream is never left buffering.
       const initErrors: string[] = []
       if (hosts.status === 'fulfilled') {
         this.hosts = hosts.value
@@ -282,10 +227,6 @@ export const useLauncherStore = defineStore('launcher', {
         if (host.id !== this.currentHostId) void this.loadHostResources(host.id)
       }
 
-      // Only install progress is tracked, and only until it ends: an install
-      // whose event never arrived is recovered by `watchInstallTask` when the
-      // Versions page starts one, and one that finished without an event is
-      // retired on the next refresh.
       const unTaskProgress = await api.onTaskProgress((p) => {
         const claim = this.pendingInstallTasks[p.id]
         if (claim !== undefined) delete this.pendingInstallTasks[p.id]
@@ -295,16 +236,11 @@ export const useLauncherStore = defineStore('launcher', {
         const hostId = known?.host_id ?? claim?.hostId
         const version = known?.version ?? claim?.version
         if (hostId == null || version == null) {
-          // Not ours to show. A running task is kept by id so it lands here if
-          // its row ever appears; a finished one has no row to land on, and
-          // nothing would ever clear a placeholder left behind for it.
           if (p.state === 'running') {
             if (claim === undefined) this.pendingInstallTasks[p.id] = null
           } else {
             delete this.pendingInstallTasks[p.id]
           }
-          // An install this page never saw still creates an instance and a
-          // version directory somewhere: the lists have to catch up with it.
           if (p.state !== 'running' && p.instance_id) {
             void this.refreshInstances()
             void this.loadHostResources(this.currentHostId)
@@ -330,9 +266,6 @@ export const useLauncherStore = defineStore('launcher', {
           }
           return
         }
-        // Terminal. A finished install leaves the row (the version itself is
-        // now in the installed list); a failure or a cancellation stays there
-        // with the backend's reason, which is the only place the user reads it.
         if (p.state === 'done') {
           delete this.installingVersions[key]
         } else {
@@ -415,10 +348,6 @@ export const useLauncherStore = defineStore('launcher', {
     setHosts(hosts: HostWithStatus[]) {
       let currentWentStale = false
       let hostListChanged = hosts.length !== this.hosts.length
-      // A machine that left the list takes every answer cached for it — its
-      // HOMEs, versions, installable list, the reasons its reads failed — and
-      // the states of the instances filed under it: nothing would ever report
-      // those again.
       const kept = new Set(hosts.map((h) => h.id))
       for (const before of this.hosts) {
         if (kept.has(before.id)) continue
@@ -436,9 +365,6 @@ export const useLauncherStore = defineStore('launcher', {
           hostListChanged = true
           continue
         }
-        // Anything that decides what that machine answers — where it is, where
-        // its data lives, which registry it lists from — makes the cached
-        // answers worthless: keeping them would present them as current.
         const changed =
           before.ssh_target !== host.ssh_target ||
           before.data_dir !== host.data_dir ||
@@ -474,12 +400,6 @@ export const useLauncherStore = defineStore('launcher', {
       this.installingVersions = installLedger(await api.listTasks())
     },
 
-    /**
-     * Follows one install the user just started, so its progress appears on the
-     * Versions page before the first task event arrives. `hostId` and `version`
-     * are what the row it belongs to is keyed by; the task id is what the start
-     * call returned.
-     */
     async watchInstallTask(taskId: string, hostId: string, version: string) {
       const tasks = await api.listTasks()
       const task = tasks.find((t) => t.id === taskId)

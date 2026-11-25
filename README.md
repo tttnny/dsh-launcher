@@ -58,7 +58,7 @@ pnpm verify:quick    # 只跑 clippy 与 Rust 测试
 pnpm format          # 用 prettier 格式化代码
 ```
 
-注释基线（`scripts/comment-baseline.json`）按文件记录允许保留的注释行数，只降不升：删了注释要用 `pnpm check:comments -- --update` 下调基线，新增注释会让 `pnpm verify` 失败，新文件默认零注释。一轮清理的做法写在 `/delete-comment` 技能（`.agents/skills/delete-comment`）里，决策记录在 `docs/adr/`。
+注释基线（`scripts/comment-baseline.json`）按文件记录允许保留的注释行数，只降不升；当前基线已清零，等同于硬禁止注释：任何新增注释都会让 `pnpm verify` 失败。要放宽只能在 PR 里显式运行 `node scripts/check-comments.mjs --update --allow-increase` 并说明理由。一轮清理的做法写在 `/delete-comment` 技能（`.agents/skills/delete-comment`）里，决策记录在 `docs/adr/`。
 
 ## 目录结构
 

@@ -193,22 +193,12 @@ function loadDb(): MockDb {
       for (const v of db.versions) {
         v.dedicated_home =
           v.dedicated_home ?? `${LOCAL_DATA_DIR}/homes/${v.version}`
-        // Bin readiness is what the machine answers; a version stored before
-        // the field existed was installed by the launcher, so it is ready.
         v.bin_ready = v.bin_ready ?? true
         v.path_linked = v.path_linked ?? false
       }
-      // The PATH registration is newer than the stored sample versions, and it
-      // is per machine: an older preview stored one string for 本机 only.
       if (typeof db.path_link === 'string' || db.path_link == null) {
         db.path_link = { [LOCAL_HOST_ID]: db.path_link ?? null }
       }
-      // Backfill host ownership, which every record gained at once: whatever
-      // was stored before the field existed can only belong to 本机.
-      // A preview stored before remote hosts existed knows only 本机; it gains
-      // the sample remote machine once, so host-aware pages have two to show.
-      // A stored db that already carries a host list is left as it is: the
-      // sample machine must not come back after the user deletes it.
       const storedHosts = Array.isArray(db.hosts)
       db.hosts = db.hosts ?? [localHost()]
       for (const h of db.homes) h.host_id = h.host_id ?? LOCAL_HOST_ID
@@ -584,11 +574,6 @@ function argOf(
   return args?.[backendKey(cmd, name)]
 }
 
-/**
- * The host a host-aware list belongs to. Absent means 本机 — the backend's own
- * rule (`config::resolve_host`) — so a list that was not told which machine it
- * is for never merges two of them.
- */
 function hostIdArg(cmd: string, args?: Record<string, unknown>): string {
   const raw = argOf(args, cmd, 'hostId')
   const id = raw === undefined || raw === null ? '' : String(raw).trim()
@@ -880,9 +865,6 @@ export async function mockCall<T>(
       })
     }
     case 'start_create_instance_task': {
-      // Internal: reached only through `start_install_version_task`, so Tauri
-      // never looks this one up and its keys are not subject to
-      // `SNAKE_CASE_COMMANDS` — they mirror the Rust function's parameter names.
       const name = String(args?.name ?? '').trim()
       const version = String(args?.version ?? '').trim()
       const dedicated = Boolean(args?.dedicated)
@@ -911,9 +893,6 @@ export async function mockCall<T>(
       ) {
         fail('同名实例的下载任务已在进行中')
       }
-      // The same version on the same host is one install; two hosts are two
-      // directories and may install it side by side, exactly as the backend
-      // allows.
       if (
         [...mockTasks.values()].some(
           (t) =>
@@ -928,8 +907,6 @@ export async function mockCall<T>(
 
       const hostDir = hostDirOf(db, host.id)
       const sep = sepOf(hostDir)
-      // Dedicated HOME is only materialized when the task finishes, mirroring
-      // the real backend's placeholder semantics.
       let dedicatedPath: string | null = null
       if (dedicated) {
         const safe = name.replace(/[^\w一-龥.-]+/g, '_')
@@ -1467,7 +1444,6 @@ export async function mockCall<T>(
     case 'open_instance_window': {
       const id = String(args?.id ?? '')
       const url = db.running[id]?.url
-      // 与桌面端 open_instance_window 未就绪报错保持一致。
       if (!url) fail('实例未在运行或尚未就绪')
       window.open(url, '_blank', 'noopener,noreferrer')
       return undefined as T
@@ -1597,7 +1573,6 @@ export async function mockCall<T>(
         profile,
         input.instanceId,
       )
-      // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
       const view = nativeViewFor(db, homeId, profile, instanceId)
       const bundle = view.bundles.find((b) => b.name === input.name)
@@ -1629,15 +1604,12 @@ export async function mockCall<T>(
         profile,
         input.instanceId,
       )
-      // No instance → a plain error (mirrors the backend Err), not a refusal.
       if (!instanceId) fail('实例未在运行，请先启动实例')
       const view = nativeViewFor(db, homeId, profile, instanceId)
       const index = view.bundles.findIndex((b) => b.name === input.name)
       if (index < 0) {
         return mockRefusal('remove', input.name, 'unknown-plugin') as T
       }
-      // Bundles that ship with DSH can only be disabled, never removed — the
-      // instance refuses with `not-removable` (HTTP 200, changed:false).
       if (!view.bundles[index].removable) {
         return mockRefusal('remove', input.name, 'not-removable') as T
       }

@@ -47,34 +47,6 @@ pub(crate) async fn fetch_json(url: &str, cap: usize) -> Result<serde_json::Valu
     serde_json::from_slice(&bytes).map_err(|e| format!("解析 JSON 失败 {url}: {e}"))
 }
 
-/// Lists the **bundles（补丁层）** of one profile of `(home_id, profile)`.
-///
-/// The bundles are the whole answer: a bundle is what the profile selects and
-/// what DSH mounts as one patch layer, and it is the only unit that carries a
-/// version, an availability and a removal rule. The composition rows inside a
-/// layer are DSH's own detail, not a control surface the launcher hands out one
-/// switch at a time — the page states how many rows a layer contributes and
-/// manages the layer.
-///
-/// While an instance runs that profile the list is the instance's own
-/// **native plugin manager** answer (`POST /api/pluginManager/listBundles`) —
-/// the running DSH owns plugin state (ADR-0001), so the launcher neither reads
-/// files to build this list nor writes one to change it. An **adopted** process
-/// with no usable token and an unreachable one take the read-only path; their
-/// `reason` differs so the two are distinguishable, and so is "not running".
-///
-/// A remote instance is asked at the address **this Mac** reaches it at: the
-/// launcher's own port forward, re-confirmed (and rebuilt, if it died) before
-/// every call ([`crate::process::reachable_url_for`], ADR-0008). The projection
-/// for the read-only path is read on the machine that owns the profile, and a
-/// machine the launcher cannot reach answers with its own reason instead.
-///
-/// The instance is resolved from the selectors: the same DSH_HOME, running the
-/// selected profile (see [`crate::process::running_for_profile`]). `instance_id`
-/// is the instance the page was opened from, and it wins when it is itself
-/// running that profile — one DSH_HOME and one profile can be live in two
-/// instances at once. The credential is the running-table URL's one-time token;
-/// the launcher never reads `<DSH_HOME>/.credentials.yaml`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_plugins(
     state: State<'_, AppState>,
@@ -356,8 +328,6 @@ pub struct ChangeOutcome {
     pub application: String,
     pub stage: String,
     pub target: String,
-    /// The **raw** native `error.code` for a refusal (`changed:false`); logic,
-    /// not display — the localized reason rides in `diagnostic`.
     pub error_code: Option<String>,
     pub diagnostic: Option<String>,
     pub warnings: Vec<String>,
@@ -421,10 +391,6 @@ pub(crate) async fn remove_bundle_for(
     )))
 }
 
-/// Reads the store a profile's `node_modules` is currently linked from, via
-/// the `storeDir` entry pnpm records in `node_modules/.modules.yaml`. Older
-/// pnpm wrote YAML (`storeDir: /path`); pnpm 10+ writes JSON, so both
-/// layouts are parsed.
 fn linked_store_dir(profile_dir: &std::path::Path) -> Option<String> {
     let raw =
         std::fs::read_to_string(profile_dir.join("node_modules").join(".modules.yaml")).ok()?;
@@ -450,10 +416,6 @@ pub(crate) fn linked_store_document(raw: &str) -> Option<String> {
     None
 }
 
-/// Whether two store paths point at the same store. pnpm records the
-/// versioned subdirectory (`<store>/v11`) while the launcher pins the base
-/// dir, so a path containing the other as a prefix also counts as a match.
-/// Checks whether two store paths match or one is an ancestor of the other.
 fn store_paths_match(a: &str, b: &str) -> bool {
     let norm = |s: &str| s.trim_end_matches('/').to_string();
     let (a, b) = (norm(a), norm(b));
@@ -622,8 +584,6 @@ pub(crate) fn ensure_build_scripts_allowed(
 }
 
 pub(crate) fn build_scripts_manifest(raw: &str, approve: &[String]) -> Option<String> {
-    // Base document: `packages` is required for pnpm to treat the dir as a
-    // workspace (needed for allowBuilds to be read from this file).
     let mut lines: Vec<String> = if raw.trim().is_empty() {
         vec!["packages:".to_string(), "  - .".to_string()]
     } else {
@@ -646,8 +606,6 @@ pub(crate) fn build_scripts_manifest(raw: &str, approve: &[String]) -> Option<St
         changed = true;
     }
 
-    // 3. Ensure an `allowBuilds:` section exists so pnpm 11 has somewhere to
-    //    record newly-ignored builds (it auto-appends entries on failure).
     if !lines
         .iter()
         .any(|l| l.trim_start().starts_with("allowBuilds:"))
@@ -711,8 +669,6 @@ fn allow_builds_names(lines: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// One package name as a YAML mapping key. A scoped name has to be quoted: `@`
-/// may not begin a plain scalar.
 fn allow_builds_key(name: &str) -> String {
     let plain = name.starts_with(|c: char| c.is_ascii_alphanumeric())
         && name
@@ -760,10 +716,6 @@ pub(crate) async fn write_client_via(
     crate::native::NativeClient::connect_with(transport, &url).await
 }
 
-/// Translates a native `error.code` refusal into the reason the page shows
-/// verbatim (design §4d). This is the **one** place codes become Chinese; the
-/// UI never maps them. An unlisted code is surfaced as-is, and an attached
-/// `diagnostic` is appended in parentheses.
 pub(crate) fn refusal_reason(code: &str, diagnostic: Option<&str>) -> String {
     let base = match code {
         "management-required" | "unaddressable" => "该条目由 DSH 自身管理，不能在这里改动",
@@ -778,13 +730,6 @@ pub(crate) fn refusal_reason(code: &str, diagnostic: Option<&str>) -> String {
     }
 }
 
-/// Turns a refused write into the exact Chinese reason the page shows:
-/// `errorCode` stays for logic, and the localized reason rides in `diagnostic`
-/// (the frozen [`ChangeOutcome`] has no separate
-/// field) — so the UI shows it verbatim instead of guessing (design §4d).
-///
-/// Only a bare refusal (`changed:false` with a code) is rewritten; a
-/// `changed:true` + `failed` keeps the instance's own diagnostic (design §4b).
 pub(crate) fn localize_refusal(outcome: ChangeOutcome) -> ChangeOutcome {
     if outcome.changed {
         return outcome;

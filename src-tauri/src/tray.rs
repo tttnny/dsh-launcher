@@ -36,9 +36,6 @@ struct RunningItem {
     profile: String,
 }
 
-/// M1: 左键单击防抖 —— 双击会先产生两次 Click(Left,Up) 再产生 DoubleClick，
-/// 若单击立即开窗，双击就会多弹出一次主窗口。单击只记录时间戳并延迟
-/// ~250ms，若期间出现新的单击或双击则丢弃本次单击。
 const LEFT_CLICK_DEBOUNCE_MS: u64 = 250;
 static LAST_LEFT_UP_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_DOUBLE_CLICK_MS: AtomicU64 = AtomicU64::new(0);
@@ -90,45 +87,37 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 stop_instance_from_tray(app, instance_id);
             }
         })
-        .on_tray_icon_event(|tray, event| {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    let stamp = now_ms();
-                    LAST_LEFT_UP_MS.store(stamp, Ordering::SeqCst);
-                    let handle = tray.app_handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            LEFT_CLICK_DEBOUNCE_MS,
-                        ))
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => {
+                let stamp = now_ms();
+                LAST_LEFT_UP_MS.store(stamp, Ordering::SeqCst);
+                let handle = tray.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(LEFT_CLICK_DEBOUNCE_MS))
                         .await;
-                        if LAST_LEFT_UP_MS.load(Ordering::SeqCst) != stamp {
-                            return;
-                        }
-                        if LAST_DOUBLE_CLICK_MS.load(Ordering::SeqCst) > stamp {
-                            return;
-                        }
-                        show_launcher(&handle);
-                    });
-                }
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    // No-op: the menu attached via TrayIconBuilder pops up
-                    // automatically on right click. Kept explicit so a later
-                    // reader does not "fix" right click into opening windows.
-                }
-                TrayIconEvent::DoubleClick { .. } => {
-                    LAST_DOUBLE_CLICK_MS.store(now_ms(), Ordering::SeqCst);
-                    handle_double_click(tray.app_handle());
-                }
-                _ => {}
+                    if LAST_LEFT_UP_MS.load(Ordering::SeqCst) != stamp {
+                        return;
+                    }
+                    if LAST_DOUBLE_CLICK_MS.load(Ordering::SeqCst) > stamp {
+                        return;
+                    }
+                    show_launcher(&handle);
+                });
             }
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+                ..
+            } => {}
+            TrayIconEvent::DoubleClick { .. } => {
+                LAST_DOUBLE_CLICK_MS.store(now_ms(), Ordering::SeqCst);
+                handle_double_click(tray.app_handle());
+            }
+            _ => {}
         })
         .build(app)?;
     Ok(())
@@ -156,16 +145,6 @@ async fn running_snapshot(app: &AppHandle) -> Vec<RunningItem> {
     running_items(&cfg, &running)
 }
 
-/// Every running instance, with the machine it runs on — the facts the tray
-/// menu and its actions are built from.
-///
-/// The host comes from the instance's own record: the running table says a
-/// process is up, the config says what the user calls it and where it runs. An
-/// entry whose record is gone still gets a line — it really is running — and is
-/// named by its id.
-///
-/// The order is the menu's: by machine, then by name. Reading a HashMap in
-/// place would reshuffle the menu every time an instance starts or stops.
 fn running_items(cfg: &Config, running: &HashMap<String, RunningInstance>) -> Vec<RunningItem> {
     let mut items: Vec<RunningItem> = running
         .iter()
@@ -367,7 +346,6 @@ fn build_menu(app: &AppHandle, running: &[RunningItem]) -> tauri::Result<Menu<ta
     )?;
     let open_settings =
         MenuItem::with_id(app, MENU_OPEN_SETTINGS, "打开设置…", true, None::<&str>)?;
-    // 无加速键：CmdOrCtrl+R 与前端 Webview 的 Cmd+R 刷新冲突，误触会重启整个启动器，故不设加速键。
     let restart = MenuItem::with_id(app, MENU_RESTART, "重启启动器", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "退出启动器", true, Some("CmdOrCtrl+Q"))?;
 

@@ -28,7 +28,6 @@ function managedReason(): string | null {
     : null
 }
 
-/** 没有条目的层是真实存在的（只装包或只做配置），不显示「0 个条目」。 */
 function rowCount(): string | null {
   return props.bundle.rowCount > 0 ? `${props.bundle.rowCount} 个条目` : null
 }

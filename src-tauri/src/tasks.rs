@@ -16,9 +16,6 @@ const MAX_LOG_LINES: usize = 1000;
 
 const TERMINAL_LOG_LINES: usize = 50;
 
-/// How many finished tasks the launcher keeps. A task record is a progress
-/// report, not a history: the install's own log is on the machine that ran it,
-/// and the page reads the live stream from `task://log`.
 const MAX_FINISHED_TASKS: usize = 20;
 
 const REMOTE_TAIL_WAIT_SECS: u64 = 10;
@@ -26,14 +23,6 @@ const REMOTE_TAIL_WAIT_SECS: u64 = 10;
 const REMOTE_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const REMOTE_STOP_TICK: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How many times a log read that ran out of time is asked again before the
-/// launcher gives up on hearing back, and how long it waits in between.
-///
-/// A read that runs out of time is about the launcher's connection, not the
-/// install: the command is detached and keeps writing its log the whole time, so
-/// asking again reads everything that happened meanwhile and costs nothing but
-/// the wait. Three timeouts in a row (a call that already has the wait it asked
-/// for plus a generous overhead) is a machine the launcher has lost touch with.
 const MAX_FOLLOW_TIMEOUTS: u32 = 2;
 const FOLLOW_TIMEOUT_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -52,11 +41,6 @@ pub struct TaskInfo {
     pub kind: String,
     pub label: String,
     pub version: String,
-    /**
-     * The machine this task works on. Shown on the row, and half of the key the
-     * page tracks progress under: two hosts can install the same version at the
-     * same time, and their progress must not overwrite each other's.
-     */
     pub host_id: String,
     pub state: TaskState,
     pub percent: u32,
@@ -101,13 +85,7 @@ pub(crate) fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// Whether a version string is safe to use as a path segment under
-/// `versions/`: npm semver plus the alpha tags upstream publishes. Rejects
-/// path separators, `..`, and anything exotic before the string is ever
-/// joined into a filesystem path (the Tauri command boundary and GitHub tag
-/// names are both untrusted input — a Git tag may legally contain `/`).
 pub(crate) fn valid_version_string(v: &str) -> bool {
-    // `.`/`..` are charset-legal but are exactly the path-traversal segments.
     !v.is_empty()
         && v != "."
         && v != ".."
@@ -135,11 +113,6 @@ pub async fn start_install_version_task(
     start_create_instance_task(app, state, v.clone(), v, None, true, host_id).await
 }
 
-/// Enqueues a background task that installs the given DSH version (if not
-/// installed yet) and then creates the instance. Returns the task id.
-/// Internal: only reachable through `start_install_version_task`. Installing a
-/// version acquires its directory; the dedicated HOME and the 1:1 instance are
-/// recorded by the task body only after the install succeeds.
 async fn start_create_instance_task(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -165,9 +138,6 @@ async fn start_create_instance_task(
         crate::config::resolve_host(&cfg, host_id.as_deref())?.clone()
     };
 
-    // Dedicated HOME: reserve the path now (placeholder) but do NOT create the
-    // HOME record yet — it is created only once the instance is actually made,
-    // so a failed/cancelled task leaves no orphan HOME behind.
     let reserved_home_path: Option<std::path::PathBuf> = if dedicated {
         let path = host.dedicated_home_path(&state.data_dir, &name)?;
         Some(path)
@@ -175,7 +145,6 @@ async fn start_create_instance_task(
         None
     };
 
-    // Validate early so a doomed task is never enqueued.
     {
         let cfg = state.config.lock().unwrap();
         if cfg
@@ -199,13 +168,6 @@ async fn start_create_instance_task(
         format!("下载 DSH {version} 并创建实例「{name}」")
     };
 
-    // Deduplicate and insert under one lock scope so two concurrent submissions
-    // can never both pass the checks (TOCTOU). A running install-version task
-    // for the same version **on the same host** must also be rejected: the
-    // version record is only registered when its install finishes, so two
-    // installs of the same version would otherwise run `pnpm install --prefix`
-    // into the same directory concurrently and corrupt the tree. Two hosts are
-    // two directories, so they may install the same version side by side.
     let task_id = {
         let mut tasks = state.tasks.lock().await;
         for task in tasks.values() {
@@ -275,15 +237,6 @@ async fn start_create_instance_task(
     Ok(task_id)
 }
 
-// ---------------------------------------------------------------------------
-// Task runner — completion bookkeeping shared by every background task kind
-// (install-version is the only one today). A task body runs to `Ok(payload)` /
-// `Err(message)`; [`finish_task`] encodes the completion invariants once:
-// a cancelled task stays cancelled (the worker finishing anyway must not
-// flip it back), logs cap at MAX_LOG_LINES, and terminal progress always
-// reaches the frontend.
-// ---------------------------------------------------------------------------
-
 pub(crate) async fn finish_task<R: tauri::Runtime, T>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
@@ -321,9 +274,6 @@ pub(crate) async fn finish_task<R: tauri::Runtime, T>(
     emit_progress(app, task_id, terminal.0, terminal.1, terminal.2, terminal.3);
 }
 
-/// Cuts a finished task's log down to its tail: the lines that explain how it
-/// ended are the last ones, and the rest is a progress report nobody reads once
-/// the task is over.
 fn trim_terminal_log(task: &mut TaskInfo) {
     if task.logs.len() > TERMINAL_LOG_LINES {
         let cut = task.logs.len() - TERMINAL_LOG_LINES;
@@ -351,10 +301,6 @@ fn prune_finished_tasks(tasks: &mut HashMap<String, TaskInfo>) {
 pub async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskInfo>, String> {
     let tasks = state.tasks.lock().await;
     let mut out: Vec<TaskInfo> = tasks.values().cloned().collect();
-    // A finished task's log is not carried in the list: it is a progress report
-    // that has already reached the page as `task://log` events, and the list
-    // must not grow with the launcher's history. A running task's tail still
-    // travels, so a page opened mid-install shows what has been said so far.
     for task in &mut out {
         if task.state != TaskState::Running {
             task.logs.clear();
@@ -398,8 +344,6 @@ pub async fn cancel_task(
     {
         let mut tasks = state.tasks.lock().await;
         if let Some(task) = tasks.get_mut(&id) {
-            // An install that finished while the stop was in flight keeps its
-            // own outcome: it is not cancelled, it is done.
             if task.state == TaskState::Running {
                 task.state = TaskState::Cancelled;
                 task.message = Some("已取消".to_string());
@@ -522,10 +466,6 @@ async fn do_create_instance<R: tauri::Runtime>(
             .clone()
     };
 
-    // 2.5. Only dedicated (freshly allocated) homes need the baseline `web`
-    // profile and `__temp__` template materialized. When the caller selects an
-    // existing HOME, that HOME is already established and its profiles should
-    // not be touched during instance creation.
     if home_id.is_none() && host.builtin {
         ensure_web_profile_template(app, state, task_id, &home_path, &version_record).await?;
     }
@@ -591,11 +531,6 @@ async fn ensure_web_profile_template<R: tauri::Runtime>(
     }
     let web_dir = profiles.join("web");
 
-    // A HOME that has run DSH before already has a materialized `web` profile
-    // (e.g. the default ~/.dsh of a live instance). Booting DSH again would
-    // bind the port pinned in that profile's cordis.patch.yml — DSH honors
-    // the patch over the CLI `--port` — and crash with EADDRINUSE while the
-    // owning instance is running. Copying is all the template needs.
     let web_populated = web_dir.is_dir()
         && std::fs::read_dir(&web_dir)
             .map(|mut d| d.next().is_some())
@@ -633,9 +568,6 @@ async fn ensure_web_profile_template<R: tauri::Runtime>(
         .spawn()
         .map_err(|e| format!("启动 DSH 生成 profile 失败: {e}"))?;
 
-    // Drain stderr concurrently: DSH reports boot failures (missing native
-    // addons, plugin load errors) on stderr, and an undrained pipe could also
-    // fill up and stall the child. Keep the tail for the failure message.
     let stderr_tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let mut stderr_reader = None;
     if let Some(err) = child.stderr.take() {
@@ -692,8 +624,6 @@ async fn ensure_web_profile_template<R: tauri::Runtime>(
         }
     }
 
-    // Stop DSH, then give the stderr reader a moment to flush whatever a
-    // crash printed (the child is gone, so its pipes hit EOF).
     child.kill().await.ok();
     let _ = child.wait().await;
     if let Some(reader) = stderr_reader.take() {
@@ -785,8 +715,6 @@ async fn install_version_streamed<R: tauri::Runtime>(
         return install_version_remote(app, state, task_id, host, version).await;
     }
 
-    // Alpha builds ship only as GitHub `dsh-v*` tags, never to npm; route
-    // those to the from-source pipeline before touching the version dir.
     if !npm_has_version(version).await {
         push_task_log(
             app,
@@ -822,10 +750,6 @@ async fn install_version_streamed<R: tauri::Runtime>(
     )
     .await;
     if install_result.is_err() {
-        // A half-installed tree (plus the allowBuilds workspace manifest this
-        // path writes) makes a retry's semantics unclear and wastes disk —
-        // clear it so the next attempt starts clean. This version is not
-        // registered, so nothing can reference the directory yet.
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             crate::log_warn!("清理失败的版本目录 {} 失败: {e}", dir.display());
         } else {
@@ -956,10 +880,6 @@ async fn install_remote_from_npm<R: tauri::Runtime>(
 ) -> Result<(), RemoteStepFailure> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut attempt: u32 = 1;
-    // Every round writes its own log file: the machine **appends** to the one it
-    // is given, and a follower that started at the top of a previous round's log
-    // would read that round's exit status and call this one finished before it
-    // had begun.
     let mut round: u32 = 0;
     let mut approvals = BuildApprovals::default();
     loop {
@@ -984,13 +904,8 @@ async fn install_remote_from_npm<R: tauri::Runtime>(
         .await
         {
             Ok(run) => run,
-            // A transport failure is not the install's own failure: retrying a
-            // machine the launcher cannot reach would only repeat it.
             Err(e) => return Err(e),
         };
-        // Only this round's output can answer the approval question: the task
-        // log holds every round, and a refusal from an earlier round must not
-        // be mistaken for this one's.
         let output = run.output;
         let failed_code = match run.outcome {
             RemoteCommandOutcome::Cancelled => {
@@ -1072,8 +987,6 @@ async fn install_remote_from_source<R: tauri::Runtime>(
 ) -> Result<(), String> {
     let tag = format!("dsh-v{version}");
 
-    // 1. Clone the tag. A kept checkout is reused as-is (tags are immutable);
-    //    any other leftover directory is a failed attempt and gets cleared.
     let checkout_manifest = layout.dir.join("apps").join("cli").join("package.json");
     let reused = state
         .host_transport
@@ -1125,9 +1038,6 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         }
     }
 
-    // 2. Dependencies. The checkout manages its own workspace manifest
-    //    (including build-script policy), so the launcher's allowBuilds
-    //    workaround does not apply here.
     push_task_log(
         app,
         state,
@@ -1189,9 +1099,6 @@ async fn install_remote_from_source<R: tauri::Runtime>(
         return Err(remote_install_failure(&output, Some(code), &log_path));
     }
 
-    // 4. Verify: the same two layouts the local flow checks, read on the
-    //    machine that produced them. No known-version list is needed here: this
-    //    call only asks whether the bin landed, not what `dsh` points at.
     let versions_dir = layout.versions_dir.to_string_lossy().to_string();
     let installed =
         crate::remote::installed_versions(&*state.host_transport, target, &versions_dir, &[])
@@ -1210,11 +1117,6 @@ async fn install_remote_from_source<R: tauri::Runtime>(
     Ok(())
 }
 
-/// The remote twin of [`ensure_pending_builds`]: a tree whose `pendingBuilds`
-/// list is not empty is missing compiled native addons (fs-ext since dsh
-/// 0.1.3-alpha.2) and DSH fails to boot with an opaque MODULE_NOT_FOUND, so
-/// `pnpm rebuild` runs there and a tree still incomplete afterwards is refused
-/// instead of registered.
 async fn ensure_remote_pending_builds<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
@@ -1288,8 +1190,6 @@ async fn ensure_remote_pending_builds<R: tauri::Runtime>(
     Ok(())
 }
 
-/// A missing `.modules.yaml` means "nothing pending", exactly as it does
-/// locally: a tree without it has no build scripts pnpm passed over.
 async fn remote_pending_builds(
     state: &State<'_, AppState>,
     target: &crate::ssh::RemoteHost,
@@ -1301,10 +1201,6 @@ async fn remote_pending_builds(
     }
 }
 
-/// A command the launcher runs **on another machine**, as argv words:
-/// `/usr/bin/env`, that host's own environment variables, the ones this command
-/// adds, then the program and its arguments. Never a shell string — argv words
-/// reach the machine exactly as they are, with no second layer to quote through.
 fn remote_argv(
     layout: &InstallLayout,
     env: &[(&str, &str)],
@@ -1325,8 +1221,6 @@ fn remote_argv(
 
 fn remote_pnpm_argv(pnpm: &Path, layout: &InstallLayout, args: &[String]) -> Vec<String> {
     let mut env = crate::toolchain::pnpm_network_env().to_vec();
-    // No TTY under the launcher: keep pnpm non-interactive so a modules purge
-    // (store relink) never aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
     env.push(("CI", "true"));
     remote_argv(layout, &env, &pnpm.to_string_lossy(), args)
 }
@@ -1394,12 +1288,6 @@ impl RemoteStepFailure {
     }
 }
 
-/// What became of one remote command the launcher started.
-///
-/// There are three endings, not two: a command that finished (and recorded how),
-/// one that was killed before it could (on a small server usually the
-/// out-of-memory killer — the log is then the only evidence), and one the user
-/// cancelled. Only the first has an exit status at all.
 enum RemoteCommandOutcome {
     Exited(i32),
     Killed,
@@ -1432,10 +1320,6 @@ async fn run_remote_streamed<R: tauri::Runtime>(
     what: &str,
     path_dirs: &[String],
 ) -> Result<RemoteStepRun, RemoteStepFailure> {
-    // A cancelled task starts nothing. The click can land between two of this
-    // task's commands — during the pause before a retry, say — and a command
-    // started after it would be one nobody is waiting for, on a machine the user
-    // has already been told the install stopped on (issue #14 验收).
     if !task_is_running(state, task_id).await {
         return Ok(RemoteStepRun {
             outcome: RemoteCommandOutcome::Cancelled,
@@ -1443,8 +1327,6 @@ async fn run_remote_streamed<R: tauri::Runtime>(
         });
     }
 
-    // Echo the exact command line, as the local streamed runner does: when a
-    // child fails silently, the invocation itself is the only clue.
     push_task_log(app, state, task_id, &format!("$ {}", argv.join(" "))).await;
 
     let transport = state.host_transport.clone();
@@ -1521,9 +1403,6 @@ async fn follow_remote_log<R: tauri::Runtime>(
             return Ok((RemoteCommandOutcome::Exited(code), output));
         }
         if !chunk.alive {
-            // The wrapper's status line is written by the shell that just
-            // exited, so it can still be in flight when the process is already
-            // gone. One read with no wait, and whatever is there is all there is.
             let last = crate::remote::tail(&**transport, &run.host, log_path, offset, run.pid, 0)
                 .await
                 .map_err(|e| {
@@ -1556,13 +1435,6 @@ async fn clear_remote_run(state: &State<'_, AppState>, task_id: &str) {
     }
 }
 
-/// Splits newly read log text into whole lines, logging each one: a chunk can
-/// end mid-line, and half a line is not something anyone can read. A line that
-/// grows past [`crate::remote::MAX_LOG_LINE_BYTES`] is cut and said so, so a
-/// progress bar with no newline in it cannot grow the buffer without end.
-/// Returns the exit status if the wrapper's status line was among them. Every
-/// other line is also kept in `output`, bounded like the task log: that is the
-/// only evidence an approval decision may read.
 async fn drain_log_lines<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
@@ -1669,16 +1541,6 @@ async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Result<(), String
     Ok(())
 }
 
-/// Stops one remote command because the task it belongs to was cancelled — the
-/// half of the cancellation contract the click cannot cover by itself.
-///
-/// The click stops whatever is running at the moment it lands. It can land when
-/// nothing is: between two of a task's commands, during the pause before a
-/// retry. The command that starts afterwards is the worker's to stop, or it
-/// outlives the task that started it and holds that machine's store.
-///
-/// A failure here goes to the app log rather than to the user: the click already
-/// answered 「已取消」, and a cancelled task records no further outcome.
 async fn stop_run_on_cancel(state: &AppState, task_id: &str, run: &RemoteRun) {
     if let Err(e) = stop_remote_run(state, run).await {
         crate::log_warn!(
@@ -1709,10 +1571,6 @@ async fn remove_remote_dir(
     }
 }
 
-/// Whether `path` is inside `root` and not `root` itself. Decided by text,
-/// because it has to hold for a path the launcher built without touching that
-/// machine's filesystem — and it is the one rule that keeps a remote cleanup
-/// inside the host that owns the directory.
 pub(crate) fn inside(root: &Path, path: &Path) -> bool {
     let root = root.to_string_lossy();
     let path = path.to_string_lossy();
@@ -1723,12 +1581,6 @@ pub(crate) fn inside(root: &Path, path: &Path) -> bool {
     !root.is_empty() && path.starts_with(&format!("{root}/"))
 }
 
-/// What a remote install failure comes down to. The first two look alike in a
-/// progress bar and need opposite fixes, so the launcher tells them apart from
-/// the log that machine produced (issue #9 风险): a small server that ran out of
-/// memory, and a machine that could not reach the network. The third is a
-/// dependency's own build script failing — the install got that far, and what it
-/// needs is a toolchain, not a retry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteInstallFailure {
     OutOfMemory,
@@ -1737,8 +1589,6 @@ pub(crate) enum RemoteInstallFailure {
     Other,
 }
 
-/// Words that mean the machine ran out of memory. `Killed` is what a shell
-/// prints for a child the OOM killer took, and 137 is that child's exit status.
 const OUT_OF_MEMORY_WORDS: [&str; 6] = [
     "out of memory",
     "cannot allocate memory",
@@ -1748,8 +1598,6 @@ const OUT_OF_MEMORY_WORDS: [&str; 6] = [
     "killed",
 ];
 
-/// Words that mean the machine could not reach the registry. These are the
-/// errors the tools themselves produce, not the word 「网络」.
 const NETWORK_WORDS: [&str; 12] = [
     "enotfound",
     "econnrefused",
@@ -1765,15 +1613,8 @@ const NETWORK_WORDS: [&str; 12] = [
     "socket hang up",
 ];
 
-/// Words that mean a dependency's lifecycle script ran and failed. pnpm prints
-/// the stage and the command it ran, then the shell's exit status; a script that
-/// cannot find `node` exits 127, which is a toolchain problem rather than a
-/// package problem.
 const BUILD_SCRIPT_WORDS: [&str; 3] = ["postinstall", "preinstall", "exited with exit status"];
 
-/// Reads a failure out of what the install said. Memory evidence comes first:
-/// an install that hit the memory ceiling may well have network retries in its
-/// log on the way there, and the memory is what it cannot get past.
 pub(crate) fn classify_remote_install_failure(
     log: &str,
     exit_code: Option<i32>,
@@ -1984,12 +1825,6 @@ async fn install_via_pnpm<R: tauri::Runtime>(
 
         let mut cmd = tokio::process::Command::new(pnpm_prog);
         crate::process::hide_console(&mut cmd);
-        // Network robustness: the default fetch timeout (60s) and retries (2)
-        // are too tight for large native binaries (e.g. sharp-win32-x64),
-        // which fail with "error (23) ... aborted due to timeout" on flaky
-        // connections. These ride along as pnpm_config_* env vars -- the
-        // --config.fetch-* flag spelling hangs pnpm 11 (see
-        // crate::toolchain::pnpm_network_env).
         cmd.args(crate::toolchain::pnpm_install_args(
             dir,
             store_dir,
@@ -1997,9 +1832,6 @@ async fn install_via_pnpm<R: tauri::Runtime>(
             &format!("@deepseek-ai/dsh@{version}"),
         ));
         crate::toolchain::apply_pnpm_network_env(&mut cmd);
-        // No TTY under the launcher: keep pnpm non-interactive so a modules
-        // purge (store relink) never aborts with
-        // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
         cmd.env("CI", "true");
 
         let mut output = Vec::new();
@@ -2158,8 +1990,6 @@ async fn github_tag_exists(version: &str) -> Result<bool, String> {
     match crate::plugins::fetch_json(&url, 256 * 1024).await {
         Ok(_) => Ok(true),
         Err(e) if e.contains("HTTP 404") => Ok(false),
-        // Anonymous GitHub API quota is small; a 403/429 here is rate
-        // limiting, and surfacing that plainly beats a cryptic HTTP error.
         Err(e) if e.contains("HTTP 403") || e.contains("HTTP 429") => Err(format!(
             "GitHub API 请求被限流，无法确认版本 {version} 是否存在；请稍后重试{e}"
         )),
@@ -2280,13 +2110,6 @@ impl tokio::io::AsyncRead for StreamPipe {
     }
 }
 
-/// Streams one child's output into the task log, one line at a time.
-///
-/// A line is whatever the child wrote up to its next newline, and a child that
-/// redraws a progress bar with `\r` may not write one for minutes: the
-/// unfinished line is held up to [`crate::remote::MAX_LOG_LINE_BYTES`], past
-/// which it is cut and said so. A pipe therefore cannot grow the launcher's
-/// memory without end, however long the child runs.
 async fn stream_pipe<R: tauri::Runtime, P: tokio::io::AsyncRead + Unpin>(
     app: tauri::AppHandle<R>,
     task_id: String,
@@ -2470,14 +2293,8 @@ async fn run_streamed_command_collecting<R: tauri::Runtime>(
     push_task_log(app, state, task_id, &format!("$ {cmdline}")).await;
     crate::log_debug!("run_streamed_command[{what}]: {cmdline}");
 
-    // The launcher's proxy must apply to the children it spawns (pnpm, git),
-    // not just its own reqwest requests.
     crate::proxy::apply_to_command(&mut cmd);
 
-    // Capture output centrally: callers build bare commands, and a child
-    // without piped stdio prints its errors straight into the GUI process's
-    // inherited stdout where nobody sees them — the task log then holds
-    // nothing but the echoed command line.
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
@@ -2569,10 +2386,6 @@ async fn run_streamed_command_collecting<R: tauri::Runtime>(
         }
     }
 
-    // Drain the pipe readers before judging the outcome: the child has
-    // exited but the reader tasks may still be flushing buffered lines into
-    // the task log. Reading the log here without waiting races them and
-    // loses the very error lines the failure summary is built from.
     for reader in pipe_readers {
         let _ = reader.await;
     }
@@ -2580,8 +2393,6 @@ async fn run_streamed_command_collecting<R: tauri::Runtime>(
 
     if !status.success() {
         let logs = &*output;
-        // pnpm's remedy ("reinstall your dependencies with pnpm install")
-        // sits on the following lines and is exactly what the user needs.
         let is_error_line = |l: &str| {
             let s = l.to_lowercase();
             s.contains("err_pnpm")
@@ -2710,8 +2521,6 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
 
     #[test]
     fn assert_lan_bind_port_leaves_unmanaged_profiles_alone() {
-        // No managed block: the CLI --port already wins, so nothing is written
-        // and a hand-authored webserver row keeps its pin.
         let home = patch_fixture("web", "[]\n\n- id: webserver\n  config:\n    port: 3080\n");
         crate::profile::assert_profile_lan_bind_port(&home, "web", 3099);
         let text = std::fs::read_to_string(home.join("profiles/web/cordis.patch.yml")).unwrap();
@@ -2780,9 +2589,6 @@ config:\n    host: '0.0.0.0'\n    port: 3080\n    compression: gzip\n\
         }
     }
 
-    /// A windowless app to hand the install paths: they report what they do
-    /// through an `AppHandle`, and macOS can only build a real one on the main
-    /// thread — which a test thread is not.
     fn install_app(state: AppState) -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_app();
         app.manage(state);
@@ -3147,9 +2953,6 @@ protobufjs@7.6.6 postinstall: `node scripts/postinstall` exited with exit status
         let root =
             std::env::temp_dir().join(format!("dsh-{tag}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        // The machine's own id: the probe answer is cached per host for a
-        // while, so a test that reused another's id would read that one's
-        // answer instead of asking the fake.
         let host = Host {
             id: format!("host-{tag}"),
             ..remote_host()
@@ -3685,11 +3488,6 @@ printf '%s\\n' 'Error: ERR_PNPM_IGNORED_BUILDS' \\\n  \
         assert!(err.contains("4242"), "要点出是哪个进程：{err}");
     }
 
-    /// The click stops what is running when it lands. It can land when nothing
-    /// is — between two of a task's commands, during the pause before a retry —
-    /// and then the command that starts afterwards is the worker's to stop, or
-    /// the cancelled install leaves a pnpm on that machine holding the store's
-    /// lock (issue #14 验收).
     #[tokio::test]
     async fn a_cancel_the_click_missed_is_stopped_by_the_worker() {
         let fake = FakeTransport::new()

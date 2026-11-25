@@ -11,16 +11,6 @@ export interface Action<T, TArgs extends unknown[]> {
   run: (...args: TArgs) => Promise<T | undefined>
 }
 
-/**
- * Wraps one async operation with the launcher's standard invocation shape:
- * per-key busy tracking, a success toast, and a failure toast carrying the
- * backend's message. The error presentation policy (backend errors surface
- * raw, since they are already localized Chinese) lives here instead of ~45
- * view handlers.
- *
- * The busy flag doubles as a re-entrancy guard per key: `run` is a no-op
- * while that key's invocation is in flight.
- */
 export function useAction<T, TArgs extends unknown[]>(
   op: (...args: TArgs) => Promise<T>,
   options: UseActionOptions<T, TArgs> = {},

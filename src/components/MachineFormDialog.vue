@@ -6,9 +6,6 @@ import type { HostInput, HostWithStatus, SshAlias } from '@/api/types'
 import { useAction } from '@/composables/useAction'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 添加或编辑一台机器。这里只是写一条记录，不拨号；能不能连上由「测试连接」回答。
-// 本机是内置的，没有 ssh 目标，只能改名字、数据目录、registry 和额外环境变量。
-
 const props = defineProps<{
   visible: boolean
   host?: HostWithStatus | null

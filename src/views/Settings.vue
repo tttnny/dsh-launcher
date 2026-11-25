@@ -47,7 +47,6 @@ async function flushSave() {
   const snapshot = { ...store.settings }
   try {
     const saved = await api.updateSettings(snapshot)
-    // 保存期间若又改了，保留界面上的新值，等下一次写回，不让旧回包覆盖。
     if (JSON.stringify({ ...store.settings }) === JSON.stringify(snapshot)) {
       store.settings = saved
     }
@@ -56,9 +55,7 @@ async function flushSave() {
     Message.error(String(e))
     try {
       store.settings = await api.getSettings()
-    } catch {
-      // 读取也失败时保留界面值，让用户看到刚才的改动。
-    }
+    } catch {}
   }
 }
 
@@ -170,8 +167,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  // 离开设置页时把还没写回的改动立即写回：定时器不再在组件卸载后触发，
-  // 刚改的选项也不会丢。
   if (!saveTimer) return
   clearTimeout(saveTimer)
   saveTimer = undefined

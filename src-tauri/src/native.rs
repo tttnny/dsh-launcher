@@ -8,8 +8,6 @@ const METHOD_PREFIX: &str = "pluginManager";
 
 const ENDPOINT_PREFIX: &str = "/api/pluginManager";
 
-/// A boxed future, so [`NativeTransport`] stays object-safe (`Arc<dyn …>`)
-/// without pulling in an async-trait dependency.
 pub type NativeFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -23,13 +21,6 @@ pub struct NativeBundleRow {
     pub meta: Option<NativeMeta>,
 }
 
-/// A native text field: plain text, or the locale map the service uses for its
-/// own localized copy (`{"en": …, "zh": …}`).
-///
-/// Both shapes occur in one payload — DSH localizes the copy it ships and
-/// leaves the rest as plain strings — so a field that can be either must accept
-/// both. Reading one of these as `String` is what makes a whole list
-/// unparseable the moment a single layer carries a translated title.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum NativeText {
@@ -73,7 +64,6 @@ pub struct NativeBundle {
     pub name: String,
     #[serde(default)]
     pub official: bool,
-    /// `installation` | `profile` | `missing`.
     #[serde(default)]
     pub availability: Option<String>,
     #[serde(default)]
@@ -82,20 +72,16 @@ pub struct NativeBundle {
     pub meta: Option<NativeMeta>,
     #[serde(default)]
     pub description: Option<NativeText>,
-    /// Selected by the profile manifest.
     #[serde(default)]
     pub enabled: bool,
-    /// Declared as a dependency by the profile.
     #[serde(default)]
     pub installed: bool,
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub rows: Vec<NativeBundleRow>,
-    /// Shipped with the install, offered as a user toggle.
     #[serde(default)]
     pub optional: bool,
-    /// `false` = can only be disabled, never removed.
     #[serde(default)]
     pub removable: bool,
     #[serde(default)]
@@ -113,16 +99,10 @@ pub struct NativeBundleError {
     pub diagnostic: Option<serde_json::Value>,
 }
 
-/// The native `ChangeResult` — the answer to a write method, narrowed to the
-/// stable subset the launcher shows. **A refused operation still returns HTTP
-/// 200 + `result.ok:true`**: the refusal arrives here as `changed:false` plus
-/// an `error.code`, which is "this cannot be changed", not a transport error
-/// (design §4b). Shared by T2/T3/T4 — there is exactly one definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativeChangeResult {
     pub changed: bool,
     pub application: String,
-    /// `install` | `enable` | `remove`.
     pub stage: String,
     pub target: String,
     #[serde(default)]
@@ -180,8 +160,6 @@ pub struct NativeResponse {
 }
 
 pub trait NativeTransport: Send + Sync {
-    /// (`GET /?token=<token>`, `redirect: manual` — the `Set-Cookie` lives on
-    /// the 303, so following it would fail). Returns the full `Cookie` header
     fn mint<'a>(&'a self, url: &'a str) -> NativeFuture<'a, Result<String, String>>;
 
     fn send(&self, req: NativeRequest) -> NativeFuture<'_, Result<NativeResponse, String>>;
@@ -257,9 +235,6 @@ impl NativeTransport for ReqwestTransport {
     }
 }
 
-/// Headers every RPC carries: the session cookie and a JSON content type.
-/// No `Origin` (a wrong one is a 403) and no manual `Host` (reqwest derives
-/// the correct one).
 pub(crate) fn rpc_headers(cookie: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -297,8 +272,6 @@ impl NativeClient {
         })
     }
 
-    /// is added to the envelope. HTTP status and `result.ok` are **both**
-    /// checked: the service answers HTTP 200 even when it refuses.
     pub async fn call(
         &self,
         method: &str,
@@ -318,8 +291,6 @@ impl NativeClient {
         serde_json::from_value(value).map_err(|e| format!("解析 Bundle 列表失败: {e}"))
     }
 
-    /// argument is `name`, not `id`). Re-enabling appends the bundle to the
-    /// **end** of the profile's ordered bundle list, so its priority shifts.
     pub async fn set_bundle_enabled(
         &self,
         name: &str,
@@ -342,10 +313,6 @@ impl NativeClient {
     }
 }
 
-/// Interprets a raw response: transport-layer failures (bad status, `not
-/// found`, `ok:false`) are errors. A refused *operation* still arrives as
-/// HTTP 200 + `ok:true` with the refusal inside `value` — that is the
-/// caller's business (see design §4b).
 fn parse_value(resp: NativeResponse) -> Result<serde_json::Value, String> {
     match resp.status {
         404 => {
@@ -459,10 +426,8 @@ pub struct BundleItem {
     pub version: Option<String>,
     pub enabled: bool,
     pub installed: bool,
-    /// `false` = can only be disabled, never removed.
     pub removable: bool,
     pub optional: bool,
-    /// `installation` | `profile` | `missing`.
     pub availability: Option<String>,
     pub read_only_reason: Option<String>,
     pub error_code: Option<String>,
@@ -472,9 +437,6 @@ pub struct BundleItem {
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
     pub mode: PluginViewMode,
-    /// Which instance answered. The page was opened from one instance's row,
-    /// but (HOME, Profile) can be running in two of them at once: this is the
-    /// one that actually resolved, so the page can name it instead of assuming.
     pub instance_id: Option<String>,
     pub reason: Option<String>,
     pub bundles: Vec<BundleItem>,

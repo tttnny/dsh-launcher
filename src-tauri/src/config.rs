@@ -35,16 +35,12 @@ pub struct DshInstance {
     pub default_profile: Option<String>,
     #[serde(default)]
     pub last_profile: Option<String>,
-    /// Instance icon: an http(s) URL, or "local" for a cropped PNG stored at
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }
 
-/// The built-in local host's id. A literal rather than [`new_id`]: migrations,
-/// tests and the frontend need one fixed reference to 本机, and a generated one
-/// would differ on every machine.
 pub const LOCAL_HOST_ID: &str = "host-local";
 
 pub const USER_DSH_HOME_ID: &str = "home-user-dsh";
@@ -142,12 +138,6 @@ impl Host {
     }
 }
 
-/// What the launcher last learned about reaching one host: 连接中 while a test
-/// is in flight, then 可达 or 不可达.
-///
-/// This is **runtime**, never a field of `config.json`: 「现在连不上」 is a fact
-/// about the network and the moment, not about the host record. A machine that
-/// is off is still a machine the user saved (ADR-0006).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostState {
@@ -206,8 +196,6 @@ pub struct LauncherSettings {
     pub proxy_port: u16,
     #[serde(default = "default_no_proxy")]
     pub no_proxy: String,
-    /// Also inject the proxy into launched dsh instances, overriding the
-    /// instance's own environment variables (applies on next start).
     #[serde(default)]
     pub proxy_apply_dsh: bool,
     #[serde(default = "default_terminal")]
@@ -347,11 +335,6 @@ pub fn resolve_host<'a>(cfg: &'a Config, host_id: Option<&str>) -> Result<&'a Ho
     }
 }
 
-/// Gives every record written before hosts existed the local host, and makes
-/// sure the built-in host is in the list.
-///
-/// This runs before the other migrations: they merge and sweep HOME records by
-/// path, and a path only identifies one record within the host that owns it.
 pub fn migrate_hosts(cfg: &mut Config) -> bool {
     let mut changed = false;
 
@@ -390,9 +373,6 @@ pub fn migrate_hosts(cfg: &mut Config) -> bool {
 pub struct RemoteVersion {
     pub version: String,
     pub released_at: Option<String>,
-    /// Where the version comes from: absent/`npm` installs from the registry;
-    /// `github` marks a GitHub-only tag (dsh-v*) that must be built from
-    /// source (clone + pnpm install + build).
     #[serde(default)]
     pub source: Option<String>,
 }
@@ -445,16 +425,11 @@ pub struct InstanceStatus {
 }
 
 pub fn load_config(path: &Path) -> Result<Config, String> {
-    // file that exists but cannot be read (a permission or I/O failure) is
-    // reported to the caller instead, so a later save never overwrites a file
-    // the launcher failed to understand.
     let raw = match fs::read_to_string(path) {
         Ok(raw) => Some(raw),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(format!("读取配置失败: {err}")),
     };
-    // written before each host kept its own toolchain still spells that pair
-    // under `settings`, and only the raw document can say what it was.
     let document = match &raw {
         Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
             Ok(document) => document,
@@ -465,8 +440,6 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
     match serde_json::from_value::<Config>(document.clone()) {
         Ok(mut cfg) => {
             let data_dir = path.parent().unwrap_or(Path::new("."));
-            // Ownership first: the sweeps below compare HOME paths, which
-            // only identify one record per host.
             let hosts_changed = migrate_hosts(&mut cfg);
             let adopted = adopt_legacy_toolchain(&document, &mut cfg);
             let local = cfg.local_host().cloned().unwrap_or_else(Host::local);
@@ -491,11 +464,6 @@ fn backup_and_reset(path: &Path, reason: &str) -> Config {
     Config::default()
 }
 
-/// Moves the toolchain pair a config written before hosts owned it kept under
-/// `settings` onto the local host, which is whose pair it was.
-///
-/// Without this the user's hand-picked executables would be dropped: the pair is
-/// per host now, and an unknown key in the document is simply not read.
 fn adopt_legacy_toolchain(document: &serde_json::Value, cfg: &mut Config) -> bool {
     let settings = &document["settings"];
     let binding: ToolchainBinding =
@@ -697,8 +665,6 @@ pub fn normalize_dir_path(raw: &str) -> Result<PathBuf, String> {
             .ok_or_else(|| "无法解析 ~：未设置 HOME".to_string())?
             .join(rest)
     } else if trimmed.starts_with('~') {
-        // `~user/...` needs the user database; treat it as unsupported rather
-        // than silently creating a literal `~user` directory.
         return Err(format!("不支持 ~用户名 形式的路径：{trimmed}"));
     } else {
         PathBuf::from(trimmed)
@@ -1107,8 +1073,6 @@ mod tests {
 
     #[test]
     fn normalize_rejects_relative_and_tilde_user_paths() {
-        // A relative path would mean "relative to the app's cwd" — the exact
-        // bug that produced a literal `~` directory.
         assert!(normalize_dir_path("relative/dsh").is_err());
         assert!(
             normalize_dir_path("~/../x").is_ok(),

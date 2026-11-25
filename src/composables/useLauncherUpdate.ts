@@ -19,7 +19,6 @@ async function checkUpdate(notify = true) {
     pendingCheck = api
       .checkLauncherUpdate()
       .then((info) => {
-        // Keep progress tied to the selected version until its download finishes.
         if (downloadPercent.value === null || downloadPercent.value === 100) {
           if (info.latest !== updateInfo.value?.latest)
             downloadPercent.value = null
