@@ -10,10 +10,7 @@ const props = withDefaults(
   { size: 13, disabled: false },
 )
 
-// One full glyph turn; keep in sync with the .is-spinning animation duration.
 const SPIN_MS = 700
-// Reduced-motion users get no spin, so holding the button for a full turn would
-// read as a dead click rather than feedback: settle as soon as the work does.
 const reduceMotion =
   window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 const running = ref(false)
@@ -25,11 +22,8 @@ async function onClick() {
   try {
     await props.action()
   } catch {
-    // Refresh is best-effort; callers surface their own errors.
   } finally {
     if (!reduceMotion) {
-      // Always let the current turn finish, so the glyph stops upright instead
-      // of snapping back from a random angle.
       const elapsed = performance.now() - started
       const turns = Math.max(1, Math.ceil(elapsed / SPIN_MS))
       const wait = turns * SPIN_MS - elapsed
@@ -81,8 +75,6 @@ async function onClick() {
   animation: dl-refresh-spin 700ms linear infinite;
 }
 
-/* While working the button stays fully colored: dimming it would read as
-   "unavailable", not "busy". Re-entrancy is guarded in onClick. */
 .dl-refresh-btn.is-busy {
   cursor: default;
 }

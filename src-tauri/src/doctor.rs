@@ -40,9 +40,6 @@ fn cli_core_version(version_dir: &Path) -> Option<String> {
     .or_else(|| package_version(&version_dir.join("apps").join("cli")))
 }
 
-/// Checks if a package name is a DSH/Cordis core runtime package.
-/// Utility libraries (cosmokit, schemastery, etc.) are independent libraries
-/// commonly imported by plugins and do not participate in DSH singleton/scheduler state.
 fn is_core_package(name: &str) -> bool {
     let short = name.strip_prefix("@deepseek-ai/").unwrap_or(name);
     short == "dsh" || short.starts_with("dsh-") || short == "cordis" || short.starts_with("cordis-")

@@ -82,15 +82,6 @@ pub(crate) fn pnpm_install_args(
     args
 }
 
-/// Runs `<prog> --version` from a neutral cwd; `Some((raw_output, major))`
-/// when the probe succeeded (the major is `None` when the output is not a
-/// version).
-///
-/// The cwd matters: pnpm resolves a `packageManager` field from the working
-/// directory and reports *that* version — a corepack shim would even download
-/// it — so a probe run from the app's cwd can report a version the binary is
-/// not. [`crate::runtime::PROBE_CWD`] makes the answer depend only on the
-/// binary.
 async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
     let raw = crate::runtime::probe_version(prog).await?;
     let major = pnpm_major(&raw);
@@ -191,15 +182,6 @@ pub(crate) async fn ensure_pnpm_for_task<R: tauri::Runtime>(
     }
 }
 
-/// The pnpm one background task drives on one host, and the directories every
-/// command it runs there needs in front of `PATH`.
-///
-/// The directories are not a convenience: a pnpm that is a standalone binary
-/// (pnpm 12 ships as one) runs without node, so the lifecycle scripts it starts
-/// inherit whatever `PATH` the ssh session has — and an install that runs
-/// `node scripts/postinstall` then fails with exit status 127. The probe
-/// resolved node through an interactive login shell, which is not the shell a
-/// detached install runs in, so its directory has to travel with the command.
 pub(crate) struct PnpmForTask {
     pub path: PathBuf,
     pub path_dirs: Vec<String>,

@@ -48,3 +48,8 @@
 
 - **钉死 pnpm 11**：被否。拒绝用户已经装好的工具链，而收益是零——DSH 不校验版本。
 - **继续用 `--config.fetch-*`**：被否，在 pnpm 11 上直接挂死。
+
+## 追加（2026-11 注释清理）
+
+- 构建批准清单里先写 packages: 根键：pnpm 按它把这个目录当工作区，allowBuilds 才有地方被读到；文件为空时先写 packages: [.]，再写批准项。
+- 本机与远端都在没有 TTY 的环境里跑 pnpm，必须带 CI=true：pnpm 清理 node_modules（store relink）时要确认，没有终端就以 ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY 中止，安装看起来像无缘无故失败。

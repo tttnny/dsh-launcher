@@ -149,7 +149,6 @@ async function load(force = false) {
     if (answer.host_id === LOCAL_HOST_ID) store.runtime = answer
   } catch (e) {
     if (token !== loadToken) return
-    // 连不上的机器没有结论：显示「无法检测」，绝不把工具说成「未安装」。
     loadError.value = String(e)
     runtime.value = null
   }

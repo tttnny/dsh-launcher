@@ -11,9 +11,6 @@ const LOWEST_BORROWABLE_PORT: u16 = 1024;
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// How long the whole withdrawal at exit may take. Every request in it is a
-/// word to a connection that is already up, so the ordinary cost is nothing;
-/// the budget only bounds a connection that has stopped answering.
 const EXIT_BUDGET: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -100,10 +97,6 @@ pub(crate) async fn withdraw(state: &AppState, host_id: &str, remote_url: &str) 
     }
 }
 
-/// Withdraws every forward this session opened to one host and ends the
-/// connection they ride on. For a host whose records are going: nothing that
-/// connection carried is the launcher's to reach anymore, and a forward left
-/// behind would hold a local port for a machine it no longer knows.
 pub(crate) async fn withdraw_host(state: &AppState, host_id: &str) {
     let open: Vec<OpenForward> = {
         let mut map = state.forwards.open.lock().await;
@@ -172,9 +165,6 @@ pub(crate) async fn close_all(state: &AppState) {
     }
 }
 
-/// [`close_all`] for the exit path, which is not an async context: the closes
-/// run on a thread with a runtime of their own and the exit waits for them,
-/// bounded by [`EXIT_BUDGET`].
 pub(crate) fn close_all_blocking(state: &AppState) {
     if state.forwards.open.blocking_lock().is_empty() {
         return;
@@ -534,17 +524,6 @@ mod tests {
         );
     }
 
-    /// Run it against a host this Mac can log into without a password:
-    /// ```text
-    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
-    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_ssh
-    /// ```
-    /// The default target is that machine's own sshd, which needs nothing set up
-    /// there: its banner is what answers on the local port. Point
-    /// `DSH_LAUNCHER_TEST_SSH_URL` at a service on that machine that logs what it
-    /// is asked for, and `DSH_LAUNCHER_TEST_SSH_LOG` at that log, and the test
-    /// also checks that the request reached that machine with the token in the
-    /// address unchanged.
     #[tokio::test]
     #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
     async fn a_real_ssh_carries_the_address_over_the_forward() {

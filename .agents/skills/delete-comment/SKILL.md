@@ -54,7 +54,8 @@ disable-model-invocation: true
 
 scripts/comment-baseline.json 按文件记录允许的注释行数。任何文件的新增注释让行数超过基线时
 pnpm verify 失败；新文件默认 0 行。基线只能下降，目标是把文件从基线里逐个删掉，直到空文件，
-那时 lint 就是硬禁止注释。
+那时 lint 就是硬禁止注释。**2026-11 的清理已经把基线清空，现在就是硬禁止状态**；下一轮如果要
+处理的是新出现的注释，按 RULES.md 的四类判定处理后再跑 --update 维持基线为空。
 
 ## 不做什么
 

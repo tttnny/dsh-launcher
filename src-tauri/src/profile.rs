@@ -36,8 +36,6 @@ fn patch_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("cordis.patch.yml")
 }
 
-/// Marker lines the `@linxin666/dsh-remote-web-ui` plugin wraps its managed
-/// lan-bind block in (must match that plugin's `lan-bind.ts`).
 const LAN_BIND_BLOCK_BEGIN: &str = "# --- remote-web-ui lan-bind block (managed - do not edit) ---";
 const LAN_BIND_BLOCK_END: &str = "# --- end remote-web-ui lan-bind block ---";
 

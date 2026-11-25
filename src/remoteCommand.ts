@@ -1,4 +1,3 @@
-/** POSIX single-quoting — the backend's `remote::quote`. */
 function word(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
 }

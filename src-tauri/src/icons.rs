@@ -108,8 +108,6 @@ fn remember_icon(instance_id: &str, icon: &str, data: Option<String>) {
     });
 }
 
-/// Drops one instance's cached icon. Called wherever the bytes it was read
-/// under change or the instance itself goes.
 pub(crate) fn forget_icon(instance_id: &str) {
     REMOTE_ICON_CACHE
         .lock()
@@ -117,11 +115,6 @@ pub(crate) fn forget_icon(instance_id: &str) {
         .retain(|entry| entry.instance_id != instance_id);
 }
 
-/// Sets an instance icon from a local image file or an http(s) URL. Local
-/// files are cropped to a square PNG inside the HOME — on this Mac, or, for an
-/// instance on another machine, **there**: the image is picked and cropped
-/// locally and only the finished PNG travels (user story 35). URLs are stored
-/// as-is after a decode sanity check.
 #[tauri::command]
 pub async fn set_instance_icon(
     state: State<'_, AppState>,

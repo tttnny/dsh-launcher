@@ -55,11 +55,6 @@ export const api = {
   updateHost: (id: string, input: HostInput) =>
     call<Host>('update_host', { id, input }),
   deleteHost: (id: string) => call<void>('delete_host', { id }),
-  /**
-   * Tests one host: its system, home, data directory and what Node / pnpm it
-   * resolves to. A machine that cannot be reached comes back as a result
-   * (「不可达」 plus one of the four classes), not as a thrown error.
-   */
   testHostConnection: (id: string) =>
     call<ConnectionTest>('test_host_connection', { id }),
   listSshAliases: () => call<SshAlias[]>('list_ssh_aliases'),
@@ -115,15 +110,12 @@ export const api = {
     }),
   deleteProfile: (homeId: string, name: string) =>
     call<void>('delete_profile', { home_id: homeId, name }),
-  /** Sets an instance icon from a local image path or http(s) URL. */
   setInstanceIcon: (instanceId: string, source: string) =>
     call<void>('set_instance_icon', { instanceId, source }),
   clearInstanceIcon: (instanceId: string) =>
     call<void>('clear_instance_icon', { instanceId }),
-  /** Resolves the displayable icon (URL or data URL); null = launcher default. */
   readInstanceIcon: (instanceId: string) =>
     call<string | null>('read_instance_icon', { instanceId }),
-  /** Cold-start deep link from process argv (null when launched normally). */
   pendingDeepLink: () => call<string | null>('pending_deep_link'),
 
   startInstance: (id: string, profile: string) =>
@@ -134,7 +126,6 @@ export const api = {
       profile,
     }),
   stopInstance: (id: string) => call<void>('stop_instance', { id }),
-  /** One backend lifecycle transition: stop + start on the running profile. */
   restartInstance: (id: string) => call<void>('restart_instance', { id }),
   openInstanceWindow: (id: string) =>
     call<void>('open_instance_window', { id }),
@@ -169,18 +160,8 @@ export const api = {
     call<string>('open_instance_log', { instanceId }),
   openInstanceDirectory: (instanceId: string) =>
     call<string>('open_instance_directory', { instanceId }),
-  /**
-   * A remote instance's location: the DSH_HOME as that machine spells it, and
-   * one command that reaches it from a terminal here. Answers from the
-   * launcher's records, so it works while that machine is off.
-   */
   instanceRemoteLocation: (instanceId: string) =>
     call<InstanceLocation>('instance_remote_location', { instanceId }),
-  /**
-   * One command that reaches a host's data directory from a terminal here.
-   * The backend builds the line (`remote::ssh_command` + `directory_recipe`),
-   * so the launcher and the instance card share a single quoting rule.
-   */
   hostDirectoryCommand: (hostId: string, path: string) =>
     call<string>('host_directory_command', { hostId, path }),
   openHomeDirectory: (homeId: string) =>

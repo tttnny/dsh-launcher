@@ -44,7 +44,6 @@ const currentProfile = computed(() => {
       return inst.default_profile
     return list[0] ?? ''
   }
-  // 配置列表读不到时，仍拿记录里已知的名字去问，好让主机不可达这类状态能显示出来。
   return inst.default_profile ?? inst.last_profile ?? ''
 })
 
@@ -225,7 +224,6 @@ function reportOutcome(
   showOutcome(renderOutcome(outcome, success))
 }
 
-// 进程一变（停了、或带着新地址回来了），它就不再是那个回答过「需重启」的进程。
 const liveTick = computed(
   () => `${status.value.state}:${status.value.url ?? ''}`,
 )

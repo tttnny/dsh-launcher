@@ -19,11 +19,6 @@ pub const EVT_MENU_NAVIGATE: &str = "menu-navigate";
 pub const EVT_CHECK_UPDATE: &str = "check-update";
 pub const EVT_OPEN_HELP: &str = "open-help";
 
-/// 构建 macOS 原生应用菜单。在 Windows/Linux 上同样显示
-/// 一致的菜单栏 (不受支持的 predefined 项在那些平台上为 no-op)，
-/// macOS 上第一个菜单会自动使用应用名。
-/// Window / Help 子菜单使用 Tauri 标准 id
-/// (`WINDOW_SUBMENU_ID` / `HELP_SUBMENU_ID`) 以获得原生集成。
 pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let about_meta = AboutMetadataBuilder::new()
         .name(Some("DSH Launcher"))
@@ -143,8 +138,6 @@ pub fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &items)
 }
 
-/// Newly created windows check on startup. An existing window can refresh
-/// immediately and show its result in the title bar.
 pub(crate) fn request_update_check(app: &AppHandle) {
     let had_window = app.get_webview_window("main").is_some();
     crate::windows::show_or_create_main(app);

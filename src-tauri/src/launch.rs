@@ -57,9 +57,6 @@ pub fn web_app_startup_script(version_dir: &Path) -> PathBuf {
             .join("lib")
             .join("startup.js")
     } else {
-        // The pnpm hoisted "public" store keeps one canonical copy with a
-        // stable path; the hashed `.pnpm/<name>@<ver>_<hash>` layout would
-        // need a scan.
         version_dir
             .join("node_modules")
             .join(".pnpm")

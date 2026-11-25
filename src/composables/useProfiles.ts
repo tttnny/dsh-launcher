@@ -11,9 +11,6 @@ const requestsByHome: Record<
   string,
   Promise<string[] | undefined> | undefined
 > = {}
-/** Per-HOME load generation: a cache invalidation bumps it, so a request that
- *  was already in flight when the list changed no longer writes its stale
- *  result back. */
 const generations: Record<string, number> = {}
 
 export function useProfiles() {
@@ -49,12 +46,6 @@ export function useProfiles() {
     return request
   }
 
-  /** Ensures the instance's selection exists and still exists in its HOME's
-   *  list, applying the fallback chain; returns the effective profile.
-   *
-   *  A failed read keeps whatever selection the instance already had instead of
-   *  running the chain over an empty list — "could not read" must not clear a
-   *  valid choice or read as "no profiles". */
   async function ensureSelection(
     inst: DshInstance,
   ): Promise<string | undefined> {
@@ -82,9 +73,6 @@ export function useProfiles() {
     generations[homeId] = (generations[homeId] ?? 0) + 1
   }
 
-  /** Clears any selection still naming `profile` after it was renamed or
-   *  deleted, so the next check picks one that exists. Scope it to the HOME's
-   *  instances when the caller knows them. */
   function forgetSelection(profile: string, instanceIds?: string[]) {
     const ids = instanceIds ?? Object.keys(selectionByInstance)
     for (const id of ids) {
@@ -92,10 +80,6 @@ export function useProfiles() {
     }
   }
 
-  /** Drops everything cached for one HOME — its profile list, the read in
-   *  flight, the failure reason and its generation — once the HOME is removed.
-   *  A read still in flight keeps its generation, so its result cannot write a
-   *  list back for a HOME that no longer exists. */
   function forgetHome(homeId: string) {
     const inFlight = requestsByHome[homeId]
     invalidateHome(homeId)

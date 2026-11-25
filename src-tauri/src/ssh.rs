@@ -6,8 +6,6 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Duration;
 
-/// The launcher's own `ssh`. Absolute, so it does not depend on the `PATH` this
-/// GUI app happened to inherit.
 pub const SSH_BIN: &str = "/usr/bin/ssh";
 
 pub const REMOTE_SHELL: &str = "/bin/bash";
@@ -16,15 +14,10 @@ const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 const CONTROL_PERSIST_SECS: u64 = 60;
 
-/// ssh's own failure status. A remote command that exits 255 is
-/// indistinguishable from ssh failing to connect — a limit of the protocol, so
-/// 255 is read as the transport's word.
 const SSH_FAILURE_STATUS: i32 = 255;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A boxed future, so [`HostTransport`] stays object-safe (`Arc<dyn …>`) the
-/// way `native::NativeFuture` does.
 pub type HostFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +26,6 @@ pub enum HostErrorKind {
     Unreachable,
     Auth,
     Timeout,
-    /// We got in, the command ran, and it failed (or said nothing the launcher
     RemoteCommand,
 }
 
@@ -89,19 +81,6 @@ impl std::fmt::Display for HostError {
     }
 }
 
-/// Which shell a script needs on that machine.
-///
-/// An **interactive login** shell reads `~/.bashrc` / `/etc/profile.d`, which is
-/// where Linux users put the directories of conda, nvm, Linuxbrew and the like.
-/// Every script that has to *find a tool* therefore needs it, and nothing else
-/// does: a script that names absolute paths or runs busybox-class commands
-/// (`cat`, `wc`, `ps`, `ss`, `kill`) gets the same answer either way.
-///
-/// The distinction is not cosmetic. On a machine whose `~/.bashrc` runs
-/// `conda activate`, nvm and shell completion, starting one costs about a
-/// second — and the launcher sends a dozen of these for one start, so every
-/// call that does not need the environment was paying that second for nothing.
-/// [`Shell::Login`] is the deliberate choice; [`Shell::Plain`] is the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shell {
     #[default]
@@ -109,9 +88,6 @@ pub enum Shell {
     Login,
 }
 
-/// One ready-made remote invocation: a script built by [`crate::remote`], the
-/// shell it needs there, and how long it may take. Call sites never assemble
-/// `script` themselves.
 #[derive(Clone, Debug)]
 pub struct RemoteCall {
     pub script: String,
@@ -142,10 +118,6 @@ impl RemoteCall {
     }
 }
 
-/// What one remote script left behind. A non-zero `status` is **not** an error
-/// here: a script that reports 「这台机器没有 pnpm」 exits 0 and answers, and one
-/// that fails outright is read by [`crate::remote`] — which owns the marker
-/// convention — before it becomes a [`HostError`].
 #[derive(Clone, Debug, Default)]
 pub struct RemoteOutput {
     pub status: i32,
@@ -207,9 +179,6 @@ pub trait HostTransport: Send + Sync {
         call: RemoteCall,
     ) -> HostFuture<'a, Result<RemoteOutput, HostError>>;
 
-    /// would run it locally; `path_dirs` are put in front of the process's
-    /// `PATH` (see [`crate::remote::spawn_script`]); the detached-start script
-    /// is [`crate::remote`]'s, never the caller's.
     fn spawn_detached<'a>(
         &'a self,
         host: &'a RemoteHost,
@@ -457,11 +426,6 @@ impl HostTransport for SshTransport {
     }
 }
 
-/// One `-o` value. ssh parses `-o` values the way it parses config-file lines,
-/// so a value with a space in it has to be quoted or ssh reads the rest as
-/// extra arguments and refuses the whole call — and that is not hypothetical:
-/// the launcher's own data directory on macOS is
-/// `/Users/<name>/Library/Application Support/in.dsh-plug.dsh-launcher`.
 fn config_value(value: &str) -> String {
     const PLAIN: &str = "-_./~:@+,=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     if value.chars().all(|c| PLAIN.contains(c)) {
@@ -492,10 +456,6 @@ pub fn ssh_argv(target: &str, socket: &Path, command: &[String]) -> Vec<String> 
     argv
 }
 
-/// The remote command words for one script, in the shell it asked for. The
-/// script must reach the remote shell as **one** word: ssh joins the command
-/// words with spaces and the remote shell splits them again, so the quoting has
-/// to survive that second shell (see [`crate::remote::quote`]).
 pub fn script_command(script: &str, shell: Shell) -> Vec<String> {
     vec![
         REMOTE_SHELL.to_string(),
@@ -562,12 +522,6 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
         ),
         HostErrorKind::Unreachable => {
             if silent {
-                // ssh exits 255 without a word when it loses a connection it
-                // already had, which is not the failure of being unable to
-                // dial: the launcher's own exit path cuts its multiplexed
-                // connection out from under a call still in flight (a log
-                // follower inside `remote::tail`), and the far side of that
-                // established connection going away looks identical. Dialing
                 format!(
                     "ssh 什么都没说就退出了：这既可能是连不上 {target}，\
                      也可能是启动器自己那条连接刚被断开（撤销转发、退出启动器时会这样）。\
@@ -582,13 +536,6 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
     HostError::new(kind, message)
 }
 
-/// The readable reason for ssh saying the launcher's own socket path is too
-/// long, or `None` when that is not what it said.
-///
-/// Two texts, one cause: `ControlPath too long ('…' >= 104 bytes)` is ssh's
-/// check before it starts, and `unix_listener: path "…" too long for Unix
-/// domain socket` is the bind failing on the temporary name it adds. Only the
-/// first names a limit, and neither says the path belongs to the launcher.
 fn socket_path_too_long(stderr: &str) -> Option<String> {
     let said = stderr.to_lowercase();
     if !said.contains("controlpath too long") && !said.contains("too long for unix domain socket") {
@@ -621,10 +568,6 @@ fn ssh_failure_kind(stderr: &str) -> HostErrorKind {
     HostErrorKind::Unreachable
 }
 
-/// The tail of a remote stderr: the last few lines that are not the remote
-/// shell's own chatter. `bash -i` announces 「no job control in this shell」 on
-/// every single call, and that line must never become the failure reason the
-/// user reads.
 pub(crate) fn stderr_tail(stderr: &str) -> String {
     const KEEP: usize = 3;
     const MAX_CHARS: usize = 400;
@@ -670,11 +613,6 @@ pub fn ssh_aliases_at(path: &Path) -> Vec<SshAlias> {
     }
 }
 
-/// Reads the `Host` blocks out of one `~/.ssh/config`.
-///
-/// Wildcard patterns are left out (`Host *` is a catch-all full of defaults, not
-/// an alias anyone picks), and a `Match` block's keywords are ignored — they
-/// apply conditionally, so they are not an alias's target either.
 pub fn parse_ssh_config(text: &str) -> Vec<SshAlias> {
     let mut aliases: Vec<SshAlias> = Vec::new();
     let mut block: Vec<usize> = Vec::new();
@@ -913,10 +851,6 @@ mod tests {
         }
     }
 
-    /// ```text
-    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
-    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_ssh_binds
-    /// ```
     #[tokio::test]
     #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
     async fn a_real_ssh_binds_the_socket_the_launcher_derives() {
@@ -996,8 +930,6 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&echoed.stdout), script);
     }
 
-    /// The difference is a second per call on a machine whose `~/.bashrc` loads
-    /// conda.
     #[test]
     fn only_a_call_that_needs_the_environment_gets_the_login_shell() {
         assert_eq!(script_command("true", Shell::Plain)[1], "-c");

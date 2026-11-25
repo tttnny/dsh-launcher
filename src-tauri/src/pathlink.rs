@@ -3,9 +3,6 @@ use std::path::{Path, PathBuf};
 
 use crate::launch;
 
-/// The line a wrapper script carries, with the version directory after it. A
-/// script is only written for a CLI that is not executable itself. The remote
-/// script (`crate::remote`'s `PATH_LINK`) writes and recognises the same line.
 pub const MARKER: &str = "# dsh-launcher path link: ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,10 +71,6 @@ pub fn linked_to(state: &LinkState, versions: &[&Path]) -> Option<PathBuf> {
     }
 }
 
-/// Registers one version as the `dsh` command on PATH.
-///
-/// `versions` is every version the launcher knows on this Mac: a link into one
-/// of them is the launcher's to replace, and anything else is the user's.
 pub fn register(home: &Path, version_dir: &Path, versions: &[&Path]) -> Result<(), String> {
     let state = inspect(home);
     ensure_replaceable(&state, versions)?;

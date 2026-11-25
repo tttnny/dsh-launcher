@@ -26,14 +26,9 @@ pub struct ToolStatus {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeStatus {
-    /// switched hosts can tell an answer that arrived late from the one it is
-    /// waiting for.
     pub host_id: String,
     pub node: ToolStatus,
     pub pnpm: ToolStatus,
-    /// setup page can hand out a command that fits the machine instead of one
-    /// fixed recipe. Order is by preference: a manager the user already has is
-    /// always the right thing to extend.
     pub managers: Vec<String>,
     pub node_below_recommended: bool,
     pub requirements: ToolchainRequirements,
@@ -86,10 +81,6 @@ impl ToolchainRequirements {
     }
 }
 
-/// The Node install command for a machine that has these managers: extend the
-/// one the user already uses, so they end up with one Node in the place they
-/// expect. With no manager at all, the recipe installs nvm first (it is the
-/// least invasive option — no admin rights, no system-wide change).
 fn node_install_command(managers: &[String]) -> String {
     let has = |m: &str| managers.iter().any(|x| x == m);
     if has("nvm") {
@@ -133,13 +124,6 @@ pub(crate) fn candidates_with(
 
     for dir in fallback_dirs {
         let exe = exe_in(dir, program);
-        // A system directory may be a per-shell temporary: fnm hands every shell
-        // its own `fnm_multishells/<pid>_<stamp>/bin`, holding hard links to the
-        // version it selected, so a binding made there dies with that shell while
-        // the same binary also sits in fnm's durable directory. When a system
-        // entry and a known directory hold the *same file*, the durable spelling
-        // is the one that gets bound; the source stays `System`, because the
-        // user's terminal does reach this very file.
         let same = out
             .iter()
             .position(|(seen, source)| *source == ToolSource::System && same_file(seen, &exe));
@@ -159,7 +143,6 @@ pub(crate) fn candidates_with(
 }
 
 fn exe_in(dir: &Path, program: &str) -> PathBuf {
-    // An empty PATH entry means the current directory.
     if dir.as_os_str().is_empty() {
         PathBuf::from(program)
     } else {
@@ -175,10 +158,6 @@ pub(crate) async fn tool_candidates(
     candidates(program, manual, &env.dirs)
 }
 
-/// Whether two paths name the same file on disk rather than the same string.
-/// On Unix that is device and inode, so hard links count (fnm's per-shell
-/// directories are hard links into the real installation) while an ordinary copy
-/// does not.
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -218,15 +197,6 @@ pub(crate) fn source_of(
 
 const PROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Runs `<exe> --version` from a neutral cwd and returns its trimmed stdout, or
-/// `None` when it cannot be run, exits non-zero, or outlives
-/// [`PROBE_VERSION_TIMEOUT`].
-///
-/// The cwd matters: pnpm resolves a `packageManager` field from the working
-/// directory and reports *that* version — a corepack shim would even download
-/// it — so [`PROBE_CWD`] is what makes the reported version depend only on the
-/// binary. `kill_on_drop` is what leaves no probe process behind when the
-/// timeout fires.
 pub(crate) async fn probe_version(exe: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(exe);
     crate::process::hide_console(&mut cmd);
@@ -275,9 +245,6 @@ const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHELL_PATH_MARK: &str = "<<<DSH-PATH>>>";
 const SHELL_PATH_END: &str = "<<<DSH-END>>>";
 
-/// Prints PATH between two markers. `.zshrc` files routinely print something of
-/// their own (plugin manager banners, version notices), so the whole stdout is
-/// not usable as the PATH — only what sits between the markers is.
 const SHELL_PATH_SCRIPT: &str = "printf '<<<DSH-PATH>>>%s<<<DSH-END>>>' \"$PATH\"";
 
 #[derive(Clone, Debug)]
@@ -299,10 +266,6 @@ fn remote_env_cache() -> &'static Mutex<HashMap<String, (crate::remote::RemoteEn
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The PATH this process inherited at launch, captured before
-/// [`ensure_macos_paths`] appends the known tool directories to the process
-/// PATH. Afterwards `std::env::var("PATH")` is no longer the inherited value,
-/// so this is the only honest record of it.
 static INHERITED_PATH: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
 pub(crate) enum EnvHost {
@@ -421,9 +384,6 @@ async fn remote_env(
     Ok(env)
 }
 
-/// Drops one host's cached answers. Every write that changes what the probe
-/// would find — a new hand-picked path, a cleared one — has to drop them, or the
-/// page would keep showing the conclusion of the previous choice.
 pub(crate) fn forget_host_env(host_id: &str) {
     system_env_cache().lock().unwrap().remove(host_id);
     remote_env_cache().lock().unwrap().remove(host_id);
@@ -448,8 +408,6 @@ async fn read_shell_path() -> Result<(String, String), String> {
     crate::process::hide_console(&mut cmd);
     cmd.arg("-ilc").arg(SHELL_PATH_SCRIPT);
     cmd.stdin(std::process::Stdio::null());
-    // The timeout below drops the future; killing on drop is what keeps a hung
-    // shell from being left behind as an orphan process.
     cmd.kill_on_drop(true);
 
     let output = match tokio::time::timeout(SHELL_PROBE_TIMEOUT, cmd.output()).await {
@@ -789,8 +747,6 @@ pub(crate) async fn set_toolchain_override_for(
         };
         if changed {
             *slot = manual;
-            // The recorded binding is the answer to the previous choice; drop it
-            // so the refresh below resolves again instead of reusing it.
             if is_node {
                 record.toolchain.node = None;
             } else {
@@ -819,7 +775,6 @@ pub(crate) async fn runtime_status_for(
 
 async fn local_runtime_status(state: &AppState, force: bool) -> RuntimeStatus {
     if force {
-        // Warm the cache first: every probe below reads it.
         system_env(true).await;
     }
     let binding = refresh_local_binding(state, force).await;
@@ -906,13 +861,7 @@ fn skipped_candidates(
         .collect()
 }
 
-/// Accepts a hand-typed executable path, or explains in the user's terms why it
-/// cannot be used. The file must exist *and* answer `--version` from
-/// [`PROBE_CWD`] — the same probe every automatic candidate goes through — so an
-/// override the launcher would then fail to spawn is refused up front.
 async fn validate_manual_tool(program: &str, raw: &str) -> Result<PathBuf, String> {
-    // The app's cwd is wherever Finder launched it from; storing a relative
-    // path would mean something different for every later spawn.
     let path = std::path::absolute(raw).map_err(|e| format!("无法解析路径「{raw}」：{e}"))?;
     if !path.is_file() {
         return Err(format!(
@@ -1018,10 +967,6 @@ pub(crate) fn node_major(version_output: &str) -> Option<u64> {
         .ok()
 }
 
-/// Which Node version managers exist on this machine, most preferred first.
-/// Only managers whose directory layout the scanner already understands are
-/// reported, so the setup page never suggests a tool the launcher cannot then
-/// find. Pure filesystem checks — no subprocess.
 fn detected_managers() -> Vec<String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1102,14 +1047,6 @@ fn fnm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// nvm-managed Node bin directories, most specific first:
-///
-/// 1. the version `~/.nvm/alias/default` points at
-/// 2. every `<root>/versions/node/<v>/bin`, newest first.
-///
-/// Only `~/.nvm` is scanned: that is where the installer puts it, and the
-/// location is not relocatable without `$NVM_DIR` being exported (which a
-/// Finder-launched app does not inherit).
 fn nvm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     let root = home.join(".nvm");
     if !root.is_dir() {
@@ -1149,11 +1086,6 @@ fn nvm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Directories holding a standalone `pnpm` binary. The official installer
-/// puts it in `PNPM_HOME/bin` on macOS (`~/Library/pnpm/bin`), while the v10
-/// era linked it straight into `PNPM_HOME` — both layouts are scanned, and an
-/// explicit `$PNPM_HOME` wins because that is where pnpm itself was told to
-/// live.
 fn pnpm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = std::env::var_os("PNPM_HOME").map(PathBuf::from) {
@@ -1180,12 +1112,6 @@ fn pnpm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The cwd every version probe runs in. `--version` must not depend on the
-/// app's own working directory: pnpm resolves a `packageManager` field from the
-/// cwd and reports *that* version (and a corepack shim would download it), so
-/// probing from a neutral directory is what makes the reported version
-/// truthful. Shared with [`crate::toolchain`]'s resolver, which runs the same
-/// probe.
 pub(crate) const PROBE_CWD: &str = "/";
 
 fn tool_fallback_bins() -> Vec<PathBuf> {
@@ -1217,15 +1143,7 @@ fn tool_fallback_bins() -> Vec<PathBuf> {
     dirs
 }
 
-/// Ensures the standard macOS tool paths — nvm/fnm-managed Node, standalone
-/// pnpm, Homebrew, and user bin directories — are on PATH even when launched
-/// from Finder without an interactive shell, so node/pnpm/git resolve for
-/// spawned children. Reuses the probe's directory scan so the two can never
-/// disagree about where a tool lives.
 pub fn ensure_macos_paths() {
-    // Before this function touches PATH: from here on, the process PATH is a
-    // widened one, and the *inherited* PATH (what the app was launched with) is
-    // only available from the snapshot.
     capture_inherited_path();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
