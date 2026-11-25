@@ -1,8 +1,3 @@
-// Mock adapter (browser preview): a localStorage-backed reference
-// implementation of the backend command contract. Every command the public
-// api object can invoke MUST have a case in mockCall, so the two adapters
-// cannot drift silently.
-
 import type {
   BundleItem,
   ChangeOutcome,
@@ -42,12 +37,9 @@ interface MockDb {
   instances: DshInstance[]
   settings: LauncherSettings
   running: Record<string, InstanceStatus>
-  /** The version `~/.local/bin/dsh` runs on each machine, by host id; a host
-   *  with no entry has nothing registered there. */
   path_link: Record<string, string | null>
 }
 
-/** The built-in host the browser preview always has. */
 function localHost(): Host {
   return {
     id: LOCAL_HOST_ID,
@@ -60,10 +52,8 @@ function localHost(): Host {
   }
 }
 
-/** The preview's remote machine, so host-aware pages have two of them to show. */
 const REMOTE_HOST_ID = 'host-aliyun'
 
-/** 本机's data directory as the preview spells it. */
 const LOCAL_DATA_DIR = '/Users/demo/Library/Application Support/dsh-launcher'
 
 function remoteHost(): Host {
@@ -78,12 +68,6 @@ function remoteHost(): Host {
   }
 }
 
-/**
- * Host statuses, runtime only — the mock's stand-in for the backend's status
- * map, which is not persisted either (a machine that is off is still saved).
- * The remote sample starts out 不可达 so that state is visible in the preview;
- * 「测试连接」 then turns it 可达.
- */
 const mockHostStatuses: Record<string, HostStatus> = {
   [REMOTE_HOST_ID]: {
     state: 'unreachable',
@@ -199,7 +183,6 @@ function loadDb(): MockDb {
     const raw = localStorage.getItem(MOCK_KEY)
     if (raw) {
       const db = JSON.parse(raw) as MockDb
-      // Backfill fields added after the mock db was persisted.
       db.settings.log_level = db.settings.log_level ?? 'info'
       db.settings.proxy_enabled = db.settings.proxy_enabled ?? false
       db.settings.proxy_url = db.settings.proxy_url ?? 'http://127.0.0.1'
@@ -207,14 +190,12 @@ function loadDb(): MockDb {
       db.settings.no_proxy = db.settings.no_proxy ?? '127.0.0.1,localhost,::1'
       db.settings.proxy_apply_dsh = db.settings.proxy_apply_dsh ?? false
       db.settings.terminal = db.settings.terminal ?? 'system'
-      // Backfill the dedicated DSH_HOME added with the version-delete change.
       for (const v of db.versions) {
         v.dedicated_home =
           v.dedicated_home ?? `${LOCAL_DATA_DIR}/homes/${v.version}`
         // Bin readiness is what the machine answers; a version stored before
         // the field existed was installed by the launcher, so it is ready.
         v.bin_ready = v.bin_ready ?? true
-        // The PATH registration is newer than the stored sample versions.
         v.path_linked = v.path_linked ?? false
       }
       // The PATH registration is newer than the stored sample versions, and it
@@ -236,9 +217,7 @@ function loadDb(): MockDb {
       if (!storedHosts) db.hosts.push(remoteHost())
       return db
     }
-  } catch {
-    // fall through to seed
-  }
+  } catch {}
   const db = seedDb()
   localStorage.setItem(MOCK_KEY, JSON.stringify(db))
   return db
@@ -254,7 +233,6 @@ function uuid(): string {
   )
 }
 
-// Simple event emitter used by the mock to mimic Tauri events.
 const statusListeners = new Set<Listener<InstanceStatus>>()
 const taskProgressListeners = new Set<Listener<TaskProgress>>()
 const taskLogListeners = new Set<Listener<TaskLog>>()
@@ -269,17 +247,9 @@ function emitTaskLog(l: TaskLog) {
   taskLogListeners.forEach((fn) => fn(l))
 }
 
-// Mock task storage (runtime only, like the real backend).
 const mockTasks = new Map<string, TaskInfo>()
-// Mock profiles created at runtime per home id.
 const mockProfiles: Record<string, string[]> = {}
-// Mock native plugin views per `homeId:profile`, mirroring what a running
-// instance answers to `/api/pluginManager/listBundles` (localized titles, an
-// installation-only layer, an unmounted layer, and one broken layer).
 const mockNativeStore: Record<string, PluginView> = {}
-// The hand-picked executables of the browser preview, **per host** — as the
-// backend keys them. There is no backend here, so a path chosen on the setup
-// page is only remembered in this module.
 const mockToolchainOverrides: Record<
   string,
   Partial<Record<'node' | 'pnpm', string>>
@@ -292,7 +262,6 @@ function mockOverridesOf(
   return mockToolchainOverrides[hostId]
 }
 
-/** Where each preview machine's tools are, as its own probe would report them. */
 const MOCK_TOOLS: Record<
   string,
   {
@@ -316,13 +285,6 @@ const MOCK_TOOLS: Record<
   },
 }
 
-/**
- * The preview's runtime status for one host: both tools are assumed to be
- * present, a tool that was picked by hand reports that path instead (the same
- * "the pick wins" rule the guard applies), and the remote sample also carries
- * the candidates its probe passed over — the apt Node 18 and the pnpm 9 a real
- * Linux machine very often has.
- */
 function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
   const tools = MOCK_TOOLS[hostId]
   const overrides = mockOverridesOf(hostId)
@@ -342,8 +304,6 @@ function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
       }
     }
     if (!base) {
-      // A host the preview has never probed: saying "not found" is the honest
-      // answer, and it is what a real fresh host reports.
       return {
         installed: false,
         version: null,
@@ -402,11 +362,6 @@ function mockRuntimeStatus(hostId: string = LOCAL_HOST_ID): RuntimeStatus {
   }
 }
 
-/**
- * A refusal, shaped exactly like the backend's `ChangeOutcome` (design §4d/§4b):
- * `errorCode` carries the **raw** native code and `diagnostic` carries the
- * **localized** reason the UI renders verbatim. `changed:false`, never an error.
- */
 function mockRefusal(
   stage: string,
   target: string,
@@ -429,11 +384,6 @@ function mockRefusal(
   }
 }
 
-/**
- * Which instance answers for `(homeId, profile)`: the one the page was opened
- * from when it is itself running that profile, otherwise the first registered
- * match — the same rule as the backend's `running_for_profile`.
- */
 function resolveRunningInstance(
   db: MockDb,
   homeId: string,
@@ -450,17 +400,9 @@ function resolveRunningInstance(
   return (preferred ?? own.find(live))?.id ?? null
 }
 
-/** Seed a native view on first read, so the Plugins page is usable. */
-/**
- * What the profile's own files say, as the backend's offline projection reports
- * it: which layers it declares and installs, and nothing only a running
- * instance could know — no live state, availability, row count or removal rule.
- */
 function offlineProjection(bundles: BundleItem[]): BundleItem[] {
   return bundles.map((b) => ({
     ...b,
-    // A file has no title, no description and no count: those come from the
-    // running instance's own list.
     title: null,
     description: null,
     rowCount: 0,
@@ -472,7 +414,6 @@ function offlineProjection(bundles: BundleItem[]): BundleItem[] {
   }))
 }
 
-/** The layers this profile declares: the mock's stand-in for its `package.json`. */
 function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
   const key = `${homeId}:${profile}`
   if (!mockNativeStore[key]) {
@@ -523,7 +464,6 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
           readOnlyReason: null,
           errorCode: null,
         },
-        // Disabled layers the user could re-mount; most bundles ship this way.
         {
           name: '@deepseek-ai/dsh-llm-anthropic',
           rowCount: 2,
@@ -552,7 +492,6 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
           readOnlyReason: null,
           errorCode: null,
         },
-        // A bundle whose package files cannot be read.
         {
           name: '@example/dsh-missing',
           rowCount: 0,
@@ -573,18 +512,12 @@ function mockBundlesFor(homeId: string, profile: string): BundleItem[] {
   return mockNativeStore[key].bundles
 }
 
-/**
- * The sentence the backend uses when the machine that owns a DSH_HOME cannot be
- * reached (`plugins.rs`): the machine's own reason, and the action that can
- * change the answer.
- */
 function hostUnreachableReason(host: Host): string {
   const detail =
     mockHostStatuses[host.id]?.message?.trim() || '那台机器没有回应'
   return `主机「${host.display_name}」现在连不上（${detail}）。那台机器上的实例问不到，Profile 文件也读不到；恢复连接后点「重试」。`
 }
 
-/** The home's own machine, when the preview currently cannot reach it. */
 function hostOutOfReach(db: MockDb, homeId: string): Host | null {
   const home = db.homes.find((h) => h.id === homeId)
   const host = home ? hostOf(db, home.host_id ?? LOCAL_HOST_ID) : undefined
@@ -601,9 +534,6 @@ function nativeViewFor(
   instanceId: string | null,
 ): PluginView {
   const bundles = mockBundlesFor(homeId, profile)
-  // A machine the preview marks 不可达 answers nothing — not the instance, and
-  // not the profile's own files either. A list shown anyway would be the
-  // launcher's memory, not that machine's answer.
   const unreachable = hostOutOfReach(db, homeId)
   if (unreachable) {
     return {
@@ -614,8 +544,6 @@ function nativeViewFor(
     }
   }
   if (!instanceId) {
-    // No instance answers, so the list is the profile's own files — the same
-    // fallback the backend takes, labelled read-only by `mode`.
     return {
       mode: 'not-running',
       instanceId: null,
@@ -623,7 +551,6 @@ function nativeViewFor(
       bundles: offlineProjection(bundles),
     }
   }
-  // The list is per profile; which instance answers is per call.
   return { mode: 'managed', instanceId, reason: null, bundles }
 }
 
@@ -631,13 +558,6 @@ function mockNewId(prefix: string): string {
   return `${prefix}-${uuid()}`
 }
 
-/**
- * The commands whose Rust signature declares `rename_all = "snake_case"`: they
- * read their arguments under the underscore spelling, every other command under
- * the camelCase one. The backend decides this, so this list is the mock's copy
- * of a rule it cannot see: every argument the mock reads must use the spelling
- * its command really declares, or the preview drifts silently.
- */
 const SNAKE_CASE_COMMANDS = new Set([
   'start_install_version_task',
   'list_profiles',
@@ -651,25 +571,11 @@ const SNAKE_CASE_COMMANDS = new Set([
   'remove_bundle',
 ])
 
-/** The key `cmd` reads the argument `name` (camelCase) under. */
 function backendKey(cmd: string, name: string): string {
   if (!SNAKE_CASE_COMMANDS.has(cmd)) return name
   return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
 }
 
-/**
- * One argument, read under the exact key its own command reads — and under no
- * other spelling. Tauri looks an argument up by that one name, and a miss is not
- * an error: an `Option<T>` argument reads as `None` there (here: as 本机), which
- * is how a remote install once landed on this Mac while the page named the
- * user's server. A mock that accepted either spelling would keep the preview
- * working through exactly that bug, so it reads like the backend does.
- *
- * Only the arguments whose key depends on the command go through here — the host
- * one, shared by commands of both kinds, and the terminal's instance id. Every
- * other read in this file spells one literal key, and the contract test holds
- * those against the same Rust sources.
- */
 function argOf(
   args: Record<string, unknown> | undefined,
   cmd: string,
@@ -689,35 +595,22 @@ function hostIdArg(cmd: string, args?: Record<string, unknown>): string {
   return id || LOCAL_HOST_ID
 }
 
-/** Every host with the status the preview holds for it. */
 function hostViews(db: MockDb): HostWithStatus[] {
   return db.hosts.map((h) => ({ ...h, status: mockHostStatuses[h.id] ?? null }))
 }
 
-/** One host of the preview's db, by the id a call named (本机 when it named none). */
 function hostOf(db: MockDb, hostId: string): Host {
   return db.hosts.find((h) => h.id === hostId) ?? db.hosts[0] ?? localHost()
 }
 
-/** The data directory the preview pretends a host has. */
 function hostDirOf(db: MockDb, hostId: string): string {
   return hostOf(db, hostId).data_dir ?? LOCAL_DATA_DIR
 }
 
-/**
- * The separator the preview's sample paths use: joining a path follows whichever
- * separator the starting directory already uses.
- */
 function sepOf(dir: string): string {
   return dir.includes('\\') ? '\\' : '/'
 }
 
-/**
- * The typed data directory settled the way the connection test settles it **on
- * that machine**, mirroring the script: `~` is that machine's home directory,
- * and a value that cannot be settled (a relative path, `~用户名`) comes back as
- * a reason instead — the record keeps what the user typed.
- */
 function settleRemoteDataDir(
   host: Host,
   typed: string | null | undefined,
@@ -733,11 +626,6 @@ function settleRemoteDataDir(
   }
 }
 
-/**
- * A host the preview marks 不可达 answers nothing: the backend's per-host reads
- * fail there too, and a page that showed a list anyway would be showing the
- * launcher's memory instead of the machine's answer.
- */
 function refuseUnreachable(host: Host) {
   if ((mockHostStatuses[host.id]?.state ?? 'reachable') === 'unreachable') {
     throw new Error(
@@ -746,10 +634,6 @@ function refuseUnreachable(host: Host) {
   }
 }
 
-/**
- * The launcher only touches 本机's paths with its own filesystem calls; a remote
- * host's path is a path on that server. Mirrors `Host::local_paths_only`.
- */
 function refuseRemotePathTouches(host: Host, what: string) {
   if (!host.builtin) {
     throw new Error(
@@ -758,20 +642,8 @@ function refuseRemotePathTouches(host: Host, what: string) {
   }
 }
 
-/**
- * Each machine's home directory as the preview learned it from 「测试连接」.
- * `~` in a path typed for another host expands against **that** machine's home
- * — the backend asks the machine itself (`remote::home_path_script`), and the
- * preview cannot ask, so it keeps what the connection test reported.
- */
 const mockHostHomes: Record<string, string> = { [REMOTE_HOST_ID]: '/home/demo' }
 
-/**
- * Settles a DSH_HOME path **on a remote host**, the way that machine would:
- * `~` against its own home, `..` (and doubled or trailing slashes) by text, and
- * a relative path refused. Mirrors `remote::home_path_script`, which is why the
- * preview refuses the same inputs the real scripts do.
- */
 function settleRemotePath(host: Host, raw: string): string {
   const home = mockHostHomes[host.id] ?? '/home/demo'
   let requested: string
@@ -802,7 +674,6 @@ export async function mockCall<T>(
   }
 
   switch (cmd) {
-    // --- Hosts ---------------------------------------------------------------
     case 'list_hosts':
       return hostViews(db) as T
     case 'create_host': {
@@ -836,7 +707,6 @@ export async function mockCall<T>(
       if (!host) fail(`主机不存在: ${id}`)
       host.display_name =
         String(input.display_name ?? '').trim() || host.display_name
-      // 本机 does not go over ssh; a form must not be able to make it one.
       if (!host.builtin) host.ssh_target = String(input.ssh_target ?? '').trim()
       host.registry = input.registry ?? null
       host.extra_env = input.extra_env ?? {}
@@ -849,8 +719,6 @@ export async function mockCall<T>(
       const host = db.hosts.find((h) => h.id === id)
       if (!host) fail(`主机不存在: ${id}`)
       if (host.builtin) fail('本机是内置的，不能删除')
-      // Only the launcher's records go: the machine keeps everything it has and
-      // the instances running there keep running (ADR-0006 §5).
       db.hosts = db.hosts.filter((h) => h.id !== id)
       db.homes = db.homes.filter((h) => h.host_id !== id)
       db.versions = db.versions.filter((v) => v.host_id !== id)
@@ -865,7 +733,6 @@ export async function mockCall<T>(
       if (!host) fail(`主机不存在: ${id}`)
       if (host.builtin) fail('本机就在这台 Mac 上，不需要测试连接')
       const settled = settleRemoteDataDir(host, host.data_dir)
-      // A machine that answers: the sample the real script's JSON mirrors.
       const test: ConnectionTest = {
         ok: true,
         kind: null,
@@ -883,8 +750,6 @@ export async function mockCall<T>(
       }
       mockHostStatuses[id] = { state: 'reachable', message: null }
       mockHostHomes[id] = test.home ?? mockHostHomes[id] ?? ''
-      // What that machine settled is what the launcher writes down; a value it
-      // could not settle leaves the record as the user typed it.
       if (settled.dir && host.data_dir !== settled.dir) {
         host.data_dir = settled.dir
         saveDb(db)
@@ -902,17 +767,10 @@ export async function mockCall<T>(
         { alias: 'lab-gpu', host_name: '10.0.0.7', user: 'deploy', port: null },
       ] as T
 
-    // --- DSH_HOME ------------------------------------------------------------
     case 'list_homes': {
       const host = hostOf(db, hostIdArg(cmd, args))
-      // A DSH_HOME is a record the launcher keeps, so a machine the preview
-      // cannot reach still has its list here; the one thing only that machine
-      // can answer — whether it has a `~/.dsh` of its own — is skipped rather
-      // than guessed at.
       const answers =
         (mockHostStatuses[host.id]?.state ?? 'reachable') !== 'unreachable'
-      // Its own `~/.dsh` joins the list the first time it is asked — the
-      // question 本机's load-time sweep asks about this Mac (ADR-0006).
       if (!host.builtin && answers) {
         const dsh = `${mockHostHomes[host.id] ?? '/home/demo'}/.dsh`
         const known = db.homes.some(
@@ -936,7 +794,6 @@ export async function mockCall<T>(
       const name = String(args?.name ?? 'instance')
       const safe = name.replace(/[^\w一-龥.-]+/g, '_')
       const hostDir = hostDirOf(db, hostIdArg(cmd, args))
-      // The joined path follows whichever separator the host's directory uses.
       const sep = hostDir.includes('\\') ? '\\' : '/'
       return `${hostDir}${sep}homes${sep}${safe}` as T
     }
@@ -945,9 +802,6 @@ export async function mockCall<T>(
       const name = String(args?.name ?? '').trim()
       const raw = String(args?.path ?? '').trim()
       if (!name || !raw) fail('名称与路径不能为空')
-      // 本机's path is this Mac's; another machine's is settled **there**, and
-      // only the answer is recorded — a path that machine will not use is not
-      // saved at all.
       const path = host.builtin ? raw : settleRemotePath(host, raw)
       const existing = db.homes.find(
         (h) => (h.host_id ?? LOCAL_HOST_ID) === host.id && h.path === path,
@@ -963,9 +817,6 @@ export async function mockCall<T>(
       const hostId = hostIdArg(cmd, args)
       if (db.instances.some((i) => i.home_id === id))
         fail('该 DSH_HOME 仍被实例引用，无法删除')
-      // The record must belong to the host the caller names: the same path on
-      // another machine is a different HOME, and a deletion that did nothing
-      // must not be reported as one.
       const home = db.homes.find((h) => h.id === id)
       if (!home || (home.host_id ?? LOCAL_HOST_ID) !== hostId)
         fail('该主机下没有这个 DSH_HOME')
@@ -975,8 +826,6 @@ export async function mockCall<T>(
     }
     case 'list_versions': {
       const host = hostOf(db, hostIdArg(cmd, args))
-      // A machine the preview cannot reach answers with an error, not with a
-      // list: 「装了哪些」 is a claim only that machine can make.
       refuseUnreachable(host)
       return db.versions
         .filter((v) => (v.host_id ?? LOCAL_HOST_ID) === host.id)
@@ -988,9 +837,6 @@ export async function mockCall<T>(
     }
     case 'fetch_available_versions': {
       const host = hostOf(db, hostIdArg(cmd, args))
-      // Only a host with a registry of its own is asked over ssh; a host
-      // without one is listed from the same registry this Mac uses, so the
-      // list is the local one either way in the preview.
       if (host.registry) {
         refuseUnreachable(host)
         return [
@@ -1098,8 +944,6 @@ export async function mockCall<T>(
 
       const task: TaskInfo = {
         id: mockNewId('t'),
-        // The launcher's only long task, and the only `kind` the UI branches
-        // on: see `installingVersions` in the launcher store.
         kind: 'install-version',
         label: `下载 DSH ${version} 并创建实例「${name}」`,
         version,
@@ -1121,7 +965,6 @@ export async function mockCall<T>(
         instance_id: null,
       })
 
-      // Simulate npm --loglevel=http download + install + instance creation.
       const fakeLogs = [
         `npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh 120ms`,
         `npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-${version}.tgz 480ms`,
@@ -1152,7 +995,6 @@ export async function mockCall<T>(
         }
         clearInterval(timer)
         const cur = loadDb()
-        // Resolve the HOME now (dedicated HOME is created at completion time).
         let resolvedHomeId = homeIdArg
         if (dedicated && dedicatedPath) {
           const same = (a: string, b: string) =>
@@ -1174,7 +1016,6 @@ export async function mockCall<T>(
             resolvedHomeId = home.id
           }
         }
-        // Install version record if missing — on that host.
         let ver = cur.versions.find(
           (v) =>
             v.version === version && (v.host_id ?? LOCAL_HOST_ID) === host.id,
@@ -1223,7 +1064,6 @@ export async function mockCall<T>(
       return task.id as T
     }
     case 'get_runtime_status': {
-      // Browser preview: assume the tools are there so the UI is usable, per host.
       return mockRuntimeStatus(hostIdArg(cmd, args)) as T
     }
     case 'set_toolchain_override': {
@@ -1272,9 +1112,6 @@ export async function mockCall<T>(
         (v) => v.id === id && (v.host_id ?? LOCAL_HOST_ID) === host.id,
       )
       db.versions = db.versions.filter((v) => v.id !== id)
-      // The version's dedicated DSH_HOME record goes with it, by the same path
-      // rule the backend deletes the directory with — and only that host's
-      // record: the same path on another machine is another HOME.
       if (removed) {
         const same = (a: string, b: string) =>
           host.id === LOCAL_HOST_ID
@@ -1289,7 +1126,6 @@ export async function mockCall<T>(
             ),
         )
       }
-      // The version's PATH registration goes with it — on that machine only.
       if (db.path_link[host.id] === id) db.path_link[host.id] = null
       saveDb(db)
       return undefined as T
@@ -1312,7 +1148,6 @@ export async function mockCall<T>(
       return undefined as T
     }
     case 'list_instances': {
-      // The board's 全部 view is an explicit request; silence still means 本机.
       if (args?.allHosts) return db.instances as T
       const hostId = hostIdArg(cmd, args)
       return db.instances.filter(
@@ -1325,9 +1160,6 @@ export async function mockCall<T>(
       const homeId = String(args?.homeId ?? '')
       const hostId = hostIdArg(cmd, args)
       if (!name) fail('实例名称不能为空')
-      // Names are unique per host: two machines may each have an instance
-      // called 「web」, and the row, the tray and the plugin link tell them
-      // apart by host.
       if (
         db.instances.some(
           (i) => i.name === name && (i.host_id ?? LOCAL_HOST_ID) === hostId,
@@ -1387,8 +1219,6 @@ export async function mockCall<T>(
       ) {
         fail('同名实例已存在')
       }
-      // The binding's host is the record's, not the form's. The port follows
-      // the same rule as the backend: out of range means "random".
       const port =
         typeof input.port === 'number' &&
         Number.isInteger(input.port) &&
@@ -1403,8 +1233,6 @@ export async function mockCall<T>(
     }
     case 'list_profiles': {
       const homeId = String(args?.home_id)
-      // Profiles are data on the machine that owns the DSH_HOME: a host the
-      // preview cannot reach has no list to show.
       refuseUnreachable(
         hostOf(
           db,
@@ -1413,7 +1241,6 @@ export async function mockCall<T>(
       )
       const home = db.homes.find((h) => h.id === homeId)
       if (!home) fail('DSH_HOME 不存在')
-      // Mock: combine the default set with previously created profiles.
       const base: string[] = home.path.endsWith('.dsh')
         ? ['web', 'demo', 'pack']
         : ['web']
@@ -1422,8 +1249,6 @@ export async function mockCall<T>(
     }
     case 'create_profile': {
       const homeId = String(args?.home_id)
-      // Profiles are data on the machine that owns the DSH_HOME: a host the
-      // preview cannot reach has no list to show.
       refuseUnreachable(
         hostOf(
           db,
@@ -1448,8 +1273,6 @@ export async function mockCall<T>(
     }
     case 'copy_profile': {
       const homeId = String(args?.home_id)
-      // Profiles are data on the machine that owns the DSH_HOME: a host the
-      // preview cannot reach has no list to show.
       refuseUnreachable(
         hostOf(
           db,
@@ -1477,8 +1300,6 @@ export async function mockCall<T>(
     }
     case 'rename_profile': {
       const homeId = String(args?.home_id)
-      // Profiles are data on the machine that owns the DSH_HOME: a host the
-      // preview cannot reach has no list to show.
       refuseUnreachable(
         hostOf(
           db,
@@ -1503,7 +1324,6 @@ export async function mockCall<T>(
       if (exists(newName)) fail(`Profile「${newName}」已存在`)
       const idx = mockProfiles[homeId].indexOf(oldName)
       if (idx >= 0) mockProfiles[homeId][idx] = newName
-      // Keep instance references in sync.
       for (const inst of db.instances) {
         if (inst.home_id === homeId) {
           if (inst.default_profile === oldName) inst.default_profile = newName
@@ -1515,8 +1335,6 @@ export async function mockCall<T>(
     }
     case 'delete_profile': {
       const homeId = String(args?.home_id)
-      // Profiles are data on the machine that owns the DSH_HOME: a host the
-      // preview cannot reach has no list to show.
       refuseUnreachable(
         hostOf(
           db,
@@ -1572,9 +1390,6 @@ export async function mockCall<T>(
         const running: InstanceStatus = {
           id,
           state: 'running',
-          // 本机可达的地址：远端实例走启动器的端口转发，远端位置另说一处。
-          // 样本故意让两个端口不同（远端 3080 在本机被占的情形），好让界面上
-          // 「远端位置」与「本机地址」这两件事在浏览器预览里也看得出区别。
           url: remote
             ? 'http://127.0.0.1:41080/?token=demo-token-remote-instance'
             : `http://127.0.0.1:${30000 + Math.floor(Math.random() * 20000)}`,
@@ -1605,8 +1420,6 @@ export async function mockCall<T>(
       return undefined as T
     }
     case 'restart_instance': {
-      // Mirrors the backend: one transition that stops then starts on the
-      // profile the instance was running.
       const id = String(args?.id)
       const entry = db.running[id]
       if (!entry) fail('实例未在运行')
@@ -1623,12 +1436,6 @@ export async function mockCall<T>(
       return mockCall('start_instance', { id, profile: entry.profile })
     }
     case 'refresh_instance_status': {
-      // The page's retry. A machine the preview marks 不可达 answers nothing,
-      // and 「已停止」 is the one answer it must not give there: that reading is
-      // what makes a user press 启动 and end up with a second DSH on a server
-      // (ADR-0007). `list_instance_status` already says 主机不可达 for this
-      // host; the retry has to come back with the same word. The preview has no
-      // machine to ask, so the mark stays until 「测试连接」 clears it.
       const id = String(args?.id)
       const inst = db.instances.find((i) => i.id === id)
       const host = hostOf(db, inst?.host_id ?? LOCAL_HOST_ID)
@@ -1643,8 +1450,6 @@ export async function mockCall<T>(
         })
         return undefined as T
       }
-      // Otherwise the preview mirrors what a reachable machine answers: whatever
-      // its own running table says, or 「已停止」 when it holds nothing.
       const entry = db.running[id]
       if (entry) {
         emitStatus(entry)
@@ -1660,8 +1465,6 @@ export async function mockCall<T>(
       return undefined as T
     }
     case 'open_instance_window': {
-      // Browser preview mirrors the desktop behavior (system browser):
-      // open the running instance URL in a new tab.
       const id = String(args?.id ?? '')
       const url = db.running[id]?.url
       // 与桌面端 open_instance_window 未就绪报错保持一致。
@@ -1670,13 +1473,11 @@ export async function mockCall<T>(
       return undefined as T
     }
     case 'open_external':
-      // Browser preview: a real new tab is the expected behavior here.
       window.open(String(args?.url ?? ''), '_blank', 'noopener,noreferrer')
       return undefined as T
     case 'open_launcher_directory':
     case 'open_launcher_log':
     case 'open_instance_log':
-      // Browser preview has no file manager; the target path is reported as-is.
       return LOCAL_DATA_DIR as T
     case 'open_instance_directory': {
       const inst = db.instances.find((i) => i.id === String(args?.instanceId))
@@ -1729,11 +1530,6 @@ export async function mockCall<T>(
     case 'open_instance_terminal':
       return `DSH ${String(argOf(args, cmd, 'instanceId') ?? '')}` as T
     case 'list_instance_status': {
-      // Mirrors `process::list_statuses`: the machine that runs an instance
-      // decides what may be said about it. A record with no process says
-      // 「已停止」 — unless its machine is one the launcher cannot reach, which
-      // is 「主机不可达」 and deliberately not a relabelling of 已停止: that
-      // reading is what makes a user start a second DSH on a server (ADR-0007).
       const rows: InstanceStatus[] = Object.values(db.running)
       for (const inst of db.instances) {
         if (rows.some((r) => r.id === inst.id)) continue
@@ -1752,7 +1548,6 @@ export async function mockCall<T>(
       return rows as T
     }
     case 'check_instance_health':
-      // Browser preview has no real dependency tree: report healthy.
       return {
         instance_id: String(args?.instance_id ?? ''),
         profile: String(args?.profile ?? ''),
@@ -1782,10 +1577,6 @@ export async function mockCall<T>(
     case 'list_plugins': {
       const homeId = String(args?.home_id)
       const profile = String(args?.profile ?? 'web')
-      // Mirror the backend: the view is managed only while an instance of this
-      // HOME is running this profile, and that instance is the one the page was
-      // opened from when it is still the candidate — otherwise the read-only
-      // not-running stub.
       const instanceId = resolveRunningInstance(
         db,
         homeId,
@@ -1798,8 +1589,6 @@ export async function mockCall<T>(
       const input = args?.input as SetBundleEnabledInput
       const homeId = input.homeId
       const profile = input.profile
-      // A machine the preview cannot reach is a plain error naming the machine,
-      // the same one the backend's write path returns: 不可达 is not 已停止.
       const unreachable = hostOutOfReach(db, homeId)
       if (unreachable) fail(hostUnreachableReason(unreachable))
       const instanceId = resolveRunningInstance(
@@ -1815,9 +1604,6 @@ export async function mockCall<T>(
       const refusal = (code: string): ChangeOutcome =>
         mockRefusal('enable', input.name, code)
       if (!bundle) return refusal('unknown-plugin') as T
-      // A missing package's files cannot be read, so the layer cannot mount.
-      // `removable:false` does NOT block this toggle — it only forbids deletion
-      // (the delete rule is a separate concern).
       if (bundle.availability === 'missing')
         return refusal('unknown-plugin') as T
       bundle.enabled = input.enabled
@@ -1835,8 +1621,6 @@ export async function mockCall<T>(
       const input = args?.input as RemoveBundleInput
       const homeId = input.homeId
       const profile = input.profile
-      // A machine the preview cannot reach is a plain error naming the machine,
-      // the same one the backend's write path returns: 不可达 is not 已停止.
       const unreachable = hostOutOfReach(db, homeId)
       if (unreachable) fail(hostUnreachableReason(unreachable))
       const instanceId = resolveRunningInstance(
@@ -1850,7 +1634,6 @@ export async function mockCall<T>(
       const view = nativeViewFor(db, homeId, profile, instanceId)
       const index = view.bundles.findIndex((b) => b.name === input.name)
       if (index < 0) {
-        // The instance answers a refusal (not an error) with the code only.
         return mockRefusal('remove', input.name, 'unknown-plugin') as T
       }
       // Bundles that ship with DSH can only be disabled, never removed — the
@@ -1873,10 +1656,6 @@ export async function mockCall<T>(
       fail(`mock: unknown command ${cmd}`)
   }
 }
-
-// ---------------------------------------------------------------------------
-// Mock event seam (mirrors the Tauri event bridge in tauri.ts)
-// ---------------------------------------------------------------------------
 
 export function subscribeMockInstanceStatus(
   cb: Listener<InstanceStatus>,

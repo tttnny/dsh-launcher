@@ -9,13 +9,8 @@ import { useCopy } from '@/composables/useCopy'
 import PageHeader from '@/components/PageHeader.vue'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 设置页只做一件事：把启动器的全局选项摆在一列里，改一下就保存。
-// 没有侧边目录，没有底部保存栏；每处改动都在失焦或切换时写回后端。
-
 const store = useLauncherStore()
 const { copy } = useCopy()
-
-// --- 读取失败与重试 ---------------------------------------------------------
 
 const reloadError = ref('')
 const settingsError = computed(
@@ -37,11 +32,6 @@ async function reloadSettings() {
     Message.error(String(e))
   }
 }
-
-// --- 改动即保存 -------------------------------------------------------------
-//
-// 所有控件直接绑定 store.settings。改动后短暂合并，再整份写回；成功给一次
-// 「设置已保存」，失败用后端原文提示并把界面拉回后端当前的设置。
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -72,8 +62,6 @@ async function flushSave() {
   }
 }
 
-// --- 外观 -------------------------------------------------------------------
-
 function setTheme(mode: ThemeMode) {
   if (store.settings.theme === mode) return
   store.settings.theme = mode
@@ -86,16 +74,12 @@ const THEME_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: 'system', label: '跟随系统' },
 ]
 
-// --- 日志等级 ---------------------------------------------------------------
-
 const LOG_LEVELS = [
   { value: 'debug', label: '调试' },
   { value: 'info', label: '信息' },
   { value: 'warn', label: '警告' },
   { value: 'error', label: '错误' },
 ]
-
-// --- 网络代理 ---------------------------------------------------------------
 
 function onPortChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -108,8 +92,6 @@ function onPortChange(e: Event) {
   input.value = String(store.settings.proxy_port)
   persist()
 }
-
-// --- 启动器更新 -------------------------------------------------------------
 
 const launcherVersion = ref('')
 const versionLoading = ref(true)
@@ -142,8 +124,6 @@ async function loadVersion() {
     versionLoading.value = false
   }
 }
-
-// --- 数据 -------------------------------------------------------------------
 
 const launcherDir = ref('')
 const dirLoading = ref(true)
@@ -221,7 +201,6 @@ onUnmounted(() => {
     </div>
 
     <template v-else>
-      <!-- 外观 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">外观</span>
@@ -251,7 +230,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <!-- 窗口与启动 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">窗口与启动</span>
@@ -296,7 +274,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <!-- 日志 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">日志</span>
@@ -327,7 +304,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <!-- 网络代理 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">网络代理</span>
@@ -407,7 +383,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <!-- 启动器更新 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">启动器更新</span>
@@ -481,7 +456,6 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <!-- 数据 -->
       <section class="section">
         <div class="section-head">
           <span class="section-title">数据</span>
@@ -532,7 +506,6 @@ onUnmounted(() => {
 </template>
 
 <style lang="scss" scoped>
-// 分段选择：外观主题用三选一，比下拉更直接。
 .seg {
   display: inline-flex;
   gap: 2px;
@@ -568,7 +541,6 @@ onUnmounted(() => {
   }
 }
 
-// 代理的输入区夹在两个开关行之间，自己补上分隔线。
 .proxy-body {
   display: flex;
   flex-direction: column;

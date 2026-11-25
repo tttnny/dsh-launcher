@@ -7,10 +7,6 @@ use tauri::State;
 
 use crate::AppState;
 
-/// Where a resolved executable came from: the user pointed at it, the user's
-/// login shell has it on PATH, or the launcher found it in a known install
-/// directory on its own. The setup page reports this so "环境已就绪" can say
-/// which of the three it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolSource {
@@ -24,77 +20,43 @@ pub struct ToolStatus {
     pub installed: bool,
     pub version: Option<String>,
     pub path: Option<String>,
-    /// Which candidate the executable at `path` came from; `None` when the tool
-    /// was not found at all.
     pub source: Option<ToolSource>,
-    /// The path the user picked by hand, if any. Reported even when it can no
-    /// longer be run, so the page can say that the choice has stopped working
-    /// instead of silently showing a different tool.
     pub manual_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeStatus {
-    /// Which host this answer is about — `host-local` for 本机. A page that
     /// switched hosts can tell an answer that arrived late from the one it is
     /// waiting for.
     pub host_id: String,
     pub node: ToolStatus,
     pub pnpm: ToolStatus,
-    /// Which Node version managers are present (`nvm`, `fnm`, `brew`), so the
     /// setup page can hand out a command that fits the machine instead of one
     /// fixed recipe. Order is by preference: a manager the user already has is
     /// always the right thing to extend.
     pub managers: Vec<String>,
-    /// True when node is present but older than the version DSH is developed
-    /// against. Advisory: the launcher does not block on it, because DSH itself
-    /// declares no engine requirement.
     pub node_below_recommended: bool,
-    /// The numbers the setup page has to state, carried from the constants that
-    /// enforce them so the UI copy cannot drift out of sync with what the
-    /// backend actually accepts.
     pub requirements: ToolchainRequirements,
-    /// The shell the system environment was read from (e.g. `/bin/zsh`, or the
-    /// remote machine's `bash`), or `None` when that read failed — in which case
-    /// the system environment falls back to the PATH the app itself inherited.
     pub system_env_shell: Option<String>,
-    /// Candidates the probe passed over, with the reason. A remote host passes
-    /// over a Node below the recommended major (and any pnpm below its floor)
-    /// and reports it; the local host passes nothing over (ADR-0005 追加 2).
     pub skipped_candidates: Vec<SkippedCandidate>,
 }
 
-/// One candidate the launcher's probe passed over on its way to a conclusion.
 #[derive(Clone, Debug, Serialize)]
 pub struct SkippedCandidate {
-    /// `node` | `pnpm`.
     pub tool: String,
     pub path: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub version: String,
-    /// A code, not a sentence: `below-minimum` (under the floor the launcher
-    /// drives), `unparsable` (a version it cannot read) or `unusable` (a path
-    /// the user typed that is not there or would not run). The page says it in
-    /// the reader's language.
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub major: Option<u64>,
 }
 
-/// What the launcher needs from the user's toolchain. Sent to the frontend so
-/// text like "需要 pnpm 11 或更高" renders from the same value the resolver
-/// checks, instead of a second hardcoded literal.
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolchainRequirements {
     pub min_pnpm_major: u32,
     pub recommended_node_major: u64,
     pub pnpm_install_command: String,
-    /// The Node install command to suggest for *this* machine.
-    ///
-    /// Composed here rather than in the UI because the choice depends on which
-    /// manager was detected and in what preference order — knowledge that lives
-    /// in [`detected_managers`]. A second copy of that cascade in the frontend
-    /// could disagree with the detection it is describing.
     pub node_install_command: String,
 }
 
@@ -108,10 +70,6 @@ impl ToolchainRequirements {
         }
     }
 
-    /// The same numbers and the same manager preference, as commands the user
-    /// runs **on this Mac** to install the tool on `host`. One command each,
-    /// prefixed with `ssh <host>`, in the shape that installs into the same
-    /// directories the probe searches (ADR-0005 追加 4).
     pub(crate) fn for_remote(host: &crate::ssh::RemoteHost, managers: &[String]) -> Self {
         Self {
             min_pnpm_major: crate::toolchain::MIN_PNPM_MAJOR,
@@ -147,20 +105,8 @@ fn node_install_command(managers: &[String]) -> String {
         .to_string()
 }
 
-/// The Node major the launcher recommends. README states it as a development
-/// prerequisite; DSH's own `engines` field is empty, so this is a warning
-/// threshold, never a hard gate.
 pub(crate) const RECOMMENDED_NODE_MAJOR: u64 = 20;
 
-/// Every executable of this name the launcher may run, in resolution order, each
-/// tagged with where it came from: what the user picked by hand first, then the
-/// directories of the system environment (the user's login shell PATH), then the
-/// known tool directories. A path that appears twice keeps only its first —
-/// earlier entries are the more authoritative source.
-///
-/// Shared by the UI probe and by [`crate::toolchain`]'s resolver, so "what the
-/// setup page reports" and "what the launcher actually executes" can never
-/// disagree.
 pub(crate) fn candidates(
     program: &str,
     manual: Option<&Path>,
@@ -169,8 +115,6 @@ pub(crate) fn candidates(
     candidates_with(program, manual, system_dirs, &tool_fallback_bins())
 }
 
-/// [`candidates`] with the known tool directories injected, so a test can drive
-/// the resolution without touching the machine's own node.
 pub(crate) fn candidates_with(
     program: &str,
     manual: Option<&Path>,
@@ -205,9 +149,6 @@ pub(crate) fn candidates_with(
         }
     }
 
-    // The same path can be reached twice (a directory named twice on the PATH,
-    // or the system environment naming one of the known directories). The first
-    // entry keeps its source.
     let mut seen: Vec<PathBuf> = Vec::new();
     out.retain(|(exe, _)| {
         let duplicate = seen.iter().any(|s| crate::config::paths_equal(s, exe));
@@ -226,9 +167,6 @@ fn exe_in(dir: &Path, program: &str) -> PathBuf {
     }
 }
 
-/// [`candidates`] with the system environment resolved for this call. Async
-/// because the system directories are read from the user's login shell (unless
-/// that read is still cached).
 pub(crate) async fn tool_candidates(
     program: &str,
     manual: Option<&Path>,
@@ -259,11 +197,6 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Which source produced the executable at `path`, decided by the candidate
-/// list itself: the first entry that is that same file wins, so the answer can
-/// never contradict what the resolver actually walked. A bound path that today's
-/// list spells differently — the same tool reached through another directory, or
-/// the per-shell temporary an earlier read named — still matches by file.
 pub(crate) fn source_of(
     program: &str,
     path: &Path,
@@ -283,9 +216,6 @@ pub(crate) fn source_of(
     ToolSource::Fallback
 }
 
-/// How long one `--version` probe may take. A tool that never answers — a broken
-/// shim, a program waiting on its own startup — must not hold up the whole
-/// candidate walk, so a probe that outlives this is treated as 「这个候选不行」.
 const PROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs `<exe> --version` from a neutral cwd and returns its trimmed stdout, or
@@ -313,12 +243,7 @@ pub(crate) async fn probe_version(exe: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// The first runnable executable of this name, in [`candidates`] order.
 async fn probe_tool(program: &str, manual: Option<&Path>) -> ToolStatus {
-    // GUI-launched apps inherit a minimal PATH with no shell rc, so a plain
-    // Command::new(program) misses fnm/nvm/Homebrew/user-installed tools.
-    // The candidate list walks the user's shell PATH first and then the known
-    // tool directories (fnm/nvm layouts, PNPM_HOME, Homebrew, …).
     let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
     for (exe, source) in tool_candidates(program, manual).await {
         if !exe.is_file() {
@@ -343,13 +268,8 @@ async fn probe_tool(program: &str, manual: Option<&Path>) -> ToolStatus {
     }
 }
 
-/// How long a shell read is reused. The setup page asks for a status every time
-/// it is opened or focused, and each read costs a full interactive shell
-/// startup, so the answer is cached briefly instead of spawning one per call.
 const SYSTEM_ENV_TTL: Duration = Duration::from_secs(30);
 
-/// A shell that hangs — a `.zshrc` waiting on input, a slow plugin manager —
-/// must not hang the launcher with it.
 const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SHELL_PATH_MARK: &str = "<<<DSH-PATH>>>";
@@ -360,9 +280,6 @@ const SHELL_PATH_END: &str = "<<<DSH-END>>>";
 /// not usable as the PATH — only what sits between the markers is.
 const SHELL_PATH_SCRIPT: &str = "printf '<<<DSH-PATH>>>%s<<<DSH-END>>>' \"$PATH\"";
 
-/// The system environment as the launcher sees it: the directories a name
-/// resolves in, and the shell they were read from (`None` when the read failed
-/// and `dirs` are the PATH this app inherited instead).
 #[derive(Clone, Debug)]
 struct SystemEnv {
     dirs: Vec<PathBuf>,
@@ -370,21 +287,11 @@ struct SystemEnv {
     at: Instant,
 }
 
-/// The system environment (PATH) **per host**, keyed by host id: this Mac's comes
-/// from the user's own login shell, a remote host's from the probe it runs over
-/// ssh. One cache per host is what keeps two machines' conclusions from answering
-/// for each other — a single slot would report whichever host was asked last
-/// (ADR-0005 追加). Only 本机 has an entry here: a remote host's PATH comes back
-/// inside that host's probe answer and is cached with it.
 fn system_env_cache() -> &'static Mutex<HashMap<String, SystemEnv>> {
     static CACHE: OnceLock<Mutex<HashMap<String, SystemEnv>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The whole environment answer per remote host, keyed by
-/// [`crate::ssh::RemoteHost::id`]. The probe is one ssh call, but the shell on
-/// the other side starts an interactive login shell before it says anything, so
-/// the answer is reused for the same short window the local PATH read is.
 fn remote_env_cache() -> &'static Mutex<HashMap<String, (crate::remote::RemoteEnvironment, Instant)>>
 {
     static CACHE: OnceLock<Mutex<HashMap<String, (crate::remote::RemoteEnvironment, Instant)>>> =
@@ -398,18 +305,11 @@ fn remote_env_cache() -> &'static Mutex<HashMap<String, (crate::remote::RemoteEn
 /// so this is the only honest record of it.
 static INHERITED_PATH: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
-/// Which host an environment answer is about, and how to reach it. Everything
-/// that probes or resolves is stated per host, so no two machines can share a
-/// conclusion (ADR-0005 追加).
 pub(crate) enum EnvHost {
-    /// This Mac: read directly, dial nothing.
     Local,
-    /// Another machine: everything goes through the transport.
     Remote(crate::ssh::RemoteHost),
 }
 
-/// The host a runtime question is about — the one the caller named, or 本机 when
-/// it named none, which is what every caller written before hosts existed meant.
 pub(crate) fn env_host(
     state: &AppState,
     host_id: Option<&str>,
@@ -425,8 +325,6 @@ pub(crate) fn env_host(
     Ok((host, EnvHost::Remote(target)))
 }
 
-/// Remembers the inherited PATH. Called before the process PATH is first
-/// mutated; a later caller gets whatever was stored then.
 fn capture_inherited_path() {
     INHERITED_PATH.get_or_init(|| {
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect()
@@ -447,12 +345,6 @@ fn cached_system_env() -> Option<SystemEnv> {
         .cloned()
 }
 
-/// Reads `PATH` from the *local* machine's login shell, cached for
-/// [`SYSTEM_ENV_TTL`]. `force` skips the cache (the setup page's re-check: the
-/// user just edited their shell config and wants that honoured now).
-///
-/// A failed read is not an error the user has to act on: the launcher keeps
-/// working with the PATH it inherited, and the failure is logged instead.
 async fn system_env(force: bool) -> SystemEnv {
     if !force {
         if let Some(cached) = cached_system_env() {
@@ -478,7 +370,6 @@ async fn system_env(force: bool) -> SystemEnv {
     env
 }
 
-/// Records the local host's system environment, as [`read_shell_path`] read it.
 fn remember_system_env(dirs: Vec<PathBuf>, shell: Option<String>) {
     system_env_cache().lock().unwrap().insert(
         crate::config::LOCAL_HOST_ID.to_string(),
@@ -490,9 +381,6 @@ fn remember_system_env(dirs: Vec<PathBuf>, shell: Option<String>) {
     );
 }
 
-/// The whole environment answer of one remote host, probed at most once per
-/// [`SYSTEM_ENV_TTL`]. `force` bypasses the cache — 「重新检测」 means the user
-/// changed something on that machine and wants that honoured now.
 async fn remote_env(
     state: &AppState,
     host: &crate::ssh::RemoteHost,
@@ -541,8 +429,6 @@ pub(crate) fn forget_host_env(host_id: &str) {
     remote_env_cache().lock().unwrap().remove(host_id);
 }
 
-/// The shell whose environment counts as "the system's": the user's login shell
-/// if it is known, otherwise the platform default.
 fn login_shell() -> String {
     match std::env::var("SHELL") {
         Ok(shell) if !shell.trim().is_empty() => shell.trim().to_string(),
@@ -556,13 +442,6 @@ fn login_shell() -> String {
     }
 }
 
-/// Reads PATH out of the user's login shell: `Ok((shell, path))`, or a reason
-/// why the read failed.
-///
-/// A GUI app inherits neither the shell's PATH nor its rc files, so without
-/// this a user who exports PATH in `.zshrc` — nvm, fnm, a custom Node — is
-/// invisible to the launcher even though the same command works in their
-/// terminal.
 async fn read_shell_path() -> Result<(String, String), String> {
     let shell = login_shell();
     let mut cmd = tokio::process::Command::new(&shell);
@@ -590,9 +469,6 @@ async fn read_shell_path() -> Result<(String, String), String> {
     }
 }
 
-/// Pulls PATH out of a shell's stdout: everything between
-/// [`SHELL_PATH_MARK`] and [`SHELL_PATH_END`], regardless of whatever else the
-/// shell printed. `None` when either marker is missing or the value is empty.
 fn parse_shell_path(stdout: &str) -> Option<String> {
     let after_mark = &stdout[stdout.find(SHELL_PATH_MARK)? + SHELL_PATH_MARK.len()..];
     let path = after_mark[..after_mark.find(SHELL_PATH_END)?].trim();
@@ -602,23 +478,6 @@ fn parse_shell_path(stdout: &str) -> Option<String> {
     Some(path.to_string())
 }
 
-/// Probes node and pnpm and records the result in the **local host's** own
-/// binding, so every later spawn can use an absolute path instead of
-/// re-resolving a name against whatever PATH the app inherited. Returns the
-/// binding that was written.
-///
-/// Freshness is checked per tool: a binding whose path still exists on disk is
-/// kept, so a startup probe does not re-run `--version` for a toolchain that
-/// has not moved. A binding whose path vanished (an nvm version the user
-/// switched away from, a removed brew formula) is re-probed and updated — that
-/// is the whole point of persisting a *resolution* rather than a preference.
-/// A tool the user picked by hand is only fresh while the binding is exactly
-/// that file, so the choice is applied on the next refresh.
-///
-/// `force` probes even a binding that is still fresh: it is the setup page's
-/// re-check, and the user asking for it means the environment may have moved
-/// under us (a path exported in `.zshrc` outranks the directory a still-valid
-/// binding was found in).
 pub async fn refresh_toolchain_binding(
     state: &State<'_, AppState>,
     force: bool,
@@ -626,27 +485,21 @@ pub async fn refresh_toolchain_binding(
     refresh_local_binding(state, force).await
 }
 
-/// [`refresh_toolchain_binding`] for callers holding `&AppState`, which is every
-/// caller inside this module and every test.
 pub(crate) async fn refresh_local_binding(
     state: &AppState,
     force: bool,
 ) -> crate::config::ToolchainBinding {
     let (current, overrides) = local_toolchain(state);
-    // Both freshness checks run before either field is moved out.
     let (node_fresh, pnpm_fresh) = (
         !force && current.node_is_fresh(overrides.node.as_deref()),
         !force && current.pnpm_is_fresh(overrides.pnpm.as_deref()),
     );
 
-    // node: keep the recorded path when it still exists.
     let node = if node_fresh {
         current.node
     } else {
         bound_from(probe_tool("node", overrides.node.as_deref()).await)
     };
-    // pnpm: reuse the resolver, so the bound binary is exactly the one the
-    // install flows will drive (and its version already meets the floor).
     let pnpm = if pnpm_fresh {
         current.pnpm
     } else {
@@ -668,8 +521,6 @@ pub(crate) async fn refresh_local_binding(
     binding
 }
 
-/// The local host's recorded binding and the user's choices for it, so every
-/// caller reads the same pair.
 fn local_toolchain(
     state: &AppState,
 ) -> (
@@ -683,10 +534,6 @@ fn local_toolchain(
     }
 }
 
-/// Probes one remote host and records the conclusion in that host's own
-/// binding. The one place a remote conclusion is written, so the page and a
-/// spawn on that machine read the same resolution — and the same candidates
-/// were walked to get it.
 async fn remote_probe(
     state: &AppState,
     host: &crate::config::Host,
@@ -698,9 +545,6 @@ async fn remote_probe(
     Ok(env)
 }
 
-/// What a remote probe's answer becomes for the launcher's own use: the path to
-/// execute and the version it reported, or `None` when that machine has no
-/// usable tool.
 fn binding_of_remote(env: &crate::remote::RemoteEnvironment) -> crate::config::ToolchainBinding {
     let bound = |tool: &crate::remote::RemoteToolStatus| match (
         tool.path.as_deref(),
@@ -718,18 +562,12 @@ fn binding_of_remote(env: &crate::remote::RemoteEnvironment) -> crate::config::T
     }
 }
 
-/// One remote host's toolchain as a task should drive it: the machine, that
-/// machine's probe answer, and the tools the launcher resolved there.
-///
-/// A task resolves through the same walk the environment page shows, so the
-/// binary it runs is the one the page reported (ADR-0005 追加 1).
 pub(crate) struct HostTools {
     pub target: crate::ssh::RemoteHost,
     pub env: crate::remote::RemoteEnvironment,
     pub pnpm: Option<crate::config::BoundTool>,
 }
 
-/// Resolves one **remote** host's tools on that machine.
 pub(crate) async fn remote_host_tools(
     state: &AppState,
     host: &crate::config::Host,
@@ -744,10 +582,6 @@ pub(crate) async fn remote_host_tools(
     })
 }
 
-/// Why a version cannot be installed on one remote host: that machine has no
-/// pnpm the launcher can drive. The fix is a command the user runs **here** to
-/// install it **there** — the recipe the environment page shows for that host,
-/// composed in one place so the two can never tell the user different things.
 pub(crate) fn remote_pnpm_missing_error(
     host: &crate::config::Host,
     target: &crate::ssh::RemoteHost,
@@ -762,9 +596,6 @@ pub(crate) fn remote_pnpm_missing_error(
     )
 }
 
-/// One candidate a remote probe passed over, as a line of the task log. The page
-/// renders the reason codes in the user's language; a log line has no such
-/// machinery, so the codes become words here.
 pub(crate) fn skipped_candidate_note(tool: &str, skipped: &crate::remote::RemoteSkipped) -> String {
     let why = match skipped.reason.as_str() {
         "below-minimum" => match skipped.major {
@@ -778,9 +609,6 @@ pub(crate) fn skipped_candidate_note(tool: &str, skipped: &crate::remote::Remote
     format!("那台机器上的 {tool} 候选 {} 被跳过：{why}", skipped.path)
 }
 
-/// Records one host's probe conclusion. The binding is the launcher's
-/// resolution, not a preference: it is rewritten whenever it changed, and always
-/// into the host it is about — never into a slot two machines would share.
 fn write_host_binding(state: &AppState, host_id: &str, binding: &crate::config::ToolchainBinding) {
     let mut cfg = state.config.lock().unwrap();
     let Some(host) = cfg.hosts.iter_mut().find(|host| host.id == host_id) else {
@@ -805,8 +633,6 @@ fn bound_from(status: ToolStatus) -> Option<crate::config::BoundTool> {
     }
 }
 
-/// Whether two bindings describe the same tools, so an unchanged probe does not
-/// rewrite the config file on every startup.
 fn binding_matches(
     a: &crate::config::ToolchainBinding,
     b: &crate::config::ToolchainBinding,
@@ -821,10 +647,6 @@ fn binding_matches(
     same(&a.node, &b.node) && same(&a.pnpm, &b.pnpm)
 }
 
-/// The node executable every DSH spawn should use, for callers that hold a
-/// config snapshot. Falls back to the bare name only if the binding is absent
-/// (a config written before the binding existed), in which case PATH resolution
-/// is still better than refusing to launch.
 fn node_for_spawn(cfg: &crate::config::Config) -> PathBuf {
     let bound = cfg
         .local_host()
@@ -835,26 +657,16 @@ fn node_for_spawn(cfg: &crate::config::Config) -> PathBuf {
     }
 }
 
-/// Whether a spawn has a usable node. Node is required to run DSH at all, so
-/// this is the one thing that must be present; pnpm only matters for installs
-/// and plugin management (both of which have their own actionable error).
 pub fn node_missing_error() -> String {
     "未找到可用的 Node.js（需要 20 或更高版本）。\n\
      请在终端安装（如 nvm install --lts）后，回到「设置 → 环境」点重新检测。"
         .to_string()
 }
 
-/// Probes node and returns its absolute path, refreshing a stale binding first.
-/// Used by spawn paths so a toolchain installed while the app was running is
-/// picked up without a restart.
 pub async fn node_for_spawn_checked(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     node_for_spawn_checked_for(state, None).await
 }
 
-/// The node executable to spawn DSH with **on one host**, refreshing a stale
-/// binding first. 本机 keeps the shape it always had; a remote host resolves
-/// through that machine's own probe, so the path the page reports and the path a
-/// spawn there would run are the same file.
 pub(crate) async fn node_for_spawn_checked_for(
     state: &AppState,
     host_id: Option<&str>,
@@ -885,17 +697,6 @@ pub(crate) async fn node_for_spawn_checked_for(
     }
 }
 
-/// The interpreter and the `PATH` directories one **remote** DSH spawn needs.
-///
-/// The interpreter is resolved exactly as [`node_for_spawn_checked_for`] resolves
-/// it. The directories are the ones a DSH started there cannot do without: a DSH
-/// run by the launcher is handed an absolute `node`, but its own plugin manager
-/// invokes `pnpm` **by name**, and an ssh session's minimal `PATH` does not
-/// reach a version-manager or standalone install. Naming `node`'s directory too
-/// keeps a `pnpm` that is a Node script able to find its interpreter.
-///
-/// Both come from the one probe the spawn already needs, so the paths are the
-/// ones the environment page reports.
 pub(crate) async fn remote_spawn_tools(
     state: &AppState,
     host: &crate::config::Host,
@@ -914,11 +715,6 @@ pub(crate) async fn remote_spawn_tools(
     Ok((node, dirs))
 }
 
-/// The directories one remote command needs in front of its `PATH`: the
-/// resolved tool's own directory, for a pnpm that is a Node script, and node's,
-/// for the lifecycle scripts pnpm runs. A directory that would break the joined
-/// `PATH` (one containing the delimiter) is left out rather than silently
-/// splitting another entry.
 pub(crate) fn tool_path_dirs(node: Option<&Path>, pnpm: Option<&Path>) -> Vec<String> {
     let mut dirs: Vec<String> = Vec::new();
     for tool in [node, pnpm].into_iter().flatten() {
@@ -934,12 +730,6 @@ pub(crate) fn tool_path_dirs(node: Option<&Path>, pnpm: Option<&Path>) -> Vec<St
     dirs
 }
 
-/// The status the setup page renders for one host — 本机 when the caller names
-/// none, which is what every caller written before hosts existed meant.
-///
-/// `force` re-reads the system environment and re-probes both tools: it is the
-/// page's re-check, and the user asking for one means the environment may have
-/// moved (a path they just exported, a tool they just installed).
 #[tauri::command]
 pub async fn get_runtime_status(
     state: State<'_, AppState>,
@@ -949,15 +739,6 @@ pub async fn get_runtime_status(
     runtime_status_for(&state, host_id.as_deref(), force.unwrap_or(false)).await
 }
 
-/// Points the launcher at a `node` / `pnpm` the user picked by hand **on one
-/// host**, or clears that choice when `path` is absent or empty. Answers with
-/// that host's status as it stands afterwards, so one call applies the change
-/// and refreshes the page.
-///
-/// Nothing is written until the file has been run successfully — locally by
-/// executing it, on a remote host by running `--version` there: an override that
-/// cannot be executed would leave the launcher with a toolchain it cannot spawn,
-/// and the user with no obvious way back.
 #[tauri::command]
 pub async fn set_toolchain_override(
     state: State<'_, AppState>,
@@ -968,8 +749,6 @@ pub async fn set_toolchain_override(
     set_toolchain_override_for(&state, &tool, path.as_deref(), host_id.as_deref()).await
 }
 
-/// [`set_toolchain_override`] for callers holding `&AppState` — which is every
-/// test, since a Tauri `State` only exists inside a running app.
 pub(crate) async fn set_toolchain_override_for(
     state: &AppState,
     tool: &str,
@@ -1004,8 +783,6 @@ pub(crate) async fn set_toolchain_override_for(
             &mut record.toolchain_overrides.pnpm
         };
         let changed = match (slot.as_deref(), manual.as_deref()) {
-            // Path equality follows the host's own filesystem: this Mac folds
-            // case, a Linux machine does not.
             (Some(a), Some(b)) => !host.paths_equal(a, b),
             (None, None) => false,
             _ => true,
@@ -1024,14 +801,10 @@ pub(crate) async fn set_toolchain_override_for(
             .map_err(|e| format!("保存设置失败: {e}"))?;
     }
 
-    // The cached probe answer is the conclusion of the previous choice too.
     forget_host_env(&host.id);
     runtime_status_for(state, Some(&host.id), false).await
 }
 
-/// Probes one host and reports where each tool came from. The one path both the
-/// page and the binding go through, so the numbers shown are the ones the
-/// launcher will actually spawn there.
 pub(crate) async fn runtime_status_for(
     state: &AppState,
     host_id: Option<&str>,
@@ -1049,8 +822,6 @@ async fn local_runtime_status(state: &AppState, force: bool) -> RuntimeStatus {
         // Warm the cache first: every probe below reads it.
         system_env(true).await;
     }
-    // One probe path for both the UI and the binding: the numbers the setup
-    // page shows are the ones the launcher will actually spawn.
     let binding = refresh_local_binding(state, force).await;
     let overrides = local_toolchain(state).1;
     let env = system_env(false).await;
@@ -1065,23 +836,16 @@ async fn local_runtime_status(state: &AppState, force: bool) -> RuntimeStatus {
         requirements: ToolchainRequirements::current(&managers),
         managers,
         system_env_shell: env.shell,
-        // The local host passes nothing over: an old Node is reported as a
-        // recommendation and still used (ADR-0005 追加 2).
         skipped_candidates: Vec::new(),
     }
 }
 
-/// One remote host, as its own interactive login shell answered: the same three
-/// sources and the same candidate order as the local host, plus the remote-only
-/// rule that a Node below the recommended major is passed over.
 async fn remote_runtime_status(
     state: &AppState,
     host: &crate::config::Host,
     target: &crate::ssh::RemoteHost,
     force: bool,
 ) -> Result<RuntimeStatus, String> {
-    // The probe's conclusion *is* the binding: what the page reports is what the
-    // launcher will execute there.
     let env = remote_probe(state, host, target, force).await?;
 
     let node = remote_status(&env.node, host.toolchain_overrides.node.as_deref());
@@ -1101,9 +865,6 @@ async fn remote_runtime_status(
     })
 }
 
-/// One remote tool as the page reports it: where it is, what it says, and which
-/// source it came from. The user's own choice is carried back even when it was
-/// passed over, so the page can say the pick has stopped working.
 fn remote_status(tool: &crate::remote::RemoteToolStatus, manual: Option<&Path>) -> ToolStatus {
     let manual_path = manual.map(|p| p.to_string_lossy().into_owned());
     match (tool.path.as_deref(), tool.version.as_deref()) {
@@ -1128,7 +889,6 @@ fn remote_status(tool: &crate::remote::RemoteToolStatus, manual: Option<&Path>) 
     }
 }
 
-/// The candidates the remote probe passed over on its way to one tool.
 fn skipped_candidates(
     tool: &str,
     status: &crate::remote::RemoteToolStatus,
@@ -1189,13 +949,6 @@ async fn validate_manual_tool(program: &str, raw: &str) -> Result<PathBuf, Strin
     Ok(path)
 }
 
-/// Accepts a hand-typed path **on a remote host**, or explains in the user's
-/// terms why it cannot be used.
-///
-/// The only honest validation is running `--version` on that machine: the
-/// launcher cannot execute a file on another computer, and a path that merely
-/// looks right here says nothing about there (ADR-0005 追加 3). The version
-/// floors are the same ones the local path enforces.
 async fn validate_remote_manual_tool(
     transport: &dyn crate::ssh::HostTransport,
     host: &crate::ssh::RemoteHost,
@@ -1245,9 +998,6 @@ async fn validate_remote_manual_tool(
     }
 }
 
-/// Whether the probed node reports a major older than
-/// [`RECOMMENDED_NODE_MAJOR`]. An unparsable version is not flagged: the
-/// version string of a working node is not worth a warning.
 fn node_is_below_recommended(node: &ToolStatus) -> bool {
     let Some(version) = node.version.as_deref() else {
         return false;
@@ -1258,7 +1008,6 @@ fn node_is_below_recommended(node: &ToolStatus) -> bool {
     }
 }
 
-/// Parses the major out of `node --version` output ("v22.14.0" or "22.14.0").
 pub(crate) fn node_major(version_output: &str) -> Option<u64> {
     version_output
         .trim()
@@ -1290,9 +1039,6 @@ fn detected_managers() -> Vec<String> {
     found
 }
 
-/// The status of one tool: what the binding resolved to, tagged with the source
-/// that produced it and with the user's own choice (which the page reports even
-/// when the launcher fell back to something else).
 fn status_from(
     program: &str,
     tool: &Option<crate::config::BoundTool>,
@@ -1318,14 +1064,6 @@ fn status_from(
     }
 }
 
-/// fnm-managed Node bin directories, most specific first:
-///
-/// 1. the `default` alias (`<fnm-root>/aliases/default/bin`)
-/// 2. `<fnm-root>/current/bin`
-/// 3. every `<fnm-root>/node-versions/<v>/installation/bin`, newest first.
-///
-/// Both the modern XDG layout (`~/.local/share/fnm`) and the legacy layout
-/// (`~/.fnm`) are scanned.
 fn fnm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     for root in [
@@ -1352,7 +1090,7 @@ fn fnm_bin_dirs(home: &Path) -> Vec<PathBuf> {
                     Some((ver, e.path()))
                 })
                 .collect();
-            found.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+            found.sort_by(|a, b| b.0.cmp(&a.0));
             for (_, p) in found {
                 let bin = p.join("installation").join("bin");
                 if bin.is_dir() && !dirs.contains(&bin) {
@@ -1379,9 +1117,6 @@ fn nvm_bin_dirs(home: &Path) -> Vec<PathBuf> {
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
 
-    // `nvm alias default v20.11.0` writes a bare version. Indirect aliases
-    // (`lts/*`, `node`) resolve to another alias and are not usable here, so
-    // anything that is not a bare version is ignored.
     if let Ok(raw) = std::fs::read_to_string(root.join("alias").join("default")) {
         let alias = raw.trim();
         if semver::Version::parse(alias.strip_prefix('v').unwrap_or(alias)).is_ok() {
@@ -1403,7 +1138,7 @@ fn nvm_bin_dirs(home: &Path) -> Vec<PathBuf> {
                 Some((ver, e.path()))
             })
             .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        found.sort_by(|a, b| b.0.cmp(&a.0));
         for (_, p) in found {
             let bin = p.join("bin");
             if bin.is_dir() && !dirs.contains(&bin) {
@@ -1436,8 +1171,6 @@ fn pnpm_bin_dirs(home: &Path) -> Vec<PathBuf> {
 
     let mut dirs: Vec<PathBuf> = Vec::new();
     for root in roots {
-        // `/bin` first: a root that has both layouts should resolve the
-        // installer-managed one.
         for candidate in [root.join("bin"), root.clone()] {
             if candidate.is_dir() && !dirs.contains(&candidate) {
                 dirs.push(candidate);
@@ -1455,9 +1188,6 @@ fn pnpm_bin_dirs(home: &Path) -> Vec<PathBuf> {
 /// probe.
 pub(crate) const PROBE_CWD: &str = "/";
 
-/// Known directories where user-level tools (node/pnpm via nvm/fnm,
-/// standalone pnpm, bun, Homebrew) may live — used as a probe fallback when
-/// PATH alone would miss them.
 fn tool_fallback_bins() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1503,8 +1233,6 @@ pub fn ensure_macos_paths() {
     let mut parts: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
 
-    // The same candidates the probe walks (nvm/fnm versions, PNPM_HOME, …),
-    // so anything the UI reports as found is also reachable by our children.
     let mut extra: Vec<PathBuf> = tool_fallback_bins();
     for d in [
         "/opt/homebrew/bin",
@@ -1552,11 +1280,9 @@ mod tests {
     fn fnm_dirs_prefer_default_alias_then_newest_version() {
         let home = std::env::temp_dir().join(format!("fnm-test-{}", uuid::Uuid::new_v4()));
         make_tree(&home);
-        // No alias: newest installed version's bin wins.
         let dirs = fnm_bin_dirs(&home);
         assert!(!dirs.is_empty());
         assert!(dirs[0].ends_with("node-versions/v24.16.0/installation/bin"));
-        // With a default alias, it ranks first.
         let alias = home.join(".local/share/fnm/aliases/default/bin");
         std::fs::create_dir_all(&alias).unwrap();
         let dirs = fnm_bin_dirs(&home);
@@ -1586,11 +1312,9 @@ mod tests {
         std::fs::create_dir_all(home.join(".nvm/versions/node/v20.11.0/bin")).unwrap();
         std::fs::create_dir_all(home.join(".nvm/versions/node/v24.16.0/bin")).unwrap();
 
-        // No alias: newest installed version wins.
         let dirs = nvm_bin_dirs(&home);
         assert_eq!(dirs[0], home.join(".nvm/versions/node/v24.16.0/bin"));
 
-        // `nvm alias default v20.11.0` writes the version into the alias file.
         std::fs::create_dir_all(home.join(".nvm/alias")).unwrap();
         std::fs::write(home.join(".nvm/alias/default"), "v20.11.0\n").unwrap();
         let dirs = nvm_bin_dirs(&home);
@@ -1602,12 +1326,10 @@ mod tests {
     #[test]
     fn nvm_dirs_ignore_indirect_alias_and_missing_root() {
         let home = tmp_home("nvm-test");
-        // `lts/*` and `node` are alias-of-alias indirections, not versions.
         std::fs::create_dir_all(home.join(".nvm/alias")).unwrap();
         std::fs::write(home.join(".nvm/alias/default"), "lts/*\n").unwrap();
         assert!(nvm_bin_dirs(&home).is_empty());
 
-        // Absent ~/.nvm contributes nothing.
         let bare = tmp_home("nvm-bare");
         assert!(nvm_bin_dirs(&bare).is_empty());
         std::fs::remove_dir_all(&home).ok();
@@ -1617,15 +1339,12 @@ mod tests {
     #[test]
     fn pnpm_dirs_cover_bin_subdirectory_layout() {
         let home = tmp_home("pnpm-test");
-        // The official `get.pnpm.io/install.sh` layout puts the binary in
-        // PNPM_HOME/bin on macOS, not directly in PNPM_HOME.
         std::fs::create_dir_all(home.join("Library/pnpm/bin")).unwrap();
         let dirs = pnpm_bin_dirs(&home);
         assert!(
             dirs.contains(&home.join("Library/pnpm/bin")),
             "expected the official PNPM_HOME/bin layout, got {dirs:?}"
         );
-        // The v10-era layout linked straight into PNPM_HOME; keep it too.
         std::fs::create_dir_all(home.join("Library/pnpm")).ok();
         assert!(pnpm_bin_dirs(&home).contains(&home.join("Library/pnpm")));
         std::fs::remove_dir_all(&home).ok();
@@ -1633,10 +1352,6 @@ mod tests {
 
     #[test]
     fn probe_runs_with_a_neutral_cwd() {
-        // pnpm's `--version` is cwd-dependent: a corepack shim (and the pnpm 12
-        // binary itself) honour a `packageManager` field found in the working
-        // directory, so the same binary reports different versions per cwd.
-        // Probing must therefore not inherit the app's cwd.
         assert_eq!(PROBE_CWD, "/");
     }
 
@@ -1658,17 +1373,13 @@ mod tests {
             source: None,
             manual_path: None,
         };
-        // Other majors are supported; 20 is the recommendation floor.
         assert!(node_is_below_recommended(&with(Some("v18.19.0"))));
         assert!(!node_is_below_recommended(&with(Some("v20.0.0"))));
         assert!(!node_is_below_recommended(&with(Some("v24.16.0"))));
-        // A missing or unparsable version must not produce a warning.
         assert!(!node_is_below_recommended(&with(None)));
         assert!(!node_is_below_recommended(&with(Some("weird"))));
     }
 
-    /// Somewhere no real tool directory can be: a temp dir, so a test about
-    /// ordering does not accidentally pick up the machine's own node.
     fn tmp_bin_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1693,7 +1404,6 @@ mod tests {
             (system_dir.join("node"), ToolSource::System),
             "the system environment comes next"
         );
-        // Whatever the launcher knows on its own is a fallback only.
         assert!(list.iter().skip(2).all(|(_, s)| *s == ToolSource::Fallback));
 
         std::fs::remove_dir_all(&manual_dir).ok();
@@ -1702,10 +1412,6 @@ mod tests {
 
     #[test]
     fn candidates_list_each_path_once_and_keep_the_first_source() {
-        // `~/.local/bin` is also one of the launcher's own fallback directories,
-        // so a shell PATH that names it must still read as the system's — the
-        // first source to meet a path is the one that decides. The same holds
-        // for a directory the PATH names twice.
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default();
@@ -1722,9 +1428,6 @@ mod tests {
         }
     }
 
-    /// fnm hands each shell its own directory of hard links into the version it
-    /// selected. Both spellings name one file; the durable one is what gets
-    /// bound, and the source still says the terminal has it.
     #[test]
     fn candidates_bind_the_durable_spelling_of_the_same_file() {
         let shell_dir = tmp_bin_dir("fnm-multishell");
@@ -1745,9 +1448,6 @@ mod tests {
         std::fs::remove_dir_all(&durable_dir).ok();
     }
 
-    /// A copy is a different file: the directory the shell named keeps the
-    /// binding, and the launcher's own copy stays a fallback for the day the
-    /// first one is gone.
     #[test]
     fn candidates_keep_a_copy_where_the_system_named_it() {
         let shell_dir = tmp_bin_dir("copy-shell");
@@ -1774,8 +1474,6 @@ mod tests {
         std::fs::remove_dir_all(&fallback_dir).ok();
     }
 
-    /// A recorded path can be spelled differently from today's list while naming
-    /// the same tool, so the answer follows the file.
     #[test]
     fn a_path_matches_a_candidate_by_file_not_by_spelling() {
         let picked_dir = tmp_bin_dir("picked");
@@ -1821,9 +1519,6 @@ mod tests {
             ),
             ToolSource::System
         );
-        // A path outside both the pick and the system environment — including
-        // one the launcher would not itself offer — reads as a fallback rather
-        // than making the page claim a source it cannot prove.
         assert_eq!(
             source_of(
                 "node",
@@ -1840,8 +1535,6 @@ mod tests {
 
     #[test]
     fn a_hand_picked_path_outranks_the_same_directory_entry() {
-        // Both the pick and the system environment name the very same file: the
-        // user's deliberate choice is what the page must say.
         let dir = tmp_bin_dir("same-bin");
         let exe = dir.join("node");
         std::fs::write(&exe, "#!/bin/sh\n").unwrap();
@@ -1854,8 +1547,6 @@ mod tests {
 
     #[test]
     fn parse_shell_path_survives_a_noisy_login_shell() {
-        // Plugin managers print their own banners while `.zshrc` runs, so only
-        // what sits between the markers may be taken as PATH.
         assert_eq!(
             parse_shell_path("compinit: 3 warnings\n<<<DSH-PATH>>>/usr/bin:/bin<<<DSH-END>>>\n"),
             Some("/usr/bin:/bin".to_string())
@@ -1873,8 +1564,6 @@ mod tests {
 
     #[test]
     fn parse_shell_path_rejects_output_without_the_markers() {
-        // A shell that failed, or one that overrides `printf`, gives nothing
-        // usable — the caller then falls back to the inherited PATH.
         assert_eq!(parse_shell_path("/usr/bin:/bin\n"), None);
         assert_eq!(parse_shell_path("<<<DSH-PATH>>>/usr/bin:/bin"), None);
         assert_eq!(parse_shell_path(""), None);
@@ -1885,8 +1574,6 @@ mod tests {
     fn node_install_command_extends_whatever_manager_exists() {
         let m = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-        // An existing manager is always the right thing to extend, and the
-        // preference order is the detection order.
         assert_eq!(node_install_command(&m(&["nvm"])), "nvm install --lts");
         assert_eq!(node_install_command(&m(&["fnm"])), "fnm install --lts");
         assert_eq!(node_install_command(&m(&["brew"])), "brew install node");
@@ -1899,7 +1586,6 @@ mod tests {
             "fnm install --lts"
         );
 
-        // Nothing to extend: install a manager first, then Node.
         let bare = node_install_command(&m(&[]));
         assert!(
             bare.contains("nvm-sh/nvm"),
@@ -1908,12 +1594,6 @@ mod tests {
         assert!(bare.contains("nvm install --lts"));
     }
 
-    // -----------------------------------------------------------------------
-    // Per host
-    // -----------------------------------------------------------------------
-
-    /// A scratch directory that also holds the config, so a probe's conclusion
-    /// can be checked where it is persisted.
     struct Scratch(PathBuf);
 
     impl Scratch {
@@ -1969,7 +1649,6 @@ mod tests {
         }
     }
 
-    /// One host's record as a restart would read it back from disk.
     fn persisted(state: &AppState, id: &str) -> crate::config::Host {
         let cfg = crate::config::load_config(&state.config_path).expect("读取配置失败");
         cfg.hosts
@@ -1979,8 +1658,6 @@ mod tests {
             .unwrap_or_else(|| panic!("config.json 里没有 {id}"))
     }
 
-    /// Whether a refused write left anything on disk: no config file at all, or
-    /// a record with neither tool picked by hand.
     fn nothing_written(state: &AppState, id: &str) -> bool {
         if !state.config_path.exists() {
             return true;
@@ -1996,8 +1673,6 @@ mod tests {
             .unwrap_or(true)
     }
 
-    /// A real executable the local probe can run, printing the version it was
-    /// made with.
     fn fake_exe(dir: &Path, name: &str, version: &str) -> PathBuf {
         let exe = dir.join(name);
         std::fs::write(&exe, format!("#!/bin/sh\necho {version}\n")).unwrap();
@@ -2009,8 +1684,6 @@ mod tests {
         exe
     }
 
-    /// The local host is the user's own desktop: it says an old Node is old and
-    /// keeps using it. The remote-only rule (pass it over) must not leak here.
     #[tokio::test]
     async fn the_local_host_warns_about_an_old_node_instead_of_skipping_it() {
         let data = Scratch::new("runtime-local-old");
@@ -2042,9 +1715,6 @@ mod tests {
         );
     }
 
-    /// The ticket's core promise: two machines, two conclusions, two picks. The
-    /// probe cache and the user's choice are keyed by host, and neither host's
-    /// answer can be written into the other's record.
     #[tokio::test]
     async fn each_host_keeps_its_own_conclusion_and_its_own_pick() {
         let data = Scratch::new("runtime-per-host");
@@ -2084,7 +1754,6 @@ mod tests {
         );
         assert_eq!(local.node.source, Some(ToolSource::Manual));
 
-        // Each record keeps its own pair, on disk as well as in memory.
         let local_record = persisted(&state, crate::config::LOCAL_HOST_ID);
         let remote_record = persisted(&state, &remote_id);
         assert_eq!(
@@ -2102,8 +1771,6 @@ mod tests {
         );
     }
 
-    /// Two reachable machines are two answers. A single PATH cache would report
-    /// whichever host was probed last (ADR-0005 追加).
     #[tokio::test]
     async fn two_machines_do_not_share_one_probe_answer() {
         let data = Scratch::new("runtime-two-machines");
@@ -2163,8 +1830,6 @@ mod tests {
         assert_eq!(second.managers, vec!["brew".to_string()]);
     }
 
-    /// A remote conclusion travels with its source, with what was passed over,
-    /// and with commands the user can actually run from this Mac.
     #[tokio::test]
     async fn a_remote_probe_reports_its_source_and_what_it_passed_over() {
         let data = Scratch::new("runtime-remote-source");
@@ -2227,8 +1892,6 @@ mod tests {
         assert_eq!(skipped[1].tool, "pnpm");
         assert_eq!(skipped[1].major, Some(9));
 
-        // The install guidance is one command the user runs here, over ssh, in
-        // the same shell shape the probe used.
         assert!(
             status
                 .requirements
@@ -2251,9 +1914,6 @@ mod tests {
             .contains("nvm install --lts"));
     }
 
-    /// Probing and execution are the same resolution on a remote host too: the
-    /// path a spawn would use is the path the page reported — and a second
-    /// question inside the cache window does not cost another ssh call.
     #[tokio::test]
     async fn a_remote_probe_and_a_remote_spawn_resolve_to_the_same_candidate() {
         let data = Scratch::new("runtime-remote-agree");
@@ -2292,7 +1952,6 @@ mod tests {
             "同一个窗口内第二次提问不该再起一次 shell：{:?}",
             fake.calls()
         );
-        // And the record a restart would read agrees too.
         let record = persisted(&state, &remote_id);
         assert_eq!(
             record
@@ -2304,9 +1963,6 @@ mod tests {
         );
     }
 
-    /// A remote pick is validated by running it **there**. A path the launcher
-    /// could not run is refused and nothing is written — the same call the local
-    /// host makes, for the same reason.
     #[tokio::test]
     async fn a_remote_pick_is_refused_when_it_cannot_be_run_there() {
         let data = Scratch::new("runtime-remote-pick");
@@ -2334,16 +1990,12 @@ mod tests {
             fake.clone(),
         );
 
-        // Not there: the message names the path on *that* machine, and nothing
-        // is written.
         let err = set_toolchain_override_for(&state, "node", Some("/gone/node"), Some(&remote_id))
             .await
             .unwrap_err();
         assert!(err.contains("/gone/node") && err.contains("远端"), "{err}");
         assert!(nothing_written(&state, &remote_id), "被拒绝的指定不能落库");
 
-        // There, but a pnpm the launcher will not drive: refused, with the
-        // command that fixes it on that machine.
         let err =
             set_toolchain_override_for(&state, "pnpm", Some("/usr/bin/pnpm"), Some(&remote_id))
                 .await
@@ -2351,7 +2003,6 @@ mod tests {
         assert!(err.contains("pnpm 9") && err.contains("ssh lab "), "{err}");
         assert!(nothing_written(&state, &remote_id), "被拒绝的指定不能落库");
 
-        // A path that runs: accepted, and reported back as the manual source.
         let status =
             set_toolchain_override_for(&state, "node", Some("/opt/pick/node"), Some(&remote_id))
                 .await
@@ -2366,8 +2017,6 @@ mod tests {
         );
     }
 
-    /// A pick that stopped working falls back to detection but is still reported,
-    /// so the page can say so and let the user replace or clear it (ADR-0005).
     #[tokio::test]
     async fn a_remote_pick_that_stopped_working_falls_back_and_is_still_reported() {
         let data = Scratch::new("runtime-remote-stale");
@@ -2411,10 +2060,6 @@ mod tests {
         assert_eq!(status.skipped_candidates[0].reason, "unusable");
     }
 
-    /// The directories a remote command gets in front of its `PATH`: node's
-    /// first (lifecycle scripts run `node`), pnpm's next (a Node-script pnpm
-    /// needs its interpreter), each once, and never one that would split the
-    /// joined value.
     #[test]
     fn tool_path_dirs_puts_node_first_and_keeps_the_join_safe() {
         assert_eq!(
@@ -2428,7 +2073,6 @@ mod tests {
             ]
         );
 
-        // Both tools in one directory: one entry, and it is node's spelling.
         assert_eq!(
             tool_path_dirs(
                 Some(Path::new("/opt/bin/node")),
@@ -2437,13 +2081,11 @@ mod tests {
             vec!["/opt/bin".to_string()]
         );
 
-        // A machine without node still gets pnpm's directory.
         assert_eq!(
             tool_path_dirs(None, Some(Path::new("/opt/pnpm/pnpm"))),
             vec!["/opt/pnpm".to_string()]
         );
 
-        // A directory holding the PATH delimiter cannot be joined safely.
         assert!(tool_path_dirs(Some(Path::new("/a:b/node")), None).is_empty());
     }
 }

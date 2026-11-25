@@ -3,11 +3,8 @@ import { ref } from 'vue'
 
 const props = withDefaults(
   defineProps<{
-    /** Async work run on click; the glyph spins until it settles. */
     action: () => Promise<unknown>
-    /** External busy/disabled condition (e.g. a store loading flag). */
     disabled?: boolean
-    /** Glyph edge length in px. */
     size?: number
   }>(),
   { size: 13, disabled: false },
@@ -66,8 +63,6 @@ async function onClick() {
       stroke-linecap="round"
       stroke-linejoin="round"
     >
-      <!-- A single ~300° arc with a clean corner barb: no wedge-cut ring, no
-           arrowhead mushed into the stroke. -->
       <path d="M14 8a6 6 0 1 1-6-6c1.68 0 3.287.667 4.493 1.827L14 5.333" />
       <path d="M14 2v3.333h-3.333" />
     </svg>
@@ -76,8 +71,6 @@ async function onClick() {
 </template>
 
 <style scoped>
-/* Chrome (border, background, size) comes from the caller's button class, so
-   the same glyph drops into the toolbar, a card, and a pill button. */
 .dl-refresh-glyph {
   display: block;
   transform-box: view-box;

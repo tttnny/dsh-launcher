@@ -29,7 +29,7 @@ usage() {
 用法: scripts/verify.sh [--quick]
 
   （无参数）     全部检查：cargo fmt --check、clippy、Rust 测试、版本同步、
-                 scripts/*.test.mjs（通配符发现）、prettier --check、pnpm build。
+                 scripts/*.test.mjs（通配符发现）、注释基线、prettier --check、pnpm build。
                  合并前跑这一次。
   --quick       只跑 clippy 与 Rust 测试。合并之间快速过一次用。
 TEXT
@@ -51,7 +51,6 @@ case "${1:-}" in
     ;;
 esac
 
-# 依赖是按模式要的：--quick 只跑 Rust 检查，没必要先确认 node 与 pnpm 在不在。
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "错误：找不到 ${1}（${2}）。" >&2
@@ -70,15 +69,13 @@ case "$MODE" in
     ;;
 esac
 
-# 测试文件由通配符发现。仓库已移除 scripts/*.test.mjs，一个都匹配不上时按「无源码级测试」
-# 处理，让 verify 仍能跑完其余检查，而不是因为目录里没有测试就直接失败。
 SUITES=(scripts/*.test.mjs)
 if [ ! -e "${SUITES[0]}" ]; then
   SUITES=()
 fi
 
 case "$MODE" in
-  full) TOTAL=$((5 + ${#SUITES[@]} + 1)) ;;
+  full) TOTAL=$((6 + ${#SUITES[@]} + 1)) ;;
   quick) TOTAL=2 ;;
 esac
 
@@ -130,6 +127,8 @@ case "$MODE" in
       cargo test --manifest-path "$MANIFEST" --workspace --locked
     step "版本同步（package.json / Cargo.toml / tauri.conf.json）" \
       node scripts/check-versions.mjs
+    step "注释基线（禁止新增注释）" \
+      node scripts/check-comments.mjs
     run_suites
     step "前端格式检查（prettier --check）" \
       pnpm exec prettier --check .

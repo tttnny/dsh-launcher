@@ -1,24 +1,3 @@
-//! The one seam that knows ssh.
-//!
-//! Every remote action the launcher takes — running a script, starting a
-//! detached process, stopping it by pid or as a whole process tree, reading or
-//! writing a file, listing a directory, opening a port forward — goes through
-//! [`HostTransport`]. That
-//! keeps "how we talk to the other machine" in one place (ADR-0006), and it is
-//! what lets a test drive the whole remote feature through an in-memory double
-//! instead of a live server. The shape is copied from `native::NativeTransport`,
-//! the launcher's other process/network seam.
-//!
-//! Two rules hold here:
-//!
-//! * **Shell text never appears in this module.** Every script comes from
-//!   [`crate::remote`]; a call site (including this one) never assembles a
-//!   shell string of its own.
-//! * **The launcher dials through its own socket.** `~/.ssh/config` may set
-//!   `ControlPath` for the user's own terminals; sharing it would let the
-//!   launcher and the user's shells tear down each other's connections, so the
-//!   launcher keeps its own under its data directory.
-
 use crate::config::Host;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,16 +10,10 @@ use std::time::Duration;
 /// GUI app happened to inherit.
 pub const SSH_BIN: &str = "/usr/bin/ssh";
 
-/// The shell every remote script runs in: interactive *and* login, so it reads
-/// what the user's terminal reads (`~/.bashrc` is where Linux users put their
-/// `PATH`). Probing and executing use this same shape, which is the only way
-/// the page and the work can agree on which Node is meant (ADR-0005 追加).
 pub const REMOTE_SHELL: &str = "/bin/bash";
 
-/// How long ssh may take to establish a connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 
-/// How long the launcher's multiplexed connection survives its last use.
 const CONTROL_PERSIST_SECS: u64 = 60;
 
 /// ssh's own failure status. A remote command that exits 255 is
@@ -48,43 +21,23 @@ const CONTROL_PERSIST_SECS: u64 = 60;
 /// 255 is read as the transport's word.
 const SSH_FAILURE_STATUS: i32 = 255;
 
-/// How long a whole remote call may take unless the caller says otherwise. A
-/// login shell on the other side has to start (rc files, plugin managers)
-/// before it answers anything, and the ssh handshake itself may spend up to
-/// [`CONNECT_TIMEOUT_SECS`] on a machine that is slow to answer.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A boxed future, so [`HostTransport`] stays object-safe (`Arc<dyn …>`) the
 /// way `native::NativeFuture` does.
 pub type HostFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-// ---------------------------------------------------------------------------
-// Failure classes
-// ---------------------------------------------------------------------------
-
-/// The four ways a remote call fails, told apart because the user's next move
-/// differs: 连不上 (network), 认证失败 (keys), 超时 (slow or hung), 远端命令失败
-/// (their script, carrying what it said).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostErrorKind {
-    /// ssh never reached the machine: refused, unresolvable, no route. It is
-    /// also where a failure ssh did not explain lands — 255 with an empty
-    /// stderr, which cannot tell that machine from the launcher's own
-    /// connection being cut out from under the call.
     Unreachable,
-    /// The machine answered but would not let us in — no key and no agent to
-    /// offer one, or a host key `known_hosts` does not know yet.
     Auth,
-    /// No answer in time: a remote call that hung, or ssh's connect timeout.
     Timeout,
     /// We got in, the command ran, and it failed (or said nothing the launcher
-    /// could read). The message carries the tail of its stderr.
     RemoteCommand,
 }
 
 impl HostErrorKind {
-    /// The word the page shows for this class.
     pub fn label(self) -> &'static str {
         match self {
             Self::Unreachable => "连不上",
@@ -95,9 +48,6 @@ impl HostErrorKind {
     }
 }
 
-/// Why one remote call did not produce an answer: the class, plus one readable
-/// sentence for the user. The sentence carries what the remote side said (its
-/// stderr tail) and, where the class has one, the thing the user should do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostError {
     pub kind: HostErrorKind,
@@ -139,10 +89,6 @@ impl std::fmt::Display for HostError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The transport
-// ---------------------------------------------------------------------------
-
 /// Which shell a script needs on that machine.
 ///
 /// An **interactive login** shell reads `~/.bashrc` / `/etc/profile.d`, which is
@@ -158,10 +104,8 @@ impl std::fmt::Display for HostError {
 /// [`Shell::Login`] is the deliberate choice; [`Shell::Plain`] is the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shell {
-    /// `bash -c`: no rc files. The default, and what every path-only script uses.
     #[default]
     Plain,
-    /// `bash -ilc`: the shell the user's terminal is (ADR-0005 追加).
     Login,
 }
 
@@ -184,8 +128,6 @@ impl RemoteCall {
         }
     }
 
-    /// The same call, made in the shell that reads that machine's rc files —
-    /// for a script that has to resolve `node` / `pnpm` / `npm` by name.
     pub fn with_login_shell(mut self) -> Self {
         self.shell = Shell::Login;
         self
@@ -211,21 +153,14 @@ pub struct RemoteOutput {
     pub stderr: String,
 }
 
-/// One host as the transport sees it: which machine to dial, through which
-/// socket. Built from a [`Host`] record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteHost {
     pub id: String,
-    /// The ssh target as the user typed it: an alias from `~/.ssh/config`, or a
-    /// free string such as `user@host -p 2222`.
     pub target: String,
-    /// The launcher's own connection-multiplexing socket for this target.
     pub socket: PathBuf,
 }
 
 impl RemoteHost {
-    /// The ssh way to reach `host`. A built-in host is this Mac — nothing is
-    /// dialed for it, so it has no address and nothing to test.
     pub fn of(host: &Host, launcher_data_dir: &Path) -> Result<Self, HostError> {
         let target = host.ssh_target.trim();
         if host.builtin || target.is_empty() {
@@ -242,25 +177,13 @@ impl RemoteHost {
     }
 }
 
-/// One local→remote port forward (ADR-0008). The caller chooses the local port:
-/// the launcher prefers the remote one and falls back to a free local port,
-/// which only the caller can know.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortForward {
     pub local_port: u16,
-    /// The address as seen *from the host itself* (`127.0.0.1`).
     pub remote_host: String,
     pub remote_port: u16,
 }
 
-/// The `-L` spec for one forward: `[bind_address:]port:host:hostport`.
-///
-/// The bind address is spelled out as loopback rather than left implicit. A
-/// bare `port:host:port` is bound according to `GatewayPorts`, which a user's
-/// own `~/.ssh/config` may leave on — and an instance's address offered to this
-/// Mac's network is exactly what the whole feature refuses to do (ADR-0008).
-/// The remote end travels verbatim: the address DSH printed from its own point
-/// of view is the address the forward has to reach.
 pub fn forward_spec(forward: &PortForward) -> String {
     format!(
         "127.0.0.1:{}:{}:{}",
@@ -268,11 +191,6 @@ pub fn forward_spec(forward: &PortForward) -> String {
     )
 }
 
-/// The argv words of one `-O` control request on an **established** connection:
-/// `forward`/`cancel` carry the `-L` spec, `exit` ends the connection and needs
-/// nothing. ssh does not dial a machine for `-O`; it talks to the master that
-/// owns the launcher's socket, which is why these calls fail instantly when
-/// there is none.
 fn control_command(action: &str, forward: Option<&PortForward>) -> Vec<String> {
     let mut argv = vec!["-O".to_string(), action.to_string()];
     if let Some(forward) = forward {
@@ -282,24 +200,13 @@ fn control_command(action: &str, forward: Option<&PortForward>) -> Vec<String> {
     argv
 }
 
-/// The one boundary every remote action crosses, injectable so a test
-/// substitutes an in-memory double. Production is [`SshTransport`].
-///
-/// The whole method list is declared here so the tickets that need a
-/// capability later add no seam of their own. [`run`](Self::run) is what the
-/// connection test exercises; the rest are the same plumbing, and the module's
-/// tests drive each one through the fake to keep it honest.
 pub trait HostTransport: Send + Sync {
-    /// Runs one script in a fresh remote login shell and returns what it left
-    /// behind.
     fn run<'a>(
         &'a self,
         host: &'a RemoteHost,
         call: RemoteCall,
     ) -> HostFuture<'a, Result<RemoteOutput, HostError>>;
 
-    /// Starts one session-detached process (ADR-0007: it must outlive the ssh
-    /// session) and returns its pid. `argv` is the command line as the launcher
     /// would run it locally; `path_dirs` are put in front of the process's
     /// `PATH` (see [`crate::remote::spawn_script`]); the detached-start script
     /// is [`crate::remote`]'s, never the caller's.
@@ -311,35 +218,24 @@ pub trait HostTransport: Send + Sync {
         path_dirs: &'a [String],
     ) -> HostFuture<'a, Result<i32, HostError>>;
 
-    /// Sends SIGTERM to one pid on that host.
     fn stop_pid<'a>(
         &'a self,
         host: &'a RemoteHost,
         pid: i32,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
-    /// Stops the whole process tree one [`spawn_detached`](Self::spawn_detached)
-    /// started: the process group `pid` leads, falling back to `pid` itself when
-    /// it leads none. Already gone counts as stopped.
-    ///
-    /// A detached spawn runs under `setsid`, so its pid is also its process
-    /// group's id and a negative pid reaches every child it started. That is the
-    /// difference between cancelling an install and leaving a pnpm helper behind
-    /// holding the store's lock (issue #9 风险).
     fn stop_group<'a>(
         &'a self,
         host: &'a RemoteHost,
         pid: i32,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
-    /// Reads one file's bytes.
     fn read_file<'a>(
         &'a self,
         host: &'a RemoteHost,
         path: &'a str,
     ) -> HostFuture<'a, Result<Vec<u8>, HostError>>;
 
-    /// Writes one file's bytes, creating its directory.
     fn write_file<'a>(
         &'a self,
         host: &'a RemoteHost,
@@ -347,39 +243,30 @@ pub trait HostTransport: Send + Sync {
         contents: Vec<u8>,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
-    /// Lists one directory's entry names.
     fn list_dir<'a>(
         &'a self,
         host: &'a RemoteHost,
         path: &'a str,
     ) -> HostFuture<'a, Result<Vec<String>, HostError>>;
 
-    /// Opens a port forward to that host.
     fn open_forward<'a>(
         &'a self,
         host: &'a RemoteHost,
         forward: PortForward,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
-    /// Closes a forward [`open_forward`](Self::open_forward) opened.
     fn close_forward<'a>(
         &'a self,
         host: &'a RemoteHost,
         forward: PortForward,
     ) -> HostFuture<'a, Result<(), HostError>>;
 
-    /// Ends the launcher's own multiplexed connection to that host, and with it
-    /// every forward that was riding it. The user's own connections use their
-    /// own socket; nothing of theirs is touched. A host with no connection up
-    /// is already in the state this asks for.
     fn close_connection<'a>(
         &'a self,
         host: &'a RemoteHost,
     ) -> HostFuture<'a, Result<(), HostError>>;
 }
 
-/// The real transport: the system `ssh`, through the launcher's own control
-/// socket. Stateless — a host carries its own address.
 #[derive(Default)]
 pub struct SshTransport;
 
@@ -388,7 +275,6 @@ impl SshTransport {
         Self
     }
 
-    /// The one place a local ssh process is spawned.
     async fn dial(
         &self,
         host: &RemoteHost,
@@ -406,12 +292,9 @@ impl SshTransport {
         let argv = ssh_argv(&host.target, &host.socket, command);
         let mut cmd = tokio::process::Command::new(SSH_BIN);
         cmd.args(&argv);
-        // No terminal in a GUI app: ssh must not try to ask anything, and a
-        // remote command must not be able to read this app's stdin.
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        // A hung ssh must not outlive the call that started it.
         cmd.kill_on_drop(true);
 
         let output = match tokio::time::timeout(timeout, cmd.output()).await {
@@ -443,13 +326,6 @@ impl SshTransport {
         self.dial(host, &command, call.timeout).await
     }
 
-    /// Adds or cancels one `-L` forward on the launcher's own multiplexed
-    /// connection. That connection is already up whenever the launcher has
-    /// talked to the host, which every other call here ensures by using the
-    /// same socket — **and which adding a forward has to ensure itself**: `ssh
-    /// -O forward` is a request to a master, it does not start one, so a
-    /// launcher that has not talked to the host yet would be refused the first
-    /// time the user opens an instance.
     async fn forward(
         &self,
         host: &RemoteHost,
@@ -464,11 +340,6 @@ impl SshTransport {
         self.dial(host, &command, CONTROL_TIMEOUT).await.map(|_| ())
     }
 
-    /// Ends the launcher's own connection to one host, which takes every forward
-    /// riding it with it. Nothing is dialed to do it: no master means there is
-    /// nothing of ours left on that machine, which is the state this call is
-    /// asking for. The user's own connections live on their own socket and are
-    /// not touched.
     async fn end_connection(&self, host: &RemoteHost) -> Result<(), HostError> {
         self.dial(host, &control_command("exit", None), CONTROL_TIMEOUT)
             .await
@@ -476,8 +347,6 @@ impl SshTransport {
     }
 }
 
-/// How long an `-O` control request (a forward, its cancellation) may take; it
-/// rides an established connection and only has to be acknowledged.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl HostTransport for SshTransport {
@@ -588,10 +457,6 @@ impl HostTransport for SshTransport {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The ssh command line
-// ---------------------------------------------------------------------------
-
 /// One `-o` value. ssh parses `-o` values the way it parses config-file lines,
 /// so a value with a space in it has to be quoted or ssh reads the rest as
 /// extra arguments and refuses the whole call — and that is not hypothetical:
@@ -606,13 +471,6 @@ fn config_value(value: &str) -> String {
     }
 }
 
-/// The argv one launcher ssh call is made with: our options, the target as
-/// typed, then `command`.
-///
-/// ssh keeps reading options up to the first word that is not one — that is
-/// where the remote command starts — so a free target such as
-/// `user@host -p 2222` works here, and when the target and our options
-/// disagree ours win, because ssh takes the first value it sees.
 pub fn ssh_argv(target: &str, socket: &Path, command: &[String]) -> Vec<String> {
     let mut argv = vec![
         "-o".to_string(),
@@ -650,24 +508,6 @@ pub fn script_command(script: &str, shell: Shell) -> Vec<String> {
     ]
 }
 
-/// Where the launcher keeps its own multiplexed connection for one target.
-///
-/// The file name is a hash of the target rather than the target itself: a Unix
-/// socket path is short, and the target is not (it may be a free string such as
-/// `user@host -p 2222`).
-///
-/// **Short enough or somewhere else.** A Unix socket address holds 104 bytes and
-/// ssh spends 17 of them before it even binds: it binds `<ControlPath>.<16
-/// random characters>` first and hard-links that into place (OpenSSH's
-/// `muxserver_listen`), so the launcher has **86** bytes to work with — and a
-/// stock macOS data directory already derives 89
-/// (`~/Library/Application Support/in.dsh-plug.dsh-launcher/ssh/<16 hex>.sock`),
-/// which ssh refuses outright ("too long for Unix domain socket"). So the
-/// launcher's own directory is used when the path fits there, and otherwise the
-/// socket moves to a short directory of the launcher's own under `$HOME`, its
-/// name derived from **both** the data directory and the target: the socket is
-/// one ssh master, and two data directories sharing one would put two
-/// configurations' commands on the same session.
 fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
     let digest = Sha256::digest(target.as_bytes());
     let short: String = digest
@@ -681,18 +521,10 @@ fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
         return own;
     }
 
-    // `$HOME` and not the temporary directory: this Mac's `$TMPDIR` is a long
-    // `/var/folders/…` path that would overflow this budget just as the data
-    // directory did, and `/tmp` is shared with every other user on the machine —
-    // a control socket somebody else can create first is a connection somebody
-    // else can answer on.
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
     if home.as_os_str().is_empty() {
-        // No home to move into: keep the launcher's own directory and let ssh say
-        // what is wrong with the path ([`socket_path_too_long`] turns that into a
-        // sentence a user can act on).
         return own;
     }
     let scoped: String = Sha256::digest(launcher_data_dir.to_string_lossy().as_bytes())
@@ -704,34 +536,11 @@ fn socket_path(launcher_data_dir: &Path, target: &str) -> PathBuf {
         .join(format!("{scoped}-{short}.sock"))
 }
 
-/// The directory the socket moves into when the launcher's data directory
-/// cannot hold one. Hidden, and the launcher's own: the user's `~/.ssh` is
-/// theirs and carries their own `ControlPath`.
 const SHORT_SOCKET_DIR: &str = ".dsh-launcher-ssh";
 
-/// How many bytes a path handed to ssh as `ControlPath` may use.
-///
-/// Measured against this Mac's OpenSSH: 86 passes, 87 fails with
-/// `unix_listener: path "…" too long for Unix domain socket`, because of the
-/// 17-byte temporary name ssh binds first. See [`ssh_failure`] for the other
-/// half of that rule — ssh also refuses anything of 104 bytes or more before it
-/// starts.
 const MAX_SOCKET_PATH: usize = 86;
 
-/// Classifies one failed ssh call. ssh reports its own failures on stderr and
-/// exits 255; there is no structured code to read, so the four classes come
-/// from what it said.
-///
-/// A failure ssh did **not** explain (255, nothing on stderr) is what losing a
-/// connection ssh already had looks like, and it does not say which end went:
-/// the message for it states both possibilities rather than asserting a cause —
-/// see the 「连不上」 arm.
 pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
-    // The one failure that is not about the machine: ssh's own control socket
-    // path. It has two spellings (ssh's pre-flight check and the bind that
-    // follows), neither of which says anything a user can act on, and both of
-    // which would otherwise be filed under 「连不上」 with advice about the
-    // machine being off — which is exactly what it is not.
     if let Some(message) = socket_path_too_long(stderr) {
         return HostError::unreachable(message);
     }
@@ -744,9 +553,6 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
         tail
     };
     let message = match kind {
-        // The first connection to a machine whose key is not in `known_hosts`
-        // fails exactly like this, and it is the one failure the launcher
-        // cannot fix from here: accepting a host key needs a terminal.
         HostErrorKind::Auth => format!(
             "{said}。启动器只支持免密连接（密钥或 ssh-agent）：请先在终端里跑一次 \
              ssh {target} 确认能直接登录，第一次连接要在那里接受主机密钥（密码与口令启动器不保存）"
@@ -762,10 +568,6 @@ pub fn ssh_failure(target: &str, stderr: &str) -> HostError {
                 // connection out from under a call still in flight (a log
                 // follower inside `remote::tail`), and the far side of that
                 // established connection going away looks identical. Dialing
-                // failures always name their cause (refused, no route, timeout,
-                // unresolvable name). Silence therefore says nothing about the
-                // machine, and this states both possibilities instead of
-                // sending the user to check a machine that may be up.
                 format!(
                     "ssh 什么都没说就退出了：这既可能是连不上 {target}，\
                      也可能是启动器自己那条连接刚被断开（撤销转发、退出启动器时会这样）。\
@@ -846,28 +648,14 @@ fn shell_chatter(line: &str) -> bool {
         || line.contains("cannot set terminal process group")
 }
 
-// ---------------------------------------------------------------------------
-// The user's own ~/.ssh/config
-// ---------------------------------------------------------------------------
-
-/// One alias the user's `~/.ssh/config` defines, with as much of its target as
-/// the picker needs to be useful. The launcher does not re-implement ssh's
-/// configuration language: it offers the alias, and the alias *is* what gets
-/// handed to ssh — keys, jump hosts and connection reuse stay where the user
-/// wrote them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshAlias {
     pub alias: String,
-    /// `HostName`, when the block names one. An alias that only sets options
-    /// for its own name uses the alias as the host name.
     pub host_name: Option<String>,
     pub user: Option<String>,
     pub port: Option<u16>,
 }
 
-/// The aliases in the user's `~/.ssh/config`, for the picker in the settings
-/// page. A machine with no config file has no aliases — that is not an error
-/// worth showing anyone.
 pub fn ssh_aliases() -> Vec<SshAlias> {
     match std::env::var_os("HOME") {
         Some(home) => ssh_aliases_at(&PathBuf::from(home).join(".ssh").join("config")),
@@ -875,8 +663,6 @@ pub fn ssh_aliases() -> Vec<SshAlias> {
     }
 }
 
-/// The aliases in one config file. A missing or unreadable file is an empty
-/// list: the user can always type a free target instead.
 pub fn ssh_aliases_at(path: &Path) -> Vec<SshAlias> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse_ssh_config(&text),
@@ -891,7 +677,6 @@ pub fn ssh_aliases_at(path: &Path) -> Vec<SshAlias> {
 /// apply conditionally, so they are not an alias's target either.
 pub fn parse_ssh_config(text: &str) -> Vec<SshAlias> {
     let mut aliases: Vec<SshAlias> = Vec::new();
-    // The aliases the current block's keyword lines belong to.
     let mut block: Vec<usize> = Vec::new();
 
     for raw in text.lines() {
@@ -945,15 +730,12 @@ pub fn parse_ssh_config(text: &str) -> Vec<SshAlias> {
                     }
                 }
             }
-            // Every other keyword (IdentityFile, ProxyJump, …) is ssh's
-            // business: the launcher hands over the alias and ssh reads it.
             _ => {}
         }
     }
     aliases
 }
 
-/// `Keyword value`, `Keyword=value` and `Keyword = value` are all legal.
 fn split_keyword(line: &str) -> (&str, &str) {
     let cut = line
         .find(|c: char| c.is_whitespace() || c == '=')
@@ -994,14 +776,8 @@ mod tests {
         }
     }
 
-    /// The flags the whole remote feature rests on: non-interactive (a GUI app
-    /// has no terminal to type a password into), the launcher's **own**
-    /// multiplexing socket, and a connect timeout so a dead machine cannot hang
-    /// the page.
     #[test]
     fn ssh_argv_carries_batch_mode_and_the_launchers_own_socket() {
-        // Short enough to sit inside the data directory, and with a space in it
-        // — the case the `-o` quoting exists for.
         let dir = Path::new("/Users/me/Library/Application Support/dsh");
         let host = RemoteHost::of(&remote_host("zjq_aliyun"), dir).unwrap();
         let argv = ssh_argv(
@@ -1034,16 +810,6 @@ mod tests {
         );
     }
 
-    /// A Unix socket path holds 104 bytes, and ssh does not bind the
-    /// `ControlPath` directly: it binds `<ControlPath>.<16 random characters>`
-    /// first and hard-links that into place, so 17 of the 103 usable bytes are
-    /// spoken for and the launcher has 86 to work with.
-    ///
-    /// A stock macOS data directory already spends 89 of them
-    /// (`~/Library/Application Support/in.dsh-plug.dsh-launcher/ssh/<16 hex>.sock`),
-    /// which ssh refuses — so a HOME that is merely longer than this one, let
-    /// alone a data directory the user pointed somewhere deep, must still get a
-    /// socket, or every remote action fails with ssh's own complaint.
     const SOCKET_BUDGET: usize = 86;
 
     fn socket_len(host: &RemoteHost) -> usize {
@@ -1070,9 +836,6 @@ mod tests {
         );
     }
 
-    /// The stock macOS data directory is the case that matters most: this path
-    /// is what `app_data_dir()` produces on an ordinary account, and ssh refuses
-    /// the 89-byte socket it used to derive from it.
     #[test]
     fn the_stock_macos_data_directory_also_gets_a_bindable_socket() {
         let stock = Path::new("/Users/me/Library/Application Support/in.dsh-plug.dsh-launcher");
@@ -1086,10 +849,6 @@ mod tests {
         );
     }
 
-    /// Moving the socket out must not merge two launcher data directories onto
-    /// one connection: the socket is the multiplexed ssh master, so sharing one
-    /// would put two configurations' commands on the same session. The name is
-    /// derived from the data directory as well as the target.
     #[test]
     fn two_data_directories_never_share_one_socket() {
         let one = RemoteHost::of(
@@ -1112,9 +871,6 @@ mod tests {
         assert_eq!(one.socket, again.socket, "同一份配置问两次是同一个答案");
     }
 
-    /// A data directory short enough for the socket to live inside it keeps it
-    /// there: the launcher's own storage is where its own files belong, and the
-    /// short path is the common case.
     #[test]
     fn a_short_data_directory_keeps_the_socket_inside_it() {
         let dir = Path::new("/Users/me/.dsh-launcher");
@@ -1127,10 +883,6 @@ mod tests {
         );
     }
 
-    /// Both of ssh's ways of saying "this path is too long" are about the
-    /// launcher's own socket, not about the machine — and one of them says
-    /// nothing at all about the limit. Neither may reach the user as raw ssh
-    /// output with 「确认那台机器开着」 attached to it.
     #[test]
     fn sshs_two_too_long_messages_become_one_readable_reason() {
         let refused = ssh_failure(
@@ -1161,12 +913,6 @@ mod tests {
         }
     }
 
-    /// The real OpenSSH on the real path: it must be able to bind the socket the
-    /// launcher derives from a data directory as long as the stock one, which is
-    /// the case ssh refuses when the socket is kept inside it. It writes nothing
-    /// into that machine's tree — the check is that ssh gets a session at all —
-    /// and takes its socket away again afterwards.
-    ///
     /// ```text
     /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
     ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_ssh_binds
@@ -1195,9 +941,6 @@ mod tests {
             "{}",
             host.socket.display()
         );
-        // End the launcher's own connection first, the way the app's exit path
-        // does, and only then take the socket away: a master that is still alive
-        // owns it.
         let _ = transport.close_connection(&host).await;
         let _ = std::fs::remove_file(&host.socket);
         if let Some(parent) = host.socket.parent() {
@@ -1205,10 +948,6 @@ mod tests {
         }
     }
 
-    /// The argv has to be more than the right words: ssh has to **accept** it.
-    /// `ssh -G` prints the configuration it derived and stops, so this needs no
-    /// server — and it is what catches a `-o` value ssh cannot parse (a path
-    /// with a space in it, unquoted, is refused outright).
     #[test]
     fn ssh_parses_the_argument_list_the_launcher_builds() {
         let dir = Path::new("/Users/me/Library/Application Support/in.dsh-plug.dsh-launcher");
@@ -1240,9 +979,6 @@ mod tests {
         );
     }
 
-    /// The script has to arrive at the remote shell as one word — ssh joins the
-    /// command words and the remote shell splits them again, so nothing in this
-    /// position may be left unquoted.
     #[test]
     fn the_script_reaches_the_remote_shell_as_one_word() {
         let script = "printf 'a b' \"$HOME\"";
@@ -1252,7 +988,6 @@ mod tests {
         assert_eq!(command.len(), 3);
         assert_eq!(command[2], "'printf '\\''a b'\\'' \"$HOME\"'");
 
-        // And one real shell must put it back together as the same script.
         let echoed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("printf %s {}", crate::remote::quote(script)))
@@ -1261,8 +996,6 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&echoed.stdout), script);
     }
 
-    /// A platform script's shell is chosen, not inherited: the cheap one by
-    /// default, the rc-reading one only where a tool has to be resolved by name.
     /// The difference is a second per call on a machine whose `~/.bashrc` loads
     /// conda.
     #[test]
@@ -1280,11 +1013,6 @@ mod tests {
         );
     }
 
-    /// A forward's local end is bound to loopback **by spelling it out**:
-    /// `port:host:port` alone is bound according to `GatewayPorts`, and a user's
-    /// `~/.ssh/config` may turn that on — which would offer the instance's own
-    /// address to this Mac's network. The remote end is carried verbatim, so an
-    /// instance bound to that machine's LAN address is forwarded to that address.
     #[test]
     fn a_forward_spec_spells_out_the_loopback_bind() {
         let loopback = PortForward {
@@ -1302,10 +1030,6 @@ mod tests {
         assert_eq!(forward_spec(&lan), "127.0.0.1:41000:192.168.1.5:4000");
     }
 
-    /// One `-O` control request rides the connection the launcher already has;
-    /// adding a forward carries the `-L` spec, and ending the connection carries
-    /// nothing. Both are requests to an established master, which is why a
-    /// caller must not read them as "start a connection".
     #[test]
     fn control_requests_carry_the_forward_spec_only_when_they_need_one() {
         let forward = PortForward {
@@ -1324,8 +1048,6 @@ mod tests {
         assert_eq!(control_command("exit", None), vec!["-O", "exit"]);
     }
 
-    /// A free target may carry its own ssh arguments, and they belong before the
-    /// remote command — after it, ssh would hand them to the remote shell.
     #[test]
     fn a_free_target_keeps_its_own_arguments() {
         let dir = Path::new("/tmp/launcher");
@@ -1346,7 +1068,6 @@ mod tests {
         );
     }
 
-    /// A Unix socket path is length-limited, and two hosts must never share one.
     #[test]
     fn two_targets_never_share_a_socket_and_the_path_stays_short() {
         let dir = Path::new("/Users/someuser/Library/Application Support/in.dsh-plug.dsh-launcher");
@@ -1362,8 +1083,6 @@ mod tests {
         assert_eq!(a.socket.extension().unwrap(), "sock");
     }
 
-    /// The local host is this Mac: there is nothing to dial and nothing to
-    /// test, and saying so is better than a silent dial to an empty target.
     #[test]
     fn the_local_host_has_nothing_to_dial() {
         let err = RemoteHost::of(&Host::local(), Path::new("/tmp/launcher")).unwrap_err();
@@ -1374,10 +1093,6 @@ mod tests {
         );
     }
 
-    /// The four classes, each with a message a user can act on. The first
-    /// connection to a machine whose key is not in `known_hosts` fails under
-    /// `BatchMode`; that failure has to point at the terminal, because the
-    /// launcher can neither show the prompt nor take the password.
     #[test]
     fn ssh_failures_are_classified_into_four_readable_classes() {
         let refused = ssh_failure(
@@ -1415,8 +1130,6 @@ mod tests {
         assert_eq!(slow.kind, HostErrorKind::Timeout);
         assert_eq!(slow.label(), "超时");
 
-        // What a firewall or a proxy says: the machine answered nothing the
-        // launcher can use, and it is not an authentication problem.
         let dropped = ssh_failure("lab", "Connection closed by 198.18.0.65 port 22\n");
         assert_eq!(dropped.kind, HostErrorKind::Unreachable);
         assert!(
@@ -1434,12 +1147,6 @@ mod tests {
         );
     }
 
-    /// ssh exits 255 with an empty stderr when the connection it was riding is
-    /// cut out from under it — which is what the launcher's own exit path does
-    /// to a log follower still waiting inside a remote call. Such a failure may
-    /// not be told to the user as 「确认那台机器开着」: the launcher does not know
-    /// that, and a machine that is up is then the thing the user is sent to
-    /// debug. A failure ssh *did* explain keeps its own, more useful reason.
     #[test]
     fn a_silent_ssh_failure_names_both_possibilities_instead_of_the_machine_being_off() {
         let silent = ssh_failure("lab", "");
@@ -1461,8 +1168,6 @@ mod tests {
         );
         assert!(silent.message.contains("ssh lab"), "{}", silent.message);
 
-        // ssh's own words still carry the reason whenever it said anything:
-        // 「连不上」 for these is not a guess.
         let refused = ssh_failure(
             "lab",
             "ssh: connect to host lab port 22: Connection refused\n",
@@ -1474,8 +1179,6 @@ mod tests {
         );
     }
 
-    /// A login shell says `no job control in this shell` on every call; the
-    /// failure reason must be what actually went wrong.
     #[test]
     fn the_stderr_tail_drops_the_login_shells_own_chatter() {
         let stderr = "bash: no job control in this shell\n\
@@ -1490,9 +1193,6 @@ mod tests {
         assert!(!err.message.contains("no job control"), "{}", err.message);
     }
 
-    /// The alias picker reads the user's config without re-implementing ssh's
-    /// configuration language: aliases yes, catch-alls no, and an alias's own
-    /// options are not its target.
     #[test]
     fn ssh_config_aliases_skip_wildcards_and_carry_the_target() {
         let text = "\
@@ -1538,8 +1238,6 @@ Match host lab
         assert_eq!(aliases[3].port, None, "Match 块里的 Port 不属于它");
     }
 
-    /// A machine with no `~/.ssh/config` has nothing to pick — that is not an
-    /// error worth showing anyone, and the user can still type a free target.
     #[test]
     fn a_missing_ssh_config_is_no_aliases_not_an_error() {
         let path = std::env::temp_dir().join(format!("dsh-ssh-config-{}", uuid::Uuid::new_v4()));

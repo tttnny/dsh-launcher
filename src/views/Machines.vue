@@ -9,8 +9,6 @@ import EmptyState from '@/components/EmptyState.vue'
 import MachineFormDialog from '@/components/MachineFormDialog.vue'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 机器列表：每行一台机器，点进去看连接、环境和资源。
-
 const router = useRouter()
 const store = useLauncherStore()
 

@@ -42,14 +42,11 @@ const homeName = computed(() => home.value?.name ?? '未知数据目录')
 const homePath = computed(() => home.value?.path ?? '')
 const isRemote = computed(() => !!host.value && !host.value.builtin)
 
-/** 状态先于装饰：不可达时把这台机器给出的原因说清楚。 */
 const statusTitle = computed(() =>
   status.value.state === 'unreachable'
     ? (host.value?.status?.message ?? '主机没有回应')
     : '',
 )
-
-// --- 配置列表（概览与诊断用） ------------------------------------------------
 
 const homeProfiles = ref<string[]>([])
 const homeProfilesError = ref('')
@@ -81,8 +78,6 @@ const activeProfile = computed(
     '',
 )
 
-// --- 标签页 ------------------------------------------------------------------
-
 const TABS = [
   { key: 'overview', label: '概览' },
   { key: 'settings', label: '设置' },
@@ -91,8 +86,6 @@ const TABS = [
 ] as const
 type TabKey = (typeof TABS)[number]['key']
 const tab = ref<TabKey>('overview')
-
-// --- 顶栏与概览动作 ----------------------------------------------------------
 
 const openAction = useAction(() => api.openInstanceWindow(id.value), {
   success: () => '已在浏览器打开实例',
@@ -148,8 +141,6 @@ function goBack() {
   void router.push({ name: 'instances' })
 }
 
-// --- 启动：先决定用哪个 Profile ---------------------------------------------
-
 const pickerVisible = ref(false)
 const pickerProfiles = ref<string[]>([])
 
@@ -189,7 +180,6 @@ async function requestStart() {
     await startAction.run(list[0])
     return
   }
-  // 多个配置、没有默认也没有上次使用记录：问清楚这次用哪一个。
   pickerProfiles.value = list
   pickerVisible.value = true
 }
@@ -197,8 +187,6 @@ async function requestStart() {
 function onPickProfile(profile: string) {
   void startAction.run(profile)
 }
-
-// --- 设置表单 ---------------------------------------------------------------
 
 interface EnvRow {
   key: string
@@ -378,8 +366,6 @@ function removeEnvRow(index: number) {
   form.envRows.splice(index, 1)
 }
 
-// --- 图标 -------------------------------------------------------------------
-
 const iconSource = ref('')
 const applyIconAction = useAction(
   async () => {
@@ -424,8 +410,6 @@ const clearIconAction = useAction(
   { success: () => '已恢复默认图标' },
 )
 
-// --- 诊断 -------------------------------------------------------------------
-
 const report = ref<DoctorReport | null>(null)
 const diagLoading = ref(false)
 const diagError = ref('')
@@ -460,8 +444,6 @@ watch(tab, (t) => {
   )
     void runDiagnostics()
 })
-
-// --- 删除 -------------------------------------------------------------------
 
 const deleteAction = useAction(async () => {
   await api.deleteInstance(id.value, inst.value?.host_id)
@@ -637,7 +619,6 @@ function confirmDelete() {
         </button>
       </nav>
 
-      <!-- 概览 -->
       <div v-if="tab === 'overview'" class="detail-body">
         <div v-if="status.state === 'unreachable'" class="notice notice--warn">
           <DlIcon name="alert" :size="14" />
@@ -792,7 +773,6 @@ function confirmDelete() {
         </section>
       </div>
 
-      <!-- 设置 -->
       <div v-else-if="tab === 'settings'" class="detail-body settings-body">
         <div class="surface">
           <div class="field-row">
@@ -998,12 +978,10 @@ function confirmDelete() {
         </section>
       </div>
 
-      <!-- 插件 -->
       <div v-else-if="tab === 'plugins'" class="detail-body">
         <PluginPanel :instance="inst" />
       </div>
 
-      <!-- 诊断 -->
       <div v-else class="detail-body">
         <div class="section-head">
           <span class="section-title">依赖自检</span>
@@ -1139,7 +1117,6 @@ function confirmDelete() {
   font-size: var(--dl-text-sm);
 }
 
-// 值一律靠右，长地址与路径截断而不换行。
 .field-value {
   display: flex;
   align-items: center;
@@ -1229,7 +1206,6 @@ function confirmDelete() {
   gap: 8px;
 }
 
-// 底部的保存栏：只有脏了才亮起来，一直贴在可见区域底部。
 .save-bar {
   position: sticky;
   bottom: 0;

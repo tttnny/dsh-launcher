@@ -13,9 +13,6 @@ import InstanceRow from '@/components/InstanceRow.vue'
 import NewInstanceDialog from '@/components/NewInstanceDialog.vue'
 import ProfilePickerDialog from '@/components/ProfilePickerDialog.vue'
 
-// 实例页是启动器的主页：所有机器上的实例都在这里，按状态分组，
-// 每一行都有一个明确的下一步动作。
-
 const store = useLauncherStore()
 const router = useRouter()
 const route = useRoute()

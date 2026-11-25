@@ -14,13 +14,6 @@ import { useAction } from '@/composables/useAction'
 import DlIcon from '@/components/DlIcon.vue'
 import BundleRow from '@/components/BundleRow.vue'
 
-// 插件管理是这个实例自己的服务（/api/pluginManager/*），启动器从不改写 Profile
-// 文件。它管理的单位是「补丁层」：整体挂载或卸载，带版本、可用性与移除规则；
-// 层内部的条目是 DSH 自己的组合细节，只报数量，不逐个给开关。
-//
-// 每一次改动都经过实例，并如实呈现它返回的结果：已生效 / 需重启 / 被覆盖 /
-// 失败 / 已取消，或者一个带本地化原因的拒绝。
-
 const props = defineProps<{ instance: DshInstance }>()
 
 const store = useLauncherStore()
@@ -39,10 +32,6 @@ const managed = computed(() => mode.value === 'managed')
 const bundles = computed<BundleItem[]>(() => view.value?.bundles ?? [])
 const reason = computed(() => view.value?.reason ?? '')
 
-/**
- * 插件列表要按一个 Profile 去问。实例正在运行时以它实际的配置为准；没有在运行时
- * 落回默认配置、上次使用的配置，再落回数据目录里的第一个。
- */
 const currentProfile = computed(() => {
   const st = status.value
   if (st.profile) return st.profile
@@ -87,8 +76,6 @@ async function load() {
 
 onMounted(() => void load())
 
-// 实例的状态或它运行的配置一变，这个面板就要重新问一次：它决定的是 managed
-// 还是只读。
 const statusKey = computed(
   () => `${status.value.state}:${status.value.profile ?? ''}`,
 )
@@ -101,8 +88,6 @@ watch(
     void load()
   },
 )
-
-// --- 从只读状态里出来 --------------------------------------------------------
 
 const fixAction = useAction(async () => {
   const st = status.value
@@ -168,7 +153,6 @@ const showBanner = computed(
   () => !!view.value && !managed.value && !loading.value,
 )
 
-/** 数据目录里一个 Profile 都没有：没有可问的对象，启动也无从谈起。 */
 const noProfile = computed(
   () =>
     !loading.value &&
@@ -177,8 +161,6 @@ const noProfile = computed(
     !profileError.value &&
     !currentProfile.value,
 )
-
-// --- 写入结果 ---------------------------------------------------------------
 
 type Tone = 'success' | 'warning' | 'info'
 
@@ -205,11 +187,6 @@ function applicationOutcome(application: string): {
   }
 }
 
-/**
- * 一个写入结果的唯一渲染处，启停与移除共用，拒绝分支和五种 application
- * 分支不会在两者之间走样。拒绝（changed:false）把本地化原因放在 diagnostic，
- * errorCode 只是原始代码，不展示。
- */
 function renderOutcome(
   o: ChangeOutcome,
   success?: { applied: string; restartRequired: string },
@@ -237,7 +214,6 @@ function showOutcome({ tone, message }: { tone: Tone; message: string }) {
   else Message.warning(message)
 }
 
-/** 实例答了「需重启」：改动已落盘但进程里还没生效，页面一直说清这件事。 */
 const restartNeeded = ref(false)
 
 function reportOutcome(
@@ -256,8 +232,6 @@ const liveTick = computed(
 watch(liveTick, (now, before) => {
   if (now !== before && before) restartNeeded.value = false
 })
-
-// --- 补丁层 -----------------------------------------------------------------
 
 const ownLayers = computed(() => bundles.value.filter((b) => b.removable))
 const shippedLayers = computed(() => bundles.value.filter((b) => !b.removable))
@@ -355,8 +329,6 @@ async function removeBundle(b: BundleItem) {
     </div>
 
     <template v-else>
-      <!-- 只读：实例没在运行、没有把管理权交给启动器、或那台机器连不上。
-           原因由后端本地化，按钮就是离开这个状态的那一步。 -->
       <div
         v-if="showBanner"
         class="notice"
@@ -376,7 +348,6 @@ async function removeBundle(b: BundleItem) {
         </button>
       </div>
 
-      <!-- 已写盘但进程里还没生效：一直提示，直到实例重启。 -->
       <div v-if="restartNeeded && managed" class="notice notice--info">
         <DlIcon name="restart" :size="14" />
         <div class="notice-body">
@@ -394,7 +365,6 @@ async function removeBundle(b: BundleItem) {
         </button>
       </div>
 
-      <!-- 可管理：完整的分组列表与开关。 -->
       <template v-if="managed">
         <div class="section-head">
           <span class="section-title">补丁层</span>
@@ -455,7 +425,6 @@ async function removeBundle(b: BundleItem) {
         </div>
       </template>
 
-      <!-- 只读但读到了 Profile 自己声明的层：平铺展示，开关锁住。 -->
       <template v-else-if="bundles.length">
         <div class="section-head">
           <span class="section-title">这个 Profile 装了什么</span>

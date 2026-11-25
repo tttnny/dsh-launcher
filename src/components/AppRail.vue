@@ -5,8 +5,6 @@ import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
 import launcherIcon from '@/assets/launcher-icon.png'
 
-// 左侧导航。五个页面，一层，没有第二组机器列表：机器只属于「机器」页。
-
 const store = useLauncherStore()
 const route = useRoute()
 const router = useRouter()

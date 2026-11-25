@@ -1,7 +1,3 @@
-// The app's icon set: one stroke style everywhere (16px grid, 1.5 stroke,
-// round joins). Views that used to carry inline SVGs at three different
-// weights now all read from here, so the icon language cannot drift.
-
 export type IconName =
   | 'instances'
   | 'library'
@@ -37,7 +33,6 @@ export type IconName =
   | 'more'
   | 'arrow-left'
 
-/** Filled glyphs opt out of the stroke treatment. */
 export const FILLED: Partial<Record<IconName, string>> = {
   play: '<path d="M5.6 3.4 12.6 8l-7 4.6z"/>',
   stop: '<rect x="4.5" y="4.5" width="7" height="7" rx="1.6"/>',

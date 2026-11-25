@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-// 空状态永远是一个邀请：说明现在是什么情况，并给一个能继续走的动作。
-
 type EmptyIcon = 'instance' | 'version' | 'data' | 'machine' | 'search'
 
 const props = withDefaults(

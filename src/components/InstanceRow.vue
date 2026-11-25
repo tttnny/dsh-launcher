@@ -11,9 +11,6 @@ import { useProfiles } from '@/composables/useProfiles'
 import DlIcon from '@/components/DlIcon.vue'
 import InstanceAvatar from '@/components/InstanceAvatar.vue'
 
-// 实例列表里的一行：状态、身份、和每天要用的动作。默认配置和端口这类设置
-// 收在详情页，不占列表的空间。
-
 const props = defineProps<{
   inst: DshInstance
   showMachine: boolean

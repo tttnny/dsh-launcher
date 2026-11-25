@@ -1,14 +1,6 @@
-/**
- * 应用内快捷键与原生菜单事件契约。
- *
- * 原生菜单栏和托盘发出的导航事件统一走 `menu-navigate`，载荷是路由字符串；
- * 这个文件是唯一把事件名与「载荷 → 页面」写在一起的地方，前后端不会各说各话。
- */
-
 export type ShortcutRoute =
   'instances' | 'install' | 'data' | 'machines' | 'settings'
 
-/** 规范事件名在前，历史别名在后。 */
 export const MENU_NAVIGATE_EVENTS = [
   'menu-navigate',
   'navigate',
@@ -35,7 +27,6 @@ export const SHORTCUT_DOCS: ShortcutDoc[] = [
   { label: '退出启动器', keys: [MOD, 'Q'], native: true },
 ]
 
-/** 原生菜单载荷 → 新页面。旧路径一并兼容，避免托盘和历史链接失效。 */
 export function resolveMenuRoute(payload: unknown): ShortcutRoute | null {
   let raw: unknown = payload
   if (

@@ -1,48 +1,15 @@
-//! Toolchain module — the single owner of "which pnpm, which store, which
-//! registry, which network flags".
-//!
-//! Every pnpm/npm invocation the launcher drives (version installs, source
-//! builds, version listings) derives its toolchain policy from here, so a
-//! policy change (a new pnpm major, different timeouts, a mirror variable) is
-//! made once and applies everywhere. The pnpm is resolved once by
-//! [`ensure_pnpm_for_task`]: background tasks get task-log notes and a percent
-//! nudge, sharing one probe and bootstrap decision.
-
 use crate::AppState;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
-/// Lowest pnpm major the launcher drives installs with.
-///
-/// This used to be an exact pin on 11, on the theory that "DSH profiles are
-/// initialized by pnpm 11" and any other major produces trees the CLI does not
-/// expect. That premise did not hold up: DSH's profile init writes only
-/// `package.json`, `cordis.patch.yml` and `pnpm-workspace.yaml` and checks no
-/// pnpm version anywhere (the `pnpm@11.7.0` in DSH's own repo builds DSH's
-/// monorepo, not consumer profiles). Meanwhile every easy install channel —
-/// `brew install pnpm`, `npm i -g pnpm`, `curl get.pnpm.io` — now delivers
-/// major 12, so an exact pin rejected the toolchain most users already had.
-///
-/// The floor stays at 11 rather than being dropped: it is the oldest major the
-/// launcher's own flag set and store layout are verified against. See
-/// ADR-0003.
 pub(crate) const MIN_PNPM_MAJOR: u32 = 11;
 
-/// What the user is told to run when no acceptable pnpm is on the machine.
-/// The launcher no longer installs one itself: toolchain provisioning is the
-/// user's call (nvm/brew/standalone all work), and the setup guide offers this
-/// same text as a copyable command. Not pinned to a version — the accept floor
-/// is a range, so pinning here would only go stale.
 pub(crate) const PNPM_INSTALL_HINT: &str = "npm install -g pnpm";
 
-/// Whether a probe's major version is one the launcher will drive installs
-/// with. `None` (unparsable version output) is not acceptable — a shim whose
-/// `--version` is unreadable cannot be trusted to run a 600-package tree.
 pub(crate) fn accepts_pnpm_major(major: u32) -> bool {
     major >= MIN_PNPM_MAJOR
 }
 
-/// Parses the major version out of `pnpm --version` output ("11.17.0\n").
 pub(crate) fn pnpm_major(version_output: &str) -> Option<u32> {
     version_output
         .trim()
@@ -53,9 +20,6 @@ pub(crate) fn pnpm_major(version_output: &str) -> Option<u32> {
         .ok()
 }
 
-/// Optional registry mirror (e.g. npmmirror) via `DSH_NPM_REGISTRY`, trimmed.
-/// Shared by every npm/pnpm invocation so listings and installs never
-/// disagree about which registry answered.
 pub(crate) fn registry_mirror() -> Option<String> {
     std::env::var("DSH_NPM_REGISTRY")
         .ok()
@@ -63,75 +27,28 @@ pub(crate) fn registry_mirror() -> Option<String> {
         .filter(|r| !r.is_empty())
 }
 
-/// The launcher's shared pnpm content store under the data dir, reused by
-/// version installs, source builds, and plugin management. Profiles linked
-/// against any other store fail with ERR_PNPM_UNEXPECTED_STORE.
 pub(crate) fn store_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(".pnpm-store")
 }
 
-/// Network robustness settings for pnpm *download* subcommands (`add` /
-/// `install`): the defaults (60s timeout, 2 retries) are too tight for large
-/// native binaries (e.g. sharp), which abort on flaky connections.
-///
-/// They travel as `pnpm_config_*` environment variables, NOT as
-/// `--config.<name>=<value>` flags. The flag form looks cross-major but is a
-/// trap on pnpm 11: pnpm re-parses the collected `--config.` args with an
-/// empty type map (`nopt({}, {}, configDotArgs)` in pnpm.mjs), so
-/// `--config.fetch-timeout=300000` reaches `AbortSignal.timeout()` as the
-/// *string* "300000". Node throws ERR_INVALID_ARG_TYPE, pnpm swallows that
-/// rejection, and the install promise never settles: the task sits at its
-/// percent ceiling forever having downloaded nothing. That is the
-/// stuck-near-100% report -- the progress bar is a heartbeat, not a download.
-///
-/// Env vars instead go through the config reader, which coerces by declared
-/// type (`fetch-timeout` is declared `Number`), so both majors get a number.
-/// Verified against pnpm 11.22.0 and 12.4.2.
-///
-/// `--network-concurrency` has no cross-major spelling at all
-/// (`--config.network-concurrency=4` crashes pnpm 11 with "Expected
-/// `concurrency` to be a number from 1 and up"), so it is deliberately
-/// absent: pnpm's default concurrency is a fine trade for one settings set
-/// that works everywhere.
 pub(crate) fn pnpm_network_env() -> [(&'static str, &'static str); 3] {
     [
-        ("pnpm_config_fetch_timeout", "300000"), // 5 min per request
+        ("pnpm_config_fetch_timeout", "300000"),
         ("pnpm_config_fetch_retries", "5"),
         ("pnpm_config_fetch_retry_maxtimeout", "120000"),
     ]
 }
 
-/// Applies [`pnpm_network_env`] to a command that downloads through pnpm.
-///
-/// Env is the only channel that carries these settings intact on pnpm 11 (see
-/// [`pnpm_network_env`]), and it survives being inherited: pnpm spawns its own
-/// helpers, so the variables set on the pnpm process are what reaches them.
 pub(crate) fn apply_pnpm_network_env(cmd: &mut tokio::process::Command) {
     for (key, value) in pnpm_network_env() {
         cmd.env(key, value);
     }
 }
 
-/// The full pnpm argument set for a command that writes to the launcher's
-/// shared store: store, log level, optional registry.
-///
-/// This is the one place those choices are made. Call sites used to assemble
-/// the same four pieces independently (npm version install, source build),
-/// which is exactly why the pnpm-12 flag migration had to be applied by hand
-/// at each. `fetch` is false for subcommands that reject the download flags
-/// outright (`pnpm remove` fails with "Unknown options: 'fetch-timeout'"
-/// before touching anything).
-///
-/// The network-robustness settings are NOT here: they must reach pnpm as
-/// `pnpm_config_*` env vars (see [`pnpm_network_env`]), which is a property of
-/// the command, not of this argument list. Download-capable callers pair this
-/// with [`apply_pnpm_network_env`].
 pub(crate) fn pnpm_store_flags(store_dir: &Path, loglevel: &str) -> Vec<String> {
     pnpm_store_flags_with(store_dir, loglevel, registry_mirror().as_deref())
 }
 
-/// [`pnpm_store_flags`] for a caller that knows which registry answers: 本机
-/// uses the launcher's own mirror, a remote host the registry its record names.
 pub(crate) fn pnpm_store_flags_with(
     store_dir: &Path,
     loglevel: &str,
@@ -149,10 +66,6 @@ pub(crate) fn pnpm_store_flags_with(
     args
 }
 
-/// The whole argument set for installing one package from npm into `dir`: the
-/// target directory, the store flags, then the package. One place, because the
-/// local install and an install on a remote host have to make the same choices
-/// — a second copy is how the two drift apart.
 pub(crate) fn pnpm_install_args(
     dir: &Path,
     store_dir: &Path,
@@ -184,17 +97,6 @@ async fn probe_pnpm_version(prog: &Path) -> Option<(String, Option<u32>)> {
     Some((raw, major))
 }
 
-/// The pnpm executable the launcher should drive installs with: the first
-/// candidate whose major is acceptable, plus its version output. Candidates
-/// come from the same scan the setup page reports (see
-/// [`crate::runtime::tool_candidates`]), so the two never disagree — including
-/// the executable the user picked by hand, which `manual` carries and which is
-/// tried before anything detected.
-///
-/// `note` receives a human-readable reason for each candidate that was
-/// skipped, so a user with pnpm 9 learns why it was not used instead of seeing
-/// a bare "not found" — and a user whose hand-picked pnpm stopped working
-/// learns that too.
 pub(crate) async fn resolve_pnpm(
     manual: Option<&Path>,
     note: &mut (dyn FnMut(String) + Send),
@@ -203,9 +105,6 @@ pub(crate) async fn resolve_pnpm(
     resolve_pnpm_from(candidates, note).await
 }
 
-/// The walk itself over a candidate list the caller assembled, so the decision
-/// ("which of these may drive an install") is testable without a login shell or
-/// the machine's own PATH.
 async fn resolve_pnpm_from(
     candidates: Vec<(PathBuf, crate::runtime::ToolSource)>,
     note: &mut (dyn FnMut(String) + Send),
@@ -248,9 +147,6 @@ async fn resolve_pnpm_from(
     None
 }
 
-/// The error every pnpm-dependent flow returns when no acceptable pnpm exists.
-/// One shared wording so the version-install task, the source build and plugin
-/// management all tell the user the same actionable thing.
 pub(crate) fn pnpm_missing_error() -> String {
     format!(
         "未找到可用的 pnpm（需要 {MIN_PNPM_MAJOR} 或更高版本）。\n\
@@ -258,18 +154,11 @@ pub(crate) fn pnpm_missing_error() -> String {
     )
 }
 
-/// Resolves a pnpm executable for a background task: the same decision, with
-/// the skip reasons also landing in the task log so the user sees why an
-/// installed pnpm was not used. A pnpm the user picked by hand on the setup
-/// page is the one this drives, so version installs and source builds run the
-/// same binary the page reports.
 pub(crate) async fn ensure_pnpm_for_task<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
     task_id: &str,
 ) -> Result<PathBuf, String> {
-    // Version installs are the local host's: a remote install is its own flow
-    // with its own resolution on that machine.
     let manual = state
         .config
         .lock()
@@ -313,18 +202,9 @@ pub(crate) async fn ensure_pnpm_for_task<R: tauri::Runtime>(
 /// detached install runs in, so its directory has to travel with the command.
 pub(crate) struct PnpmForTask {
     pub path: PathBuf,
-    /// Empty for 本机, whose process `PATH` already carries the tools the
-    /// launcher resolved.
     pub path_dirs: Vec<String>,
 }
 
-/// [`ensure_pnpm_for_task`] for one host: 本机 resolves exactly as it always
-/// has, and a remote host through that machine's own probe, so the binary a
-/// task runs there is the one the environment page reported.
-///
-/// A machine without a pnpm the launcher can drive fails with the command that
-/// installs one **there** (reusing the page's own recipe), because the launcher
-/// never installs Node or pnpm on another computer by itself.
 pub(crate) async fn ensure_pnpm_for_task_on<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &State<'_, AppState>,
@@ -397,9 +277,6 @@ mod tests {
     use super::*;
     use crate::runtime::ToolSource;
 
-    /// A stand-in pnpm: a script that prints the version it was told to, so the
-    /// candidate walk can be driven against real executables without depending
-    /// on what the test machine has installed.
     fn fake_pnpm(tag: &str, version: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -432,8 +309,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unusable_hand_picked_pnpm_falls_back_and_says_so() {
-        // A pnpm below the floor is skipped with the measured major in the note,
-        // and the walk continues instead of failing the install outright.
         let (old_dir, old) = fake_pnpm("pnpm-old", "9.15.0");
         let (good_dir, good) = fake_pnpm("pnpm-good", "12.4.2");
         let mut notes = Vec::new();
@@ -453,8 +328,6 @@ mod tests {
             "the user has to be told why their pnpm was passed over: {notes:?}"
         );
 
-        // A pick that no longer exists is reported too, not just silently
-        // skipped — that is what tells the user their path went stale.
         let mut notes = Vec::new();
         let gone = old_dir.join("gone");
         assert!(
@@ -485,12 +358,6 @@ mod tests {
 
     #[test]
     fn network_settings_ride_as_env_not_config_flags() {
-        // Regression guard for the stuck-install bug: the network settings must
-        // NOT be passed as `--config.fetch-*=...`. pnpm 11 re-parses those with
-        // an empty type map, so the value arrives as a string and
-        // `AbortSignal.timeout()` throws ERR_INVALID_ARG_TYPE. pnpm swallows
-        // that rejection, the install promise never settles, and the task hangs
-        // at its percent ceiling having downloaded nothing.
         for (key, value) in pnpm_network_env() {
             assert!(
                 key.starts_with("pnpm_config_"),
@@ -499,13 +366,10 @@ mod tests {
             assert!(!key.contains('-'), "env keys cannot contain dashes: {key}");
             assert!(!value.is_empty(), "missing value for {key}");
         }
-        // The three settings the flag set used to carry must all still be here.
         let keys: Vec<&str> = pnpm_network_env().iter().map(|(k, _)| *k).collect();
         assert!(keys.contains(&"pnpm_config_fetch_timeout"));
         assert!(keys.contains(&"pnpm_config_fetch_retries"));
         assert!(keys.contains(&"pnpm_config_fetch_retry_maxtimeout"));
-        // `--network-concurrency` has no cross-major spelling; its absence is
-        // deliberate, so guard against it being reintroduced by habit.
         assert!(
             !keys.iter().any(|k| k.contains("concurrency")),
             "network-concurrency cannot be passed to both majors"
@@ -514,10 +378,6 @@ mod tests {
 
     #[test]
     fn accepted_major_is_a_floor_not_an_exact_pin() {
-        // DSH itself never pins a pnpm major (its profile init writes only
-        // package.json / cordis.patch.yml / pnpm-workspace.yaml), so the
-        // launcher accepts anything at or above the verified floor. pnpm 12's
-        // tree, lockfile and build-approval flow are compatible; see ADR-0003.
         assert!(accepts_pnpm_major(11));
         assert!(accepts_pnpm_major(12));
         assert!(accepts_pnpm_major(13));
@@ -536,18 +396,11 @@ mod tests {
 
     #[test]
     fn store_flags_never_carry_network_flags() {
-        // `pnpm remove` used to reject the fetch flags outright, which is why
-        // they are not in this arg list at all any more: env config is not
-        // validated per-subcommand. Guard that no `--config.fetch-*` sneaks back
-        // in -- that spelling is the stuck-install bug.
         let flags = pnpm_store_flags(Path::new("/s"), "warn");
         assert!(flags.iter().any(|a| a == "--config.loglevel=warn"));
         assert!(!flags.iter().any(|a| a.starts_with("--config.fetch-")));
     }
 
-    /// One argument set for installing a package, built in one place: the local
-    /// install and an install on another machine have to make the same choices,
-    /// or the two drift apart and only one of them keeps working.
     #[test]
     fn the_install_arguments_are_the_same_whichever_machine_runs_them() {
         let args = pnpm_install_args(
@@ -571,7 +424,6 @@ mod tests {
             ]
         );
 
-        // Without a registry the flags are exactly what they always were.
         assert_eq!(
             pnpm_install_args(
                 Path::new("/versions/1.2.3"),
@@ -590,8 +442,6 @@ mod tests {
             ]
         );
 
-        // The registry a caller names wins over the launcher's own mirror, and
-        // an empty one means "no --registry at all".
         assert_eq!(
             pnpm_store_flags_with(Path::new("/store"), "http", Some("  ")),
             pnpm_store_flags_with(Path::new("/store"), "http", None)

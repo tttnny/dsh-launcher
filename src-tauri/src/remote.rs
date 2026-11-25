@@ -1,24 +1,3 @@
-//! Every remote script the launcher runs, and the reading of their answers.
-//!
-//! Two rules hold for the whole remote feature (issue #9, 「传输层」):
-//!
-//! * **The shell text lives here.** A call site asks this module for a script
-//!   and hands the result to the transport; nobody assembles shell strings of
-//!   their own, because everything that can go wrong with quoting goes wrong
-//!   there.
-//! * **An answer comes back as JSON between two markers.** A Linux login shell
-//!   prints things of its own (`~/.bashrc` banners, version notices, and
-//!   `bash -i`'s 「no job control」), so the whole of stdout is not usable as the
-//!   answer — only what sits between `<<<DSH-JSON>>>` and `<<<DSH-END>>>` is.
-//!   `runtime::parse_shell_path` reads the local login shell's `PATH` the same
-//!   way.
-//!
-//! Probing here is deliberately raw: the connection test reports what a machine
-//! resolves `node` and `pnpm` to, and nothing more. The three sources
-//! (系统环境变量 / 常见安装目录 / 用户指定) and the 「远端跳过 Node 低于 20 的候选」 rule
-//! belong to the remote environment page, which extends `dsh_tool` below rather
-//! than re-deriving it (ADR-0005 追加).
-
 use crate::ssh::{
     HostError, HostErrorKind, HostTransport, RemoteCall, RemoteHost, RemoteOutput, Shell,
     DEFAULT_TIMEOUT,
@@ -27,31 +6,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Marks the answer. Read back between these, never around them.
 pub const MARK: &str = "<<<DSH-JSON>>>";
 pub const END: &str = "<<<DSH-END>>>";
 
-/// Marks the line a [`measured_argv`] wrapper appends to its command's log: the
-/// exit status. A detached process is nobody's child, so nothing can `wait` for
-/// it — this line written next to its own output is the only place its outcome
-/// exists (see [`measured_argv`]).
 pub const EXIT_MARK: &str = "<<<DSH-EXIT>>>";
 
-/// POSIX single-quoting: the one escaping rule every remote script uses, and
-/// the reason a path with a space or a quote in it survives.
-///
-/// A remote word goes through **two** shells — the local ssh argv, which joins
-/// the command words with spaces, and the remote login shell, which splits them
-/// again. Both are ordinary shells, so one rule covers both.
 pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Reads the marked JSON block out of a script's stdout.
-///
-/// A missing block and unreadable JSON are both 「远端命令失败」: the remote side
-/// did not do what it was asked, and its stderr is the best explanation there
-/// is.
 pub fn parse_marked<T: DeserializeOwned>(out: &RemoteOutput) -> Result<T, HostError> {
     let payload =
         between_markers(&out.stdout).ok_or_else(|| failed(out, "远端脚本没有返回结果标记"))?;
@@ -78,10 +41,6 @@ fn failed(out: &RemoteOutput, note: &str) -> HostError {
     HostError::remote_command(message)
 }
 
-/// Runs one script and reads its marked JSON answer. The shell is the caller's
-/// choice: a script that resolves a tool by name needs the login shell; one that
-/// only touches files does not, and pays a second for it on a machine whose
-/// `~/.bashrc` loads conda.
 pub async fn json<T: DeserializeOwned>(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -104,11 +63,6 @@ pub async fn json<T: DeserializeOwned>(
 /// for standing still.
 const NPM_VIEW_TIMEOUT: Duration = Duration::from_secs(60);
 
-// ---------------------------------------------------------------------------
-// The connection test
-// ---------------------------------------------------------------------------
-
-/// A machine's system, as reported by `uname`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSystem {
     pub os: String,
@@ -116,9 +70,6 @@ pub struct RemoteSystem {
     pub arch: String,
 }
 
-/// One probe of one tool on a remote machine: the absolute path the login shell
-/// resolves it to, and what `--version` said. `None` means the machine has no
-/// such command, which is a fact to report, not an error.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteTool {
     pub path: String,
@@ -138,17 +89,8 @@ pub struct ConnectionTest {
     pub message: Option<String>,
     pub system: Option<RemoteSystem>,
     pub home: Option<String>,
-    /// The launcher's data directory *on that machine*, settled there: `~` is
-    /// that machine's home directory, and one directory typed two ways is one
-    /// path — only that machine can settle a path at all. `None` when the value
-    /// the user typed could not be settled, which `data_dir_problem` explains.
     pub data_dir: Option<String>,
-    /// Why the configured data directory could not be settled on that machine —
-    /// a relative path, or a `~用户名` the launcher will not expand. The record
-    /// keeps what the user typed, and this is what the page says about it.
     pub data_dir_problem: Option<String>,
-    /// Whether that directory is already there. A fresh host has none until the
-    /// launcher first writes something into it.
     pub data_dir_exists: bool,
     pub node: Option<RemoteTool>,
     pub pnpm: Option<RemoteTool>,
@@ -190,15 +132,12 @@ impl ConnectionTest {
     }
 }
 
-/// The script's answer, field for field.
 #[derive(Deserialize)]
 struct Facts {
     os: String,
     release: String,
     arch: String,
     home: String,
-    /// Settled by the script *there*; `None` with a reason in
-    /// `data_dir_problem` when the configured value cannot be settled.
     data_dir: Option<String>,
     data_dir_problem: Option<String>,
     data_dir_exists: bool,
@@ -206,79 +145,45 @@ struct Facts {
     pnpm: Option<RemoteTool>,
 }
 
-/// Runs the connection test on one host.
-///
-/// `data_dir` is the host record's configured data directory, or `None` for the
-/// default. The script settles it *there* — `~`, `.` / `..` and existence are
-/// facts only that machine has — and the answer is what the launcher writes
-/// down, so no later script is handed a `~` to misread.
 pub async fn connection_test(
     transport: &dyn HostTransport,
     host: &RemoteHost,
     data_dir: Option<&str>,
 ) -> ConnectionTest {
     let script = connection_test_script(data_dir);
-    // Resolves `node` / `pnpm` by name in that machine's own shell: login.
     match json::<Facts>(transport, host, script, DEFAULT_TIMEOUT, Shell::Login).await {
         Ok(facts) => ConnectionTest::answered(facts),
         Err(err) => ConnectionTest::refused(err),
     }
 }
 
-/// The versions one remote machine has installed, read from that machine.
-///
-/// The launcher's records say which versions the user asked for on that host;
-/// only the machine can say what is really in its versions directory and
-/// whether each version's bin is there — a directory left behind by an install
-/// that stopped early is not a version anyone can start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteInstalledVersion {
-    /// The directory's name under `versions/`, which is the version string.
     pub name: String,
     pub dir: String,
-    /// Whether that version's bin exists and is not empty. The layout is the
-    /// local launcher's (`launch::version_bin`), applied on that machine.
     pub bin_ready: bool,
 }
 
-/// Named `dsh` on one machine: what the command there is and, when it is one of
-/// the launcher's links, the version directory it runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct RemotePathLink {
-    /// `absent`, `symlink`, `script` (a wrapper the launcher wrote) or `foreign`
-    /// (something the user installed).
     #[serde(default)]
     pub state: String,
-    /// The version directory a link runs; empty when there is no link.
     #[serde(default)]
     pub target: String,
 }
 
-/// One machine's versions directory and its PATH registration, from the one
-/// answer [`installed_versions`] reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteVersions {
     pub versions: Vec<RemoteInstalledVersion>,
     pub link: RemotePathLink,
 }
 
-/// What one machine's `npm view` said about `@deepseek-ai/dsh`: the version
-/// list and the publish times, both **as text** — the same two strings the
-/// local `npm view` hands over, so one conversion serves both sources.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct NpmListings {
     pub versions: String,
     pub time: String,
 }
 
-/// The versions installed under `versions_dir`, as the machine describes them,
-/// with the `dsh` command that machine has on PATH.
-///
-/// `known` is every version directory the launcher's records claim for that
-/// host — the same list `crate::pathlink` consults here, so a link pointing into
-/// one of them is the launcher's on both machines. A caller that only wants the
-/// versions may pass none: the link state is then still reported, just never as
-/// the launcher's own.
 pub async fn installed_versions(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -294,8 +199,6 @@ pub async fn installed_versions(
     decode_remote_versions(&out)
 }
 
-/// What `@deepseek-ai/dsh` can be installed from on one machine, asked of that
-/// machine's own npm against the registry its host record names.
 pub async fn available_versions(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -311,12 +214,6 @@ pub async fn available_versions(
     .await
 }
 
-// ---------------------------------------------------------------------------
-// Following one detached command
-// ---------------------------------------------------------------------------
-
-/// What one read of a remote log left behind: the text appended since the
-/// previous offset, and whether the process tree is still there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TailChunk {
     pub text: String,
@@ -326,16 +223,8 @@ pub struct TailChunk {
     pub alive: bool,
 }
 
-/// The most one tail read returns. A log that grew past this while the launcher
-/// was not reading it is read from its end: the follower needs the tail, not
-/// every byte in between, and a single read must not carry a whole file's
-/// growth into memory (base64 text, decoded bytes and the final string at once).
 pub const MAX_TAIL_BYTES: usize = 256 * 1024;
 
-/// How much longer than the wait it asks for one remote call may take: the ssh
-/// connection (which may spend [`crate::ssh`'s connect timeout on a machine
-/// that is slow to answer), an interactive login shell starting, the work over
-/// there, and the answer coming back.
 const WAIT_OVERHEAD_SECS: u64 = 30;
 
 /// The budget for a call whose script waits `wait_secs` **on that machine**.
@@ -348,8 +237,6 @@ fn budget_for(wait_secs: u64) -> Duration {
     Duration::from_secs(wait_secs + WAIT_OVERHEAD_SECS)
 }
 
-/// Reads a remote log from `offset`, waiting **on that machine** for output, for
-/// the process to go, or for the budget, whichever comes first.
 pub async fn tail(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -385,19 +272,8 @@ pub async fn tail(
 /// would otherwise grow the buffer for as long as it runs.
 pub(crate) const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
 
-/// How much of a line that was cut at [`MAX_LOG_LINE_BYTES`] is kept as its
-/// readable stand-in. The cut line is a progress bar or a runaway dump, and what
-/// the reader needs from it is that something was there, not its bytes.
 pub(crate) const CUT_LINE_PREFIX_BYTES: usize = 1024;
 
-/// Moves whole lines out of a pending buffer and leaves at most
-/// [`MAX_LOG_LINE_BYTES`] of an unfinished one behind.
-///
-/// A line that grows past the cap is cut and the rest of it is dropped: the
-/// buffer is a window on the tail of a log, and a progress bar with no newline
-/// in it is not something to hold on to. Only a short prefix of it travels on,
-/// so a single line can never carry the buffer's whole weight into a task log.
-/// Returns whether a line was cut, so the caller can say so.
 pub(crate) fn take_log_lines(pending: &mut String, lines: &mut Vec<String>) -> bool {
     while let Some(at) = pending.find('\n') {
         lines.push(pending[..at].trim_end_matches('\r').to_string());
@@ -406,8 +282,6 @@ pub(crate) fn take_log_lines(pending: &mut String, lines: &mut Vec<String>) -> b
     if pending.len() <= MAX_LOG_LINE_BYTES {
         return false;
     }
-    // Cut on a character boundary: the buffer is UTF-8 and a byte index inside
-    // a character would panic.
     let mut end = CUT_LINE_PREFIX_BYTES.min(pending.len());
     while !pending.is_char_boundary(end) {
         end -= 1;
@@ -417,7 +291,6 @@ pub(crate) fn take_log_lines(pending: &mut String, lines: &mut Vec<String>) -> b
     true
 }
 
-/// Whether the process tree one detached spawn started is still there.
 pub async fn alive(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -433,9 +306,6 @@ pub async fn alive(
     Ok(parse_marked::<Answer>(&out)?.alive)
 }
 
-/// One listener on a port **on that machine**: its pid when `ss` could name it,
-/// the command `ps` reports and its command line. A listener belonging to another
-/// user comes back without a pid and with both empty — 「被占着，但说不出是谁」.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemotePortOwner {
     pub pid: Option<i32>,
@@ -443,12 +313,6 @@ pub struct RemotePortOwner {
     pub args: String,
 }
 
-/// Who holds `port` on that machine. `None` = nothing is listening there; `Err`
-/// = the machine could not tell (for example it has no `ss`), which the caller
-/// must treat as 不可判断 rather than 端口空闲.
-///
-/// The probe runs **there**; a local `lsof` would answer about this Mac's
-/// listeners (`crate::process::probe_port_owner` is that half).
 pub async fn port_owner(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -480,24 +344,12 @@ pub async fn port_owner(
     }))
 }
 
-/// What one attempt to spend an instance URL's launch token left behind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteMint {
-    /// The HTTP status, 0 when that machine has no `curl` (or the request never
-    /// got an answer).
     pub status: u16,
-    /// The `Set-Cookie` pair, when the instance sent one.
     pub cookie: Option<String>,
 }
 
-/// Asks **that machine** to spend one instance URL's launch token, and reports
-/// what its instance answered.
-///
-/// The token belongs to an instance listening on that machine's loopback, so
-/// only a request made there can say whether it is still accepted (ADR-0006:
-/// the same URL read from here would reach a different service). Whether the
-/// answer counts as 「认证成功」 is [`crate::native`]'s business — the cookie name
-/// is bound to the authority — and that decision stays in one place.
 pub async fn mint_headers(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -539,8 +391,6 @@ pub async fn log_size(
     Ok(parse_marked::<Size>(&out)?.offset)
 }
 
-/// Whether one file is there and not empty — the local rule a version's `bin.js`
-/// is checked with (`-s`), asked of the machine that owns the file.
 pub async fn file_ready(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -556,13 +406,6 @@ pub async fn file_ready(
     Ok(parse_marked::<Ready>(&out)?.ready)
 }
 
-/// When one pid started, as that machine's own `/proc/<pid>/stat` records it
-/// (field 22: clock ticks since boot). A pid number alone is not an identity —
-/// the kernel reuses it — so this is what tells the process the launcher started
-/// from a later one wearing the same number (ADR-0007 §3).
-///
-/// `None` means the pid is not there (or the file cannot be read): the caller
-/// decides whether that is "already gone" or "cannot check".
 pub async fn process_start_time(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -599,13 +442,8 @@ pub async fn read_file_optional(
     decode_blob(&out).map(Some)
 }
 
-/// The exit status [`READ_FILE`] uses for 「这台机器上没有这个文件」.
 const READ_FILE_MISSING: i32 = 2;
 
-/// Removes one remote path. Not being there is already the state the caller
-/// asked for. The callers aim it at a directory they computed from that host's
-/// own data directory (a version tree, the dedicated DSH_HOME) — and at the one
-/// file an instance may own, the icon inside its HOME.
 pub async fn remove_dir(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -617,10 +455,6 @@ pub async fn remove_dir(
     decode_ack(&out)
 }
 
-/// Whether that machine's npm knows one version of the launcher's package —
-/// which decides between installing it from npm there and building it from
-/// source there. `registry` empty means "use that machine's own npm
-/// configuration".
 pub async fn npm_has_version(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -631,7 +465,6 @@ pub async fn npm_has_version(
     struct Answer {
         exists: bool,
     }
-    // `npm view`: the name is resolved in that machine's own shell, so login.
     let out = transport
         .run(
             host,
@@ -641,53 +474,30 @@ pub async fn npm_has_version(
     Ok(parse_marked::<Answer>(&out)?.exists)
 }
 
-// ---------------------------------------------------------------------------
-// The environment probe
-// ---------------------------------------------------------------------------
-
-/// One candidate the probe passed over, and why. A remote host passes over a
-/// Node below the recommended major and says so instead of using it silently
-/// (ADR-0005 追加 2); the local host only warns about one and keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct RemoteSkipped {
     pub path: String,
     #[serde(default)]
     pub version: String,
-    /// `below-minimum` (its major is under the floor the launcher drives),
-    /// `unparsable` (a version the launcher cannot read) or `unusable` (a
-    /// hand-typed path that is not there or would not run). Codes, not
-    /// sentences: the page renders them in the user's language.
     pub reason: String,
-    /// The major the candidate reported, when the reason is about a version.
     #[serde(default)]
     pub major: Option<u64>,
 }
 
-/// One tool as a remote probe resolved it: where it is, what it says, which of
-/// the three sources it came from, and everything passed over on the way.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RemoteToolStatus {
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
-    /// `manual` | `system` | `fallback`; absent when nothing was found.
     #[serde(default)]
     pub source: Option<String>,
     #[serde(default)]
     pub skipped: Vec<RemoteSkipped>,
 }
 
-/// What one remote probe learned about a host's environment: the shell it was
-/// read from, the version managers that machine has, and both tools resolved in
-/// the launcher's fixed candidate order.
-///
-/// The machine's `PATH` is not carried back: the walk inside the probe uses it,
-/// and everything the launcher does afterwards on that machine uses the absolute
-/// paths the walk resolved (ADR-0005 追加 1).
 #[derive(Clone, Debug, Deserialize)]
 pub struct RemoteEnvironment {
-    /// The shell the answer came from — that machine's bash.
     pub shell: String,
     #[serde(default)]
     pub managers: Vec<String>,
@@ -695,13 +505,6 @@ pub struct RemoteEnvironment {
     pub pnpm: RemoteToolStatus,
 }
 
-/// Runs the environment probe on one host: a single interactive login shell that
-/// reads `PATH`, walks the launcher's candidates in order and reports what each
-/// one turned out to be.
-///
-/// The budget is larger than one command's: that shell starts an interactive
-/// login shell (rc files included) and then runs `--version` for every candidate
-/// it walks.
 pub async fn environment(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -712,25 +515,15 @@ pub async fn environment(
     json::<RemoteEnvironment>(transport, host, script, ENVIRONMENT_TIMEOUT, Shell::Login).await
 }
 
-/// How long the environment probe may take. Longer than one command's budget:
-/// that shell starts an interactive login shell (rc files and all) and then runs
-/// `--version` for every candidate it walks.
 const ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// What one hand-typed path turned out to be on that machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManualProbe {
-    /// The file is there and answered `--version` with this.
     Version(String),
-    /// There is no such file there.
     Missing,
-    /// The file is there but would not run.
     Unusable,
 }
 
-/// Runs one hand-typed path's `--version` **on that machine**: the launcher
-/// cannot execute a file on another computer, so this is the only way to accept
-/// a path there at all (ADR-0005 追加 3).
 pub async fn probe_manual_tool(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -758,15 +551,6 @@ struct ManualFacts {
     version: Option<String>,
 }
 
-/// The Linux install directories a remote probe searches after the machine's own
-/// `PATH` (ADR-0005 追加 4): Linuxbrew, the nvm / fnm version directories, the
-/// pnpm official script's directory, and the two user / system bin directories.
-///
-/// The probe walks exactly this list, so what the page reports is what any later
-/// work on that machine will find; the wildcard entries are expanded there.
-///
-/// `$HOME` and the wildcards stay as written — only that machine's shell can
-/// expand either, and expanding them here would read *this* machine's home.
 pub fn fallback_bins() -> Vec<&'static str> {
     vec![
         "/home/linuxbrew/.linuxbrew/bin",
@@ -785,20 +569,6 @@ pub fn fallback_bins() -> Vec<&'static str> {
     ]
 }
 
-/// One command the user runs **on this Mac** to run a script on a remote host.
-///
-/// Quoted for two shells because it goes through two: the user's own shell has
-/// to hand ssh a single argument, and ssh joins its arguments with spaces and
-/// lets the login shell at the other end split them again. The inner quotes are
-/// what make the script reach `bash -ilc` as one word — the same shape
-/// [`crate::ssh::script_command`] uses, so the command runs in the shell the
-/// probe read.
-///
-/// The outer quoting is single-quote escaping rather than a plain pair of
-/// quotes, so a script that quotes a path **itself** — `ls -la '<一个带空格的
-/// 目录>'`, where the directory may also carry a single quote — survives the
-/// user's own shell. A command therefore must not contain a double quote: the
-/// inner pair would end early, and the ones below are written without one.
 pub fn ssh_command(target: &str, recipe: &str) -> String {
     let shell = crate::ssh::REMOTE_SHELL;
     format!(
@@ -826,34 +596,14 @@ pub fn node_install_recipe(managers: &[String]) -> &'static str {
     }
 }
 
-/// The pnpm install recipe for a Linux machine: the official script rather than
-/// `npm install -g pnpm`, because it needs no Node to run and it writes to
-/// `~/.local/share/pnpm` — a directory the probe already searches, so a machine
-/// that follows this instruction is found again without further setup.
 pub fn pnpm_install_recipe() -> &'static str {
     "curl -fsSL https://get.pnpm.io/install.sh | sh -"
 }
 
-// ---------------------------------------------------------------------------
-// Scripts
-// ---------------------------------------------------------------------------
-
-/// Escapes one value for the JSON the script builds. A login shell prints
-/// things of its own, and a banner full of quotes must not be able to break the
-/// answer apart: control characters go, backslashes and quotes are escaped.
 const ESCAPER: &str = r#"dsh_esc() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }"#;
 
-/// The connection test: what this machine is, where its home and the launcher's
-/// data directory are, and what `node` / `pnpm` resolve to.
-///
-/// It runs in an **interactive** login shell, which is the point: on a machine
-/// where `~/.bashrc` puts Linuxbrew's Node 26 in front of apt's Node 18, only
-/// that shell sees the Node the user's terminal sees — and execution later uses
-/// the same shape, so the page and the work agree (ADR-0005 追加).
-///
-/// `%%DATA_DIR%%` is the host record's data directory, quoted, or empty.
 const CONNECTION_TEST: &str = r#"set -u
 %%ESCAPER%%
 
@@ -994,19 +744,6 @@ case "$dsh_state" in
 esac
 "#;
 
-/// The versions installed under one directory, with whether each one's bin is
-/// ready.
-///
-/// The layout is [`crate::launch::version_bin`]'s, applied on that machine: a
-/// repo checkout carries `apps/cli/lib/bin.js`, an npm tree carries
-/// `node_modules/@deepseek-ai/dsh/lib/bin.js`, and a version whose install
-/// stopped early has neither. A versions directory that is not there yet is an
-/// empty list — a machine with nothing installed is a machine, not an error.
-///
-/// The same answer carries what `dsh` on that machine's PATH is
-/// ([`crate::pathlink`] applied there), because the page shows the registration
-/// on the very rows it gets from this call and a second ssh would ask one
-/// machine two things at two moments.
 const INSTALLED_VERSIONS: &str = r#"set -u
 %%ESCAPER%%
 dsh_versions_dir=%%PATH%%
@@ -1030,13 +767,6 @@ printf '<<<DSH-JSON>>>{"versions":[%s],"link":{"state":"%s","target":"%s"}}<<<DS
   "$dsh_rows" "$dsh_state" "$(dsh_esc "$dsh_target")"
 "#;
 
-/// `@deepseek-ai/dsh` as **that machine's** npm sees it, against the registry
-/// its host record names — a machine whose registry is its own can install
-/// versions this Mac's npm has never heard of, and listing them from here would
-/// offer the user a list that cannot be installed there.
-///
-/// The two listings travel as JSON *text*, the shape the local `npm view` hands
-/// over, so one conversion serves both sources.
 const AVAILABLE_VERSIONS: &str = r#"set -u
 %%ESCAPER%%
 dsh_npm=$(command -v npm 2>/dev/null || true)
@@ -1054,9 +784,6 @@ dsh_json=$(printf '{"versions":"%s","time":"%s"}' "$(dsh_esc "$dsh_versions")" "
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
 
-/// The link-state prologue both remote scripts start with, with the marker
-/// filled in quoted. The version directories come from the caller's own
-/// `dsh_versions`, so one list serves both the link check and the script's work.
 fn link_state() -> String {
     fill(
         LINK_STATE,
@@ -1067,8 +794,6 @@ fn link_state() -> String {
     )
 }
 
-/// The installed-versions script for one host's `versions` directory (that
-/// host's data directory plus `/versions`, which the caller resolves).
 pub fn installed_versions_script(versions_dir: &str, versions: &[&str]) -> String {
     fill(
         INSTALLED_VERSIONS,
@@ -1080,7 +805,6 @@ pub fn installed_versions_script(versions_dir: &str, versions: &[&str]) -> Strin
         ],
     )
 }
-/// The versions-query script for one registry.
 pub fn available_versions_script(registry: &str) -> String {
     fill(
         AVAILABLE_VERSIONS,
@@ -1091,8 +815,6 @@ pub fn available_versions_script(registry: &str) -> String {
     )
 }
 
-/// The connection test's script. `data_dir` is the host's configured data
-/// directory (`None` = let that machine pick its default).
 pub fn connection_test_script(data_dir: Option<&str>) -> String {
     fill(
         CONNECTION_TEST,
@@ -1103,20 +825,6 @@ pub fn connection_test_script(data_dir: Option<&str>) -> String {
     )
 }
 
-/// The environment probe: what this machine's **interactive login shell** gives,
-/// and what the launcher's candidates resolve to when walked in order.
-///
-/// Interactive *and* login, not just login: on Linux `~/.bashrc` is where
-/// brew, nvm, fnm and miniconda put themselves on `PATH`, and only an
-/// interactive shell reads it — a `bash -lc` would miss the very Node the user's
-/// terminal runs (ADR-0005 追加 1). Execution later uses the same shell shape,
-/// so what the page reports and what runs are the same thing.
-///
-/// A Node below `%%NODE_MIN%%` is passed over and the walk continues; only when
-/// nothing qualifies is the newest one below the floor used, and it stays
-/// reported as passed over (ADR-0005 追加 2). pnpm below its floor drives no
-/// install, so there the walk simply finds nothing — the same call the local
-/// resolver makes.
 const ENVIRONMENT: &str = r#"set -u
 %%ESCAPER%%
 
@@ -1242,16 +950,10 @@ dsh_json=$(printf '{"shell":"%s","managers":[%s],"node":%s,"pnpm":%s}' \
 printf '<<<DSH-JSON>>>%s<<<DSH-END>>>' "$dsh_json"
 "#;
 
-/// The environment probe's script. `manual_node` / `manual_pnpm` are the user's
-/// hand-typed paths on that machine, or `None`.
 pub fn environment_script(manual_node: Option<&str>, manual_pnpm: Option<&str>) -> String {
     environment_script_with(manual_node, manual_pnpm, &fallback_bins())
 }
 
-/// [`environment_script`] with the install-directory list injected, the way
-/// `runtime::candidates_with` injects the local one: the walk over that list is
-/// what has to be driven against a fixture, because the test machine's own home
-/// directory is not the remote machine's.
 pub(crate) fn environment_script_with(
     manual_node: Option<&str>,
     manual_pnpm: Option<&str>,
@@ -1279,9 +981,6 @@ pub(crate) fn environment_script_with(
     )
 }
 
-/// The probe of one hand-typed path: is it there, and does it answer
-/// `--version`. The order is the answer — the file has to exist before the
-/// launcher judges whether it runs.
 const MANUAL_TOOL: &str = r#"set -u
 %%ESCAPER%%
 dsh_path=%%PATH%%
@@ -1306,23 +1005,6 @@ pub fn manual_tool_script(path: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// DSH_HOME 与 Profile
-// ---------------------------------------------------------------------------
-
-/// Makes sure one DSH_HOME exists on that machine and answers where it is.
-///
-/// The path is the user's, typed for a machine they are not sitting at, so
-/// **that machine** is what resolves it: `~` expands against its own `$HOME`
-/// (the launcher's `normalize_dir_path` would expand it against this Mac's),
-/// `..` rows are resolved as text the way the local rule does — no symlink
-/// resolution, so the path the record keeps is the path the user wrote in its
-/// settled spelling — and the directory is created if it is not there yet,
-/// exactly as [`crate::commands::create_home_record_in`] does for 本机.
-///
-/// A path that cannot be used there fails here, with what the machine said,
-/// instead of becoming a record pointing at a directory that does not exist
-/// where the instance will run.
 const HOME_PATH: &str = r#"set -u
 %%ESCAPER%%
 dsh_raw=%%PATH%%
@@ -1366,10 +1048,6 @@ fi
 printf '<<<DSH-JSON>>>{"path":"%s"}<<<DSH-END>>>' "$(dsh_esc "$dsh_path")"
 "#;
 
-/// That machine's home directory, and whether it already has a `~/.dsh` —
-/// [`crate::config::ensure_user_dsh_home`]'s question asked of the machine that
-/// can answer it (that sweep expands `~` against *this* Mac's home, so it can
-/// only ever be about 本机).
 const USER_HOME: &str = r#"set -u
 %%ESCAPER%%
 dsh_user_home=${HOME:-}
@@ -1383,10 +1061,6 @@ printf '<<<DSH-JSON>>>{"home":"%s","dsh_home":"%s","exists":%s}<<<DSH-END>>>' \
   "$(dsh_esc "$dsh_user_home")" "$(dsh_esc "$dsh_dsh_home")" "$dsh_exists"
 "#;
 
-/// The profile directories under one DSH_HOME on that machine. Directories
-/// only, and the two reserved names left out, so the list is the same list
-/// [`crate::profile::profiles_dir`] yields here. A HOME with no `profiles/`
-/// yet is an empty list, not an error.
 const PROFILES: &str = r#"set -u
 %%ESCAPER%%
 dsh_dir=%%DIR%%
@@ -1405,8 +1079,6 @@ done
 printf '<<<DSH-JSON>>>{"profiles":[%s]}<<<DSH-END>>>' "$dsh_names"
 "#;
 
-/// Copies one profile directory on that machine. The checks mirror the local
-/// flow's, so both machines answer the same situation the same way.
 const COPY_PROFILE: &str = r#"set -u
 dsh_from=%%FROM%%
 dsh_to=%%TO%%
@@ -1429,7 +1101,6 @@ fi
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Renames one profile directory on that machine.
 const RENAME_PROFILE: &str = r#"set -u
 dsh_from=%%FROM%%
 dsh_to=%%TO%%
@@ -1448,7 +1119,6 @@ fi
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Removes one profile directory on that machine.
 const DELETE_PROFILE: &str = r#"set -u
 dsh_target=%%PATH%%
 if [ ! -d "$dsh_target" ]; then
@@ -1649,17 +1319,6 @@ case "$dsh_action" in
 esac
 "#;
 
-/// One profile's own files on the machine that owns it: the `package.json` the
-/// profile declares its layers and dependencies in, and the version of every
-/// package installed under its `node_modules`.
-///
-/// One call for the whole profile, not one per package: this is the projection
-/// the plugins page falls back to whenever no instance answers, and a connection
-/// per file would make the fallback slower than what it stands in for (the same
-/// rule the dependency self-check follows). The `package.json` travels as base64
-/// because it is a document and not a line of text; each version is picked out
-/// of its own manifest here, so a caller gets the one field it needs without a
-/// round trip per package.
 const PROFILE_PACKAGES: &str = r#"set -u
 %%ESCAPER%%
 dsh_dir=%%PATH%%
@@ -1705,11 +1364,6 @@ fi
 printf '<<<DSH-JSON>>>{"manifest":%s,"installed":[%s]}<<<DSH-END>>>' "$dsh_manifest" "$dsh_rows"
 "#;
 
-/// The PATH registration on one machine: `register` puts `version` there,
-/// `unregister` takes the launcher's link out, `unlink` withdraws it only while
-/// it runs `version` (a version deletion). `versions` is every version directory
-/// the launcher knows on that machine — a link into one of them is the
-/// launcher's to replace or remove.
 pub fn path_link_script(action: &str, version: Option<&str>, versions: &[&str]) -> String {
     fill(
         PATH_LINK,
@@ -1722,7 +1376,6 @@ pub fn path_link_script(action: &str, version: Option<&str>, versions: &[&str]) 
     )
 }
 
-/// Runs [`path_link_script`] on that machine and reads its answer.
 pub async fn path_link(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1739,9 +1392,6 @@ pub async fn path_link(
     decode_ack(&out)
 }
 
-/// Makes one profile on that machine: `profiles_dir` is the HOME's `profiles/`,
-/// `homes_root` that machine's `<数据目录>/homes` (where a template may be
-/// found), and `user_default` says whether the HOME is the user's own `~/.dsh`.
 pub async fn create_profile(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1830,7 +1480,6 @@ pub fn delete_profile_script(path: &str) -> String {
     fill(DELETE_PROFILE, &[("%%PATH%%", quote(path))])
 }
 
-/// The script that reads one profile's own files on that machine.
 pub fn profile_packages_script(profile_dir: &str) -> String {
     fill(
         PROFILE_PACKAGES,
@@ -1841,8 +1490,6 @@ pub fn profile_packages_script(profile_dir: &str) -> String {
     )
 }
 
-/// Creates (or finds) that machine's DSH_HOME for `path` and answers its
-/// absolute path **as that machine resolves it**.
 pub async fn ensure_home_path(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1859,7 +1506,6 @@ pub async fn ensure_home_path(
     Ok(answer.path)
 }
 
-/// That machine's home directory, and whether it already has a `~/.dsh`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct RemoteUserHome {
     pub home: String,
@@ -1881,7 +1527,6 @@ pub async fn user_home(
     .await
 }
 
-/// The profile directories under one DSH_HOME on that machine.
 pub async fn list_profiles(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1893,7 +1538,6 @@ pub async fn list_profiles(
     decode_profiles(&out)
 }
 
-/// Copies one profile directory, on that machine.
 pub async fn copy_profile(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1906,7 +1550,6 @@ pub async fn copy_profile(
     decode_ack(&out)
 }
 
-/// Renames one profile directory, on that machine.
 pub async fn rename_profile(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1919,7 +1562,6 @@ pub async fn rename_profile(
     decode_ack(&out)
 }
 
-/// Removes one profile directory, on that machine.
 pub async fn delete_profile(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -1931,26 +1573,12 @@ pub async fn delete_profile(
     decode_ack(&out)
 }
 
-/// One profile's own files, as that machine answered: the `package.json` it
-/// declares its layers in (its bytes, or `None` when the profile has none), and
-/// the version of every package installed under its `node_modules`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteProfilePackages {
     pub manifest: Option<Vec<u8>>,
     pub installed: std::collections::BTreeMap<String, String>,
 }
 
-/// Reads several files in **one** call: each one's bytes base64-encoded, or
-/// `null` when it is not there. The whole path list travels as one single-quoted
-/// value, so a path with a space, a quote, `$` or a backtick in it arrives
-/// literally and the loop splits on newlines only.
-///
-/// This exists for the remote start's preflight, which asks about the version's
-/// `bin.js`, the profile's manifest, the version's bundle and three profile
-/// documents before it may spawn anything. One question per file is honest and
-/// costs a round trip each; on a machine whose login shell takes a second that is
-/// a second per file, so they are asked together. Everything about layout stays
-/// the caller's: this only reads what it is told.
 const READ_FILES: &str = r#"set -u
 set -f
 %%ESCAPER%%
@@ -1973,8 +1601,6 @@ IFS=$dsh_old_ifs
 printf '<<<DSH-JSON>>>{"files":[%s]}<<<DSH-END>>>' "$dsh_rows"
 "#;
 
-/// Reads the files at `paths` in one round trip. `None` is 「那台机器上没有这个
-/// 文件」; the order is the order of `paths`.
 pub async fn read_files(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -2016,11 +1642,6 @@ pub fn read_files_script(paths: &[String]) -> String {
     )
 }
 
-/// Reads one profile's own files on the machine that owns it, in one call.
-///
-/// Nothing here is a claim about the instance: this is the file projection the
-/// plugins page uses when no instance answers (ADR-0001 — the running DSH owns
-/// plugin state), and it stays thinner than a live list on purpose.
 pub async fn profile_packages(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -2032,8 +1653,6 @@ pub async fn profile_packages(
     decode_profile_packages(&out)
 }
 
-/// Reads one file, as base64 — the ssh channel is text, and version manifests,
-/// icons and patch documents must arrive byte for byte.
 const READ_FILE: &str = r#"set -u
 dsh_path=%%PATH%%
 if [ ! -f "$dsh_path" ]; then
@@ -2044,9 +1663,6 @@ dsh_data=$(base64 < "$dsh_path" | tr -d '\n')
 printf '<<<DSH-JSON>>>{"data":"%s"}<<<DSH-END>>>' "$dsh_data"
 "#;
 
-/// Writes one file, creating its directory. The bytes travel base64-encoded in
-/// the script itself: the payloads the launcher writes (an icon, a small JSON
-/// document) are far below the argv limit.
 const WRITE_FILE: &str = r#"set -u
 dsh_path=%%PATH%%
 mkdir -p "$(dirname "$dsh_path")" || exit 2
@@ -2054,7 +1670,6 @@ printf %s %%BASE64%% | base64 -d > "$dsh_path" || exit 3
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Lists one directory's entry names (hidden files included).
 const LIST_DIR: &str = r#"set -u
 %%ESCAPER%%
 dsh_path=%%PATH%%
@@ -2072,25 +1687,11 @@ done
 printf '<<<DSH-JSON>>>{"entries":[%s]}<<<DSH-END>>>' "$dsh_names"
 "#;
 
-/// Stops one process. SIGTERM by pid, with the pid cross-checked against the
-/// running record by the caller before it gets here (ADR-0007): a pid may have
-/// been reused, and signalling the wrong process is the one unrecoverable
-/// mistake available on a remote machine.
 const STOP_PID: &str = r#"set -u
 kill -TERM %%PID%% 2>/dev/null || { printf '不能给进程 %s 发信号\n' %%PID%% >&2; exit 3; }
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Stops a whole process tree: the process group one detached spawn leads
-/// (its [`SPAWN`] ran under `setsid`, so its pid is the group's id), falling
-/// back to the process itself when it leads no group.
-///
-/// Killing only the leader is not enough for the case this exists for: a
-/// cancelled `pnpm install` leaves its helpers behind, and a helper holding the
-/// store's lock makes every later install on that machine wait.
-///
-/// Already gone counts as stopped — a second cancel, or an install that exited
-/// between the click and this call, is not a failure.
 const STOP_GROUP: &str = r#"set -u
 dsh_pid=%%PID%%
 if kill -TERM -- "-$dsh_pid" 2>/dev/null || kill -TERM "$dsh_pid" 2>/dev/null; then
@@ -2115,28 +1716,6 @@ else
 fi
 "#;
 
-/// Who holds one TCP port on that machine, as `ss` names it: the pid of the
-/// listening process, the short command name `ps` reports for that pid, and its
-/// full command line.
-///
-/// `ss` is where a port's occupant is visible — and unlike a probe done from
-/// here, it answers about **that** machine's listeners (ADR-0006). The number
-/// alone is not enough to move the occupant out of the way, so the name is read
-/// too; a listener this user does not own comes back without a pid, which is
-/// still the answer "occupied, by somebody else".
-///
-/// `ss` is looked up by name first and then at its usual absolute paths, because
-/// a non-login shell may not have `/usr/sbin` on `PATH`. A machine with no `ss`
-/// at all answers 「无法探测」 in an `error` field instead of 「端口空闲」, so the
-/// caller reports 不可判断 rather than starting a second DSH on a port it never
-/// saw.
-///
-/// The command line is read as well because the name alone cannot say what the
-/// process is: a DSH installed from npm runs as this machine's `node`, but the
-/// same DSH packaged as a Python single-file executable runs as `MainThread` and
-/// names itself `…/dsh/lib/bin.js` only in its argv. Judging by the name alone
-/// calls that one 「不是 DSH」, which reads on the page as 已停止 — the misreading
-/// ADR-0007 exists to prevent.
 const PORT_OWNER: &str = r#"set -u
 dsh_port=%%PORT%%
 dsh_ss=$(command -v ss 2>/dev/null || true)
@@ -2168,22 +1747,6 @@ printf '<<<DSH-JSON>>>{"occupied":true,"pid":%s,"command":"%s","args":"%s"}<<<DS
   "$dsh_pid" "$dsh_name" "$dsh_args"
 "#;
 
-/// Stops one instance's process tree **in one call**: checks the pid is still
-/// the process the launcher started, signals the group, and waits there for it
-/// to go.
-///
-/// The three steps belong together, and not only for speed. Split across three
-/// round trips, every answer describes a moment that has already passed by the
-/// time the next call is made — the identity check in particular is about the
-/// process *the signal is aimed at*, and asking it a second before in another
-/// session leaves room for the pid to be reused in between. Here the check, the
-/// signal and the confirmation happen in one shell, and a machine whose
-/// `~/.bashrc` loads conda pays that second once instead of three times.
-///
-/// `%%STARTED%%` is the start time recorded when the launcher spawned it; null
-/// means that machine could not be read at spawn time, which is answered as
-/// 「没能确认」 rather than guessed at. `%%WAIT%%` is how long the far side may
-/// wait for the tree to go.
 const STOP_RUN: &str = r#"set -u
 dsh_pid=%%PID%%
 dsh_started=%%STARTED%%
@@ -2223,9 +1786,6 @@ if ! { kill -TERM -- "-$dsh_pid" 2>/dev/null || kill -TERM "$dsh_pid" 2>/dev/nul
   exit 0
 fi
 
-// Polls in tenths of a second: a DSH that answers SIGTERM is usually gone
-// within one, and rounding that up to a whole second is the difference the
-// user sees between a snappy 停止 and a sluggish one.
 dsh_ticks=$((dsh_wait * 10))
 dsh_i=0
 while [ "$dsh_i" -lt "$dsh_ticks" ] && dsh_alive; do
@@ -2235,30 +1795,20 @@ done
 if dsh_alive; then dsh_answer lingering; else dsh_answer stopped; fi
 "#;
 
-/// What one [`stop_run`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// The signal reached the process tree and that machine stopped seeing it.
     Stopped,
-    /// Already gone: stopping twice is not an error.
     Gone,
-    /// The recorded pid now belongs to a different process (the kernel reused
-    /// the number), so the one the launcher started has exited.
     Reused {
         now: Option<u64>,
         recorded: Option<u64>,
     },
-    /// The pid is there but its start time could not be read at all.
     Unreadable,
-    /// The start time was never recorded, so identity cannot be checked.
     Unprepared,
-    /// The signal could not be delivered, and the process is still there.
     Refused,
-    /// Signalled, and still there when the wait ran out.
     Lingering,
 }
 
-/// Stops one instance's process tree on that machine, in one round trip.
 pub async fn stop_run(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -2316,19 +1866,6 @@ pub fn stop_run_script(pid: i32, started_at: Option<u64>, wait_secs: u64) -> Str
     )
 }
 
-/// Exchanges one instance URL's launch token for its session cookie **on that
-/// machine**, and reports what came back: the HTTP status and the raw
-/// `Set-Cookie` pair.
-///
-/// The request has to be made there. A remote instance binds that machine's own
-/// `127.0.0.1`, so asking the same URL from 本机 would be asking this Mac about a
-/// different service — the confusion ADR-0006 exists to prevent, and the reason
-/// the token cannot be trusted by trying it from here. Deciding whether the
-/// answer means 「认证成功」 is [`crate::native`]'s rule (the cookie name is bound
-/// to the authority); this script only carries the response.
-///
-/// No `curl` on that machine reads as status 0 with no cookie: 「问不出来」, which
-/// the caller treats as 「没有认证成功」 — never as success.
 const MINT_REMOTE: &str = r#"set -u
 dsh_url=%%URL%%
 dsh_curl=$(command -v curl 2>/dev/null || true)
@@ -2346,25 +1883,18 @@ else
 fi
 "#;
 
-/// The smallest thing the launcher can ask a machine to do: exit 0. It exists so
-/// the launcher's multiplexed connection is up before something has to ride it —
-/// `ssh -O forward` is a request to a master, it does not start one (ADR-0008).
 const HELLO: &str = "true";
 
 pub fn hello_script() -> String {
     HELLO.to_string()
 }
 
-/// How many bytes a log already holds. A file that is not there yet is zero:
-/// every caller here reads the size of a log it is about to append to.
 const LOG_SIZE: &str = r#"set -u
 dsh_bytes=$(wc -c < %%LOG%% 2>/dev/null | tr -d ' ')
 if [ -z "$dsh_bytes" ]; then dsh_bytes=0; fi
 printf '<<<DSH-JSON>>>{"offset":%s}<<<DSH-END>>>' "$dsh_bytes"
 "#;
 
-/// Whether one file exists and is not empty (`-s`), the rule a version's
-/// `bin.js` is checked with on 本机.
 const FILE_READY: &str = r#"set -u
 if [ -s %%PATH%% ]; then dsh_ready=true; else dsh_ready=false; fi
 printf '<<<DSH-JSON>>>{"ready":%s}<<<DSH-END>>>' "$dsh_ready"
@@ -2398,13 +1928,9 @@ dsh_quoted=$(dsh_esc "$dsh_target")
 printf '<<<DSH-JSON>>>{"path":"%s","data":"%s"}<<<DSH-END>>>' "$dsh_quoted" "$dsh_data"
 "#;
 
-/// The tail of one process's current output file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StdoutTail {
-    /// The file that output goes to, as that machine spells it. `None` when the
-    /// process writes to something that is not a file.
     pub path: Option<String>,
-    /// The last bytes of that file, as text.
     pub text: String,
 }
 
@@ -2507,21 +2033,12 @@ if dsh_alive; then dsh_living=true; else dsh_living=false; fi
 printf '<<<DSH-JSON>>>{"offset":%s,"data":"%s","alive":%s}<<<DSH-END>>>' "$dsh_end" "$dsh_data" "$dsh_living"
 "#;
 
-/// Removes one directory tree. A path that is not there is already what the
-/// caller wanted. The caller only ever aims this inside the host's own data
-/// directory (ADR-0006).
 const REMOVE_DIR: &str = r#"set -u
 dsh_path=%%PATH%%
 rm -rf -- "$dsh_path" || { printf '删不掉远端目录 %s\n' "$dsh_path" >&2; exit 2; }
 printf '<<<DSH-JSON>>>{"ok":true}<<<DSH-END>>>'
 "#;
 
-/// Whether that machine's npm knows one version of the launcher's package.
-///
-/// A version published only as a GitHub `dsh-v*` tag is not on npm anywhere, and
-/// the local installer forks to a source build for exactly that case. The
-/// answer has to come from the machine that will do the installing, because its
-/// registry is the one its install will read.
 const NPM_HAS_VERSION: &str = r#"set -u
 dsh_npm=$(command -v npm 2>/dev/null || true)
 if [ -z "$dsh_npm" ]; then
@@ -2556,9 +2073,6 @@ nohup setsid %%ARGV%% >> "$dsh_log" 2>&1 < /dev/null &
 printf '<<<DSH-JSON>>>{"pid":%s}<<<DSH-END>>>' "$!"
 "#;
 
-/// Fills a script's slots. The values are already quoted by the caller; a value
-/// is inserted once and never re-scanned, so a value that happens to spell
-/// another slot cannot inject anything.
 fn fill(script: &str, slots: &[(&str, String)]) -> String {
     let mut out = script.to_string();
     for (slot, value) in slots {
@@ -2606,8 +2120,6 @@ pub fn remove_dir_script(path: &str) -> String {
     fill(REMOVE_DIR, &[("%%PATH%%", quote(path))])
 }
 
-/// The script that asks whether that machine's npm knows one version. An empty
-/// `registry` means "let that machine's own npm configuration decide".
 pub fn npm_has_version_script(package: &str, registry: Option<&str>) -> String {
     let registry_arg = match registry.map(str::trim).filter(|r| !r.is_empty()) {
         Some(registry) => format!("--registry {}", quote(registry)),
@@ -2622,8 +2134,6 @@ pub fn npm_has_version_script(package: &str, registry: Option<&str>) -> String {
     )
 }
 
-/// The tail read for one remote log. The values are numbers and a quoted path,
-/// so nothing here can be read as shell syntax.
 pub fn tail_script(log_path: &str, offset: u64, pid: i32, wait_secs: u64) -> String {
     fill(
         TAIL,
@@ -2637,22 +2147,18 @@ pub fn tail_script(log_path: &str, offset: u64, pid: i32, wait_secs: u64) -> Str
     )
 }
 
-/// The size read for one remote log.
 pub fn log_size_script(log_path: &str) -> String {
     fill(LOG_SIZE, &[("%%LOG%%", quote(log_path))])
 }
 
-/// The readiness read for one remote file.
 pub fn file_ready_script(path: &str) -> String {
     fill(FILE_READY, &[("%%PATH%%", quote(path))])
 }
 
-/// The start-time read for one pid.
 pub fn start_time_script(pid: i32) -> String {
     fill(START_TIME, &[("%%PID%%", pid.to_string())])
 }
 
-/// The read of where one pid's output goes, and its last `max_bytes`.
 pub fn stdout_tail_script(pid: i32, max_bytes: usize) -> String {
     fill(
         STDOUT_TAIL,
@@ -2664,26 +2170,14 @@ pub fn stdout_tail_script(pid: i32, max_bytes: usize) -> String {
     )
 }
 
-/// The occupancy probe for one port on that machine.
 pub fn port_owner_script(port: u16) -> String {
     fill(PORT_OWNER, &[("%%PORT%%", port.to_string())])
 }
 
-/// The token exchange for one instance URL, made on that machine.
 pub fn mint_script(url: &str) -> String {
     fill(MINT_REMOTE, &[("%%URL%%", quote(url))])
 }
 
-/// The script for one detached process: `argv` is the command line (already the
-/// argv the launcher would run locally, never a shell string), `log_path` the
-/// remote file its output is appended to, and `path_dirs` the directories to put
-/// at the front of that process's `PATH`.
-///
-/// A remote DSH is started with an absolute `node`, but it looks `pnpm` up by
-/// name when the plugin manager installs or inspects a plugin — and an ssh
-/// session's `PATH` does not include a version-manager or standalone install.
-/// The caller passes the directories the launcher resolved on that machine, so
-/// the child `pnpm` resolves there without depending on the session's shell.
 pub fn spawn_script(argv: &[String], log_path: &str, path_dirs: &[String]) -> String {
     let command = argv
         .iter()
@@ -2698,8 +2192,6 @@ pub fn spawn_script(argv: &[String], log_path: &str, path_dirs: &[String]) -> St
             .map(|dir| quote(dir))
             .collect::<Vec<_>>()
             .join(":");
-        // `"$PATH"` is expanded by the remote shell, so the session's own `PATH`
-        // survives behind ours instead of being replaced.
         format!("export PATH={joined}:\"$PATH\"")
     };
     fill(
@@ -2742,17 +2234,10 @@ pub fn measured_argv(argv: &[String], cwd: &str) -> Vec<String> {
     ]
 }
 
-/// The exit status on one line of a log a [`measured_argv`] wrapper wrote, if
-/// that line is the status line. `None` for every other line, and for text that
-/// has no status line at all.
 pub fn exit_status_of(line: &str) -> Option<i32> {
     let rest = line.trim().strip_prefix(EXIT_MARK)?;
     rest.strip_suffix(END)?.trim().parse().ok()
 }
-
-// ---------------------------------------------------------------------------
-// The two machine actions that read something there
-// ---------------------------------------------------------------------------
 
 /// The shell text a terminal on this Mac runs on the other machine: land in the
 /// instance's DSH_HOME with the same variables and PATH the local instance
@@ -2765,11 +2250,6 @@ pub fn exit_status_of(line: &str) -> Option<i32> {
 /// terminal on that machine — their login shell, on a pty.
 pub fn terminal_script(home: &str, env: &[(String, String)], path_dirs: &[String]) -> String {
     let mut script = String::new();
-    // The version's own `node_modules/.bin` first, so a bare `dsh` is the CLI
-    // the launcher runs. 本机 writes a wrapper there for source checkouts; a
-    // remote directory cannot be written to without asking, and pnpm's own
-    // `.bin/dsh` needs no flag of ours — a directory that is not there costs
-    // nothing in PATH.
     if !path_dirs.is_empty() {
         let joined = path_dirs
             .iter()
@@ -2787,16 +2267,6 @@ pub fn terminal_script(home: &str, env: &[(String, String)], path_dirs: &[String
     script
 }
 
-/// The one command line a terminal on this Mac is handed to open a session on
-/// `target` that lands where the instance lives.
-///
-/// Two shells sit between the click and the session: the one inside the
-/// terminal parses this line, and the login shell at the other end parses what
-/// ssh hands it. The script is quoted for the first ([`quote`]),
-/// so what ssh sends is the script's own text; the quoting *inside* the script —
-/// every path and every value in it goes through [`quote`] — is what carries it
-/// through the second. `-t` is what makes the far end a terminal session rather
-/// than a one-shot command.
 pub fn terminal_command(target: &str, script: &str) -> String {
     format!("ssh -t {target} {}", quote(script))
 }
@@ -2807,24 +2277,12 @@ pub fn terminal_command(target: &str, script: &str) -> String {
 /// long the instance has been printing.
 pub const LOG_TAIL_BYTES: usize = 256 * 1024;
 
-/// The last stretch of one remote log, as the machine handed it over.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogTail {
-    /// The bytes at the end of the file, as text. Empty when the file is not
-    /// there or holds nothing yet.
     pub text: String,
-    /// Whether that machine has the file at all — an instance that has never
-    /// printed anything has no log, which is a fact and not a failure.
     pub exists: bool,
 }
 
-/// Reads the last `max_bytes` of one file on that machine.
-///
-/// Not [`tail`]: that one follows a log **from an offset**, waiting there for
-/// what a run appends next, and asking it for the end would mean reading the
-/// size first and hoping nothing grows in between. Opening a log is a one-shot
-/// question about a file that may be gigabytes long, so it is `tail -c` on the
-/// far side — one call, and bounded no matter how big the file is.
 pub async fn log_tail(
     transport: &dyn HostTransport,
     host: &RemoteHost,
@@ -2837,7 +2295,6 @@ pub async fn log_tail(
     decode_log_tail(&out)
 }
 
-/// The bounded tail read for one log file.
 pub fn log_tail_script(log_path: &str, max_bytes: usize) -> String {
     fill(
         LOG_TAIL,
@@ -2848,12 +2305,6 @@ pub fn log_tail_script(log_path: &str, max_bytes: usize) -> String {
     )
 }
 
-/// The last stretch of one file, from its end. A file that is not there is an
-/// empty answer **and** says so, so the caller can tell 「还没有日志」 from
-/// 「日志里什么都还没写」.
-///
-/// The cut lands where the byte count says, which may be in the middle of a
-/// line: this is a copy of a log for a human to read, not a file to parse.
 const LOG_TAIL: &str = r#"set -u
 dsh_log=%%LOG%%
 dsh_bytes=%%BYTES%%
@@ -2884,10 +2335,6 @@ pub fn decode_log_tail(out: &RemoteOutput) -> Result<LogTail, HostError> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Answers of the non-JSON-shaped scripts
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 struct Blob {
     data: String,
@@ -2901,7 +2348,6 @@ struct Entries {
 #[derive(Deserialize)]
 struct Installed {
     versions: Vec<RemoteInstalledVersion>,
-    /// Absent when the answer predates the field or the machine gave no link.
     #[serde(default)]
     link: RemotePathLink,
 }
@@ -2914,8 +2360,6 @@ struct Pid {
 #[derive(Deserialize)]
 struct Ack {
     ok: bool,
-    /// Why the script refused, when it says. A script that only answers `ok:
-    /// false` still reads as the generic refusal below.
     #[serde(default)]
     error: Option<String>,
 }
@@ -2966,8 +2410,6 @@ pub fn decode_ack(out: &RemoteOutput) -> Result<(), HostError> {
     ))
 }
 
-/// The profile names one machine listed, in the same order the local one sorts
-/// them: the two ways of reading one list must not disagree about it.
 pub fn decode_profiles(out: &RemoteOutput) -> Result<Vec<String>, HostError> {
     let mut names = parse_marked::<ProfileNames>(out)?.profiles;
     names.sort();
@@ -2989,11 +2431,6 @@ struct ProfilePackages {
     installed: Vec<ProfilePackageRow>,
 }
 
-/// One profile's files out of the answer: the manifest's bytes and the installed
-/// versions. A manifest that is not valid base64 reads as 「没有 manifest」 — the
-/// same answer as a profile without one, because nothing can be projected out of
-/// it either way — and a package whose version the script could not find is left
-/// out rather than reported as an empty version.
 pub fn decode_profile_packages(out: &RemoteOutput) -> Result<RemoteProfilePackages, HostError> {
     use base64::Engine as _;
     let answer: ProfilePackages = parse_marked(out)?;
@@ -3016,10 +2453,6 @@ pub fn decode_profile_packages(out: &RemoteOutput) -> Result<RemoteProfilePackag
     })
 }
 
-// ---------------------------------------------------------------------------
-// The in-memory double
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -3027,18 +2460,10 @@ pub(crate) mod testing {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    /// A payload wrapped the way the scripts print it, so the fake answers with
-    /// the same shape the remote produces.
     pub(crate) fn marked(payload: &str) -> String {
         format!("{}{}{}", super::MARK, payload, super::END)
     }
 
-    /// One call, as the fake recorded it. Tests assert on the script the
-    /// launcher *would* have run, never on ssh or a real machine.
-    ///
-    /// Each forward call names the host it was aimed at: two instances on one
-    /// machine must share a single connection, and that is only checkable when
-    /// the calls say which machine they were for.
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) enum FakeCall {
         Run(String),
@@ -3059,7 +2484,6 @@ pub(crate) mod testing {
         CloseConnection(RemoteHost),
     }
 
-    /// What the fake answers the next call with.
     #[derive(Clone, Debug)]
     pub(crate) enum FakeAnswer {
         Output {
@@ -3075,7 +2499,6 @@ pub(crate) mod testing {
     }
 
     impl FakeAnswer {
-        /// A script that answered with this (already marked) stdout.
         pub(crate) fn stdout(stdout: impl Into<String>) -> Self {
             Self::Output {
                 status: 0,
@@ -3084,7 +2507,6 @@ pub(crate) mod testing {
             }
         }
 
-        /// A remote command that failed, with what it said on stderr.
         pub(crate) fn failed(status: i32, stderr: impl Into<String>) -> Self {
             Self::Output {
                 status,
@@ -3093,17 +2515,11 @@ pub(crate) mod testing {
             }
         }
 
-        /// The transport itself failed — a machine that is off, a key that is
-        /// not accepted, a call that ran out of time.
         pub(crate) fn fail(kind: HostErrorKind, message: &str) -> Self {
             Self::Fail(HostError::new(kind, message))
         }
     }
 
-    /// The in-memory [`HostTransport`]: what a test has instead of a remote
-    /// machine. It records every call and answers from a queue, so a test can
-    /// drive the page's states — reachable, unreachable, a machine without
-    /// Node — without a server.
     pub(crate) struct FakeTransport {
         calls: Mutex<Vec<FakeCall>>,
         answers: Mutex<VecDeque<FakeAnswer>>,
@@ -3117,8 +2533,6 @@ pub(crate) mod testing {
             })
         }
 
-        /// Queues the answer the next call gets. Chainable so a test reads as
-        /// one sentence.
         pub(crate) fn answering(self: &Arc<Self>, answer: FakeAnswer) -> Arc<Self> {
             self.answers.lock().unwrap().push_back(answer);
             self.clone()
@@ -3128,8 +2542,6 @@ pub(crate) mod testing {
             self.calls.lock().unwrap().clone()
         }
 
-        /// The script of the last call — what a test looks at to check that the
-        /// launcher asked the remote machine for the right thing.
         pub(crate) fn last_script(&self) -> String {
             match self.calls.lock().unwrap().last() {
                 Some(FakeCall::Run(script)) | Some(FakeCall::Spawn(script)) => script.clone(),
@@ -3143,9 +2555,6 @@ pub(crate) mod testing {
             })
         }
 
-        /// The queued answer, or the transport failure it stands for: a test
-        /// asking for 「这台机器连不上」 gets an `Err`, exactly as the real
-        /// transport would produce one.
         fn answer(&self) -> Result<FakeAnswer, HostError> {
             match self.next()? {
                 FakeAnswer::Fail(err) => Err(err),
@@ -3158,9 +2567,6 @@ pub(crate) mod testing {
         HostError::remote_command(format!("测试给这次调用排错了应答：{answer:?}"))
     }
 
-    /// A transport that answers nothing: what the tests of modules that never
-    /// touch a remote host (the local lifecycle, for one) construct `AppState`
-    /// with.
     pub(crate) fn idle() -> Arc<dyn HostTransport> {
         FakeTransport::new()
     }
@@ -3175,9 +2581,6 @@ pub(crate) mod testing {
         connection_stdout_with_dir("/home/demo/.local/share/dsh-launcher", node, pnpm)
     }
 
-    /// The same answer for a machine that settled the directory the user typed —
-    /// what the script reports when the record holds a `~` or a path with `.` or
-    /// `//` in it.
     pub(crate) fn connection_stdout_with_dir(
         data_dir: &str,
         node: Option<(&str, &str)>,
@@ -3200,17 +2603,12 @@ pub(crate) mod testing {
         ))
     }
 
-    /// The stdout one file read answers with: the file's bytes, base64-encoded
-    /// between the markers (the shape [`READ_FILE`] prints).
     pub(crate) fn file_stdout(contents: &[u8]) -> String {
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(contents);
         marked(&format!("{{\"data\":\"{data}\"}}"))
     }
 
-    /// The stdout one multi-file read answers with, in the order the paths were
-    /// asked for: a file's bytes or `null` for 「那台机器上没有」 (the shape
-    /// [`READ_FILES`] prints).
     pub(crate) fn files_stdout(files: &[Option<&[u8]>]) -> String {
         use base64::Engine as _;
         let rows = files
@@ -3227,16 +2625,10 @@ pub(crate) mod testing {
         marked(&format!("{{\"files\":[{rows}]}}"))
     }
 
-    /// The stdout one tail read answers with: the log's size now, the bytes that
-    /// appeared since the previous offset (base64), and whether the process tree
-    /// is still there.
     pub(crate) fn tail_stdout(text: &str, offset: u64) -> String {
         tail_stdout_with(text, offset, true)
     }
 
-    /// The stdout the profile read answers with: the profile's `package.json`,
-    /// base64-encoded, and one row per installed package. Mirrors what
-    /// [`PROFILE_PACKAGES`] prints, field for field.
     pub(crate) fn profile_packages_stdout(manifest: &str, installed: &[(&str, &str)]) -> String {
         use base64::Engine as _;
         let data = base64::engine::general_purpose::STANDARD.encode(manifest.as_bytes());
@@ -3250,59 +2642,32 @@ pub(crate) mod testing {
         ))
     }
 
-    /// The same read when the process is gone — the follower's signal that the
-    /// instance ended on that machine.
     pub(crate) fn tail_stdout_after_exit(text: &str, offset: u64) -> String {
         tail_stdout_with(text, offset, false)
     }
 
-    /// What one machine answers while a brand-new DSH_HOME of its own is given
-    /// the first DSH run that materializes `profiles/web`: the empty profile
-    /// list, the version's `bin.js`, its own Node, the log's size, the detached
-    /// boot and its pid's start time, the URL that boot printed, the identity
-    /// check and the stop, the copy of `web` to `__temp__`, and the port that
-    /// boot pinned scrubbed back out of the copy.
-    ///
-    /// Shared because the two callers that need a fresh HOME prepared — an
-    /// install that makes one, and an instance bound to one a user made — are
-    /// driven by the same sequence, and a second copy of it in a test would
-    /// drift from the first.
     pub(crate) fn prime_home_answers(ready_url: &str) -> Vec<FakeAnswer> {
         vec![
-            // 1. 那个 HOME 下一个 Profile 都还没有。
             FakeAnswer::stdout(marked(r#"{"profiles":[]}"#)),
-            // 2. 版本目录里的 bin.js 在不在。
             FakeAnswer::stdout(marked(r#"{"ready":true}"#)),
-            // 3. 那台机器自己的绝对 Node。
             FakeAnswer::stdout(environment_stdout(
                 remote_tool("/home/linuxbrew/.linuxbrew/bin/node", "v26.4.0", "system"),
                 remote_tool_missing(vec![]),
                 &[],
             )),
-            // 4. 起进程之前日志有多少字节。
             FakeAnswer::stdout(marked(r#"{"offset":0}"#)),
-            // 5. 脱离会话地跑一次 DSH。
             FakeAnswer::Pid(PRIME_PID),
-            // 6. 这个 pid 自己的启动时间。
             FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
-            // 7. 它起来了并打印了 URL —— `profiles/web` 现在在那台机器上。
             FakeAnswer::stdout(tail_stdout(&format!("dsh web: {ready_url}\n"), 320)),
-            // 8. 一次调用里核对 pid、发信号、等它走（`stop_run`）。
             FakeAnswer::stdout(marked(r#"{"outcome":"stopped","started_at":117384720}"#)),
-            // 9. web → __temp__。
             FakeAnswer::stdout(marked(r#"{"ok":true}"#)),
-            // 10. 模板的补丁文档：这次启动把端口钉在了里面。
             FakeAnswer::stdout(file_stdout(b"- id: webserver\n  port: 20017\n")),
-            // 11. 把那一行改回 0。
             FakeAnswer::Done,
         ]
     }
 
-    /// The pid a priming boot is answered with.
     pub(crate) const PRIME_PID: i32 = 5150;
 
-    /// The port [`prime_home_answers`]' patch document pins, which the launcher
-    /// has to scrub back out of the template.
     pub(crate) const PRIME_PINNED_PORT: &str = "20017";
 
     fn tail_stdout_with(text: &str, offset: u64, alive: bool) -> String {
@@ -3313,8 +2678,6 @@ pub(crate) mod testing {
         ))
     }
 
-    /// A tool as the environment probe reports it — one machine's answer for one
-    /// of the two tools the launcher drives.
     pub(crate) fn remote_tool(path: &str, version: &str, source: &str) -> serde_json::Value {
         serde_json::json!({
             "path": path,
@@ -3324,7 +2687,6 @@ pub(crate) mod testing {
         })
     }
 
-    /// A tool the probe did not find, with what it passed over on the way.
     pub(crate) fn remote_tool_missing(skipped: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "path": null,
@@ -3334,7 +2696,6 @@ pub(crate) mod testing {
         })
     }
 
-    /// One candidate the probe passed over.
     pub(crate) fn skipped(
         path: &str,
         version: &str,
@@ -3349,8 +2710,6 @@ pub(crate) mod testing {
         })
     }
 
-    /// The stdout a **successful** environment probe prints — what the fake
-    /// answers the launcher with instead of a real machine's `bash -ilc`.
     pub(crate) fn environment_stdout(
         node: serde_json::Value,
         pnpm: serde_json::Value,
@@ -3587,11 +2946,6 @@ mod tests {
         }
     }
 
-    /// A line that never ends is cut at the buffer cap, and only a short prefix
-    /// of it travels on: a progress bar that redraws itself with `\r` must
-    /// neither grow the buffer for as long as the process runs nor carry its
-    /// whole weight into a task log. A half line below the cap is kept for the
-    /// next read.
     #[test]
     fn a_line_that_never_ends_is_cut_at_the_buffer_cap() {
         let mut pending = String::from("完整的一行\n");
@@ -3615,8 +2969,6 @@ mod tests {
         assert_eq!(pending, "半行", "没到上限的半行留着等下一次读取");
     }
 
-    /// The happy path: the machine answers, and the page gets its system, its
-    /// home, its data directory and both tools.
     #[test]
     fn the_connection_test_reports_what_the_machine_is() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(connection_stdout(
@@ -3647,9 +2999,6 @@ mod tests {
         );
     }
 
-    /// A machine without Node or pnpm is still a machine worth connecting to;
-    /// what it lacks is reported as missing, not as a failure and not as a
-    /// plausible-looking version.
     #[test]
     fn a_machine_missing_node_or_pnpm_says_so() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(connection_stdout(
@@ -3666,8 +3015,6 @@ mod tests {
         assert_eq!(test.node.unwrap().version, "v18.19.1");
     }
 
-    /// Every one of the four classes has to reach the page intact: the class,
-    /// and a sentence the user can act on.
     #[test]
     fn the_four_failure_classes_reach_the_page() {
         let cases = [
@@ -3703,9 +3050,6 @@ mod tests {
         }
     }
 
-    /// A remote script that fails — a missing file, a command that is not
-    /// there — carries the tail of its stderr back, and it is the class
-    /// 「远端命令失败」, not a connection problem.
     #[test]
     fn a_failed_remote_script_reports_the_tail_of_its_stderr() {
         let fake = FakeTransport::new().answering(FakeAnswer::failed(
@@ -3726,8 +3070,6 @@ mod tests {
         );
     }
 
-    /// The configured data directory reaches the script as one quoted word, and
-    /// a path with a space or a quote in it stays one word.
     #[test]
     fn the_data_directory_reaches_the_script_quoted() {
         let script = connection_test_script(Some("/srv/my launcher/it's here"));
@@ -3739,24 +3081,17 @@ mod tests {
             connection_test_script(None).contains("dsh_configured=\n"),
             "没有配置时留空，让那台机器自己选默认值"
         );
-        // The scripts print what the parsing side looks for: one pair of markers,
-        // one place they are defined (script text and parser must not drift).
         assert!(
             script.contains(MARK) && script.contains(END),
             "脚本必须用与解析端同一对标记：{script}"
         );
     }
 
-    /// The escaping, end to end: the script a call site builds, run by a real
-    /// shell, must hand back the original path. This is the bug the spec calls
-    /// out as the most likely one — ssh goes through two shells.
     #[test]
     fn a_path_with_spaces_and_quotes_survives_a_real_shell() {
         let path = "/home/me/a b/it's 'quoted'/file.txt";
         let script = read_file_script(path);
 
-        // Only the line that names the path is exercised: running the whole
-        // script locally would read the local filesystem.
         let assignment = script
             .lines()
             .find(|line| line.starts_with("dsh_path="))
@@ -3768,7 +3103,6 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout), path);
 
-        // And the write script puts its payload in the same shape.
         let write = write_file_script(path, b"hello");
         let assignment = write
             .lines()
@@ -3777,12 +3111,6 @@ mod tests {
         assert!(assignment.ends_with("'/home/me/a b/it'\\''s '\\''quoted'\\''/file.txt'"));
     }
 
-    /// The script, run by a **real** shell on this machine, answers what the
-    /// parsing side expects. The samples the fake serves were written from this
-    /// shape; this is the test that keeps the script and the parser from
-    /// drifting, and the only thing in the suite that exercises the shell text
-    /// itself (the machine answering happens to be this Mac, which the script
-    /// knows nothing about).
     #[test]
     fn the_connection_test_script_answers_parsable_json_on_a_real_shell() {
         let output = local_shell(&connection_test_script(None));
@@ -3810,11 +3138,6 @@ mod tests {
         }
     }
 
-    /// The data directory the user typed is settled **on that machine**: `~` is
-    /// that machine's home directory, and one directory typed two ways is one
-    /// path. The connection test is where the value is read, so it is where it
-    /// is settled — every later script is handed the absolute answer and none of
-    /// them has to know what a `~` meant.
     #[test]
     fn the_typed_data_directory_is_settled_on_that_machine() {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -3836,10 +3159,6 @@ mod tests {
         }
     }
 
-    /// A data directory that cannot be settled is **reported**, not written down
-    /// as something else: a relative path would land in whatever directory that
-    /// machine's shell happens to be in, and `~用户名` is not the launcher's to
-    /// expand. The record keeps what the user typed and the page says why.
     #[test]
     fn a_data_directory_that_cannot_be_settled_comes_back_as_a_reason() {
         for (typed, expected) in [("dsh", "绝对路径"), ("~bob/dsh", "~用户名")] {
@@ -3872,20 +3191,11 @@ mod tests {
         );
     }
 
-    /// What a machine has under its versions directory, told the way the page
-    /// needs it: one row per version, with its directory and whether the bin is
-    /// ready. A half-installed version is not something anyone can start, and
-    /// the machine that owns the directory is the only one that can say so.
-    ///
-    /// The registered version goes along in `known` with a link pointing into
-    /// it, which is the shape the Library asks in: the link block and the
-    /// listing share one script, so the listing has to survive the block.
     #[test]
     fn the_installed_versions_script_answers_each_versions_path_and_bin_readiness() {
         let home = scratch("dsh-versions-home");
         let scratch = std::env::temp_dir().join(format!("dsh-versions-{}", uuid::Uuid::new_v4()));
         let versions = scratch.join("versions");
-        // An npm tree, the layout an installed release has...
         let npm_tree = versions.join("0.1.0-rc.6");
         std::fs::create_dir_all(npm_tree.join("node_modules/@deepseek-ai/dsh/lib")).unwrap();
         std::fs::write(
@@ -3893,14 +3203,11 @@ mod tests {
             "// dsh\n",
         )
         .unwrap();
-        // ...a repo checkout, the other layout...
         let checkout = versions.join("0.1.0-rc.5");
         std::fs::create_dir_all(checkout.join("apps/cli/lib")).unwrap();
         std::fs::write(checkout.join("apps/cli/package.json"), "{}").unwrap();
         std::fs::write(checkout.join("apps/cli/lib/bin.js"), "// dsh\n").unwrap();
-        // ...and an install that stopped before its bin existed.
         std::fs::create_dir_all(versions.join("0.1.0-rc.4")).unwrap();
-        // A `dsh` on that machine's PATH, pointing into the version that counts.
         let link = home.join(".local/bin/dsh");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(npm_tree.join("node_modules/.bin/dsh"), &link).unwrap();
@@ -3931,9 +3238,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// The remote bin check is the local launcher's rule applied on that
-    /// machine, and the two must name the same files: a version the machine
-    /// calls ready has to be one the launcher could start there.
     #[test]
     fn the_remote_bin_check_uses_the_local_launchers_two_layouts() {
         let script = installed_versions_script("/opt/dsh/versions", &[]);
@@ -3966,10 +3270,6 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// The PATH registration, run on a machine whose `HOME` is a scratch
-    /// directory: a symlink into the version, replaced by another version, left
-    /// alone when it is the user's own command, and withdrawn only for the
-    /// version it runs.
     #[test]
     fn the_path_link_script_registers_replaces_and_withdraws_on_that_machine() {
         let home = scratch("dsh-path-link-home");
@@ -4004,7 +3304,6 @@ mod tests {
             crate::launch::version_bin(&first)
         );
 
-        // The list names the version the link runs.
         let listed = local_shell_as(
             &installed_versions_script(&versions.to_string_lossy(), &dirs),
             &home,
@@ -4016,7 +3315,6 @@ mod tests {
             crate::launch::version_bin(&first).to_string_lossy()
         );
 
-        // Registering another version replaces the launcher's own link.
         let out = run("register", Some(&second.to_string_lossy()));
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert_eq!(
@@ -4024,7 +3322,6 @@ mod tests {
             crate::launch::version_bin(&second)
         );
 
-        // Withdrawing for the first version leaves the second's link alone.
         let out = run("unlink", Some(&first.to_string_lossy()));
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert!(link.exists(), "别的版本的链接不动");
@@ -4037,8 +3334,6 @@ mod tests {
         std::fs::remove_dir_all(&versions).ok();
     }
 
-    /// A `dsh` the user installed there is never replaced and never removed:
-    /// the script says why instead.
     #[test]
     fn the_path_link_script_leaves_a_users_own_dsh_alone() {
         let home = scratch("dsh-path-link-foreign");
@@ -4071,9 +3366,6 @@ mod tests {
         std::fs::remove_dir_all(&versions).ok();
     }
 
-    /// A new profile on that machine: the `__temp__` template of its own HOME
-    /// when there is one, else `web` copied (with the port pin scrubbed), else a
-    /// template from another HOME under the same data directory.
     #[test]
     fn the_create_profile_script_picks_the_template_the_way_the_local_flow_does() {
         let root = scratch("dsh-create-profile");
@@ -4097,7 +3389,6 @@ mod tests {
             "{}"
         );
 
-        // Copying `web` scrubs the webserver port the template pinned.
         let other = root.join("homes/0.2.2-rc.1/profiles");
         std::fs::create_dir_all(other.join("web")).unwrap();
         std::fs::write(
@@ -4121,8 +3412,6 @@ mod tests {
             "复制件里的端口固定值要清掉：{patch}"
         );
 
-        // A HOME with no template borrows one from another HOME under the data
-        // directory.
         let bare = root.join("homes/0.2.3-rc.1/profiles");
         std::fs::create_dir_all(&bare).unwrap();
         let out = local_shell_as(
@@ -4140,11 +3429,6 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A CLI that is not executable gets a wrapper carrying the marker, and
-    /// that wrapper reads back as the launcher's own link — the branch the
-    /// marker-as-comment bug used to break. It also has to survive being
-    /// replaced by another version, being reported by the version list, and
-    /// being withdrawn when its version is deleted.
     #[test]
     fn the_path_link_script_wraps_a_cli_without_an_executable_bit() {
         let home = scratch("dsh-path-link-wrap-home");
@@ -4189,7 +3473,6 @@ mod tests {
             assert_eq!(mode & 0o777, 0o755, "包装脚本必须可执行");
         }
 
-        // The list reads it back as the launcher's own link, naming its version.
         let listed = local_shell_as(
             &installed_versions_script(&versions.to_string_lossy(), &dirs),
             &home,
@@ -4198,15 +3481,11 @@ mod tests {
         assert_eq!(answer.link.state, "script", "{}", listed.stdout);
         assert_eq!(answer.link.target, version_text);
 
-        // Cancel registration removes it: a wrapper is the launcher's to take out.
         let out = local_shell_as(&path_link_script("unregister", None, &dirs), &home);
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert!(!link.exists(), "取消登记要撤掉启动器自己的包装脚本");
     }
 
-    /// Withdrawing for a deleted version is the `unlink` action: it takes out a
-    /// wrapper naming that version, leaves another version's wrapper alone, and
-    /// never touches a link that is not inside the version it was told about.
     #[test]
     fn the_path_link_script_withdraws_only_the_deleted_versions_wrapper() {
         let home = scratch("dsh-path-link-unlink-home");
@@ -4230,7 +3509,6 @@ mod tests {
         );
         assert_eq!(out.status, 0, "{}", out.stderr);
 
-        // Deleting the first version leaves the second's wrapper in place.
         let out = local_shell_as(&path_link_script("unlink", Some(&first_text), &dirs), &home);
         assert_eq!(out.status, 0, "{}", out.stderr);
         assert!(link.exists(), "别的版本的登记不动");
@@ -4251,9 +3529,6 @@ mod tests {
         assert!(link.exists(), "没指定版本时不能删掉别人的链接");
     }
 
-    /// A file carrying the marker but naming a directory the launcher does not
-    /// know is the user's, not the launcher's: it is never overwritten and never
-    /// removed, on either action.
     #[test]
     fn the_path_link_script_treats_an_unknown_marker_as_the_users_own() {
         let home = scratch("dsh-path-link-stray-home");
@@ -4284,7 +3559,6 @@ mod tests {
         assert_ne!(out.status, 0, "不是启动器的，不能删");
         assert_eq!(std::fs::read_to_string(&link).unwrap(), stray);
 
-        // And the list does not claim it either.
         let listed = local_shell_as(
             &installed_versions_script(&versions.to_string_lossy(), &dirs),
             &home,
@@ -4293,8 +3567,6 @@ mod tests {
         assert_eq!(answer.link.state, "foreign", "{}", listed.stdout);
     }
 
-    /// The registry a host record names is a fact about *that* machine's npm:
-    /// it has to reach the script as one quoted word.
     #[test]
     fn the_versions_query_reaches_the_machine_quoted() {
         let script = available_versions_script("https://npm.example.com/it's mirror");
@@ -4304,8 +3576,6 @@ mod tests {
         );
     }
 
-    /// npm's two listings come back as the text the local path reads, so one
-    /// conversion in the caller serves both sources.
     #[test]
     fn the_versions_query_answers_both_npm_listings() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
@@ -4324,8 +3594,6 @@ mod tests {
         assert!(listings.time.contains("2026-08-01"), "{}", listings.time);
     }
 
-    /// A machine that is not there says so — the page must not be handed a
-    /// plausible-looking empty list instead.
     #[test]
     fn an_unreachable_machine_fails_both_queries() {
         for answer in [
@@ -4352,10 +3620,6 @@ mod tests {
         }
     }
 
-    /// The transport's other capabilities: each one is the same plumbing, and
-    /// each one has to reach the remote machine with the right request. The
-    /// callers (installs, profiles, lifecycle, the tunnel) are later tickets'
-    /// work — this only keeps the seam honest.
     #[test]
     fn the_other_transport_capabilities_ask_for_the_right_thing() {
         let fake = FakeTransport::new()
@@ -4411,9 +3675,6 @@ mod tests {
         );
     }
 
-    /// A detached spawn's `PATH` prefix is built from the caller's directories:
-    /// quoted like every other word, `"$PATH"` left for the remote shell to
-    /// expand, and nothing emitted when the caller names none.
     #[test]
     fn a_detached_spawn_prepends_the_given_directories_to_path() {
         let argv = vec!["/usr/bin/node".to_string()];
@@ -4434,10 +3695,6 @@ mod tests {
         );
     }
 
-    /// The real transport is the one that builds the ssh command line, and the
-    /// script it carries is the script from this module — nothing here is a
-    /// stub. The connection test resolves `node` / `pnpm` by name, so it is one
-    /// of the calls that keep the login shell.
     #[test]
     fn the_real_transport_would_dial_with_the_script_built_here() {
         let host = host();
@@ -4453,12 +3710,6 @@ mod tests {
         let _ = SshTransport::new();
     }
 
-    // -----------------------------------------------------------------------
-    // The environment probe
-    // -----------------------------------------------------------------------
-
-    /// A fixture tool: a script that prints the version it was made with, so the
-    /// candidate walk can be driven against a controlled filesystem.
     fn fake_tool(home: &Path, rel: &str, version: &str) -> PathBuf {
         let exe = home.join(rel);
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
@@ -4471,10 +3722,6 @@ mod tests {
         exe
     }
 
-    /// A `PATH` a fixture can own: the tools the probe itself uses (`sed`, `tr`,
-    /// `head`, `cut`, `sort`, `ls`), so a fixture machine can be described
-    /// without also describing this Mac's PATH — and without a real `node`
-    /// sneaking into the answer.
     fn fixture_tools(home: &Path) -> PathBuf {
         let dir = home.join("tools");
         std::fs::create_dir_all(&dir).unwrap();
@@ -4500,7 +3747,6 @@ mod tests {
     }
 
     /// Runs the probe script in a real shell and parses its answer.
-    ///
     /// `-c` rather than the `-ilc` the launcher dials with: what is under test is
     /// the walk over the candidate list, and the fixtures have to own `PATH` and
     /// `HOME` for the answer to be about them instead of about this Mac. The
@@ -4517,9 +3763,6 @@ mod tests {
         let out = std::process::Command::new("/bin/bash")
             .arg("-c")
             .arg(&script)
-            // Cleared, so the probe answers for the fixture machine and nothing
-            // else: an inherited `BASH_ENV` or locale could rewrite PATH from
-            // under the fixture.
             .env_clear()
             .env("HOME", home)
             .env("PATH", path)
@@ -4540,8 +3783,6 @@ mod tests {
             .collect()
     }
 
-    /// The install directories are the Linux set, in the order they are tried,
-    /// and the probe walks exactly that list (ADR-0005 追加 4).
     #[test]
     fn the_remote_install_directories_are_the_linux_set_in_order() {
         let dirs = fallback_bins();
@@ -4559,8 +3800,6 @@ mod tests {
             "本机的目录不该出现在远程候选里：{dirs:?}"
         );
 
-        // The list is what the script walks, in that order: every entry has to
-        // appear after the one before it.
         let script = environment_script(None, None);
         let mut cursor = 0;
         for dir in &dirs {
@@ -4572,9 +3811,6 @@ mod tests {
         }
     }
 
-    /// The three sources in their fixed order: what the user picked, then the
-    /// directories this interactive login shell has on PATH, then the install
-    /// directories.
     #[test]
     fn the_probe_takes_the_pick_then_the_path_then_the_install_directories() {
         let home = probe_home("probe-order");
@@ -4605,9 +3841,6 @@ mod tests {
         assert_eq!(env.node.source.as_deref(), Some("manual"));
     }
 
-    /// The remote-only rule: a Node below the recommended major is passed over,
-    /// the walk continues, and the page is told which one it was and why. Only
-    /// when nothing qualifies is an older one used (ADR-0005 追加 2).
     #[test]
     fn the_probe_passes_over_an_old_node_and_names_it() {
         let home = probe_home("probe-skip");
@@ -4630,9 +3863,6 @@ mod tests {
         assert_eq!(env.node.skipped[0].reason, "below-minimum");
         assert_eq!(env.node.skipped[0].major, Some(18));
 
-        // Nothing qualifies: the last candidate below the floor is still used —
-        // a machine with only an old Node can still be looked at — and both are
-        // reported as passed over.
         let older = fake_tool(&home, "older/bin/node", "v16.20.2");
         let path = format!(
             "{}:{}:{}",
@@ -4649,9 +3879,6 @@ mod tests {
         assert_eq!(env.node.skipped.len(), 2, "两个低于门槛的候选都要报出来");
     }
 
-    /// pnpm is not driven below its floor or with a version nobody can read, and
-    /// it has no last resort: a pnpm the launcher cannot reason about drives
-    /// nothing, so it is reported and then simply not found.
     #[test]
     fn the_probe_passes_over_a_pnpm_it_cannot_drive() {
         let home = probe_home("probe-pnpm");
@@ -4681,9 +3908,6 @@ mod tests {
         assert_eq!(env.pnpm.skipped[0].reason, "unparsable");
     }
 
-    /// A hand-typed path that is not there is reported as passed over, and the
-    /// walk carries on: the user's path is not a reason to leave a machine that
-    /// has a working tool with none.
     #[test]
     fn an_unusable_pick_is_reported_and_the_walk_goes_on() {
         let home = probe_home("probe-unusable");
@@ -4704,8 +3928,6 @@ mod tests {
         assert_eq!(env.node.skipped[0].reason, "unusable");
     }
 
-    /// The shell and the managers are that machine's, read in the one shell the
-    /// answer comes from.
     #[test]
     fn the_probe_reports_the_shell_and_managers_of_that_machine() {
         let home = probe_home("probe-facts");
@@ -4722,8 +3944,6 @@ mod tests {
         );
     }
 
-    /// The whole probe is one call, and the launcher reads its answer: the
-    /// sources, the managers and what was passed over all travel in it.
     #[test]
     fn the_probe_is_one_interactive_login_shell_and_its_answer_is_read() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(environment_stdout(
@@ -4752,9 +3972,6 @@ mod tests {
         assert_eq!(env.pnpm.skipped[0].reason, "below-minimum");
         assert_eq!(env.managers, vec!["nvm".to_string()]);
 
-        // The pick and the candidate list travel in the script, so the machine
-        // that answered is the machine that was asked — and it was asked to walk
-        // the Linux install directories, not this Mac's.
         let script = fake.last_script();
         assert!(script.contains("'/opt/pick/node'"), "{script}");
         assert!(
@@ -4764,9 +3981,6 @@ mod tests {
         assert!(script.contains("$HOME/.local/share/pnpm"), "{script}");
     }
 
-    /// A remote pick is validated by running `--version` **there**: the launcher
-    /// cannot execute a file on another computer, so the script carries the path
-    /// the user typed and the answer says whether it is there and what it said.
     #[test]
     fn a_remote_pick_is_validated_by_running_it_on_that_machine() {
         let cases = [
@@ -4797,11 +4011,6 @@ mod tests {
         }
     }
 
-    /// The install guidance is one command the user runs on **this** Mac, and it
-    /// has to survive both shells on the way to the machine: the user's shell
-    /// hands ssh its arguments, ssh joins them, and the remote shell splits them
-    /// again. Both shells are real here, and the recipe is chosen so the result
-    /// is visible — a broken quoting shows up as the wrong output.
     #[test]
     fn an_install_command_survives_both_shells_on_the_way_to_the_machine() {
         let command = ssh_command("lab", "echo one two | tr a-z A-Z");
@@ -4812,7 +4021,6 @@ mod tests {
             "自由目标（带自己的参数）也要能用"
         );
 
-        // What the user's shell hands ssh.
         let handed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("printf '%s\\n' {command}"))
@@ -4826,8 +4034,6 @@ mod tests {
         assert_eq!(words[1], "lab");
         assert_eq!(words.len(), 3, "ssh 只该拿到一个参数：{words:?}");
 
-        // What ssh hands the remote shell: its arguments joined with spaces.
-        // Running that in a real shell is what the machine does with it.
         let remote = words[2..].join(" ");
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -4841,16 +4047,12 @@ mod tests {
         );
     }
 
-    /// The same round trip when the recipe quotes a path of its own — what
-    /// 「这一台的目录」 needs, since a DSH_HOME may hold a space or a single
-    /// quote and the command has to survive the user's shell with it.
     #[test]
     fn a_command_quoting_a_path_survives_both_shells() {
         let path = "/home/demo/o'brien dir";
         let command = ssh_command(TARGET, &format!("printf %s {}", quote(path)));
         assert!(command.starts_with("ssh zjq_aliyun "), "{command}");
 
-        // What the user's shell hands ssh: three words, whatever the path holds.
         let handed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!("printf '%s@@@' {command}"))
@@ -4866,7 +4068,6 @@ mod tests {
         assert_eq!(words[0], "ssh");
         assert_eq!(words[1], TARGET);
 
-        // What ssh hands the login shell, and what that shell then runs.
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(words[2])
@@ -4880,8 +4081,6 @@ mod tests {
         );
     }
 
-    /// The recipes extend the manager the machine already has, and the one for a
-    /// machine with none leaves it with both nvm and a Node.
     #[test]
     fn the_install_recipes_extend_what_the_machine_already_has() {
         assert_eq!(
@@ -4903,8 +4102,6 @@ mod tests {
         );
         assert!(pnpm_install_recipe().contains("get.pnpm.io"));
 
-        // The recipes travel inside double quotes, so a double quote in one would
-        // end the command early.
         for recipe in [
             node_install_recipe(&[]),
             node_install_recipe(&["nvm".to_string()]),
@@ -4915,11 +4112,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Following and stopping a detached command
-    // -----------------------------------------------------------------------
-
-    /// Reads the `alive` answer one real shell produced.
     fn shell_alive(pid: i32) -> bool {
         let out = local_shell(&alive_script(pid));
         parse_marked::<serde_json::Value>(&out).unwrap()["alive"]
@@ -4927,7 +4119,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Whether one pid still exists, asked of a real shell.
     fn pid_exists(pid: i32) -> bool {
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -4939,8 +4130,6 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).contains("yes")
     }
 
-    /// Waits up to a couple of seconds for a pid to be gone. A process that has
-    /// been signalled may take a moment to go away.
     fn wait_gone(pid: i32) -> bool {
         for _ in 0..20 {
             if !pid_exists(pid) {
@@ -4951,11 +4140,6 @@ mod tests {
         false
     }
 
-    /// The rule the whole cancellation story rests on: a detached spawn leads
-    /// its own process group, so stopping it means signalling the **group** —
-    /// the leader alone leaves the children pnpm started behind, holding the
-    /// store's lock. A real group with real children is stopped here, the way
-    /// `setsid` gives the launcher's detached spawn one.
     #[test]
     fn stopping_a_detached_command_reaches_the_children_it_started() {
         use std::os::unix::process::CommandExt;
@@ -4968,8 +4152,6 @@ mod tests {
         );
         let mut cmd = std::process::Command::new("/bin/sh");
         cmd.args(["-c", &fixture]);
-        // Its own process group: pgid == pid, which is what `setsid` gives the
-        // launcher's detached spawn and what makes a negative pid the whole tree.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setpgid(0, 0);
@@ -5000,8 +4182,6 @@ mod tests {
         let out = local_shell(&stop_group_script(pid));
         decode_ack(&out).expect("停止要成功");
 
-        // The leader is reaped here so the group can be judged; the children
-        // are the ones that would have held the store's lock.
         std::thread::sleep(std::time::Duration::from_millis(300));
         let _ = child.wait();
         for child_pid in in_group {
@@ -5015,17 +4195,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Stopping something that is already gone is not a failure: the second
-    /// cancel click, and an install that exited between the click and the call,
-    /// both land here.
     #[test]
     fn stopping_something_already_gone_is_not_an_error() {
         let out = local_shell(&stop_group_script(999_999));
         decode_ack(&out).expect("本来就不在了也算停好了");
     }
 
-    /// The plain pid stop is unchanged: it signals the process it was given and
-    /// nothing else, which is what an adopted process needs (ADR-0007).
     #[test]
     fn the_single_pid_stop_still_signals_only_that_pid() {
         let script = stop_pid_script(4242);
@@ -5036,9 +4211,6 @@ mod tests {
         );
     }
 
-    /// A detached command carries its own outcome: the wrapper appends its exit
-    /// status to the log the launcher is already reading, because nothing can
-    /// `wait` for a process that is not our child.
     #[test]
     fn a_detached_command_writes_its_exit_status_into_its_own_log() {
         let dir = scratch("dsh-measured");
@@ -5086,9 +4258,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// One read of a remote log asks only for what was written since the last
-    /// one, and it waits **there** until there is something to report: a quiet
-    /// install costs one call per wait budget instead of one per second.
     #[test]
     fn a_tail_read_returns_only_what_was_appended_since_the_last_one() {
         let dir = scratch("dsh-tail");
@@ -5096,8 +4265,6 @@ mod tests {
         std::fs::write(&log, "line one\n").unwrap();
         let path = log.to_string_lossy().to_string();
 
-        // Caught up and with nothing to watch: it waits the budget out on that
-        // side rather than answering at once.
         let started = std::time::Instant::now();
         let out = local_shell(&tail_script(&path, 9, 0, 2));
         let parsed: serde_json::Value = parse_marked(&out).unwrap();
@@ -5109,7 +4276,6 @@ mod tests {
             "等待发生在远端，不是立刻返回后由启动器一遍遍来问"
         );
 
-        // Everything from an offset on, decided there.
         let whole = local_shell(&tail_script(&path, 0, 0, 0));
         let parsed: serde_json::Value = parse_marked(&whole).unwrap();
         assert_eq!(parsed["offset"], 9);
@@ -5127,7 +4293,6 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&second), "line two\n");
 
-        // A process that is gone ends the wait at once, however long the budget.
         let quick = std::time::Instant::now();
         let out = local_shell(&tail_script(&path, 18, 999_999, 30));
         let parsed: serde_json::Value = parse_marked(&out).unwrap();
@@ -5137,10 +4302,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A log that grew far past one read while nobody was watching is read from
-    /// its end, and the offset lands on the file's size: the follower needs the
-    /// tail — the URL line, the exit line — and one read must not carry a whole
-    /// file's growth into memory.
     #[test]
     fn a_tail_read_that_was_left_behind_returns_only_the_end_of_the_log() {
         let dir = scratch("dsh-tail-behind");
@@ -5164,7 +4325,6 @@ mod tests {
         assert_eq!(text.len(), MAX_TAIL_BYTES, "一次读取有上限：{}", text.len());
         assert!(text.ends_with(tail), "读到的是尾部：{text:?}");
 
-        // Caught up: nothing to read, and the offset does not move back.
         let again = local_shell(&tail_script(&path, size, 0, 0));
         let parsed: serde_json::Value = parse_marked(&again).unwrap();
         assert_eq!(parsed["offset"], size);
@@ -5173,9 +4333,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Removing a directory on that machine goes by path, and only there: it is
-    /// how a cleanup touches the remote data directory and nothing else. A
-    /// directory that is not there is already what the caller wanted.
     #[test]
     fn a_remote_cleanup_removes_the_directory_it_is_given() {
         let dir = scratch("dsh-dirs");
@@ -5191,15 +4348,12 @@ mod tests {
         assert!(sibling.is_dir(), "旁边的目录不该被碰到");
         assert!(dir.is_dir(), "父目录还在");
 
-        // Already gone is already what the caller wanted.
         let again = local_shell(&remove_dir_script(&nested.to_string_lossy()));
         decode_ack(&again).expect("本来就不在了也算删好了");
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Which npm decides whether a version is installable *there* is that
-    /// machine's own, against the registry its record names.
     #[test]
     fn the_version_lookup_asks_that_machines_own_npm() {
         let with_registry = npm_has_version_script(
@@ -5223,10 +4377,6 @@ mod tests {
         );
     }
 
-    /// The transport carries the new capability, and it stops the **group**: the
-    /// pid a detached spawn leads, not that process alone. What may not happen
-    /// is a signal to the bare pid — that leaves whatever the instance started
-    /// running on that machine.
     #[test]
     fn the_process_group_stop_reaches_the_machine_with_that_pid() {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
@@ -5247,9 +4397,6 @@ mod tests {
         assert!(stop_group_script(4242).contains("-$dsh_pid"));
     }
 
-    /// Runs one script the way the transport runs it, with a chosen `HOME` —
-    /// the remote machine's home directory is not this one, and `~` is expanded
-    /// against whichever home the machine's own shell reports.
     fn local_shell_as(script: &str, home: &Path) -> RemoteOutput {
         let out = std::process::Command::new("/bin/bash")
             .arg("-ilc")
@@ -5301,11 +4448,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// One profile read, one answer: the manifest's own bytes and a version for
-    /// every package the profile has installed — a scoped package under its own
-    /// directory name, and a package whose manifest states no version left out
-    /// rather than reported as empty. A profile that is not there is one empty
-    /// answer, not a failure.
     #[test]
     fn the_profile_read_returns_the_manifest_and_the_installed_versions() {
         let dir = scratch("dsh-remote-profile");
@@ -5354,7 +4496,6 @@ mod tests {
             files.installed
         );
 
-        // 没有这个 Profile：读回一个空的答案，而不是一次失败。
         let absent = local_shell(&profile_packages_script(
             &dir.join("nope").to_string_lossy(),
         ));
@@ -5364,8 +4505,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The local rule for a version's `bin.js` is 「在，而且不是空文件」; a remote
-    /// version gets the same question asked of the machine that has the file.
     #[test]
     fn the_file_ready_script_asks_that_machines_shell_whether_the_file_is_there_and_not_empty() {
         let dir = scratch("dsh-remote-file-ready");
@@ -5397,11 +4536,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A pid number alone is not an identity: the answer has to be the process's
-    /// own start time, and a pid nothing is using has to say so instead of
-    /// inventing one. (A running pid's start time is only readable where `/proc`
-    /// exists, which is the machine this is aimed at — not the Mac the suite runs
-    /// on.)
     #[test]
     fn the_start_time_script_separates_a_live_pid_from_one_nothing_owns() {
         #[derive(serde::Deserialize)]
@@ -5421,9 +4555,6 @@ mod tests {
         );
     }
 
-    /// `~` is expanded **by the machine that owns the home directory**, and the
-    /// answer is the settled absolute path — the user typed a path for a server
-    /// they are not sitting at.
     #[test]
     fn the_home_script_expands_a_tilde_against_that_machines_home() {
         let home = scratch("dsh-remote-home");
@@ -5439,9 +4570,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// The settled spelling is what makes one directory one DSH_HOME: a path
-    /// typed with `..`, a doubled slash or a trailing slash is the same
-    /// directory, so it must come back as the same record path.
     #[test]
     fn the_home_script_settles_the_path_by_text_without_following_links() {
         let home = scratch("dsh-remote-settle");
@@ -5462,9 +4590,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// A path with a space and a single quote in it is one word all the way
-    /// through both shells; a path that is not absolute is refused **there**,
-    /// with what that machine said.
     #[test]
     fn the_home_script_keeps_awkward_paths_and_refuses_a_relative_one() {
         let home = scratch("dsh-remote-quote");
@@ -5483,8 +4608,6 @@ mod tests {
             out.stderr
         );
 
-        // `~user/...` is not expanded by the machine's shell and must not
-        // silently become a directory here.
         let out = local_shell_as(&home_path_script("~someone/.dsh"), &home);
         assert_ne!(out.status, 0);
         assert!(out.stderr.contains("~用户名"), "{}", out.stderr);
@@ -5492,9 +4615,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// The profile list is the same list the local reader yields: directories
-    /// only, and the two reserved names left out. A HOME with no `profiles/`
-    /// yet is an empty list rather than a failure.
     #[test]
     fn the_profiles_script_lists_directories_and_skips_the_reserved_names() {
         let home = scratch("dsh-remote-profiles");
@@ -5518,9 +4638,6 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// Copy, rename and remove each do one thing on that machine, and each says
-    /// what happened — including the two refusals the local flow makes
-    /// (「不存在」 and 「已存在」) rather than overwriting anything.
     #[test]
     fn the_profile_scripts_copy_rename_and_remove_on_that_machine() {
         let home = scratch("dsh-remote-profile-ops");
@@ -5534,8 +4651,6 @@ mod tests {
         assert!(profiles.join("web copy/app").is_dir(), "整棵树都复制过去");
         assert!(profiles.join("web copy/package.json").is_file());
 
-        // A target that is already there, and a source that is not: neither may
-        // silently overwrite or half-create anything.
         let out = local_shell(&copy_profile_script(&from, &to));
         assert_ne!(out.status, 0);
         assert!(out.stderr.contains("远端已经有这个目录"), "{}", out.stderr);
@@ -5560,19 +4675,8 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    // -----------------------------------------------------------------------
-    // The terminal session on the other machine
-    // -----------------------------------------------------------------------
-
-    /// A terminal on this Mac that lands in the instance's DSH_HOME **there**:
-    /// one command line, two shells. The path may hold a space and a single
-    /// quote, so the script is quoted once for the shell in the user's terminal
-    /// and once for the login shell at the other end — and running it for real
-    /// is what proves both.
     #[test]
     fn the_terminal_command_lands_in_the_homes_directory_through_both_shells() {
-        // A directory that really carries both characters: the round trip is
-        // observed, not trusted.
         let dir = std::env::temp_dir().join(format!("dsh t11'q-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let home = dir.to_string_lossy().to_string();
@@ -5591,8 +4695,6 @@ mod tests {
         let command = terminal_command(TARGET, &script);
         assert!(command.starts_with("ssh -t zjq_aliyun "), "{command}");
 
-        // What the user's own shell hands ssh. The separator is not a newline:
-        // the script itself has them, and argv is what is being read here.
         assert!(!script.contains("@@@"), "分隔符不能出现在脚本里：{script}");
         let handed = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -5615,11 +4717,6 @@ mod tests {
             "ssh 只该拿到一个参数（脚本可能被换行拆开了）"
         );
 
-        // What ssh hands the remote login shell: its arguments joined with
-        // spaces. Running that here is what the machine does with it — the
-        // session ends up in the DSH_HOME with the launcher's variables set.
-        // The exec'd login shell reads the piped lines, which is how the state
-        // in front of the exec is read back.
         let remote = words[3..].join(" ");
         let mut child = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -5660,13 +4757,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // -----------------------------------------------------------------------
-    // The last stretch of a remote log
-    // -----------------------------------------------------------------------
-
-    /// Opening a remote log copies home only the end of it: a DSH log grows
-    /// without limit, and one that has been running for weeks is not something
-    /// to hand back whole.
     #[test]
     fn the_log_tail_script_reads_the_last_bytes_of_one_file() {
         let dir = scratch("dsh-remote-log-tail");
@@ -5680,8 +4770,6 @@ mod tests {
         assert_eq!(tail.text, text[text.len() - 40..], "只读到末尾那一段");
         assert!(tail.text.len() <= 40);
 
-        // A log that is not there yet is an answer, not a failure: an instance
-        // that has never printed anything has an empty log.
         let out = local_shell(&log_tail_script(
             &dir.join("nothing.log").to_string_lossy(),
             40,
@@ -5693,9 +4781,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The same read through the seam: one call, and the one thing a test can
-    /// hold the launcher to — it asked for the log on the right machine and
-    /// asked for no more than the bound.
     #[test]
     fn the_log_tail_asks_that_machine_for_a_bounded_stretch_of_the_log() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
@@ -5725,7 +4810,6 @@ mod tests {
         );
     }
 
-    /// One question, one answer: whether that machine already has a `~/.dsh`.
     #[test]
     fn the_user_home_script_answers_that_machines_home_and_its_dsh_folder() {
         let home = scratch("dsh-remote-user-home");
@@ -5749,14 +4833,6 @@ mod tests {
     /// real profile — GNU `base64`, `grep -o`, `cut`, the `@scope/pkg` walk and
     /// the marker envelope — and answers in one call with what the page
     /// projects from.
-    ///
-    /// ```text
-    /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
-    ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_profile
-    /// ```
-    ///
-    /// It writes one throwaway profile directory under that machine's `/tmp` and
-    /// removes it again.
     #[tokio::test]
     #[ignore = "需要一台能免密登录的 ssh 主机（DSH_LAUNCHER_TEST_SSH_HOST）"]
     async fn a_real_profile_read_answers_from_that_machine() {

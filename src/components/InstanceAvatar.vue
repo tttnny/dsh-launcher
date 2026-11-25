@@ -3,10 +3,6 @@ import { ref, watch } from 'vue'
 import { api } from '@/api'
 import launcherDefaultIcon from '@/assets/launcher-icon.png'
 
-// An instance's icon is either a custom image (URL or a cropped PNG in the
-// HOME, both resolved backend-side) or the launcher mark. Loading lives here so
-// the row and the detail header cannot disagree about which image to show.
-
 const props = withDefaults(
   defineProps<{ id: string; icon?: string | null; size?: number }>(),
   {

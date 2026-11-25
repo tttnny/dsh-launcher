@@ -1,5 +1,3 @@
-// Ensures the workspace, package, and native app manifests stay in sync.
-// Errors (exit != 0) whenever any version drifts.
 import { readFileSync } from 'node:fs'
 
 const pkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version

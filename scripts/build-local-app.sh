@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# 本机构建 + 安装自测用的 .app。
-#
-# 与 `pnpm tauri build` 的区别是签名方式：这里用钥匙串里的 Apple Development 证书签名，
-# 那条命令打出的 dmg 是未签名的原始产物。
-#
-# 为什么必须用证书签名：ad-hoc 签名的 designated requirement 就是 cdhash，
-# App 内容一变 cdhash 就变，macOS 存的 TCC 授权（如「完全磁盘访问」）随之失配，
-# 表现为系统设置里开关还开着、实际却没有权限。证书签名的 DR 只钉 bundle id 和
-# 证书，不含 cdhash，重建后逐字节不变，授权得以跨更新保留。
-#
-# 用法: scripts/build-local-app.sh [--no-build]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -17,7 +6,6 @@ cd "$(dirname "$0")/.."
 BUNDLE="src-tauri/target/release/bundle/macos/dsh-launcher.app"
 DEST="/Applications/dsh-launcher.app"
 
-# 从钥匙串动态取身份，不硬编码：换证书后自动跟随，也不会把 Apple ID 写进公开仓库
 SIGN_ID="$(security find-identity -v -p codesigning \
   | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
 if [ -z "$SIGN_ID" ]; then
@@ -34,8 +22,6 @@ elif [ ! -d "$BUNDLE" ]; then
   exit 1
 fi
 
-# 产物必须真的由该证书签名，否则自测会静默退回 adhoc，授权又会在下次重建时失效。
-# （Authority 行只有 --verbose 级别才输出）
 signed_by() {
   codesign -dv --verbose=4 "$1" 2>&1 | sed -n 's/^Authority=//p' | head -1
 }
@@ -59,7 +45,6 @@ case "$DR" in
     ;;
 esac
 
-# 替换自测副本前先退出运行中的实例，避免删掉正在运行的 App
 pkill -f "dsh-launcher.app" 2>/dev/null || true
 sleep 1
 rm -rf "$DEST"

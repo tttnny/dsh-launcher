@@ -6,9 +6,6 @@ import { useLauncherStore } from '@/stores/launcher'
 import { useAction } from '@/composables/useAction'
 import DlIcon from '@/components/DlIcon.vue'
 
-// 新建实例是一次四个选择的组合：机器、版本、数据目录、名称。一次把所有
-// 条件摊开，不做多步向导，也不把「去哪儿装版本」藏起来。
-
 const props = defineProps<{
   visible: boolean
   preset?: {
@@ -66,7 +63,6 @@ function reset() {
     ? uniqueName(`${props.preset.name} 副本`)
     : uniqueName('新实例')
   if (!props.preset) {
-    // 如果默认数据目录还没读出来，等列表到达后再补上。
     window.setTimeout(() => {
       if (!homeId.value) homeId.value = homes.value[0]?.id
     }, 0)

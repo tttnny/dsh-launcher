@@ -1,15 +1,3 @@
-//! The `dsh` command on this Mac's PATH.
-//!
-//! A version the launcher installs lives under the launcher's data directory,
-//! which no PATH folder reaches. Tools that look a CLI up by name — magpie, a
-//! shell — only see one when `dsh` sits in a PATH folder. Registering a version
-//! writes one link at `~/.local/bin/dsh`: that is the folder magpie adds to its
-//! own PATH and the one a user's shell normally has. One link, one version;
-//! registering another replaces it.
-//!
-//! A real `dsh` already there (npm's global bin, an installer's own link) is
-//! never overwritten or removed: the launcher says so and leaves it alone.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,23 +8,14 @@ use crate::launch;
 /// script (`crate::remote`'s `PATH_LINK`) writes and recognises the same line.
 pub const MARKER: &str = "# dsh-launcher path link: ";
 
-/// What `~/.local/bin/dsh` is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkState {
-    /// Nothing there: no version is registered.
     Absent,
-    /// A symbolic link, to the path it names (a relative target is resolved
-    /// against the link's own folder).
     Symlink(PathBuf),
-    /// A wrapper script the launcher wrote, naming the version directory it
-    /// runs.
     Script(PathBuf),
-    /// Something else: a real file, a folder, or a link of the user's. It is
-    /// never overwritten and never removed.
     Foreign,
 }
 
-/// This Mac's home directory, where `~/.local/bin` lives.
 pub fn home_dir() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -79,7 +58,6 @@ pub fn inspect(home: &Path) -> LinkState {
         .unwrap_or(LinkState::Foreign)
 }
 
-/// The version directory the link runs, when it is one of `versions`.
 pub fn linked_to(state: &LinkState, versions: &[&Path]) -> Option<PathBuf> {
     match state {
         LinkState::Symlink(target) => versions
@@ -129,8 +107,6 @@ pub fn register(home: &Path, version_dir: &Path, versions: &[&Path]) -> Result<(
     }
 }
 
-/// Removes the launcher's registration, if there is one. A `dsh` the user
-/// installed is not touched.
 pub fn unregister(home: &Path, versions: &[&Path]) -> Result<(), String> {
     let state = inspect(home);
     match state {
@@ -146,8 +122,6 @@ pub fn unregister(home: &Path, versions: &[&Path]) -> Result<(), String> {
     }
 }
 
-/// Removes the registration only while it runs `version_dir`: deleting a
-/// version withdraws its own link, never another version's.
 pub fn unlink_version(home: &Path, version_dir: &Path) -> Result<(), String> {
     let state = inspect(home);
     let ours = match &state {

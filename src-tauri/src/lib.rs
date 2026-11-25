@@ -33,28 +33,13 @@ pub struct AppState {
     pub running: tokio::sync::Mutex<HashMap<String, process::RunningInstance>>,
     pub tasks: tokio::sync::Mutex<HashMap<String, tasks::TaskInfo>>,
     /// The one boundary every remote action crosses. A test substitutes an
-    /// in-memory double here instead of needing a real machine.
     pub host_transport: Arc<dyn ssh::HostTransport>,
-    /// The port forwards to remote hosts this launcher session opened, so the
-    /// exit path can withdraw exactly what it opened and nothing else
-    /// (ADR-0008). Launcher state, not machine state: they live and die with
-    /// this process.
     pub forwards: tunnel::Forwards,
-    /// What the launcher last learned about reaching each host. Runtime only:
-    /// 「现在连不上」 is a fact about the network and the moment, not part of the
-    /// host record — a machine that is switched off is still a machine the user
-    /// saved (ADR-0006).
     pub host_statuses: StdMutex<HashMap<String, config::HostStatus>>,
-    /// Remote hosts whose instances this session has not checked yet. Until a
-    /// host leaves this set, nothing is known about its instances, and the page
-    /// reads that as 「启动中」 — never as 「已停止」, which is the state that makes
-    /// a user start a second DSH on the server (ADR-0007 后果).
     pub remote_scan: StdMutex<std::collections::HashSet<String>>,
 }
 
 impl AppState {
-    /// The status last observed for one host. `None` before the first test: the
-    /// page then shows no badge at all rather than pretending 「不可达」.
     pub fn host_status(&self, host_id: &str) -> Option<config::HostStatus> {
         self.host_statuses.lock().unwrap().get(host_id).cloned()
     }
@@ -66,11 +51,7 @@ impl AppState {
             .insert(host_id.to_string(), status);
     }
 
-    /// Why the launcher currently cannot say anything about one host's instances
-    /// — `None` when the last word was 「到得了」, or when there is no word at all.
-    ///
     /// The one definition of 「主机不可达」, and the one predicate on it: the
-    /// instance list, the plugin page, the bulk buttons and the tray all ask
     /// this question, and two answers would let two of them disagree about the
     /// same machine. 本机 is never in this state — nothing ever sets one for it.
     pub fn host_unreachable_reason(&self, host_id: &str) -> Option<String> {
@@ -86,14 +67,12 @@ impl AppState {
         }
     }
 
-    /// A deleted host takes its status with it: statuses are keyed by host id,
     /// and a host added later is not the same machine.
     pub fn forget_host_status(&self, host_id: &str) {
         self.host_statuses.lock().unwrap().remove(host_id);
     }
 }
 
-/// Extracts a `dsh-launcher://…` deep link from process arguments.
 pub(crate) fn deep_link_from_args(args: &[String]) -> Option<String> {
     args.iter()
         .find(|a| a.starts_with("dsh-launcher://"))
@@ -134,13 +113,9 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        // macOS 原生应用菜单栏 (App/编辑/显示/窗口/帮助) + 应用快捷键 (t3)。
         .menu(crate::app_menu::build_app_menu)
         .on_menu_event(crate::app_menu::handle_menu_event)
         .setup(|app| {
-            // Register the dsh-launcher:// scheme at runtime (Windows/Linux)
-            // and forward every deep link to the frontend; the modpack
-            // import flow consumes dsh-launcher://pack?url=<tgz>.
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -165,7 +140,6 @@ pub fn run() {
                     let _ = win.hide();
                 }
             }
-            // Populate common macOS environment paths so GUI launcher can locate tools
             runtime::ensure_macos_paths();
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -175,8 +149,6 @@ pub fn run() {
             let cfg = config::load_config(&config_path).map_err(std::io::Error::other)?;
             proxy::sync_from_settings(&cfg.settings);
 
-            // Runtime log: rotate the previous latest.log, then apply the
-            // configured level (invalid stored values fall back to info).
             let log_level =
                 applog::parse_level(&cfg.settings.log_level).unwrap_or(applog::Level::Info);
             if let Err(e) = applog::init(&data_dir.join("logs"), log_level) {
@@ -200,10 +172,6 @@ pub fn run() {
                 forwards: tunnel::Forwards::default(),
             });
 
-            // Resolve the toolchain once at startup and persist it, so the
-            // first spawn of any instance uses a known absolute node/pnpm
-            // rather than whatever PATH this process happens to have. A stale
-            // binding (a deleted nvm version) is re-probed inside.
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -225,16 +193,8 @@ pub fn run() {
                 });
             }
 
-            // System tray with dynamic menu.
             tray::build_tray(app.handle())?;
 
-            // Instances that outlived the last launcher session (an update, a
-            // force quit) are adopted in the background, so the board, the tray
-            // and the plugins page all agree they are running. 本机's instances
-            // are found by probing this Mac's ports; every remote host's by
-            // asking that machine (ADR-0007 §2) — which is also why the remote
-            // hosts are marked 「还没查」 first: until a machine has answered,
-            // its instances are unknown, not stopped.
             {
                 let handle = app.handle().clone();
                 let state = handle.state::<AppState>();
@@ -256,11 +216,6 @@ pub fn run() {
                     crate::process::adopt_surviving_remote_instances(&handle).await;
                 });
             }
-            // The timer is its own task, not the tail of the pass above: one
-            // slow machine in that pass must not hold the periodic check back,
-            // or an instance started while it runs goes unnoticed for as long
-            // as the pass takes. The two share one lock, so they never ask the
-            // same machine at the same time.
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -268,8 +223,6 @@ pub fn run() {
                 });
             }
 
-            // Close-to-tray for the main window (destroyed-window recreation
-            // is handled by show_or_create_main / the RunEvent loop below).
             if let Some(win) = app.get_webview_window("main") {
                 windows::attach_close_behavior(app.handle(), &win);
             }
@@ -354,10 +307,6 @@ pub fn run() {
             } => {
                 api.prevent_exit();
             }
-            // Terminate child processes when the launcher exits so no DSH
-            // instance is left orphaned, and withdraw the port forwards this
-            // session opened — the ssh connection is the launcher's own, so
-            // nothing the user configured is touched (ADR-0008 §1).
             tauri::RunEvent::Exit => {
                 let state = app_handle.state::<AppState>();
                 process::kill_all(&state);

@@ -13,57 +13,30 @@ use tokio::sync::{Mutex, Notify};
 
 pub const STATUS_EVENT: &str = "instance://status";
 
-/// A live instance process.
 pub struct RunningInstance {
     /// Stop signal. The waiter task owns the child and `select!`s on this, so
     /// `stop_instance_process` never touches the child handle directly.
     pub kill: Arc<Notify>,
     pub profile: String,
     pub url: Option<String>,
-    /// Set when the running entry was adopted from a process the launcher did
-    /// not spawn (e.g. DSH restarted itself): `kill` is unused and the watcher
-    /// polls `pid` for liveness instead of reaping a child.
     pub adopted: Option<Adopted>,
-    /// Set when the process runs on another machine. Such an instance is
-    /// nobody's child here: it is stopped by pid **there**, and it is meant to
-    /// outlive this launcher (ADR-0007), which is what [`kill_all`] reads.
     pub remote: Option<RemoteRun>,
 }
 
-/// A DSH process the launcher started **on another machine**.
-///
-/// It replaces the child handle a local instance has: that machine's shell
-/// started it in its own session (`setsid`), so nothing here can wait for it or
-/// signal it directly. What the launcher knows instead is where it runs and what
-/// it is allowed to say about it — the pid that leads its process group, the
-/// process start time that tells a reused pid from this one, and that machine's
-/// own data directory, log and running record.
 #[derive(Clone, Debug)]
 pub struct RemoteRun {
     pub host_id: String,
-    /// The machine, as the transport dials it.
     pub host: crate::ssh::RemoteHost,
-    /// The address the instance printed on **its own** machine, token included,
-    /// once its log has shown it. It is a fact about that machine: the forward's
-    /// target, and what the card shows as 「远端位置」. What this Mac reaches the
-    /// instance at is the running entry's own `url` (ADR-0008).
     pub remote_url: Option<String>,
     /// The pid `setsid` started — also the id of the process group a stop
     /// signals as a whole.
     pub pid: i32,
-    /// When that pid started, as its own machine's `/proc/<pid>/stat` reports it.
-    /// `None` = the machine could not be asked, so a later stop cannot tell a
-    /// reused pid apart and has to say so rather than signal blindly.
     pub started_at: Option<u64>,
-    /// That host's data directory **on that machine**.
     pub data_dir: PathBuf,
     pub log_path: String,
 }
 
 impl RemoteRun {
-    /// Where one instance of `host` runs, as the launcher holds it: the machine,
-    /// the pid that leads its group, when that pid started, and that machine's
-    /// own data directory and log for the instance.
     fn of(
         host: &Host,
         run_host: crate::ssh::RemoteHost,
@@ -89,28 +62,14 @@ impl RemoteRun {
     }
 }
 
-/// One instance's entry in a remote host's own running record
-/// (`<该主机的数据目录>/running.json`).
-///
-/// It is written **on that machine** because that is where the facts are: a
-/// later launcher session (or a stop) finds here what it did not witness — the
-/// URL with the launch token in it, the profile, and the pid together with its
-/// process start time (ADR-0007 §3). Without the URL a running instance is only
-/// half-known: the card can say 运行, but the plugins page has no token to talk
-/// to it with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteRunRecord {
-    /// The URL the instance printed when it became ready, token included.
-    /// `None` until it has printed one.
     #[serde(default)]
     pub url: Option<String>,
-    /// The `token=` value out of that URL, on its own so a reader does not have
-    /// to parse it back out.
     #[serde(default)]
     pub token: Option<String>,
     pub profile: String,
     pub pid: i32,
-    /// `/proc/<pid>/stat` field 22, in clock ticks since boot.
     #[serde(default)]
     pub started_at: Option<u64>,
 }
@@ -122,16 +81,12 @@ pub struct Adopted {
     pub host: String,
 }
 
-/// One listener on the instance port, as reported by lsof.
 struct PortOwner {
     pid: i32,
     command: String,
     args: String,
 }
 
-/// Find the process listening on `port`. `None` = port free (or probe
-/// failed — degrade to the old behavior: spawn and let DSH's own
-/// EADDRINUSE speak).
 async fn probe_port_owner(port: u16) -> Option<PortOwner> {
     let mut cmd = Command::new("lsof");
     hide_console(&mut cmd);
@@ -161,7 +116,6 @@ async fn probe_port_owner(port: u16) -> Option<PortOwner> {
     Some(PortOwner { pid, command, args })
 }
 
-/// One `ps -o <field>=` value of `pid`, trimmed. Best-effort.
 async fn process_field(pid: i32, field: &str) -> Option<String> {
     let mut cmd = Command::new("ps");
     hide_console(&mut cmd);
@@ -176,22 +130,11 @@ async fn process_field(pid: i32, field: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Whether a port owner is a DSH web server. The evidence is DSH-specific —
-/// 「dsh」 in the name or the command line (case-insensitive), or the version
-/// tree's `bin.js` / `--profile` — never the `node` that a plain Node app also
-/// runs as. The command line is read as well as the name because a DSH shipped
-/// as a single-file executable (a Python-packaged build is one) runs under a
-/// name of its own (`MainThread`) and says `…/dsh/lib/bin.js` only in its
-/// argv; an npm install says `…/@deepseek-ai/dsh/…/bin.js` there.
 fn looks_like_dsh(command: &str, args: &str) -> bool {
-    // Only a real DSH marker counts: the literal "dsh" that a DSH's own name or
-    // path carries. "bin.js" and "--profile" alone belong to countless Node
-    // tools, so matching them would adopt an unrelated Node server on the port.
     let looks = |text: &str| text.to_ascii_lowercase().contains("dsh");
     looks(command) || looks(args)
 }
 
-/// Verify the adopted pid still exists (cheap `kill -0` poll).
 fn pid_alive(pid: i32) -> bool {
     // SAFETY: kill(2) with signal 0 performs the permission+existence check
     // without delivering anything.
@@ -201,15 +144,6 @@ fn pid_alive(pid: i32) -> bool {
     }
 }
 
-/// Register an externally-owned DSH process (DSH restarted itself in-place, or
-/// the launcher was replaced while the instance kept running) as the
-/// instance's running entry, then start the liveness watcher.
-///
-/// The token is in-memory in the owning process, but that process is usually
-/// still the one that printed the URL we remembered — so the remembered URL is
-/// tried first and adopted with it when the instance still accepts it (plugin
-/// management keeps working). Only when there is no working reminder does the
-/// entry degrade to the bare URL the page calls "由系统接管".
 async fn adopt_external_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -224,8 +158,6 @@ async fn adopt_external_process(
     let remembered = match recall_url(&data_dir, instance_id) {
         Some(url) if crate::native::NativeClient::connect(&url).await.is_ok() => Some(url),
         Some(_) => {
-            // The process that printed it is gone (DSH restarted itself): the
-            // new one minted its own token, so the reminder is dead weight.
             forget_url(&data_dir, instance_id);
             None
         }
@@ -235,7 +167,7 @@ async fn adopt_external_process(
     {
         let mut running = state.running.lock().await;
         if running.contains_key(instance_id) {
-            return; // A real child (re)registered first; it wins.
+            return;
         }
         running.insert(
             instance_id.to_string(),
@@ -274,8 +206,6 @@ async fn adopt_external_process(
     );
     crate::tray::rebuild_tray_menu(app).await;
 
-    // Watcher: poll the external pid; when it dies, clean up like the waiter
-    // does for real children.
     let watcher_app = app.clone();
     let watcher_id = instance_id.to_string();
     let watcher_profile = profile.to_string();
@@ -323,20 +253,10 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"dsh web: (https?://[^\s]+)").unwrap())
 }
 
-/// The port of an instance URL (`http://127.0.0.1:3088/?token=…` → 3088), for
-/// finding an instance whose port was not pinned.
 fn port_of_url(url: &str) -> Option<u16> {
     reqwest::Url::parse(url.trim()).ok()?.port()
 }
 
-/// Starts one background pass that adopts the instances this launcher session
-/// did *not* spawn.
-///
-/// A launcher that is replaced (app update) or force-quit leaves its DSH
-/// processes running: they are not reaped, and nothing notices until the user
-/// starts one again — which is exactly when the card says "已停止" while the
-/// port is taken, and the plugins page degrades to a file listing. The pinned
-/// port, or the port in the URL we remembered, is where to look.
 pub async fn adopt_surviving_instances(app: &AppHandle) {
     let state = app.state::<AppState>();
     let data_dir = state.data_dir.clone();
@@ -346,18 +266,12 @@ pub async fn adopt_surviving_instances(app: &AppHandle) {
         host: String,
         port: u16,
         remembered: Option<String>,
-        /// A user-configured port is evidence by itself; a random one is only
-        /// believed if the URL we remembered still authenticates.
         pinned: bool,
     }
     let candidates: Vec<Candidate> = {
         let cfg = state.config.lock().unwrap();
         cfg.instances
             .iter()
-            // 本机 only: another machine's port is on that machine, and the
-            // local probe below would be asking this Mac about it — a local
-            // process wearing the same port number would be adopted as a remote
-            // instance. Adopting there is that machine's own pass (ADR-0007).
             .filter(|inst| {
                 inst.host_id.trim().is_empty() || inst.host_id == crate::config::LOCAL_HOST_ID
             })
@@ -403,22 +317,6 @@ pub async fn adopt_surviving_instances(app: &AppHandle) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Remembered launch URLs
-//
-// DSH's launch token lives in the process and is unrecoverable from outside —
-// but the *URL that carries it* is ours: the instance prints it on its own
-// stdout. Persisting it is what lets a later launcher session adopt a DSH
-// process that outlived us (an app update, a quit-and-reopen) **and still
-// manage its plugins**, instead of degrading to the dead-end "由系统接管"
-// state for the rest of that process's life.
-//
-// The file is a hint, never an authority: a remembered token is only trusted
-// after the instance accepts it, and it is dropped the moment it does not
-// (DSH restarted itself in place, which mints a new token).
-// ---------------------------------------------------------------------------
-
-/// `<data_dir>/running.json` — remembered launch URLs, keyed by instance id.
 fn remembered_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("running.json")
 }
@@ -442,7 +340,6 @@ fn write_remembered(data_dir: &std::path::Path, map: &serde_json::Map<String, se
     }
 }
 
-/// Records the URL an instance printed when it became ready.
 pub(crate) fn remember_url(
     data_dir: &std::path::Path,
     instance_id: &str,
@@ -457,7 +354,6 @@ pub(crate) fn remember_url(
     write_remembered(data_dir, &map);
 }
 
-/// Forgets an instance's remembered URL (stopped, exited, or a stale token).
 pub(crate) fn forget_url(data_dir: &std::path::Path, instance_id: &str) {
     let mut map = read_remembered(data_dir);
     if map.remove(instance_id).is_some() {
@@ -465,7 +361,6 @@ pub(crate) fn forget_url(data_dir: &std::path::Path, instance_id: &str) {
     }
 }
 
-/// The URL we last saw this instance print, if we ever did.
 pub(crate) fn recall_url(data_dir: &std::path::Path, instance_id: &str) -> Option<String> {
     read_remembered(data_dir)
         .get(instance_id)
@@ -474,7 +369,6 @@ pub(crate) fn recall_url(data_dir: &std::path::Path, instance_id: &str) -> Optio
         .map(str::to_string)
 }
 
-/// The profile that instance was running when it printed that URL.
 pub(crate) fn recall_profile(data_dir: &std::path::Path, instance_id: &str) -> Option<String> {
     read_remembered(data_dir)
         .get(instance_id)
@@ -483,24 +377,12 @@ pub(crate) fn recall_profile(data_dir: &std::path::Path, instance_id: &str) -> O
         .map(str::to_string)
 }
 
-/// The URL the launcher can actually authenticate with, if any. An entry
-/// without a token (an adopted process we never saw print one) is *running* but
-/// not manageable; the reverse — adopted with a token — is both.
 pub(crate) fn manageable_url(entry: &RunningEntry) -> Option<&str> {
     entry.url.as_deref().filter(|u| u.contains("token="))
 }
 
-/// Why 「打开」 has nothing to open, when that is the whole answer: the instance
-/// is not in the running table at all.
 const NOT_RUNNING: &str = "实例未在运行或尚未就绪";
 
-/// Why 「打开」 has nothing to open, when the instance **is** running on that
-/// machine and the launcher does not know its address.
-///
-/// These are two different states and they lead to two different actions, so
-/// they are two different sentences: the first is answered by starting the
-/// instance, the second (DSH replaced itself and the address it printed went to
-/// a file the launcher was not following) by retrying or restarting it.
 const ADDRESS_UNKNOWN: &str = "实例在那台机器上运行，但启动器不知道它的地址（DSH 自己重启后启动 token 没能找回来）。点「重试」再找一次；还找不到就从启动器重启这个实例。";
 
 /// How much of a process's own output the launcher reads when it has to find the
@@ -513,27 +395,10 @@ const ADDRESS_SEARCH_BYTES: usize = 64 * 1024;
 /// restarted a dozen times does not deserve a dozen ssh round trips.
 const ADDRESS_CANDIDATES: usize = 8;
 
-/// Every `dsh web:` address in one stretch of output, oldest first.
 fn urls_in(text: &str) -> Vec<String> {
     text.lines().filter_map(url_in).collect()
 }
 
-/// The address one running remote instance printed, found by asking **that
-/// machine** where the process's output goes and reading the newest address its
-/// own loopback still accepts.
-///
-/// This is the state DSH's in-place restart leaves behind: the process keeps its
-/// pid, so the launcher keeps believing it is the instance it started, while the
-/// replacement writes its output — the `dsh web: <url>` line with the launch
-/// token — to a file of its own making. The log the launcher has been following
-/// then says nothing more, and the address is nowhere in the running record
-/// either, because the exit path dropped it when the old pid went.
-///
-/// The token is spent **there** (`mint_headers`): the address belongs to that
-/// machine's loopback, and a candidate carrying a token nothing accepts is not
-/// this instance (ADR-0006). That is why nothing is returned unless one was
-/// accepted — recovering an address is exactly the situation where a plausible
-/// guess would be worse than saying 「不知道」.
 async fn find_remote_address(state: &AppState, run: &RemoteRun) -> Option<String> {
     let transport = &*state.host_transport;
     // Each read hands back its own stretch oldest-first. Where the process
@@ -554,8 +419,6 @@ async fn find_remote_address(state: &AppState, run: &RemoteRun) -> Option<String
         Ok(_) => {}
         Err(e) => crate::log_warn!("实例 pid {} 的远端日志读不到：{e}", run.pid),
     }
-    // Only addresses that carry a token are worth an ssh round trip, and the
-    // same address seen in both places is asked about once.
     let candidates = sources.into_iter().flat_map(|urls| urls.into_iter().rev());
     let mut tried: Vec<String> = Vec::new();
     for url in candidates {
@@ -588,16 +451,6 @@ async fn find_remote_address(state: &AppState, run: &RemoteRun) -> Option<String
     None
 }
 
-/// Re-establishes the address of a remote instance the launcher is holding
-/// without one, and says which address that is on that machine — `None` when
-/// nothing could be found and therefore nothing was changed.
-///
-/// What it records is the same thing the ready path records: the address that
-/// machine printed, written into **that machine's** own running record so a
-/// later session does not have to search again (ADR-0007 §3), and the forwarded
-/// address in the running table, which is what 「打开」 hands over (ADR-0008).
-/// A forward that will not come up costs the address, not the instance — the
-/// caller retries it with the address it now has.
 async fn repair_remote_address(
     state: &AppState,
     instance_id: &str,
@@ -618,8 +471,6 @@ async fn repair_remote_address(
         started_at: run.started_at,
     };
     if let Err(e) = remember_remote_run(state, instance_id, &record, run).await {
-        // The address works for this session either way; losing the record only
-        // costs the next session another search.
         crate::log_warn!("实例 {instance_id} 的远端运行记录没写上（{e}）");
     }
     let local_url = local_address_for(state, instance_id, &run.host, &remote_url).await;
@@ -639,9 +490,6 @@ async fn repair_remote_address(
     Some(remote_url)
 }
 
-/// Emits the status of an instance whose address was just re-established: the
-/// row states two addresses and only one of them was missing, so this is what
-/// turns 「运行中」 into 「运行中，可打开」 without waiting for the next page load.
 async fn emit_address_found(app: &AppHandle, state: &AppState, instance_id: &str, profile: &str) {
     let (url, remote_url) = {
         let running = state.running.lock().await;
@@ -666,14 +514,6 @@ async fn emit_address_found(app: &AppHandle, state: &AppState, instance_id: &str
     );
 }
 
-/// Puts one remote instance's address on this Mac, for an instance whose own
-/// machine has just been found running it (ADR-0008).
-///
-/// `remote_url` is the address DSH printed on **its** machine — the forward's
-/// target, and what the card shows as 「远端位置」. What comes back is the address
-/// that works here, or `None` when the forward will not come up: that costs the
-/// address, not the instance, which is running on that machine either way and
-/// whose next 打开 builds the forward again and says why if it still cannot.
 pub(crate) async fn local_address_for(
     state: &AppState,
     instance_id: &str,
@@ -689,21 +529,6 @@ pub(crate) async fn local_address_for(
     }
 }
 
-/// The address **this Mac** can open a running instance at, bringing the
-/// launcher's port forward up if the connection that carried it went away
-/// (ADR-0008).
-///
-/// 本机's instances answer with their own URL, unchanged. A remote one answers
-/// with the address its own machine printed, translated to loopback with the
-/// path and the launch token carried over — which is the address the system
-/// browser is handed, and the one the plugins page talks to. It is deliberately
-/// not taken from the entry as it stands: a forward lives only as long as the
-/// ssh connection under it, so the entry's copy can be an address that died
-/// while the Mac slept, and this is where that is noticed and repaired.
-///
-/// A remote entry with no address at all — DSH replaced itself and its new
-/// output file was never followed — is searched for on that machine first
-/// ([`repair_remote_address`]), and only then answered 「不知道」.
 pub(crate) async fn reachable_url_for(
     state: &AppState,
     instance_id: &str,
@@ -731,27 +556,6 @@ pub(crate) async fn reachable_url_for(
     crate::tunnel::reachable_url(state, &run.host, &remote_url).await
 }
 
-// ---------------------------------------------------------------------------
-// Running an instance on another machine
-//
-// A remote instance is not this launcher's child. That machine's own shell
-// starts it in its own session, with `/dev/null` for stdin and its output
-// appended to a log file there, so it is still running after the ssh connection
-// closes and after the launcher itself quits (ADR-0007). What the launcher keeps
-// in place of a child handle is [`RemoteRun`] — which machine, which pid — and
-// what keeps it manageable across launcher restarts is the URL, launch token
-// included, written into **that machine's** own running record the moment its
-// log prints it.
-//
-// Nothing here reads a profile, a version tree or a log from this Mac: those are
-// paths on the other machine, and a local `fs` call aimed at one of them would
-// answer about whatever this Mac happens to have at the same spelling (ADR-0006).
-// ---------------------------------------------------------------------------
-
-/// How long one read of a remote instance's log may wait **on that machine** for
-/// output, for the process to go, or for the budget. The usual case — nothing
-/// new is written for minutes — costs one call per window instead of one per
-/// second; output that appears is seen about a second later.
 const REMOTE_TAIL_WAIT_SECS: u64 = 10;
 
 /// How long to wait before reading a remote log again after the machine could
@@ -759,8 +563,6 @@ const REMOTE_TAIL_WAIT_SECS: u64 = 10;
 /// either way, so a failed read is not the end of the watch.
 const REMOTE_FOLLOW_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// `<该主机的数据目录>/running.json` — the file the records above live in, as
-/// that machine spells the path.
 fn remote_record_path(data_dir: &Path) -> String {
     data_dir.join("running.json").to_string_lossy().to_string()
 }
@@ -770,8 +572,6 @@ fn remote_record_path(data_dir: &Path) -> String {
 /// every host is enough: these writes are rare and tiny.
 static REMOTE_RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// One host's running record as it is on that machine. A file that is not there
-/// yet is an empty record: the launcher is the one that creates it.
 async fn read_remote_records(
     state: &AppState,
     host: &crate::ssh::RemoteHost,
@@ -810,7 +610,6 @@ async fn write_remote_records(
         .map_err(|e| format!("写入那台机器上的运行记录失败（{path}）：{e}"))
 }
 
-/// Records one instance in **that machine's** running record (ADR-0007 §3).
 pub(crate) async fn remember_remote_run(
     state: &AppState,
     instance_id: &str,
@@ -843,9 +642,6 @@ pub(crate) async fn forget_remote_run(
     write_remote_records(state, &run.host, &run.data_dir, &map).await
 }
 
-/// The token of an instance URL, if it carries one. DSH's launch token exists
-/// only inside that URL, which is why the record keeps a copy of it: an instance
-/// whose token was lost is running but unmanageable.
 fn token_of(url: &str) -> Option<String> {
     reqwest::Url::parse(url.trim())
         .ok()?
@@ -854,14 +650,10 @@ fn token_of(url: &str) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
-/// The instance URL on one line of its output — the same line 本机 reads off the
-/// child's stdout, from the same regex.
 fn url_in(line: &str) -> Option<String> {
     url_re().captures(line).map(|cap| cap[1].to_string())
 }
 
-/// One profile's `package.json`, the document that decides whether the profile
-/// is a DSH web application.
 fn profile_package_json(home_path: &Path, profile: &str) -> PathBuf {
     crate::profile::profile_dir(home_path, profile)
         .ok()
@@ -874,8 +666,6 @@ fn profile_package_json(home_path: &Path, profile: &str) -> PathBuf {
         })
 }
 
-/// Whether one profile document declares the DSH web application among its
-/// bundles. Such a profile understands the web flags and gets a port.
 fn web_profile_document(raw: &str) -> bool {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
         return false;
@@ -889,32 +679,13 @@ fn web_profile_document(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// What one machine says about a profile's nature: whether a start has to treat
-/// it as a DSH web application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProfileNature {
-    /// That machine has the profile's own `package.json` and it declares the web
-    /// bundle.
     Web,
-    /// It has the document, and it does not: no web flags for this profile.
     NotWeb,
-    /// There is no document yet — the profile is what this start materializes.
-    /// The launcher has an answer for this case (the port policy), and DSH's own
-    /// default port is not it.
     Unmaterialized,
 }
 
-/// Re-asserts the launcher's per-instance port in the profile's managed lan-bind
-/// block, **on the machine that owns the profile**: that block outranks the CLI
-/// `--port` and the plugin only re-asserts it at boot, so without this nudge the
-/// first start after a port change comes up on the old port (see
-/// [`crate::profile::assert_profile_lan_bind_port`] for the local twin).
-///
-/// A failure only costs the next start's port, so it is logged rather than
-/// raised — the same weight the local one carries.
-///
-/// `document` is the patch file as the caller already read it, so a start that
-/// has just fetched everything in one round trip does not fetch this again.
 async fn assert_remote_lan_bind_port(
     state: &AppState,
     run_host: &crate::ssh::RemoteHost,
@@ -927,7 +698,6 @@ async fn assert_remote_lan_bind_port(
         return;
     };
     let Some(bytes) = document else {
-        // Absent file: nothing to nudge.
         return;
     };
     let path = patch.to_string_lossy().to_string();
@@ -945,19 +715,6 @@ async fn assert_remote_lan_bind_port(
     }
 }
 
-/// Pins the profile's own pnpm store and peer policy **on that machine**.
-///
-/// The DSH Web UI's plugin manager runs bare `pnpm` in the profile directory and
-/// never sees the launcher's `--store-dir`; the profile itself has to record the
-/// settings, or every add/remove there fails with ERR_PNPM_UNEXPECTED_STORE.
-/// See [`crate::plugins::ensure_profile_store_pin`] / `ensure_profile_npmrc` for
-/// the local twins and why each setting exists. Best effort, like theirs.
-///
-/// The three documents arrive as the caller read them, for the same reason
-/// [`assert_remote_lan_bind_port`] takes its patch: one start, one round trip.
-/// The three profile documents one start reads from the machine that owns the
-/// profile, already in hand: the caller fetched them in the same round trip as
-/// everything else (`crate::remote::read_files`), so nothing here asks again.
 struct ProfileDocuments {
     modules: Option<Vec<u8>>,
     workspace: Option<Vec<u8>>,
@@ -977,8 +734,6 @@ async fn pin_remote_profile_store(
     };
     let text = |bytes: Option<Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(&b).to_string());
 
-    // The store the profile is already linked from, so a profile a user
-    // installed against their own store keeps working.
     let linked = text(documents.modules)
         .as_deref()
         .and_then(crate::plugins::linked_store_document);
@@ -1027,25 +782,12 @@ pub(crate) fn remote_instance_log_path(data_dir: &Path, instance_id: &str) -> St
         .to_string()
 }
 
-/// What one remote start leaves behind.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteStart {
     pub run: RemoteRun,
-    /// Where **this run's** output begins in that machine's log.
     pub offset: u64,
 }
 
-/// Starts one instance **on a remote host** and returns where it runs.
-///
-/// The command line and the environment are 本机's policy, taken from
-/// [`crate::launch`], with two differences: the answers that depend on the other
-/// machine's files (whether the profile is a web application, whether its bundle
-/// understands `--no-open`, whether the version's `bin.js` is there) are asked
-/// there, and the launcher's proxy settings never ride along — a remote host's
-/// network exit is its record's business (`launch::instance_env_for`).
-///
-/// Everything here is a fact about the other machine: nothing is emitted and
-/// nothing is registered, so the caller owns the projections.
 pub(crate) async fn spawn_remote_instance(
     state: &AppState,
     cfg: &crate::config::Config,
@@ -1105,8 +847,6 @@ pub(crate) async fn spawn_remote_instance(
         .map_err(|e| format!("无法读取「{}」上的文件：{e}", host.display_name))?
         .into_iter();
     let bin_bytes = answers.next().flatten();
-    // Slots line up with `optional`: a file that was not asked for reads as
-    // 「没有这份文档」, which is exactly what its absence means below.
     let mut next = |asked: bool| -> Option<Vec<u8>> {
         if asked {
             answers.next().flatten()
@@ -1115,8 +855,6 @@ pub(crate) async fn spawn_remote_instance(
         }
     };
 
-    // The version's own `bin.js`: `version_bin_ready` is a local `exists()`,
-    // which at a remote path answers about this Mac.
     if bin_bytes.as_deref().map(<[u8]>::is_empty).unwrap_or(true) {
         return Err(format!(
             "版本 {} 安装不完整（缺少 {}），请重新安装",
@@ -1147,7 +885,6 @@ pub(crate) async fn spawn_remote_instance(
             }
         }
         (Some(_), None) if profile_pkg.is_some() => ProfileNature::Unmaterialized,
-        // No HOME record to ask about: the profile's own name is all there is.
         _ => {
             if profile == "web" {
                 ProfileNature::Web
@@ -1265,9 +1002,6 @@ pub(crate) async fn spawn_remote_instance(
         data_dir,
         log_path,
     };
-    // The record is written before the URL is known and completed when it
-    // appears, so a launcher that dies in between still knows which pid it left
-    // running where.
     let record = RemoteRunRecord {
         url: None,
         token: None,
@@ -1285,27 +1019,9 @@ pub(crate) async fn spawn_remote_instance(
     Ok(RemoteStart { run, offset })
 }
 
-/// How many bytes of a priming boot's output the launcher keeps for the failure
-/// message, and for how long it waits for the web URL.
 const REMOTE_PRIME_LOG_LINES: usize = 200;
 const REMOTE_PRIME_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// Gives a brand-new DSH_HOME on another machine the same start it gets here.
-///
-/// A DSH_HOME DSH has never run in has no `profiles/` at all, and DSH
-/// materializes `profiles/web` on its **first** run. 本机's dedicated HOME gets
-/// that from `tasks::ensure_web_profile_template` while the version installs;
-/// without the twin of that step, a fresh remote HOME leaves the page with an
-/// empty Profile list and 「启动」 with nothing to launch.
-///
-/// So that machine runs the same throwaway boot the local path runs — `node
-/// bin.js --profile web --host 127.0.0.1 --port 0`, DSH_HOME pointed at the HOME
-/// — and is stopped again once it has printed its URL; `profiles/web` is then
-/// copied to `profiles/__temp__`, the template later profiles are derived from,
-/// with the port the boot happened to bind scrubbed out of the copy.
-///
-/// A HOME that already has a profile is left completely alone: this is for the
-/// HOME nobody has run DSH in, not a repair for one that has.
 pub(crate) async fn ensure_remote_web_profile_template(
     state: &AppState,
     host: &Host,
@@ -1317,9 +1033,6 @@ pub(crate) async fn ensure_remote_web_profile_template(
     let data_dir = host.data_dir(&state.data_dir)?;
     let profiles = crate::profile::profiles_dir(home_path);
 
-    // A HOME that already has a profile is the user's own business: the first
-    // boot is what makes a Profile exist, and this is only for the HOME where
-    // none does yet.
     let listed = crate::remote::list_profiles(transport, &run_host, &profiles.to_string_lossy())
         .await
         .map_err(|e| format!("无法读取「{}」上的 Profile 列表：{e}", host.display_name))?;
@@ -1340,8 +1053,6 @@ pub(crate) async fn ensure_remote_web_profile_template(
     }
 
     let node = crate::runtime::node_for_spawn_checked_for(state, Some(&host.id)).await?;
-    // `--port 0`: the kernel on that machine picks a free port for a boot nobody
-    // keeps, so it can never take one an instance wants.
     let mut argv = vec![
         "/usr/bin/env".to_string(),
         format!("DSH_HOME={}", home_path.to_string_lossy()),
@@ -1349,9 +1060,6 @@ pub(crate) async fn ensure_remote_web_profile_template(
     argv.extend(crate::launch::template_boot_argv(&node, &version.dir, 0));
 
     let log_path = remote_prime_log_path(&data_dir, home_path);
-    // Read the log's size **before** the process exists: a previous attempt's URL
-    // line is not this one's, and a HOME primed twice must not mistake one for
-    // the other.
     let offset = crate::remote::log_size(transport, &run_host, &log_path)
         .await
         .map_err(|e| format!("无法读取那台机器上的日志（{log_path}）：{e}"))?;
@@ -1431,7 +1139,6 @@ pub(crate) async fn ensure_remote_web_profile_template(
         ));
     }
 
-    // The template later profiles are derived from, made the way 本机 makes it.
     let web_dir = profiles.join("web");
     let temp_dir = profiles.join("__temp__");
     crate::remote::copy_profile(
@@ -1469,11 +1176,6 @@ fn remote_prime_log_path(data_dir: &Path, home_path: &Path) -> String {
         .to_string()
 }
 
-/// Why a priming boot that is still there could not be stopped, or `None` when
-/// it did stop. A process the launcher cannot identify is never signalled
-/// (ADR-0007 §3), and one that will not go stays where it is — either way the
-/// user is told, because a DSH left running on their server is theirs to clean
-/// up, not the launcher's to forget.
 fn prime_stop_failure(host: &Host, pid: i32, outcome: RemoteStop) -> Option<String> {
     match outcome {
         RemoteStop::Stopped => None,
@@ -1490,9 +1192,6 @@ fn prime_stop_failure(host: &Host, pid: i32, outcome: RemoteStop) -> Option<Stri
     }
 }
 
-/// Why a priming boot never printed a URL: the last thing it said, errors
-/// first. The same shape the local template boot reports with, so both machines
-/// fail the same way.
 fn prime_log_summary(tail: &[String]) -> String {
     let errors: Vec<&String> = tail
         .iter()
@@ -1518,10 +1217,6 @@ fn prime_log_summary(tail: &[String]) -> String {
     }
 }
 
-/// Scrubs the port pin out of a copied profile's patch document, on the machine
-/// that holds the copy ([`crate::profile::scrub_profile_port_pin`] is the local
-/// twin). Best effort: a template with a pin costs the next start a port, not a
-/// functioning HOME.
 async fn scrub_remote_profile_port_pin(
     state: &AppState,
     run_host: &crate::ssh::RemoteHost,
@@ -1547,14 +1242,10 @@ async fn scrub_remote_profile_port_pin(
     }
 }
 
-/// What one read of a remote instance's log says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RemoteLogRead {
-    /// Where to read from next.
     pub offset: u64,
-    /// The instance's URL, once its output has printed one.
     pub url: Option<String>,
-    /// Whether the process is still there.
     pub alive: bool,
 }
 
@@ -1608,8 +1299,6 @@ pub(crate) async fn read_remote_log(
             started_at: run.started_at,
         };
         if let Err(e) = remember_remote_run(state, instance_id, &record, run).await {
-            // The instance is up either way; losing the record only costs the
-            // next session the token, so it is loud in the log, not fatal here.
             crate::log_warn!("实例 {instance_id} 的远端运行记录没写上（{e}）");
         }
     }
@@ -1621,7 +1310,6 @@ pub(crate) async fn read_remote_log(
     })
 }
 
-/// Starts the remote half of a start and hands the rest to the follower.
 async fn start_remote_instance(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -1644,16 +1332,6 @@ async fn start_remote_instance(
         },
     );
 
-    // What that machine already has, before anything is started there. This is
-    // the remote half of the pinned-port preflight in `start_instance_process`:
-    // a pinned port held by something that is not DSH is named instead of dying
-    // with a remote EADDRINUSE, and one held by DSH is the instance itself —
-    // adopted, not started a second time.
-    //
-    // It runs for random ports too, which is where it earns its place: the
-    // record that machine keeps is the only way to notice that an instance the
-    // launcher failed to adopt is *still running*, and starting a second DSH on
-    // the server is the one outcome ADR-0007 exists to prevent.
     match check_remote_instance(state, inst, host).await {
         RemoteVerdict::Running {
             pid,
@@ -1697,9 +1375,6 @@ async fn start_remote_instance(
                 }
             ));
         }
-        // Nothing is running there: the spawn proceeds. A machine that could
-        // not be asked about its port is 不可判断, not 端口空闲 — starting anyway
-        // would risk a second DSH on the same port, so it is reported instead.
         RemoteVerdict::Stopped => {}
         RemoteVerdict::Unreachable(reason) => {
             return Err(format!(
@@ -1712,7 +1387,6 @@ async fn start_remote_instance(
     let start = match spawn_remote_instance(state, cfg, host, inst, version, profile).await {
         Ok(start) => start,
         Err(e) => {
-            // Nothing is running: say so instead of leaving the card on 启动中.
             emit_status(
                 app,
                 &InstanceStatus {
@@ -1754,8 +1428,6 @@ async fn start_remote_instance(
             inst.id,
             host.display_name
         );
-        // The remote process is already up; stop it so it does not linger
-        // untracked for the next start to duplicate.
         let _ = stop_remote_run(state, &start.run).await;
         return Err(e);
     }
@@ -1765,12 +1437,6 @@ async fn start_remote_instance(
     Ok(())
 }
 
-/// Watches one remote instance's log until the process is gone: reports the URL
-/// it printed (which is what makes the card say 运行 and the plugins page able to
-/// authenticate) and cleans up when it exits.
-///
-/// The read waits on the far side, so this loop costs one ssh per quiet window
-/// rather than one per second — the same shape the install follower uses.
 fn follow_remote_instance(
     app: &AppHandle,
     instance_id: &str,
@@ -1787,8 +1453,6 @@ fn follow_remote_instance(
         let mut announced = false;
         loop {
             let state = app.state::<AppState>();
-            // Stop coordinating when the entry is gone or was replaced: the user
-            // stopped the instance, or a start raced this follower.
             let still_ours = state
                 .running
                 .lock()
@@ -1800,8 +1464,6 @@ fn follow_remote_instance(
             if !still_ours {
                 return;
             }
-            // The record is what names the process: an instance whose record is
-            // gone — deleted, or deleted with its host — is nothing to follow.
             if !instance_recorded(&state, &id) {
                 crate::log_warn!("实例 {id} 的记录已不存在，不再跟随它的远端日志");
                 forget_running_entry(&state, &id, run.pid).await;
@@ -1812,8 +1474,6 @@ fn follow_remote_instance(
             let read = match read {
                 Ok(read) => read,
                 Err(e) => {
-                    // The machine could not answer — the process may still be
-                    // running there, so this is not an exit.
                     crate::log_warn!("实例 {id} 的远端日志暂时读不到：{e}");
                     tokio::time::sleep(REMOTE_FOLLOW_RETRY).await;
                     continue;
@@ -1824,11 +1484,6 @@ fn follow_remote_instance(
             if let Some(remote_url) = read.url.filter(|_| !announced) {
                 announced = true;
                 crate::log_info!("实例 {id} 已就绪：{remote_url}");
-                // The address DSH printed is about **that** machine. What this
-                // Mac can open is the same address brought over on a loopback
-                // forward (ADR-0008), and it is brought up now rather than at
-                // the first click: the row has both addresses to state, and the
-                // plugins page talks to the instance through the forward too.
                 let local_url = local_address_for(&state, &id, &run.host, &remote_url).await;
                 {
                     let mut running = state.running.lock().await;
@@ -1853,16 +1508,9 @@ fn follow_remote_instance(
             }
 
             if !read.alive {
-                // DSH can replace itself in place: the pid the launcher was
-                // following goes, and a successor of the same instance takes
-                // the same port. Adopt it instead of reporting the instance
-                // stopped — see [`adopt_remote_successor`].
                 match adopt_remote_successor(&app, &state, &id).await {
                     RemoteSuccessor::Adopted => return,
                     RemoteSuccessor::Unknown => {
-                        // The machine stopped answering while the successor
-                        // was looked for. Keep the entry: 「已停止」 is not
-                        // available, and a later pass may still find it.
                         tokio::time::sleep(REMOTE_WATCH_BACKOFF).await;
                         continue;
                     }
@@ -1887,38 +1535,11 @@ fn follow_remote_instance(
     });
 }
 
-// ---------------------------------------------------------------------------
-// Stopping, checking and re-adopting an instance that runs on another machine
-//
-// Everything here is the remote half of what `stop_instance_process` /
-// `adopt_surviving_instances` do locally, and the rules are the same ones — they
-// are simply asked of the machine that owns the process. Two of them matter more
-// than the rest:
-//
-// * A pid is not an identity (ADR-0007 §3): the process start time recorded when
-//   it was started is checked against that machine's `/proc/<pid>/stat` before
-//   anything is signalled, because signalling a reused pid is the one mistake
-//   here that cannot be undone.
-// * 「已停止」 is only ever said about a process the launcher has seen go. A
-//   machine that cannot answer leaves the instance 「主机不可达」
-//   ([`InstanceState::Unreachable`]), never 「已停止」: that is the value that
-//   makes a user start a second DSH on the server (ADR-0007 后果).
-// ---------------------------------------------------------------------------
-
-/// How long a remote stop waits **on that machine** for the process to go. The
-/// wait happens there ([`crate::remote::wait_gone`]), so this is one call and
-/// not one per second.
 const REMOTE_STOP_WAIT_SECS: u64 = 20;
 
-/// How often a live remote instance is asked whether it is still there, and how
-/// much longer the interval gets while that machine cannot answer.
 const REMOTE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const REMOTE_WATCH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// How long a remote instance's exit is watched for the successor DSH may have
-/// started on the same port, and how often that port is asked. The restart
-/// helper DSH ships starts its replacement within a second or two; ten tries
-/// at half a second each leave the same margin 本机's waiter leaves.
 const REMOTE_SUCCESSOR_ATTEMPTS: usize = 10;
 const REMOTE_SUCCESSOR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -1932,45 +1553,31 @@ const REMOTE_SUCCESSOR_INTERVAL: std::time::Duration = std::time::Duration::from
 /// a stop that did not hold.
 const REMOTE_STOP_REPLACEMENT_ROUNDS: usize = 2;
 
-/// What one look at a remote instance found: the conclusion the page needs, not
-/// the steps that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteVerdict {
-    /// A DSH-like process holds this instance's port on that machine.
     Running {
         pid: i32,
         started_at: Option<u64>,
-        /// The URL that machine's record kept — the only place the launch token
-        /// survives a launcher restart.
         url: Option<String>,
         profile: String,
     },
-    /// Nothing of this instance is running there.
     Stopped,
     /// The instance's **pinned** port is held by something that is not DSH. The
     /// instance is not running, and a start must name who is in the way instead
     /// of dying with EADDRINUSE.
-    Occupied { pid: Option<i32>, command: String },
-    /// The machine could not answer, so nothing can be said about the instance.
+    Occupied {
+        pid: Option<i32>,
+        command: String,
+    },
     Unreachable(String),
 }
 
-/// What stopping a remote instance did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteStop {
-    /// Confirmed gone — by the signal, or it was already gone.
     Stopped,
-    /// Nothing was signalled, and why: a pid that is not the process the
-    /// launcher started, or a start time that cannot be checked at all.
     NotSignalled(String),
-    /// The pid now belongs to a **different** process — the kernel reused the
-    /// number, so the one the launcher started has exited. Nothing was
-    /// signalled, and nothing about this instance is left running: the caller
-    /// must forget the entry and report it exited.
     Reused(String),
-    /// The signal went and the process did not go.
     StillRunning(String),
-    /// The machine did not answer.
     Unreachable(String),
 }
 
@@ -2017,9 +1624,6 @@ pub(crate) async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Remote
             "「{target}」上读不到 pid {} 的启动时间（/proc/<pid>/stat 打不开），没法确认它还是启动时那个进程：没有发信号。请在那台机器上核对后自行停止：ssh {target} 'kill -TERM -- -{}'",
             run.pid, run.pid
         )),
-        // The start time was never recorded (that machine could not be read at
-        // spawn time). Saying so is the honest half of "check before you signal";
-        // 重试 (which re-establishes the instance) is what fills the record in.
         StopOutcome::Unprepared => RemoteStop::NotSignalled(format!(
             "启动时没能记下 pid {} 的启动时间，现在无法确认它还是那个进程：没有发信号。刷新一次可以重新核对这个 pid；也可以在那台机器上停：ssh {target} 'kill -TERM -- -{}'",
             run.pid, run.pid
@@ -2035,7 +1639,6 @@ pub(crate) async fn stop_remote_run(state: &AppState, run: &RemoteRun) -> Remote
     }
 }
 
-/// One instance's entry out of that machine's own running record.
 async fn recall_remote_run(
     state: &AppState,
     host: &crate::ssh::RemoteHost,
@@ -2048,13 +1651,6 @@ async fn recall_remote_run(
         .and_then(|value| serde_json::from_value::<RemoteRunRecord>(value.clone()).ok()))
 }
 
-/// The two things every call to another machine needs — how to reach that
-/// machine, and where its data directory is — or the reason this Mac cannot
-/// work them out. Both are facts about the *host*, not about one instance, so
-/// both are reported the same way wherever they block a call: a host the
-/// launcher cannot place is a host it cannot ask. The directory's own reason is
-/// kept as [`Host::data_dir`] wrote it: it is what the row shows as the
-/// explanation of 「主机不可达」, and it carries the way out of that state.
 fn remote_parts(
     host: &Host,
     launcher_data_dir: &Path,
@@ -2065,18 +1661,6 @@ fn remote_parts(
     Ok((run_host, data_dir))
 }
 
-/// What state one remote instance is in right now, as the machine that runs it
-/// reports it.
-///
-/// The rule is 本机's, asked of that machine (ADR-0007 §2): the port the instance
-/// was pinned to — or the port in the record it left behind — is where to look.
-/// A **pinned** port is evidence by itself as soon as a DSH-like process is
-/// listening on it; a **random** port has to prove itself with the token from
-/// that machine's record, or the port may belong to something else entirely.
-///
-/// The token is spent **there** ([`crate::remote::mint_headers`]): a remote
-/// instance listens on that machine's own loopback, so the same URL asked from
-/// this Mac would reach a different service.
 pub(crate) async fn check_remote_instance(
     state: &AppState,
     inst: &DshInstance,
@@ -2098,11 +1682,7 @@ pub(crate) async fn check_remote_instance(
         .or_else(|| inst.default_profile.clone())
         .unwrap_or_else(|| "web".to_string());
     let url = record.as_ref().and_then(|r| r.url.clone());
-    // The port to look at: the one the user pinned, or the one that machine's
-    // record saw the instance come up on.
     let Some(port) = inst.port.or_else(|| url.as_deref().and_then(port_of_url)) else {
-        // No address to look at: a non-web profile has none, and an instance
-        // that never printed a URL left nothing to find.
         return RemoteVerdict::Stopped;
     };
     let owner = match crate::remote::port_owner(transport, &run_host, port).await {
@@ -2141,9 +1721,6 @@ pub(crate) async fn check_remote_instance(
         };
     }
     if inst.port.is_none() {
-        // A random port says nothing on its own: the token that machine wrote
-        // down is the only thing that turns a DSH-like listener into *this*
-        // instance.
         let Some(url) = url.as_deref() else {
             return RemoteVerdict::Stopped;
         };
@@ -2170,8 +1747,6 @@ pub(crate) async fn check_remote_instance(
             return RemoteVerdict::Stopped;
         }
     }
-    // The pid to record came off that machine's own listener, so this read is
-    // also what repairs a record whose start time was never written.
     let started_at = crate::remote::process_start_time(transport, &run_host, pid)
         .await
         .ok()
@@ -2184,22 +1759,6 @@ pub(crate) async fn check_remote_instance(
     }
 }
 
-/// Registers a process that is already running on a remote host as this
-/// instance's running entry — the remote twin of [`adopt_external_process`],
-/// and what makes a restarted launcher manageable again: the URL with its launch
-/// token comes out of that machine's own running record (ADR-0007 §3).
-///
-/// That address is about **that** machine, so it is kept as the run's own
-/// address —「远端位置」, and the forward's target — while the entry is given the
-/// address this Mac can reach: the same one on a loopback forward (ADR-0008),
-/// which is what 「打开」, the tray and the plugins page read.
-///
-/// `replacing` names the pid of the entry this adoption replaces. It is set by
-/// the successor path — a DSH that restarted itself leaves an entry whose pid is
-/// gone while its replacement listens on the same port — and the two registry
-/// writes happen in one step so no reader ever sees an empty slot. `None`
-/// refuses to overwrite an entry a start registered first. Returns whether the
-/// entry was installed.
 async fn adopt_remote_process(
     app: &AppHandle,
     state: &AppState,
@@ -2264,9 +1823,6 @@ async fn adopt_remote_process_with(
         }
         None => None,
     };
-    // This adoption just talked to that machine, so it is reachable now —
-    // including when an earlier look at it failed and left the host marked
-    // unreachable.
     state.set_host_status(&run.host_id, HostStatus::reachable());
     match remote_url.as_deref() {
         Some(remote) => crate::log_info!(
@@ -2296,10 +1852,6 @@ async fn adopt_remote_process_with(
     true
 }
 
-/// Puts an adopted remote entry in the running table, in one step under the
-/// caller's lock. A start that holds the id wins over any adoption, and a
-/// successor may replace only the entry whose pid has gone. Returns whether the
-/// entry was installed.
 fn install_remote_entry(
     running: &mut std::collections::HashMap<String, RunningInstance>,
     instance_id: &str,
@@ -2322,9 +1874,6 @@ fn install_remote_entry(
     true
 }
 
-/// Whether an adoption may install its running entry: the slot is empty for a
-/// fresh adoption, or the entry there belongs to the pid this adoption replaces.
-/// A different entry means a start (or another adoption) owns the id and wins.
 fn can_adopt_remote_entry(existing: Option<&RunningInstance>, replacing: Option<i32>) -> bool {
     match existing {
         None => replacing.is_none(),
@@ -2335,14 +1884,6 @@ fn can_adopt_remote_entry(existing: Option<&RunningInstance>, replacing: Option<
     }
 }
 
-/// Watches an adopted remote instance: the machine is asked whether the process
-/// is still there, and the answer is what ends the watch.
-///
-/// A machine that cannot answer is not an exit. It is recorded as such — the
-/// host's status says 不可达, which is what makes the instance read 「主机不可达」
-/// rather than 「已停止」 — and the watch keeps trying at a lower rate, so an
-/// instance that comes back (a reboot of the server, a network that returns)
-/// converges without the user doing anything.
 fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: RemoteRun) {
     let app = app.clone();
     let id = instance_id.to_string();
@@ -2353,8 +1894,6 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
         loop {
             tokio::time::sleep(interval).await;
             let state = app.state::<AppState>();
-            // Stop coordinating when the entry is gone (the user stopped it) or
-            // was replaced (a start raced this adoption).
             let mine = state
                 .running
                 .lock()
@@ -2366,8 +1905,6 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
             if !mine {
                 return;
             }
-            // The record is what names the process: an instance whose record is
-            // gone — deleted, or deleted with its host — is nothing to watch.
             if !instance_recorded(&state, &id) {
                 crate::log_warn!("实例 {id} 的记录已不存在，不再观察它的远端进程");
                 forget_running_entry(&state, &id, run.pid).await;
@@ -2378,9 +1915,6 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
                     if reported_lost {
                         reported_lost = false;
                         state.set_host_status(&run.host_id, HostStatus::reachable());
-                        // The URL comes back with it: it is the launch token's
-                        // home, and dropping it would leave a running instance
-                        // unmanageable in the page for no reason.
                         let url = state
                             .running
                             .lock()
@@ -2402,10 +1936,6 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
                     interval = REMOTE_WATCH_INTERVAL;
                 }
                 Ok(false) => {
-                    // The watched pid is gone, but DSH may have replaced itself
-                    // and left a successor on the same port; that successor is
-                    // still this instance, so it is adopted before the terminal
-                    // status is decided.
                     match adopt_remote_successor(&app, &state, &id).await {
                         RemoteSuccessor::Adopted => return,
                         RemoteSuccessor::Unknown => {
@@ -2459,27 +1989,12 @@ fn watch_remote_process(app: &AppHandle, instance_id: &str, profile: &str, run: 
     });
 }
 
-/// What the short probe after a remote pid disappeared concluded.
 enum RemoteSuccessor {
-    /// A replacement of the same instance was found and installed.
     Adopted,
-    /// The machine answered, throughout, that no DSH process holds the port.
     Absent,
-    /// The machine could not be asked, or its answer could not identify the
-    /// process: the caller keeps the entry and reports the instance unreachable.
     Unknown,
 }
 
-/// The successor a restarted DSH left on an instance's port, if there is one.
-///
-/// Only a process on the port the instance was using is considered — its pinned
-/// port, or the one in the address it last printed. A **pinned** port is
-/// evidence by itself (ADR-0007 §2); a random one has to prove itself with the
-/// address the replacement printed and that machine accepted.
-///
-/// `Ok(None)` is the machine's definite 「那个端口上没有 DSH」. `Err` is 「问不到」
-/// or 「看到了但认不出」 — the caller must not turn either into 「已停止」
-/// (ADR-0007 后果).
 async fn await_remote_successor(
     state: &AppState,
     inst: &DshInstance,
@@ -2533,9 +2048,6 @@ async fn await_remote_successor(
             pid,
             started_at,
         );
-        // The replacement prints its own launch address. For a random port that
-        // address is also the proof this listener is the instance: a port number
-        // alone says nothing, and the old launch token died with the old process.
         let found = find_remote_address(state, &successor).await;
         if found.is_some() || inst.port.is_some() {
             return Ok(Some((pid, started_at, found)));
@@ -2552,19 +2064,6 @@ async fn await_remote_successor(
     }
 }
 
-/// Stops any DSH process that took over the instance's port while a stop was
-/// in flight, and returns the pids it stopped.
-///
-/// DSH's own restart helper starts the replacement within a second or two of the
-/// old process going. A 停止 that only signalled the pid it read before the
-/// signal would leave that replacement running — the row says 「已停止」 while the
-/// instance answers on its port, and the periodic pass would put it back on the
-/// board minutes later, undoing the user's click. So the port is asked once more
-/// after the stop is confirmed, and a replacement there is stopped too.
-///
-/// A replacement whose start time cannot be read is not signalled: that is the
-/// one mistake on another machine that cannot be undone. The caller reports it
-/// instead of saying 「已停止」.
 async fn stop_remote_replacements(
     state: &AppState,
     instance_id: &str,
@@ -2650,14 +2149,6 @@ async fn stop_remote_replacements(
     Ok(stopped)
 }
 
-/// Recognises a remote instance whose DSH replaced itself and puts the
-/// successor in the running table before the exit is projected.
-///
-/// The caller has just observed the watched pid gone. A short re-probe is enough
-/// for the usual case — DSH's restart helper starts the replacement on the same
-/// port within a second or two — and the old entry is replaced in one step, so a
-/// concurrent 停止 or 启动, which both look at that entry, cannot be silently
-/// overridden.
 async fn adopt_remote_successor(
     app: &AppHandle,
     state: &AppState,
@@ -2714,8 +2205,6 @@ async fn adopt_remote_successor(
     let (run_host, data_dir) = match remote_parts(&host, &state.data_dir) {
         Ok(parts) => parts,
         Err(reason) => {
-            // Same rule as a failed probe: the machine was not understood, so
-            // nothing may be said about the instance's process either way.
             state.set_host_status(&host.id, HostStatus::unreachable(reason));
             return RemoteSuccessor::Unknown;
         }
@@ -2734,9 +2223,6 @@ async fn adopt_remote_successor(
     if !adopted {
         return RemoteSuccessor::Absent;
     }
-    // The record names the replacement even when its address is not known yet:
-    // leaving the old pid and token there would hand the next launcher session
-    // a dead address as if it were this process's.
     let record = RemoteRunRecord {
         url: remote_url.clone(),
         token: remote_url.as_deref().and_then(token_of),
@@ -2776,30 +2262,16 @@ async fn remote_entry_matches(state: &AppState, instance_id: &str, pid: i32) -> 
         .unwrap_or(false)
 }
 
-/// Establishes — or re-establishes — one remote instance's state, and projects
-/// it: an adopted process becomes a running entry, and a machine that answered
-/// 「没有」 says so, so a card left over from an earlier session converges.
-///
-/// This is the one place the launch-time scan and the page's 重试 share, so the
-/// two can never disagree about what that machine said.
 pub(crate) async fn settle_remote_instance(
     app: &AppHandle,
     state: &State<'_, AppState>,
     inst: &DshInstance,
     host: &Host,
 ) -> InstanceState {
-    // A start owns the id until it registers its entry: asking the machine
-    // now would race the process it is already launching, and a 「已停止」
-    // taken before that registration must not be projected over 「启动中」.
     if start_is_in_flight(&inst.id) {
         finish_remote_scan(state, &host.id);
         return InstanceState::Starting;
     }
-    // Already running as far as this session is concerned. Two things are worth
-    // re-reading here, and both are 重试's answer: the process start time (a stop
-    // refuses without it, and this is how a record that missed it gets repaired)
-    // and the address (DSH can replace itself in place, leaving this session
-    // holding a live pid whose launch token went with the process it replaced).
     let existing = {
         let running = state.running.lock().await;
         running
@@ -2828,9 +2300,6 @@ pub(crate) async fn settle_remote_instance(
             {
                 emit_address_found(app, state, &inst.id, &profile).await;
             }
-            // 重试 asks this machine again, and it just answered: a host that
-            // was marked unreachable before is reachable now, so the running
-            // entry stops being reported as 「主机不可达」.
             state.set_host_status(&host.id, HostStatus::reachable());
         }
         finish_remote_scan(state, &host.id);
@@ -2838,8 +2307,6 @@ pub(crate) async fn settle_remote_instance(
     }
 
     let verdict = check_remote_instance(state, inst, host).await;
-    // That machine was talked to, whatever the answer was: its instances are no
-    // longer 「还没查」.
     finish_remote_scan(state, &host.id);
     let (run_host, data_dir) = match remote_parts(host, &state.data_dir) {
         Ok(parts) => parts,
@@ -2886,13 +2353,8 @@ pub(crate) async fn settle_remote_instance(
             }
             InstanceState::Running
         }
-        // A port held by something that is not DSH means this instance is not
-        // running; the occupant is the start path's business, not the card's.
         RemoteVerdict::Stopped | RemoteVerdict::Occupied { .. } => {
             state.set_host_status(&host.id, HostStatus::reachable());
-            // A start may have claimed the instance while the machine was
-            // answering: the process it just launched is the current truth,
-            // and an older 「已停止」 must not be projected over it.
             if state.running.lock().await.contains_key(&inst.id) {
                 return InstanceState::Running;
             }
@@ -2919,11 +2381,6 @@ pub(crate) async fn settle_remote_instance(
     }
 }
 
-/// States one host's failure on both channels the page reads: the per-host
-/// status `list_statuses` consults, and the per-instance event. Reporting only
-/// the returned state would leave `list_statuses` silent for that host, and a
-/// silent host is one the page's `statusOf` reads as 「已停止」 — the misreading
-/// ADR-0007 exists to prevent.
 fn report_unreachable(
     app: &AppHandle,
     state: &AppState,
@@ -2946,13 +2403,6 @@ fn report_unreachable(
     InstanceState::Unreachable
 }
 
-/// Marks every remote host's instances as 「还没查」 for the launch-time scan.
-///
-/// Until that scan has asked about a host, nothing is known about its instances,
-/// and the page must not fill that gap with 「已停止」: the click that mistake
-/// leads to starts a second DSH on the server (ADR-0007 后果). The page reads
-/// this as 「启动中」 — a process that is being brought into the launcher's view,
-/// whose 启动 button is therefore not there to press.
 pub fn begin_remote_scan(state: &AppState) {
     let ids: Vec<String> = {
         let cfg = state.config.lock().unwrap();
@@ -2967,7 +2417,6 @@ pub fn begin_remote_scan(state: &AppState) {
     pending.extend(ids);
 }
 
-/// One host has been asked about: its instances are no longer 「还没查」.
 fn finish_remote_scan(state: &AppState, host_id: &str) {
     state.remote_scan.lock().unwrap().remove(host_id);
 }
@@ -2987,27 +2436,10 @@ const REMOTE_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from
 /// 「已停止」 overwrite a 「运行中」 that was just adopted.
 static REMOTE_SCAN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Adopts the instances a previous launcher session left running on remote
-/// hosts — the remote half of [`adopt_surviving_instances`], which stays local
-/// on purpose: this Mac's port probe can only ask about this Mac, and a local
-/// process wearing the same port number is not somebody else's instance.
-///
-/// One pass per host, so a slow or unreachable machine holds up neither the
-/// launcher nor the other machines; the pass returns once every host has
-/// answered, which is what lets [`watch_remote_instances`] run it on a timer
-/// without stacking passes on top of each other.
 pub async fn adopt_surviving_remote_instances(app: &AppHandle) {
     scan_remote_instances(app).await;
 }
 
-/// Keeps asking every remote host whether an instance this session does not hold
-/// is running there.
-///
-/// The launch-time pass only answers for the moment the launcher starts. DSH
-/// can replace itself later — its own restart helper starts a new process on the
-/// same port — and an instance can start on a server long after the launcher was
-/// opened. Without this pass the card would keep saying 「已停止」 while the
-/// instance answers on its port, and pressing 启动 would start a second DSH.
 pub async fn watch_remote_instances(app: &AppHandle) {
     loop {
         tokio::time::sleep(REMOTE_RECONCILE_INTERVAL).await;
@@ -3036,7 +2468,6 @@ async fn scan_remote_instances(app: &AppHandle) {
         tasks.push(tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
             for inst in &mine {
-                // A start (or a previous session's entry) owns it already.
                 if state.running.lock().await.contains_key(&inst.id) || start_is_in_flight(&inst.id)
                 {
                     continue;
@@ -3059,20 +2490,14 @@ pub fn node() -> &'static str {
     "node"
 }
 
-/// Helper for command building; on macOS Unix this is a no-op passthrough.
 pub fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Version layout + every DSH invocation shape lives in `crate::launch`.
 pub use crate::launch::instance_env as build_env;
 use crate::launch::{version_bin, version_bin_ready};
 use crate::remote::StopOutcome;
 
-/// Whether a profile is a DSH web application: its package.json
-/// `dsh.profile.bundles` includes `@deepseek-ai/dsh-web-app`. Such profiles
-/// understand `--host/--port` and get a webview; they must bind a random
-/// free port so several instances don't collide.
 fn is_web_profile(home_path: &std::path::Path, profile: &str) -> bool {
     let pkg = crate::profile::profile_dir(home_path, profile)
         .ok()
@@ -3108,9 +2533,6 @@ fn starting_claims() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     STARTING.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// A start's exclusive hold on one instance id, kept for the whole start and
-/// released when it is dropped — on success the running entry owns the id
-/// instead, on failure nothing is left behind.
 struct StartClaim {
     id: String,
 }
@@ -3134,9 +2556,6 @@ fn start_is_in_flight(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Takes the exclusive right to start `id`. Fails when another start is already
-/// in flight or the instance is already running; on success the caller holds a
-/// [`StartClaim`] until the running entry is registered or the start gives up.
 async fn claim_start(state: &State<'_, AppState>, id: &str) -> Result<StartClaim, String> {
     {
         let mut starting = starting_claims()
@@ -3153,8 +2572,6 @@ async fn claim_start(state: &State<'_, AppState>, id: &str) -> Result<StartClaim
     Ok(claim)
 }
 
-/// Spawns a DSH CLI process for the instance/profile and starts the watchers
-/// that parse the web URL, write logs and emit status events.
 pub async fn start_instance_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -3174,10 +2591,6 @@ pub async fn start_instance_process(
         .find(|v| v.id == inst.version_id)
         .ok_or_else(|| "实例引用的 DSH 版本未安装".to_string())?;
 
-    // A remote instance is started **there** (ADR-0007): the version tree, the
-    // profile and the process all belong to that machine, so everything below —
-    // which reads this Mac's filesystem and spawns this Mac's child processes —
-    // is the wrong half of the world for it.
     let host = crate::config::resolve_host(&cfg, Some(&inst.host_id))?.clone();
     if !host.builtin {
         return start_remote_instance(app, state, &cfg, &host, &inst, version, profile).await;
@@ -3192,15 +2605,8 @@ pub async fn start_instance_process(
         ));
     }
 
-    // Claim the id before any of the awaits below: two starts that both saw a
-    // free instance would otherwise spawn two processes, and the second
-    // registration would take over the first's entry.
     let start_claim = claim_start(state, instance_id).await?;
 
-    // Web-app profiles (their bundle list includes @deepseek-ai/dsh-web-app)
-    // get a random free port; other profiles are managed purely as processes
-    // (no URL/webview). We detect the web bundle rather than relying on the
-    // profile being literally named "web" so user-named web profiles work.
     let home_path = cfg
         .homes
         .iter()
@@ -3211,12 +2617,6 @@ pub async fn start_instance_process(
         .map(|hp| is_web_profile(hp, profile))
         .unwrap_or(profile == "web");
 
-    // Preflight for pinned-port instances: DSH can restart itself in-place
-    // (its new process is not our child and holds the pinned port), leaving
-    // the card "stopped" while the port stays occupied — a naive start would
-    // then die with EADDRINUSE. When the port is held by a DSH-looking
-    // process, adopt it as the running instance; when held by anything else,
-    // fail with a actionable error instead of a crash loop.
     let mut pinned_port: Option<(String, u16)> = None;
     if is_web {
         if let Some(port) = inst.port {
@@ -3242,40 +2642,20 @@ pub async fn start_instance_process(
         }
     }
 
-    // Web-app profiles: the profile patch's managed lan-bind block outranks
-    // `--port` and the plugin only re-asserts it at boot, so sync it here
-    // first — otherwise a changed port would need a stop/start cycle to take
-    // effect. (Pinned ports were handled by the preflight above.)
     if is_web {
         if let Some(hp) = home_path.as_deref() {
             crate::profile::assert_profile_lan_bind_port(hp, profile, inst.port.unwrap_or(0));
         }
     }
 
-    // The running instance's own plugin manager (the Web UI's 插件 page) spawns
-    // bare `pnpm` in the profile directory — it never sees the `--store-dir`
-    // the launcher passes on its own invocations, so it falls back to the
-    // user's global store and pnpm refuses every add/remove with
-    // ERR_PNPM_UNEXPECTED_STORE. Pinning the store in the profile itself is
-    // what that process reads; a failure here only costs the Web UI's plugin
-    // management, so the launch continues.
     if let Some(hp) = home_path.as_deref() {
         let launcher_store = crate::toolchain::store_dir(&state.data_dir);
         match crate::profile::profile_dir(hp, profile) {
             Ok(dir) => {
-                // The store the profile is already linked from, so a profile a
-                // user installed by hand against their global store keeps
-                // working instead of being dragged onto the launcher's.
                 let store = crate::plugins::profile_store_target(&dir, &launcher_store);
                 if let Err(e) = crate::plugins::ensure_profile_store_pin(&dir, &store) {
                     crate::log_warn!("固定 profile pnpm store 失败（{}）: {e}", dir.display());
                 }
-                // The same bare pnpm installs into the profile: with
-                // auto-install-peers on, a plugin whose peers include a core
-                // package would drag a duplicate copy of it in (doctor reports
-                // the duplicated-Symbol failure). Pin the peer policy too, so
-                // the Web UI's own installs stay independent of the user's
-                // global pnpm config.
                 if let Err(e) = crate::plugins::ensure_profile_npmrc(&dir) {
                     crate::log_warn!("固定 profile peer 策略失败（{}）: {e}", dir.display());
                 }
@@ -3284,14 +2664,8 @@ pub async fn start_instance_process(
         }
     }
 
-    // The interpreter is the resolved binding rather than a bare name, and a
-    // toolchain installed while the app was running is picked up here (the
-    // binding is re-probed when its recorded path no longer exists).
     let node = crate::runtime::node_for_spawn_checked(state).await?;
 
-    // The launch spec module owns the argv: --profile, per-instance --port,
-    // --no-open feature detection, and the deliberate absence of --host (the
-    // profile layer owns the bind host).
     let mut cmd = crate::launch::instance_command(
         &node,
         &version.dir,
@@ -3324,8 +2698,6 @@ pub async fn start_instance_process(
     let mut child = cmd.spawn().map_err(|e| format!("启动进程失败: {e}"))?;
     crate::log_info!("实例 {instance_id} 进程已拉起（profile: {profile}）");
 
-    // Take the pipes before wrapping the child (the waiter takes ownership of
-    // the child itself).
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -3398,21 +2770,12 @@ pub async fn start_instance_process(
                     (code, true)
                 }
             };
-            // Quiet removal: the terminal status depends on the adoption
-            // re-probe below, so projections are deferred until it resolves.
-            // Only this child's own entry is removed, so a newer start that has
-            // already taken the id keeps its entry.
             remove_entry_quiet(&state, &waiter_id, &waiter_kill).await;
             if stopped {
                 crate::log_info!("实例 {waiter_id} 已停止（exit code: {code:?}）");
             } else {
                 crate::log_warn!("实例 {waiter_id} 意外退出（exit code: {code:?}）");
             }
-            // An unexpected exit may be DSH restarting itself: its successor
-            // is not our child but already re-bound the pinned port. Re-probe
-            // briefly (the successor needs a moment to bind) and adopt it so
-            // the card converges to "running" instead of dead-ending on
-            // EADDRINUSE at the next manual start.
             if !stopped {
                 if let Some((host, port)) = waiter_port {
                     for attempt in 0..10 {
@@ -3440,9 +2803,6 @@ pub async fn start_instance_process(
                     }
                 }
             }
-            // Project this child's terminal status only if the registry still
-            // belongs to it. A newer start that took the id over must not be
-            // told the old process exited.
             unregister_waiter_entry(
                 &waiter_app,
                 &state,
@@ -3465,7 +2825,6 @@ pub async fn start_instance_process(
         });
     }
 
-    // stdout watcher: parse `dsh web: <url>` and emit "running".
     if let Some(out) = stdout {
         let reader_app = app.clone();
         let reader_id = instance_id.to_string();
@@ -3479,8 +2838,6 @@ pub async fn start_instance_process(
                 if let Some(cap) = url_re().captures(&line) {
                     let url = cap[1].to_string();
                     crate::log_info!("实例 {reader_id} 已就绪：{url}");
-                    // Keep the URL (token included) across launcher restarts:
-                    // see `remember_url`.
                     remember_url(&state.data_dir, &reader_id, &url, &reader_profile);
                     {
                         let mut running = state.running.lock().await;
@@ -3504,7 +2861,6 @@ pub async fn start_instance_process(
         });
     }
 
-    // stderr watcher: forward to the log (diagnostics).
     if let Some(err) = stderr {
         let reader_log = log_file.clone();
         tauri::async_runtime::spawn(async move {
@@ -3518,8 +2874,6 @@ pub async fn start_instance_process(
     Ok(())
 }
 
-/// The running entry for one instance, as the stop path needs it: the child's
-/// kill switch, the adopted pid, the remote run, and the profile to report.
 async fn running_snapshot(
     state: &State<'_, AppState>,
     instance_id: &str,
@@ -3534,23 +2888,11 @@ async fn running_snapshot(
     })
 }
 
-/// Stops a running instance: signals the waiter task to kill the child and
-/// waits for it to reap the process and remove the registry entry. The stop
-/// is idempotent: when the entry is already gone (crashed, stopped from the
-/// tray, duplicate click) a terminal status is re-emitted so a stale
-/// frontend converges instead of erroring with "实例未在运行".
-///
-/// A remote instance is stopped **on the machine that runs it**: by pid, after
-/// the recorded process start time has been checked against that machine's own
-/// `/proc/<pid>/stat` (ADR-0007 §4), and only 「那台机器上看不到它了」 is reported
-/// as 已停止. A machine that does not answer leaves the instance 「主机不可达」.
 pub async fn stop_instance_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
     instance_id: &str,
 ) -> Result<(), String> {
-    // The instance's own machine decides what 「已停止」 means, so it is looked up
-    // first: an instance on another host is not this Mac's business below.
     let remote_owner = {
         let cfg = state.config.lock().unwrap();
         cfg.instances
@@ -3567,15 +2909,9 @@ pub async fn stop_instance_process(
     let mut entry = running_snapshot(state, instance_id).await;
     if entry.is_none() {
         if let Some((inst, host)) = remote_owner {
-            // Nothing registered — but on another machine that is not the same
-            // statement as it is here: this session may simply not have asked
-            // yet (its scan is still running). Asking is what makes 「停止」 a
-            // real action instead of a silent 「已停止」 over a running process.
             settle_remote_instance(app, state, &inst, &host).await;
             entry = running_snapshot(state, instance_id).await;
             if entry.is_none() {
-                // That machine answered 「没有在跑」 (or could not be reached, which
-                // was reported as such) — either way there is nothing to stop.
                 return Ok(());
             }
         }
@@ -3603,17 +2939,10 @@ pub async fn stop_instance_process(
         );
         return match stop_remote_run(state, &run).await {
             RemoteStop::Stopped => {
-                // The pid the click was about is gone. DSH may have restarted
-                // itself while this ran, so the port is asked once more before
-                // 「已停止」 is claimed: a replacement still there is stopped
-                // too, and one that cannot be identified is reported instead.
                 let mut pids = vec![run.pid];
                 match stop_remote_replacements(state, instance_id, &run).await {
                     Ok(replacements) => pids.extend(replacements),
                     Err(reason) => {
-                        // The port could not be re-read after the stop: whether
-                        // a replacement took over is unknown, so the row says
-                        // 「主机不可达」 rather than 「已停止」.
                         state
                             .set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
                         return Err(reason);
@@ -3637,9 +2966,6 @@ pub async fn stop_instance_process(
                     ))
                 }
             }
-            // The machine could not answer, so 「已停止」 is not available: the
-            // instance is reported as what it is — undetermined — and the page
-            // offers the retry instead of a 启动 that would create a second DSH.
             RemoteStop::Unreachable(reason) => {
                 state.set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
                 emit_status(
@@ -3656,22 +2982,12 @@ pub async fn stop_instance_process(
                 Err(reason)
             }
             RemoteStop::NotSignalled(reason) | RemoteStop::StillRunning(reason) => Err(reason),
-            // The pid was reused, so the process the launcher started is gone:
-            // an entry kept for it would claim 运行中 for something that proved
-            // itself ended, and nothing but a launcher restart would clear it.
-            // It exited, so the record is forgotten and the row says so.
             RemoteStop::Reused(reason) => {
                 crate::log_warn!("实例 {instance_id} 的 pid 已被系统复用，按已退出处理：{reason}");
-                // The recorded pid is somebody else's now, so the instance's own
-                // process — if any — is whatever holds its port; a stop asks for
-                // none of it to survive the click.
                 let mut pids = vec![run.pid];
                 match stop_remote_replacements(state, instance_id, &run).await {
                     Ok(replacements) => pids.extend(replacements),
                     Err(reason) => {
-                        // The port could not be re-read after the stop: whether
-                        // a replacement took over is unknown, so the row says
-                        // 「主机不可达」 rather than 「已停止」.
                         state
                             .set_host_status(&run.host_id, HostStatus::unreachable(reason.clone()));
                         return Err(reason);
@@ -3698,8 +3014,6 @@ pub async fn stop_instance_process(
         };
     }
     if let Some(a) = adopted {
-        // Adopted external process: no child handle, terminate by pid. The
-        // watcher notices the exit and emits the terminal status.
         crate::log_info!(
             "停止实例 {instance_id}：结束收养的外部进程（pid {}）",
             a.pid
@@ -3730,13 +3044,6 @@ pub async fn stop_instance_process(
     Err("停止实例超时（进程未响应终止信号）".to_string())
 }
 
-/// Kills every running instance (called on launcher exit). Best-effort: the
-/// waiter tasks reap the children asynchronously as the runtime shuts down.
-///
-/// **Remote instances are not signalled** (ADR-0007 §1-2): they run on someone
-/// else's machine in their own session, and outliving this launcher is the whole
-/// point of putting them there. ⌘Q leaves them alone; the next session adopts
-/// them.
 pub fn kill_all(state: &AppState) {
     let running = state.running.blocking_lock();
     for entry in running.values() {
@@ -3744,8 +3051,6 @@ pub fn kill_all(state: &AppState) {
             continue;
         }
         if let Some(a) = &entry.adopted {
-            // Best-effort SIGTERM; the external process outlives the
-            // launcher's exit anyway (it was never our child).
             unsafe {
                 libc::kill(a.pid, libc::SIGTERM);
             }
@@ -3755,10 +3060,6 @@ pub fn kill_all(state: &AppState) {
     }
 }
 
-/// The restart transition, owned by the lifecycle module instead of being
-/// re-assembled by every caller: a full stop (which observes a clean
-/// registry on return — see [`stop_instance_process`]) followed by a start
-/// on the same profile.
 pub async fn restart_instance_process(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -3777,26 +3078,12 @@ pub async fn restart_instance_process(
     start_instance_process(app, state, instance_id, &profile).await
 }
 
-/// The profile a status talks about when the process itself has nothing to say.
 fn profile_hint(inst: &DshInstance) -> Option<String> {
     inst.last_profile
         .clone()
         .or_else(|| inst.default_profile.clone())
 }
 
-/// Every instance the launcher can say something about right now.
-///
-/// The running table answers for instances that have a process. What is left is
-/// the launch-time scan of each remote host: an instance on a host that has not
-/// been asked about yet is 「启动中」, and one on a host that could not answer is
-/// 「主机不可达」. Both of those live here and must keep living here (ADR-0007
-/// 后果): reading either of them as 「已停止」 is exactly what makes a user press
-/// 启动 and end up with a second DSH on the server.
-///
-/// Every status says two addresses for an instance on another machine: the one
-/// that works **here** (`url`, which is what 「打开」 and the plugins page use)
-/// and the one that machine printed (`remote_url`), so the page can state both
-/// (ADR-0008).
 pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
     let (instances, pending) = {
         let cfg = state.config.lock().unwrap();
@@ -3806,14 +3093,8 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
     let running = state.running.lock().await;
     let mut out: Vec<InstanceStatus> = running
         .iter()
-        // An entry whose record is gone is one the launcher is about to release
-        // (its watcher drops it on the next pass). Projecting it would put a row
-        // on screen that no record can act on.
         .filter(|(id, _)| instances.iter().any(|inst| &inst.id == *id))
         .map(|(id, entry)| {
-            // A live entry whose machine has since stopped answering is not
-            // something the launcher can keep asserting: 「运行中」 would be a
-            // claim about a machine it cannot reach.
             let lost = entry
                 .remote
                 .as_ref()
@@ -3870,21 +3151,9 @@ pub async fn list_statuses(state: &AppState) -> Vec<InstanceStatus> {
     out
 }
 
-/// What the running table says about one instance, as needed by callers that
-/// only want to know where an instance lives and whether it can be managed.
 pub struct RunningEntry {
-    /// The instance this entry belongs to. Callers that were handed an
-    /// instance id report it back, so a page can say which instance actually
-    /// answered instead of assuming the one it was opened from.
     pub id: String,
-    /// The instance URL; when it carries the one-time start token
-    /// (`...?token=...`) the launcher can authenticate, otherwise it is bare
-    /// (`http://host:port`) and only good for opening in a browser.
     pub url: Option<String>,
-    /// Adopted from an external process rather than spawned by this launcher
-    /// session. Adoption alone no longer means "unmanageable" — that is
-    /// decided by [`manageable_url`] — but it is what tells the caller to stop
-    /// it by pid instead of by handle.
     pub adopted: bool,
 }
 
@@ -3911,7 +3180,6 @@ pub async fn running_for_profile(
         if !cfg.homes.iter().any(|h| h.id == home_id) {
             return Err("DSH_HOME 不存在".to_string());
         }
-        // Instances that belong to this HOME, in registration order.
         cfg.instances
             .iter()
             .filter(|i| i.home_id == home_id)
@@ -3920,9 +3188,6 @@ pub async fn running_for_profile(
     };
     let running = state.running.lock().await;
     let order = match prefer {
-        // The named instance first, the rest in registration order. An id that
-        // belongs to another HOME (or to no instance) is ignored: the caller
-        // can only be pointing at an instance of the HOME it asked about.
         Some(preferred) if instance_ids.iter().any(|id| id == preferred) => {
             let mut order = vec![preferred.to_string()];
             order.extend(
@@ -3966,11 +3231,6 @@ fn emit_status(app: &AppHandle, status: &InstanceStatus) {
 // forget the choreography because there is no choreography.
 // ---------------------------------------------------------------------------
 
-/// Binds an in-flight start to its running entry and refreshes the tray menu.
-/// An id that already has an entry is reported as an error rather than replaced,
-/// so a second process can never take over a live instance's registry slot. The
-/// caller emits the instance's own status event (Starting / Running) around it —
-/// those carry per-transition detail (url, exit code) this helper doesn't know.
 async fn register_running(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -3988,9 +3248,6 @@ async fn register_running(
     Ok(())
 }
 
-/// Removes a running entry and projects the terminal status (status event +
-/// tray menu). Not for the exit waiter, which must remove first and re-probe
-/// adoption before deciding the terminal status — see [`remove_entry_quiet`].
 async fn unregister_running(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -3998,11 +3255,7 @@ async fn unregister_running(
     status: InstanceStatus,
 ) {
     let remote = state.running.lock().await.remove(id).and_then(|r| r.remote);
-    // The process is gone, so the token it printed is worthless: drop the
-    // reminder rather than handing a stale URL to the next adoption.
     forget_url(&state.data_dir, id);
-    // Same on the machine that ran it: its own record is where a later session
-    // would find the pid and the token, and neither outlives the process.
     if let Some(run) = remote {
         withdraw_forward(state, &run).await;
         if let Err(e) = forget_remote_run(state, id, &run).await {
@@ -4074,14 +3327,6 @@ fn instance_recorded(state: &AppState, instance_id: &str) -> bool {
         .any(|inst| inst.id == instance_id)
 }
 
-/// Drops one running entry whose instance record is gone or going, together
-/// with the reminder it left on this Mac and that machine's record of it.
-///
-/// Nothing is signalled: an instance on another machine keeps running there,
-/// and a deleted record does not change that (ADR-0007). What goes is the
-/// launcher's side of it — the entry, the watcher that would otherwise ask that
-/// machine about it forever, and the bookkeeping that named a process no record
-/// names anymore.
 async fn forget_running_entry(state: &AppState, instance_id: &str, pid: i32) {
     let run = {
         let mut running = state.running.lock().await;
@@ -4104,12 +3349,6 @@ async fn forget_running_entry(state: &AppState, instance_id: &str, pid: i32) {
     }
 }
 
-/// Releases every running entry that belongs to one host, for a host whose
-/// records are being deleted. Returns the instances it released.
-///
-/// The processes themselves keep running on that machine (ADR-0006, ADR-0007):
-/// nothing here signals anything. What goes is the launcher's side of them, so
-/// no watcher is left asking a machine the launcher no longer knows about.
 pub(crate) async fn release_host_runs(state: &AppState, host_id: &str) -> Vec<String> {
     let entries: Vec<(String, i32)> = {
         let running = state.running.lock().await;
@@ -4198,7 +3437,6 @@ mod tests {
     /// A DSH shipped as a single-file executable carries a name of its own, and
     /// only its command line says what it is. Judged by the name alone it reads
     /// as 「别的进程占着端口」, which is the page's 「已停止」 for an instance that
-    /// is up.
     #[test]
     fn looks_like_dsh_reads_the_command_line_too() {
         let args = "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.2/\
@@ -4231,16 +3469,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dsh-proc-test-{}", uuid::Uuid::new_v4()));
         let profile_dir = dir.join("profiles").join("test");
         std::fs::create_dir_all(&profile_dir).unwrap();
-        // No package.json -> not a web profile.
         assert!(!is_web_profile(&dir, "test"));
-        // Web app bundle -> web profile.
         std::fs::write(
             profile_dir.join("package.json"),
             r#"{"name":"dsh-profile-test","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#,
         )
         .unwrap();
         assert!(is_web_profile(&dir, "test"));
-        // Non-web profile (no dsh-web-app bundle) -> false.
         let other = dir.join("profiles").join("bot");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(
@@ -4268,8 +3503,6 @@ mod tests {
             }),
             running: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             tasks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            // The local lifecycle never talks to a remote host; an in-memory
-            // transport that answers nothing is the honest stand-in.
             host_transport: crate::remote::testing::idle(),
             host_statuses: std::sync::Mutex::new(std::collections::HashMap::new()),
             remote_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -4277,20 +3510,8 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Remote instances
-    //
-    // These drive the remote half of a start through the transport double: what
-    // the launcher *asks that machine to do* (the detached spawn, the record it
-    // writes) and what it reads back out of that machine's log are the whole
-    // contract, so the tests assert on those and not on which of the launcher's
-    // own functions ran. The Tauri side of a start — the status event and the
-    // tray rebuild — has no double, and is not driven here.
-    // -----------------------------------------------------------------------
-
     use crate::remote::testing::{marked, FakeAnswer, FakeCall, FakeTransport};
 
-    /// The base64 one remote script's base64 field carries.
     fn base64_of(text: &str) -> String {
         use base64::Engine as _;
         base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
@@ -4355,8 +3576,6 @@ mod tests {
         }
     }
 
-    /// An `AppState` for one remote host, with the launcher's own proxy settings
-    /// switched on — they belong to this Mac and must not reach that machine.
     fn remote_app_state(
         fake: std::sync::Arc<FakeTransport>,
         host: crate::config::Host,
@@ -4393,14 +3612,6 @@ mod tests {
         br#"{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#.to_vec()
     }
 
-    /// A start's answers, in the order the launcher asks them: **one** multi-file
-    /// read of that machine's version and profile documents, the profile's store
-    /// and peer pins, that machine's toolchain, the log size, the spawn, the
-    /// pid's start time, and the empty running record it completes.
-    ///
-    /// `profile_doc` is the profile's `package.json` on that machine; `None` is a
-    /// profile this start materializes. `pnpm` is where that machine keeps the
-    /// package manager, when the probe found one.
     fn remote_start_answers(
         node: &str,
         pnpm: Option<&str>,
@@ -4423,7 +3634,6 @@ mod tests {
             // 2.-3. profile 自己那份 pnpm store 与 peer 策略：各写一次。
             FakeAnswer::Done,
             FakeAnswer::Done,
-            // 4. 那台机器自己的绝对 Node（和 pnpm，如果那台机器有）。
             FakeAnswer::stdout(crate::remote::testing::environment_stdout(
                 crate::remote::testing::remote_tool(node, "v26.0.0", "system"),
                 match pnpm {
@@ -4432,11 +3642,8 @@ mod tests {
                 },
                 &[],
             )),
-            // 5. 日志现在有多少字节（起进程之前问的）。
             FakeAnswer::stdout(marked(r#"{"offset":0}"#)),
-            // 6. 脱离会话地起进程。
             FakeAnswer::Pid(4242),
-            // 7. 这个 pid 自己的启动时间。
             FakeAnswer::stdout(marked(r#"{"started_at":117384720}"#)),
             // 8.-9. 那台机器上的运行记录：还没有，写一条。
             FakeAnswer::failed(2, "远端没有这个文件：running.json"),
@@ -4455,7 +3662,6 @@ mod tests {
             .unwrap_or_else(|| panic!("没有写下 {path}"))
     }
 
-    /// The URL DSH prints on readiness, and the line it arrives on.
     const READY_URL: &str =
         "http://127.0.0.1:3080/?token=JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
     const READY_TOKEN: &str = "JRFSsyvQL-n4ZNCC0i1GHUcAuQrlIntDazoDHwMhKsQ";
@@ -4476,16 +3682,10 @@ mod tests {
         }
     }
 
-    /// A priming boot's answers, in the order the launcher asks them.
     fn remote_prime_answers() -> Vec<FakeAnswer> {
         crate::remote::testing::prime_home_answers(READY_URL)
     }
 
-    /// A brand-new DSH_HOME on another machine has to reach the same place a
-    /// local one does, and that means that machine runs DSH once against it:
-    /// `profiles/web` only appears on a HOME's first run, and without it the
-    /// page offers no Profile to launch with — 「启动」 is a button that does
-    /// nothing.
     #[tokio::test]
     async fn a_brand_new_remote_home_gets_its_web_profile_made_there() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -4528,7 +3728,6 @@ mod tests {
             "端口由那台机器自己挑，这一次启动不能去抢实例要用的端口：{spawn}"
         );
 
-        // 模板：`profiles/web` 复制成 `profiles/__temp__`（在那台机器上）。
         let copied = calls.iter().any(|call| match call {
             FakeCall::Run(script) => {
                 script.contains(&format!("dsh_from='{REMOTE_HOME}/profiles/web'"))
@@ -4538,8 +3737,6 @@ mod tests {
         });
         assert!(copied, "模板要在那台机器上复制出来：{calls:?}");
 
-        // 模板里不能留下这次启动钉住的端口，否则从它派生出的每个 Profile 都会
-        // 去抢同一个端口，并且压过启动器给的 `--port`。
         let written = last_write_of(
             &fake,
             &format!("{REMOTE_HOME}/profiles/__temp__/cordis.patch.yml"),
@@ -4552,9 +3749,6 @@ mod tests {
         );
     }
 
-    /// A HOME that already has a profile is the user's own: the launcher does not
-    /// run DSH against it, does not copy anything, and cannot be made to touch it
-    /// by creating an instance on that host.
     #[tokio::test]
     async fn a_remote_home_that_already_has_profiles_is_left_alone() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -4581,23 +3775,11 @@ mod tests {
         );
     }
 
-    /// A profile whose own document is not on that machine yet is one **this**
-    /// start materializes — and a start that is given no port falls back to
-    /// DSH's own default (3080), which is exactly the port another service may
-    /// already hold there. So the launcher's port policy applies to this start
-    /// too: the intended port (`0` = that machine's kernel picks a free one, or
-    /// the pinned port, whose occupant the preflight already names), never DSH's
-    /// default.
-    ///
-    /// From the page this can only happen on another machine: the profile list
-    /// 本机 offers is the directory listing, so a name with no directory behind
-    /// it is not something the page can send.
     #[tokio::test]
     async fn a_start_on_a_profile_that_is_not_materialized_yet_still_carries_the_port() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
         let node = "/usr/bin/node";
         let fake = FakeTransport::new();
-        // 那个 profile 在那台机器上还没有自己的 package.json。
         let answers = remote_start_answers(node, None, None);
         for answer in answers {
             fake.answering(answer);
@@ -4630,12 +3812,6 @@ mod tests {
         );
     }
 
-    /// The whole point of ADR-0007's detached spawn: the instance is started by
-    /// that machine's own shell in its own session — `setsid`, stdin from
-    /// `/dev/null`, output appended to that machine's log — with the absolute
-    /// Node its own probe resolved, the version's `bin.js`, and the environment
-    /// the launcher promised (DSH_HOME, the instance's name and own variables,
-    /// the host record's variables) and **not** this Mac's proxy settings.
     #[tokio::test]
     async fn a_remote_start_spawns_detached_with_that_hosts_toolchain_and_environment() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -4670,8 +3846,6 @@ mod tests {
                 _ => None,
             })
             .expect("远端启动要起一个脱离会话的进程");
-        // Detached: its own session, no stdin, output appended to that machine's
-        // log — which is what lets it outlive the ssh connection and this app.
         assert!(script.contains("nohup setsid"), "{script}");
         assert!(script.contains("< /dev/null"), "{script}");
         assert!(
@@ -4679,7 +3853,6 @@ mod tests {
                 && script.contains("2>&1 < /dev/null"),
             "输出追加到那台机器上的日志：{script}"
         );
-        // Absolute Node and bin.js from that machine's own version directory.
         assert!(script.contains(&format!("'{node}'")), "{script}");
         assert!(
             script.contains(&format!(
@@ -4697,18 +3870,12 @@ mod tests {
             !script.contains("--host"),
             "绑定地址归 profile 层：{script}"
         );
-        // The DSH this starts invokes `pnpm` by name for plugin management, and
-        // an ssh session's PATH does not reach a version-manager install — so the
-        // directories the probe resolved there go in front of it, node's first so
-        // a pnpm that is a Node script finds its interpreter.
         assert!(
             script.contains(
                 "export PATH='/home/linuxbrew/.linuxbrew/bin':'/home/demo/.local/share/pnpm':\"$PATH\""
             ),
             "让那台机器上起的 DSH 能找到 pnpm：{script}"
         );
-        // The environment: DSH_HOME, the instance's name, its own variables, and
-        // the host record's variables.
         assert!(
             script.contains(&format!("'DSH_HOME={REMOTE_HOME}'")),
             "{script}"
@@ -4734,11 +3901,6 @@ mod tests {
         assert_eq!(start.offset, 0, "这次运行的输出从启动那一刻的日志末尾开始");
     }
 
-    /// ADR-0007 §3: the record that machine keeps names the pid **and** its
-    /// process start time — a pid number alone is reused by the kernel — with the
-    /// profile, and no URL until the instance prints one. It is written before
-    /// the URL appears so a launcher that dies in between still knows what it
-    /// started where.
     #[tokio::test]
     async fn the_remote_run_record_names_the_pid_its_start_time_and_the_profile() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -4772,9 +3934,6 @@ mod tests {
         assert_eq!(entry["url"], serde_json::Value::Null, "{doc}");
     }
 
-    /// The URL is where the launch token lives, so reading it out of that
-    /// machine's log and writing it — token and all — into that machine's record
-    /// is what keeps the instance manageable after a launcher restart.
     #[tokio::test]
     async fn the_url_and_token_come_out_of_that_machines_log_into_its_record() {
         let fake = FakeTransport::new()
@@ -4808,9 +3967,6 @@ mod tests {
         assert_eq!(entry["profile"], "web", "{entry}");
     }
 
-    /// One read is a byte range, so the URL line can arrive in two halves. Acting
-    /// on half a line is not an option, and neither is losing it: the URL is what
-    /// makes the instance manageable at all.
     #[tokio::test]
     async fn a_url_split_across_two_reads_is_read_once_the_line_is_complete() {
         let fake = FakeTransport::new()
@@ -4845,9 +4001,6 @@ mod tests {
         );
     }
 
-    /// A DSH that exited on that machine (a crash, a bad profile) is not the same
-    /// as one the launcher cannot see: the read says which it is, and the
-    /// follower ends the watch on the former.
     #[tokio::test]
     async fn a_read_of_a_log_whose_process_is_gone_says_so() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(
@@ -4868,10 +4021,6 @@ mod tests {
         assert_eq!(read.url, None);
     }
 
-    /// 本机's token reminder is dropped when the process is gone, so a stale URL
-    /// is never handed to the next adoption. A remote instance's record has to
-    /// lose its entry the same way — the token it holds points at a process that
-    /// no longer exists.
     #[tokio::test]
     async fn forgetting_a_remote_run_removes_only_that_entry() {
         let existing = serde_json::json!({
@@ -4902,13 +4051,11 @@ mod tests {
         );
     }
 
-    /// A port this Mac has free right now, for a remote instance to have used.
     fn free_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
     }
 
-    /// The remote addresses a run asked for a forward to, in order.
     fn forwarded(fake: &FakeTransport) -> Vec<(String, u16)> {
         fake.calls()
             .into_iter()
@@ -4921,10 +4068,6 @@ mod tests {
             .collect()
     }
 
-    /// What 「打开」 needs for a remote instance: the address **this Mac** can
-    /// reach. The instance printed its own address from where it stands, which
-    /// on this Mac is a different service — so the launcher forwards that port
-    /// and hands over the same address on loopback, token and path unchanged.
     #[tokio::test]
     async fn a_remote_instances_open_hands_over_the_address_on_this_mac() {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
@@ -4957,11 +4100,6 @@ mod tests {
         );
     }
 
-    /// The launch-time scan and the ready path hold a remote instance the same
-    /// way: the address that machine's record carries is the forward's target, and
-    /// what this Mac gets is the same address on loopback — so 「打开」 after a
-    /// launcher restart lands on that machine's instance, logged in, rather than
-    /// on whatever else answers on this Mac at that port.
     #[tokio::test]
     async fn a_recorded_remote_address_is_forwarded_for_this_mac() {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
@@ -4984,10 +4122,6 @@ mod tests {
         );
     }
 
-    /// A forward that will not come up costs the address, not the instance: it is
-    /// running on that machine either way, and the next 打开 builds the forward
-    /// again and says why if it still cannot. So this answers with no address
-    /// rather than an error a caller would have to drop the instance over.
     #[tokio::test]
     async fn a_forward_that_will_not_come_up_costs_only_the_address() {
         let fake = FakeTransport::new().answering(FakeAnswer::fail(
@@ -5007,8 +4141,6 @@ mod tests {
         );
     }
 
-    /// 本机's path is untouched: an instance running here is already reachable
-    /// here, so 「打开」 hands over its own URL and asks for no forward.
     #[tokio::test]
     async fn a_local_instance_opens_at_its_own_address_without_a_forward() {
         let fake = FakeTransport::new();
@@ -5036,9 +4168,6 @@ mod tests {
         );
     }
 
-    /// The board states both addresses for a remote instance: the one that
-    /// works from here (what 「打开」 uses, and what the plugins page talks to)
-    /// and where the instance really is, so nobody thinks DSH is bound here.
     #[tokio::test]
     async fn the_status_of_a_remote_instance_carries_both_addresses() {
         let remote_url = format!("http://127.0.0.1:{}/?token={READY_TOKEN}", free_port());
@@ -5067,16 +4196,8 @@ mod tests {
         assert_eq!(status.remote_url.as_deref(), Some(remote_url.as_str()));
     }
 
-    /// DSH replacing itself in place keeps the pid the launcher watches but
-    /// moves its output to a file of its own making, so the log the launcher was
-    /// following says nothing more and the running record has no address. 「打开」
-    /// then has to find the address where it actually is: that machine's own
-    /// file descriptors, with the token checked there before it is believed.
     #[tokio::test]
     async fn an_open_instance_without_an_address_finds_it_in_the_process_own_output() {
-        // 3080 is the authority `REMOTE_COOKIE` was computed for, so the check
-        // here is the same one the real machine makes: the cookie names the host
-        // and port the request was made to.
         let printed = format!("dsh web: {READY_URL}\n");
         let fake = FakeTransport::new()
             .answering(FakeAnswer::stdout(marked(&format!(
@@ -5148,10 +4269,6 @@ mod tests {
         );
     }
 
-    /// The page's 重试 asks that machine again — and for an instance this session
-    /// already holds, the thing worth asking again is the address it is missing.
-    /// A retry that returned 「运行中」 while 「打开」 still refused would be the
-    /// button that does nothing.
     #[tokio::test]
     async fn an_instance_without_an_address_is_repaired_in_place() {
         let printed = format!("dsh web: {READY_URL}\n");
@@ -5207,9 +4324,6 @@ mod tests {
         );
     }
 
-    /// Nothing to search, or nothing the instance accepts: the honest answer is
-    /// 「不知道地址」, not 「没在运行」 — the second sentence would send the user to
-    /// start a second DSH on a machine that is running one.
     #[tokio::test]
     async fn an_instance_whose_address_cannot_be_found_says_so_instead_of_not_running() {
         let fake = FakeTransport::new()
@@ -5241,9 +4355,6 @@ mod tests {
         );
     }
 
-    /// The registry write an adoption performs: a fresh adoption fills an empty
-    /// slot, a successor replaces only the entry whose pid has gone, and a start
-    /// that holds the id wins over both.
     #[test]
     fn installing_a_remote_entry_respects_the_pid_it_replaces() {
         let entry_for = |pid: i32, profile: &str| {
@@ -5304,8 +4415,6 @@ mod tests {
             "pid 对不上说明这条已经被别人接管，不能再改"
         );
 
-        // A start holds the id while it launches: another adoption gives way,
-        // while the start's own preflight adoption is that start and goes in.
         let claim = StartClaim {
             id: "i-claim".to_string(),
         };
@@ -5325,9 +4434,6 @@ mod tests {
         drop(claim);
     }
 
-    /// A successor may take over only the entry whose pid has just gone.
-    /// Nothing there means a user stopped it while the probe ran; a different
-    /// pid means a start or another adoption owns the id — both must win.
     #[test]
     fn a_remote_successor_replaces_only_the_entry_whose_pid_is_gone() {
         let mut run = remote_run();
@@ -5349,9 +4455,6 @@ mod tests {
         );
     }
 
-    /// ⌘Q stops this Mac's instances and nothing else (ADR-0007 §1-2): a remote
-    /// instance is meant to still be running on that machine the next time the
-    /// launcher starts.
     #[test]
     fn launcher_exit_does_not_signal_remote_instances() {
         let state = app_state(Vec::new(), Vec::new());
@@ -5400,23 +4503,12 @@ mod tests {
         });
     }
 
-    // -----------------------------------------------------------------------
-    // Stopping, checking and re-adopting remote instances
-    //
-    // The transport double is the machine: every test here queues what that
-    // machine would answer and then asserts on the conclusion the launcher
-    // reached and on what it asked for — never on which of its own functions
-    // ran. The Tauri side of these paths (the status event, the tray) has no
-    // double and is not driven here.
-    // -----------------------------------------------------------------------
-
     /// The cookie name that machine's instance mints for `127.0.0.1:3080` —
     /// `dsh-auth-<base64url(sha256(authority))>`, computed independently of the
     /// code under test.
     const REMOTE_COOKIE: &str =
         "dsh-auth-VPhEEcLKeqRDBoBalzN2Nm7CnfxKhLE00pKIDWxt1sw=v1.payload.sig";
 
-    /// An `AppState` whose only machine is the transport double.
     fn transport_state(fake: &std::sync::Arc<FakeTransport>) -> AppState {
         AppState {
             host_transport: fake.clone(),
@@ -5424,8 +4516,6 @@ mod tests {
         }
     }
 
-    /// That machine's own running record for the fixture instance, as the
-    /// launcher reads it back: url (token and all), profile, pid, start time.
     fn record_doc(url: Option<&str>) -> String {
         serde_json::json!({
             "i-remote": {
@@ -5451,22 +4541,16 @@ mod tests {
         )))
     }
 
-    /// The same answer from a machine where DSH runs as a single-file
-    /// executable: the name says nothing, the command line says everything.
     fn occupied_answer_with_args(pid: u32, command: &str, args: &str) -> FakeAnswer {
         FakeAnswer::stdout(marked(&format!(
             r#"{{"occupied":true,"pid":{pid},"command":"{command}","args":"{args}"}}"#
         )))
     }
 
-    /// The argv an npm-installed DSH carries: the listener runs as `node`, but
-    /// only the command line says it is DSH.
     fn npm_dsh_args() -> &'static str {
         "/home/demo/.local/share/dsh-launcher/versions/0.2.1-rc.2/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 3099 --no-open"
     }
 
-    /// One machine, one instance, and the record it left behind — the three
-    /// things every check needs.
     fn remote_case(
         fake: &std::sync::Arc<FakeTransport>,
         host_id: &str,
@@ -5507,9 +4591,6 @@ mod tests {
         }
     }
 
-    /// A pid number is not an identity. When the start time on that machine is
-    /// not the one recorded at spawn, the pid now belongs to somebody else — and
-    /// nothing may be signalled.
     #[tokio::test]
     async fn a_pid_whose_start_time_does_not_match_is_never_signalled() {
         let fake = FakeTransport::new().answering(FakeAnswer::stdout(marked(
@@ -5523,8 +4604,6 @@ mod tests {
             RemoteStop::Reused(reason) => assert!(reason.contains("复用"), "{reason}"),
             other => panic!("一个被复用的 pid 不能当成我们的进程：{other:?}"),
         }
-        // 「不发信号」 is the machine's own decision, made in the same shell that
-        // would have signalled: the script compares the start times first.
         let script = match &fake.calls()[0] {
             FakeCall::Run(script) => script.clone(),
             other => panic!("{other:?}"),
@@ -5534,9 +4613,6 @@ mod tests {
         assert!(check < signal, "核对要在发信号之前：{script}");
     }
 
-    /// A machine that cannot be asked is not a stopped instance. Saying 「已停止」
-    /// here is what makes a user start a second DSH on a server that was running
-    /// one all along (ADR-0007 后果).
     #[tokio::test]
     async fn a_machine_that_does_not_answer_makes_the_stop_unreachable_not_stopped() {
         let fake = FakeTransport::new().answering(FakeAnswer::fail(
@@ -5558,8 +4634,6 @@ mod tests {
         );
     }
 
-    /// ADR-0007 §2: a **pinned** port is evidence by itself — a DSH-like process
-    /// listening on it is this instance, token or no token.
     #[tokio::test]
     async fn a_pinned_port_with_a_dsh_like_listener_is_adopted() {
         let fake = FakeTransport::new()
@@ -5586,10 +4660,6 @@ mod tests {
         }
     }
 
-    /// The same rule on a machine whose DSH runs as a single-file executable:
-    /// the process name is its own (`MainThread`), so only the command line can
-    /// say this listener is DSH. Judged by the name alone, an instance that is
-    /// up reads as 「已停止」 and the next start refuses the port.
     #[tokio::test]
     async fn a_pinned_port_with_a_single_file_dsh_is_adopted_too() {
         let fake = FakeTransport::new()
@@ -5612,17 +4682,10 @@ mod tests {
         }
     }
 
-    /// DSH's own restart helper replaces the process but keeps the port: the old
-    /// pid is gone and a new DSH-like listener is on the same address. The
-    /// successor probe has to wait for it to bind and name the new process —
-    /// reading the first look as 「已停止」 is what leaves the card dead while the
-    /// instance answers on its port.
     #[tokio::test]
     async fn a_restarted_remote_instance_is_found_on_its_pinned_port() {
         let printed = format!("dsh web: {READY_URL}\n");
         let fake = FakeTransport::new()
-            // The replacement is not there on the first look (the old process
-            // has gone, the new one has not bound yet).
             .answering(FakeAnswer::stdout(marked(
                 r#"{"occupied":false,"pid":null,"command":"","args":""}"#,
             )))
@@ -5656,8 +4719,6 @@ mod tests {
         assert_eq!(url.as_deref(), Some(READY_URL), "新进程打印的地址要带回来");
     }
 
-    /// A machine that cannot be asked during the successor probe is not a
-    /// machine with no successor: 「问不到」 must not turn into 「已停止」.
     #[tokio::test]
     async fn a_successor_probe_that_cannot_ask_the_machine_says_unknown() {
         let fake = FakeTransport::new().answering(FakeAnswer::fail(
@@ -5678,9 +4739,6 @@ mod tests {
         );
     }
 
-    /// The other half of the pinned-port rule: an occupant that is not DSH is
-    /// named, because that is what the user has to move before the instance can
-    /// start on that port.
     #[tokio::test]
     async fn a_pinned_port_held_by_something_else_names_the_occupant() {
         let fake = FakeTransport::new()
@@ -5700,10 +4758,6 @@ mod tests {
         );
     }
 
-    /// A **random** port says nothing on its own, so it has to prove itself with
-    /// the token that machine wrote down — and the proof is made **there**: a
-    /// remote instance listens on that machine's own loopback, so the same URL
-    /// asked from this Mac would reach a different service.
     #[tokio::test]
     async fn a_random_port_is_adopted_when_the_recorded_token_is_accepted_there() {
         let fake = FakeTransport::new()
@@ -5741,9 +4795,6 @@ mod tests {
         );
     }
 
-    /// The same port, the same DSH-like listener, and a token that is no longer
-    /// accepted: the process on it is not *this* instance, so it is not adopted
-    /// (the local rule, asked of that machine).
     #[tokio::test]
     async fn a_random_port_whose_token_is_refused_is_not_adopted() {
         let fake = FakeTransport::new()
@@ -5760,8 +4811,6 @@ mod tests {
         assert_eq!(verdict, RemoteVerdict::Stopped);
     }
 
-    /// The machine could not be asked: nothing can be said about the instance,
-    /// and 「已停止」 is not one of the available answers.
     #[tokio::test]
     async fn an_instance_on_a_machine_that_cannot_be_asked_is_unreachable() {
         let fake = FakeTransport::new().answering(FakeAnswer::fail(
@@ -5779,11 +4828,6 @@ mod tests {
         );
     }
 
-    /// A host whose data directory is still what the user typed (`~/dsh`, before
-    /// that machine ever settled it) cannot be asked anything about its
-    /// instances. The reason reaches the row as 「主机不可达」的说明, so it has to
-    /// carry the way out: without the instruction to test the connection, 重试
-    /// answers with the same sentence forever.
     #[tokio::test]
     async fn a_machine_whose_data_directory_is_not_settled_says_how_to_settle_it() {
         let fake = FakeTransport::new();
@@ -5810,10 +4854,6 @@ mod tests {
         );
     }
 
-    /// Until the launch-time scan has asked a machine, its instances are unknown
-    /// — and unknown is reported as 「启动中」, never as 「已停止」. This is the
-    /// window in which a wrong 「已停止」 used to be exactly what made the user
-    /// start a second DSH on the server.
     #[tokio::test]
     async fn an_instance_whose_machine_has_not_been_asked_yet_is_not_stopped() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -5835,9 +4875,6 @@ mod tests {
         );
     }
 
-    /// Once the machine has answered 「不可达」, its instances say so — and a
-    /// running entry of a host that has since stopped answering is not a claim
-    /// the launcher can keep making either.
     #[tokio::test]
     async fn instances_of_an_unreachable_host_read_as_unreachable() {
         let host_id = format!("host-{}", uuid::Uuid::new_v4());
@@ -5847,15 +4884,12 @@ mod tests {
             remote_instance(&host_id, Some(3080)),
         );
 
-        // After the scan, with the machine having said 「连不上」.
         finish_remote_scan(&state, &host_id);
         state.set_host_status(&host_id, HostStatus::unreachable("ssh 连不上"));
         let statuses = list_statuses(&state).await;
         assert_eq!(statuses.len(), 1, "{statuses:?}");
         assert_eq!(statuses[0].state, InstanceState::Unreachable);
 
-        // And the same instance, believed to be running here, stops claiming
-        // 运行中 about a machine that cannot be reached.
         let mut run = remote_run();
         run.host_id = host_id.clone();
         state.running.lock().await.insert(
@@ -5876,16 +4910,12 @@ mod tests {
             "{statuses:?}"
         );
 
-        // A machine that answers again puts it back to running.
         state.set_host_status(&host_id, HostStatus::reachable());
         let statuses = list_statuses(&state).await;
         assert_eq!(statuses[0].state, InstanceState::Running, "{statuses:?}");
         assert_eq!(statuses[0].url.as_deref(), Some(READY_URL));
     }
 
-    /// 本机's half of the same function is untouched: an instance with no process
-    /// contributes nothing, which is what the page has always read as 「已停止」,
-    /// and one that is running is reported as running.
     #[tokio::test]
     async fn local_instances_keep_their_own_states() {
         let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);
@@ -5938,9 +4968,6 @@ mod tests {
         }
     }
 
-    /// The URL an instance prints is the only thing that lets a *later*
-    /// launcher session manage a process it did not spawn, so it has to
-    /// survive the session — and be dropped when the process is gone.
     #[test]
     fn remembered_urls_round_trip_and_forget() {
         let dir = std::env::temp_dir().join(format!("dsh-remembered-{}", std::process::id()));
@@ -5954,7 +4981,6 @@ mod tests {
             recall_url(&dir, "i1").as_deref(),
             Some("http://127.0.0.1:3088/?token=abc")
         );
-        // A restart re-reads the same file: same answer, no state in memory.
         assert_eq!(
             recall_url(&dir, "i2").as_deref(),
             Some("http://127.0.0.1:3089/?token=def")
@@ -5969,7 +4995,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Manageability is the token's business, not the entry's origin.
     #[test]
     fn manageable_url_requires_a_token() {
         let spawned = RunningEntry {
@@ -5979,7 +5004,6 @@ mod tests {
         };
         assert!(manageable_url(&spawned).is_some());
 
-        // Adopted, but we remembered the token it printed: manageable.
         let adopted_with_token = RunningEntry {
             id: "i1".to_string(),
             url: Some("http://127.0.0.1:1/?token=a".to_string()),
@@ -6002,9 +5026,6 @@ mod tests {
         assert!(manageable_url(&unknown).is_none());
     }
 
-    /// Without a preference the Plugins page resolves (HOME, Profile) to the
-    /// instance actually running that profile: same HOME, equal profile, and
-    /// the first registered match wins.
     #[tokio::test]
     async fn running_for_profile_matches_home_and_profile() {
         let state = app_state(
@@ -6017,7 +5038,6 @@ mod tests {
         );
         {
             let mut running = state.running.lock().await;
-            // i1 runs a different profile; i2 and i3 run "web".
             running.insert(
                 "i1".to_string(),
                 running_entry("bot", Some("http://127.0.0.1:1/?token=a")),
@@ -6039,27 +5059,21 @@ mod tests {
         assert_eq!(hit.url.as_deref(), Some("http://127.0.0.1:2/?token=b"));
         assert!(!hit.adopted);
 
-        // A different HOME never borrows another HOME's instance.
         let other = running_for_profile(&state, "h2", "web", None)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(other.url.as_deref(), Some("http://127.0.0.1:3/?token=c"));
 
-        // Instance registered but not started -> no running entry.
         assert!(running_for_profile(&state, "h1", "demo", None)
             .await
             .unwrap()
             .is_none());
-        // Unknown HOME is an error, distinct from "not running".
         assert!(running_for_profile(&state, "nope", "web", None)
             .await
             .is_err());
     }
 
-    /// Two instances can run one DSH_HOME and one profile at the same time. The
-    /// page was opened from one of their rows, and the write has to be applied
-    /// by that process — the first match is only what happens without one.
     #[tokio::test]
     async fn running_for_profile_prefers_the_instance_the_user_came_from() {
         let state = app_state(
@@ -6086,14 +5100,12 @@ mod tests {
             );
         }
 
-        // Without a preference: registration order, as before.
         let first = running_for_profile(&state, "h1", "web", None)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(first.id, "i1");
 
-        // With one: the named instance answers, and it says which one it is.
         let preferred = running_for_profile(&state, "h1", "web", Some("i2"))
             .await
             .unwrap()
@@ -6104,9 +5116,6 @@ mod tests {
             Some("http://127.0.0.1:2/?token=b")
         );
 
-        // A stale id (the instance was deleted), and one belonging to another
-        // HOME, only rank: the page is scoped by (HOME, Profile), so neither
-        // can borrow another HOME's process or turn into an error.
         for ignored in ["nope", "i9"] {
             let hit = running_for_profile(&state, "h1", "web", Some(ignored))
                 .await
@@ -6116,8 +5125,6 @@ mod tests {
         }
     }
 
-    /// An adopted instance has a bare URL and no token: it must surface as
-    /// adopted so the caller can refuse to manage it.
     #[tokio::test]
     async fn running_for_profile_reports_adopted_instances() {
         let state = app_state(vec![home("h1")], vec![instance("i1", "h1")]);

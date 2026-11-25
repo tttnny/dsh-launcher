@@ -1,16 +1,3 @@
-//! Launcher self-update check against GitHub releases.
-//!
-//! Uses the GitHub REST API (`/repos/{repo}/releases`) with the anonymous
-//! OAuth client id boost (see `plugins::GITHUB_CLIENT_ID`): plain
-//! unauthenticated API calls are limited to 60 req/h per IP, and the
-//! `releases.atom` feed served from the main github.com domain is not the API
-//! at all — under heavy IP load it can be refused at the transport layer
-//! (`error sending request for url ...`). Passing the public client id raises
-//! the unauth quota to 5000 req/h, exactly as the plugin marketplace does.
-//!
-//! By default, prerelease builds follow the preview channel and stable
-//! builds follow the stable channel.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -18,7 +5,6 @@ use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
 
-/// Self-update follows *this* repository's releases only.
 const RELEASES_API: &str = "/repos/tttnny/dsh-launcher/releases?per_page=100";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
@@ -27,7 +13,6 @@ static INSTALLER_DOWNLOAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_ne
 #[derive(Clone, Debug, Serialize)]
 pub struct LauncherUpdateInfo {
     pub current: String,
-    /// "dev" for the preview channel, otherwise "stable".
     pub channel: String,
     pub up_to_date: bool,
     pub latest: Option<String>,
@@ -67,7 +52,6 @@ fn mac_installer<'a>(release: &'a ReleaseEntry, arch: &str) -> Option<(&'a Relea
     })
 }
 
-/// Parses a release tag ("v0.2.0" / "v0.2.0-dev.12") as semver.
 fn parse_tag(tag: &str) -> Option<semver::Version> {
     semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
@@ -76,9 +60,6 @@ fn parse_releases_json(body: &[u8]) -> Result<Vec<ReleaseEntry>, String> {
     serde_json::from_slice(body).map_err(|e| format!("解析 GitHub Releases JSON 失败: {e}"))
 }
 
-/// Picks the newest published release strictly newer than `current`.
-/// `dev_channel` sees prereleases and stables; the release channel sees only
-/// stables (pre-releases are ignored).
 fn pick_latest<'a>(
     current: &semver::Version,
     dev_channel: bool,
@@ -195,8 +176,6 @@ pub async fn download_launcher_update(
         .ok_or("找不到该版本，请重新检查更新")?;
     let (asset, hash) = mac_installer(release, std::env::consts::ARCH)
         .ok_or("该版本没有适用于本机且可校验的安装包")?;
-    // The tag and filename were matched against SemVer and our bundle naming
-    // scheme. The webview never supplies a URL, checksum, or local path.
     let url = format!(
         "https://github.com/tttnny/dsh-launcher/releases/download/{}/{}",
         release.tag_name, asset.name
@@ -330,7 +309,6 @@ mod tests {
     fn stable_channel_ignores_prereleases() {
         let current = semver::Version::parse("0.1.9").unwrap();
         let releases = vec![release("v0.2.0-dev.7"), release("v0.1.9")];
-        // Only prereleases are newer: a stable build stays put.
         assert_eq!(tag_of(pick_latest(&current, false, &releases)), None);
     }
 
@@ -405,10 +383,7 @@ mod tests {
     #[test]
     fn same_version_and_unparsable_tags_are_excluded() {
         let current = semver::Version::parse("0.2.0-dev.9").unwrap();
-        let releases = vec![
-            release("v0.2.0-dev.9"), // same as current
-            release("garbage-tag"),  // unparsable
-        ];
+        let releases = vec![release("v0.2.0-dev.9"), release("garbage-tag")];
         assert_eq!(tag_of(pick_latest(&current, true, &releases)), None);
     }
 }

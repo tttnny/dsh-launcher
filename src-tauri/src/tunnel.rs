@@ -1,21 +1,3 @@
-//! The launcher's own ssh port forwards (ADR-0008).
-//!
-//! A remote instance's DSH binds on **that** machine. To reach it from this Mac
-//! the launcher asks ssh for one `-L` forward per instance address, on the
-//! connection it already has to that host — a machine whose own address is
-//! offered to this Mac's network is what this feature refuses to do, so the
-//! local end is loopback and nothing else.
-//!
-//! Two facts shape everything here:
-//!
-//! * **The forward target is the address in the run record**, taken verbatim.
-//!   Where DSH bound itself is its own business; the launcher does not guess.
-//! * **A forward is not permanent.** It rides the multiplexed connection, which
-//!   ssh keeps for `ControlPersist` after its last use and then takes down —
-//!   along with every forward on it. So a remembered forward is a hint, and the
-//!   port it holds is checked before it is believed; a dead one is rebuilt on
-//!   the spot rather than handed to a browser as a live address.
-
 use crate::ssh::{PortForward, RemoteHost};
 use crate::AppState;
 use std::collections::HashMap;
@@ -23,18 +5,10 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-/// The only address a forward is bound to, and the host in every address the
-/// launcher hands to this Mac's browser.
 const LOOPBACK: &str = "127.0.0.1";
 
-/// The lowest local port a forward may borrow. Below 1024 a Unix port can only
-/// be bound by root, and the launcher is a user's app: an instance told to serve
-/// on such a port (its profile's own lan-bind port can be anything) still opens
-/// here, on a port this Mac can actually give it.
 const LOWEST_BORROWABLE_PORT: u16 = 1024;
 
-/// How long the liveness check of one local port may take. It is a connect to
-/// loopback: the port either answers at once or nothing is there.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// How long the whole withdrawal at exit may take. Every request in it is a
@@ -42,8 +16,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// the budget only bounds a connection that has stopped answering.
 const EXIT_BUDGET: Duration = Duration::from_secs(3);
 
-/// One forward, identified by its far end: a host and the address on it. Two
-/// instances that happen to share an address share the forward to it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ForwardKey {
     host_id: String,
@@ -51,30 +23,17 @@ struct ForwardKey {
     remote_port: u16,
 }
 
-/// One forward the launcher opened and has not withdrawn.
 #[derive(Clone, Debug)]
 struct OpenForward {
     host: RemoteHost,
     forward: PortForward,
 }
 
-/// The port forwards this launcher session opened, keyed by the address on the
-/// far side. Held by [`crate::AppState`] because they belong to the launcher
-/// rather than to one page: the instance row, the plugins page and the tray all
-/// reach the same address, and the exit path withdraws all of them.
 #[derive(Default)]
 pub struct Forwards {
     open: Mutex<HashMap<ForwardKey, OpenForward>>,
 }
 
-/// The address this Mac can reach `remote_url` at, opening the forward if it is
-/// not there — and rebuilding it if the connection that carried it went away.
-///
-/// The local port is the remote one whenever this Mac has it free, so the
-/// address on screen is the address that really exists on that machine and
-/// stays the same across sessions; a taken port moves the forward to a free one
-/// (DSH accepts any loopback address, and the auth cookie follows the Host
-/// header, so the two addresses differ without the instance noticing).
 pub(crate) async fn reachable_url(
     state: &AppState,
     host: &RemoteHost,
@@ -90,21 +49,8 @@ pub(crate) async fn reachable_url(
     let mut open = state.forwards.open.lock().await;
     if let Some(existing) = open.get(&key) {
         if port_answers(existing.forward.local_port) {
-            // An answered port is taken as the forward's own. What this cannot
-            // tell apart is the one case where it is not: the ssh master died
-            // (ControlPersist, a slept Mac) and an unrelated local process took
-            // that exact port meanwhile — the launcher would then hand
-            // `127.0.0.1:<port>/?token=…` to that process instead of to the
-            // instance. Proving the port is **ours** means asking the connection
-            // that opened it (`ssh -O check` on this host's control socket),
-            // which spawns a subprocess on a path every instance row, tray
-            // rebuild and plugins page walks. Deliberately not done: the
-            // exposure stays on this Mac and needs that coincidence, and the
-            // strong check can move here the day it happens for real.
             return local_url(remote_url, existing.forward.local_port);
         }
-        // The connection is gone and took the forward with it: forget it and
-        // build the forward again below.
         open.remove(&key);
     }
 
@@ -133,11 +79,6 @@ pub(crate) async fn reachable_url(
     local_url(remote_url, local_port)
 }
 
-/// Withdraws the forward to one address on one host, if this session opened it.
-///
-/// The address is the one in the run record, and a forward is keyed by its far
-/// end: two instances that share an address share the withdrawal. The
-/// connection stays up — other forwards may be riding it.
 pub(crate) async fn withdraw(state: &AppState, host_id: &str, remote_url: &str) {
     let Ok((remote_host, remote_port)) = target_of(remote_url) else {
         return;
@@ -199,11 +140,6 @@ pub(crate) async fn withdraw_host(state: &AppState, host_id: &str) {
     }
 }
 
-/// Withdraws every forward this launcher opened and ends the connections it
-/// opened them on. Called on the way out: the ssh connection is the launcher's
-/// own (its own socket), so nothing the user configured is touched, and a
-/// forward left behind would hold a port on this Mac for a machine the launcher
-/// is no longer watching.
 pub(crate) async fn close_all(state: &AppState) {
     let open: Vec<OpenForward> = {
         let mut map = state.forwards.open.lock().await;
@@ -213,7 +149,6 @@ pub(crate) async fn close_all(state: &AppState) {
         return;
     }
 
-    // One connection per host carries its forwards, so it is ended once.
     let mut hosts: Vec<(RemoteHost, Vec<PortForward>)> = Vec::new();
     for entry in open {
         match hosts
@@ -258,8 +193,6 @@ pub(crate) fn close_all_blocking(state: &AppState) {
     });
 }
 
-/// The far end of a forward: the `host:port` out of the address in the run
-/// record, as that machine spelled it.
 fn target_of(remote_url: &str) -> Result<(String, u16), String> {
     let url = reqwest::Url::parse(remote_url.trim())
         .map_err(|e| format!("远端实例的地址无法解析（{remote_url}）：{e}"))?;
@@ -273,9 +206,6 @@ fn target_of(remote_url: &str) -> Result<(String, u16), String> {
     Ok((host.to_string(), port))
 }
 
-/// The same address, moved to this Mac: everything after the authority — path,
-/// and the query string with the launch token in it — travels unchanged, so a
-/// click still lands logged in.
 fn local_url(remote_url: &str, local_port: u16) -> Result<String, String> {
     let mut url = reqwest::Url::parse(remote_url.trim())
         .map_err(|e| format!("远端实例的地址无法解析（{remote_url}）：{e}"))?;
@@ -286,19 +216,10 @@ fn local_url(remote_url: &str, local_port: u16) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-/// Whether something is listening on one loopback port of this Mac.
-///
-/// This is how a remembered forward is checked before it is believed: ssh holds
-/// the local port for as long as the forward lives, and gives it up the moment
-/// the connection goes (a slept Mac, a dropped network, a server reboot). A
-/// connect to loopback is answered at once either way.
 fn port_answers(port: u16) -> bool {
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), PROBE_TIMEOUT).is_ok()
 }
 
-/// A port this Mac has free right now. The listener is dropped immediately, so
-/// the port is only *likely* to still be free when the forward binds it — which
-/// is the same race ssh itself would lose, and the next ensure repairs it.
 fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind((LOOPBACK, 0))
         .map_err(|e| format!("找不到可用的本机端口：{e}"))?;
@@ -308,10 +229,6 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| format!("找不到可用的本机端口：{e}"))
 }
 
-/// Why a remote instance's address could not be put on this Mac. It says what
-/// to try, and it says what this is **not**: 「DSH 拒绝了这次操作」 is an answer
-/// from the instance over a working tunnel, and reading one as the other sends
-/// the user off to repair the wrong end (ADR-0008 §4).
 fn tunnel_failure(target: &str, remote_url: &str, detail: &str) -> String {
     format!(
         "隧道没通（{detail}）：实例还在「{target}」上运行，它的地址是 {remote_url}。\
@@ -371,7 +288,6 @@ mod tests {
         format!("http://127.0.0.1:{port}/?token={TOKEN}")
     }
 
-    /// The forwards a run asked the transport for, in order.
     fn asked(fake: &FakeTransport) -> Vec<(RemoteHost, PortForward)> {
         fake.calls()
             .into_iter()
@@ -395,16 +311,11 @@ mod tests {
         (forwards, connections)
     }
 
-    /// A port this Mac has free right now, for a remote instance to have used.
     fn free_local_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
     }
 
-    /// The address in the run record is the target, taken verbatim, and the
-    /// address this Mac gets is the same port on loopback: the address on screen
-    /// is the address that really exists on that machine, and the click lands
-    /// logged in because the query string travels unchanged.
     #[tokio::test]
     async fn a_forward_targets_the_run_records_address_and_binds_loopback() {
         let port = free_local_port();
@@ -434,9 +345,6 @@ mod tests {
         assert_eq!(local, instance_url(port));
     }
 
-    /// The port is borrowed from the other machine, so it can be taken here.
-    /// The forward then moves to a free local port — and the two addresses are
-    /// no longer the same one, which is why the page has to state both.
     #[tokio::test]
     async fn a_taken_local_port_moves_the_forward_to_a_free_one() {
         let port = free_local_port();
@@ -463,9 +371,6 @@ mod tests {
         drop(taken);
     }
 
-    /// A port this Mac cannot bind is not borrowed either: below 1024 only root
-    /// may listen, and the launcher is the user's app. The instance still opens
-    /// here — on a port this Mac can actually give it.
     #[tokio::test]
     async fn a_port_the_mac_cannot_bind_moves_to_a_free_one() {
         let fake = FakeTransport::new().answering(FakeAnswer::Done);
@@ -489,11 +394,6 @@ mod tests {
         assert!(local.starts_with(&format!("http://127.0.0.1:{}", forward.local_port)));
     }
 
-    /// A forward is a hint, not a promise: it lives on a connection ssh keeps
-    /// for a while and then drops, taking the port with it. So a remembered
-    /// forward whose port is answered is reused, and one whose port is gone is
-    /// built again — otherwise the browser is handed an address that has been
-    /// dead since the Mac slept.
     #[tokio::test]
     async fn a_forward_is_reused_while_it_lives_and_rebuilt_once_it_is_gone() {
         let port = free_local_port();
@@ -504,7 +404,6 @@ mod tests {
         let first = reachable_url(&state, &host, &instance_url(port))
             .await
             .unwrap();
-        // ssh holds the local port for as long as the forward lives.
         let alive = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let again = reachable_url(&state, &host, &instance_url(port))
             .await
@@ -521,9 +420,6 @@ mod tests {
         assert_eq!(asked(&fake).len(), 2, "端口没了就要重建");
     }
 
-    /// One connection per machine, not one per instance: several instances on
-    /// one host ride the same ssh, and a second host gets a connection of its
-    /// own. Nothing of the user's is dialed — the socket is the launcher's.
     #[tokio::test]
     async fn instances_on_one_host_share_one_connection() {
         let fake = FakeTransport::new();
@@ -553,8 +449,6 @@ mod tests {
         assert_ne!(sockets[0], sockets[2], "另一台主机另一条连接");
     }
 
-    /// Exiting the launcher withdraws what it opened: every forward, and the
-    /// connection that carried them — one per host, because there is only one.
     #[tokio::test]
     async fn exiting_withdraws_every_forward_and_the_connections() {
         let fake = FakeTransport::new();
@@ -583,7 +477,6 @@ mod tests {
             .iter()
             .all(|f| crate::ssh::forward_spec(f).starts_with("127.0.0.1:")));
 
-        // Withdrawn means forgotten: the next one is asked for again.
         fake.answering(FakeAnswer::Done);
         reachable_url(&state, &first, &instance_url(free_local_port()))
             .await
@@ -591,9 +484,6 @@ mod tests {
         assert_eq!(asked(&fake).len(), 4);
     }
 
-    /// The exit path is not an async context, so it goes through the blocking
-    /// bridge — and that bridge withdraws the same thing, so quitting the
-    /// launcher does not leave a port held on this Mac.
     #[test]
     fn the_exit_path_withdraws_what_the_session_opened() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -620,10 +510,6 @@ mod tests {
         assert!(state.forwards.open.blocking_lock().is_empty());
     }
 
-    /// The first failure the user can hit. It has to name the machine's own
-    /// address, hand over a command that can be run in a terminal, and say that
-    /// this is not DSH's answer — the launcher cannot fix a machine that is off,
-    /// and it must not send the user off to reinstall anything.
     #[tokio::test]
     async fn a_broken_tunnel_says_so_and_offers_the_ssh_command() {
         let fake = FakeTransport::new().answering(FakeAnswer::fail(
@@ -648,18 +534,11 @@ mod tests {
         );
     }
 
-    /// The one thing the tests above cannot show: that a real `ssh` accepts the
-    /// argv the launcher builds for a forward, that the forward really carries
-    /// traffic to the other machine, and that the token in the address survives
-    /// the trip.
-    ///
     /// Run it against a host this Mac can log into without a password:
-    ///
     /// ```text
     /// DSH_LAUNCHER_TEST_SSH_HOST=zjq_aliyun \
     ///   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored a_real_ssh
     /// ```
-    ///
     /// The default target is that machine's own sshd, which needs nothing set up
     /// there: its banner is what answers on the local port. Point
     /// `DSH_LAUNCHER_TEST_SSH_URL` at a service on that machine that logs what it
@@ -676,9 +555,6 @@ mod tests {
         let remote_url = std::env::var("DSH_LAUNCHER_TEST_SSH_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:22/".to_string());
         let far_log = std::env::var("DSH_LAUNCHER_TEST_SSH_LOG").ok();
-        // The launcher's own socket has to go somewhere writable, and nowhere
-        // near the user's ssh configuration. A Unix socket path has a hard
-        // length limit, so this stays short.
         let socket_dir = std::path::PathBuf::from("/tmp").join(format!(
             "d9{}",
             uuid::Uuid::new_v4().simple().to_string().split_at(6).0
@@ -705,8 +581,6 @@ mod tests {
         let url = reqwest::Url::parse(&local).unwrap();
         let port = url.port().unwrap();
         match &far_log {
-            // The far end is that machine's sshd: what comes back over the
-            // launcher's own forward is its banner, which no fake can produce.
             None => {
                 let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
                 socket
@@ -720,10 +594,6 @@ mod tests {
                     "本机端口 {port} 上回来的该是那台机器的 sshd，实际是：{banner}"
                 );
             }
-            // A service that writes down what it is asked for: the whole
-            // request — address and query string — has to arrive there with the
-            // launch token in it unchanged, which is what "one click lands
-            // logged in" rests on.
             Some(log) => {
                 use std::io::Write;
                 let mut request = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -771,13 +641,8 @@ mod tests {
         std::fs::remove_dir_all(&socket_dir).ok();
     }
 
-    /// The other failure: the tunnel is up and DSH itself answers. That answer
-    /// belongs to the instance's own HTTP client, and it must not read like a
-    /// tunnel that is down — one is repaired on the machine, the other at home.
     #[tokio::test]
     async fn a_dsh_refusal_does_not_read_like_a_broken_tunnel() {
-        // A tunnel that is up: something answers on the local port, as ssh's
-        // forward does, and DSH refuses the request behind it.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
