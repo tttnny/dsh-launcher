@@ -5,6 +5,7 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
+  FullDiskAccessStatus,
   Host,
   HostInput,
   HostStatus,
@@ -542,6 +543,18 @@ function nativeViewFor(
     }
   }
   return { mode: 'managed', instanceId, reason: null, bundles }
+}
+
+const MOCK_FDA_KEY = 'dsh-launcher.mock.full-disk-access'
+
+function mockFullDiskAccessStatus(): FullDiskAccessStatus {
+  const state = localStorage.getItem(MOCK_FDA_KEY)
+  return {
+    supported: true,
+    granted: state === 'granted',
+    app_path: '/Applications/dsh-launcher.app',
+    error: state === 'unknown' ? '浏览器预览：读不到受保护的目录' : null,
+  }
 }
 
 function mockNewId(prefix: string): string {
@@ -1529,6 +1542,13 @@ export async function mockCall<T>(
         profile: String(args?.profile ?? ''),
         findings: [],
       } as T
+    case 'full_disk_access_status':
+      return mockFullDiskAccessStatus() as T
+    case 'open_full_disk_access_settings':
+    case 'show_full_disk_access_drag_panel':
+    case 'close_full_disk_access_drag_panel':
+    case 'reveal_app_bundle':
+      return undefined as T
     case 'get_settings':
       return db.settings as T
     case 'update_settings': {
@@ -1539,6 +1559,8 @@ export async function mockCall<T>(
       saveDb(db)
       return db.settings as T
     }
+    case 'restart_launcher_update':
+      return undefined as T
     case 'check_launcher_update': {
       return {
         current: '0.0.1-rc.1',
@@ -1548,6 +1570,7 @@ export async function mockCall<T>(
         url: 'https://github.com/tttnny/dsh-launcher/releases/tag/v0.0.1-rc.2',
         published_at: new Date().toISOString(),
         has_installer: true,
+        ready_to_restart: false,
       } as T
     }
     case 'list_plugins': {

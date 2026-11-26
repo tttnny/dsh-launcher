@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLauncherStore } from '@/stores/launcher'
 import DlIcon from '@/components/DlIcon.vue'
-import launcherIcon from '@/assets/launcher-icon.png'
+import launcherIcon from '../../src-tauri/icons/128x128@2x.png'
 
 const store = useLauncherStore()
 const route = useRoute()
@@ -116,7 +116,6 @@ function go(path: string) {
 .rail-mark {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
   flex-shrink: 0;
 }
 

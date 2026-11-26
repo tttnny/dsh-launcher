@@ -127,6 +127,13 @@ export interface DoctorReport {
   findings: DoctorFinding[]
 }
 
+export interface FullDiskAccessStatus {
+  supported: boolean
+  granted: boolean
+  app_path: string | null
+  error: string | null
+}
+
 export interface LauncherUpdateInfo {
   current: string
   channel: 'dev' | 'stable'
@@ -135,6 +142,7 @@ export interface LauncherUpdateInfo {
   url: string | null
   published_at: string | null
   has_installer: boolean
+  ready_to_restart: boolean
 }
 
 export type InstanceState =

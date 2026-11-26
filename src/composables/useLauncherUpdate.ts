@@ -6,8 +6,11 @@ import type { LauncherUpdateInfo } from '@/api/types'
 const updateInfo = ref<LauncherUpdateInfo | null>(null)
 const checking = ref(false)
 const downloadPercent = ref<number | null>(null)
+const readyToRestart = ref(false)
+const restarting = ref(false)
 const updateLabel = computed(() => {
-  if (downloadPercent.value === 100) return '100% · 安装包已打开'
+  if (restarting.value) return '正在安装并重启…'
+  if (readyToRestart.value) return '重启'
   if (downloadPercent.value !== null) return `下载中 ${downloadPercent.value}%`
   return updateInfo.value?.has_installer ? '更新' : '查看版本'
 })
@@ -19,10 +22,9 @@ async function checkUpdate(notify = true) {
     pendingCheck = api
       .checkLauncherUpdate()
       .then((info) => {
-        if (downloadPercent.value === null || downloadPercent.value === 100) {
-          if (info.latest !== updateInfo.value?.latest)
-            downloadPercent.value = null
+        if (downloadPercent.value === null && !readyToRestart.value) {
           updateInfo.value = info
+          readyToRestart.value = info.ready_to_restart
         }
         return info
       })
@@ -43,7 +45,35 @@ async function checkUpdate(notify = true) {
 
 async function startUpdate() {
   const info = updateInfo.value
-  if (!info?.latest || downloadPercent.value !== null) return
+  if (!info?.latest || downloadPercent.value !== null || restarting.value)
+    return
+  if (readyToRestart.value) {
+    restarting.value = true
+    try {
+      await api.restartLauncherUpdate()
+      if (!api.isTauri) {
+        readyToRestart.value = false
+        updateInfo.value = null
+      }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'action' in error) {
+        if (error.action === 'download' || error.action === 'manual') {
+          readyToRestart.value = false
+        }
+        if (error.action === 'manual') {
+          updateInfo.value = { ...info, has_installer: false }
+        }
+      }
+      Message.error(
+        error && typeof error === 'object' && 'message' in error
+          ? String(error.message)
+          : String(error),
+      )
+    } finally {
+      restarting.value = false
+    }
+    return
+  }
   try {
     if (!info.has_installer) {
       if (info.url) await api.openExternal(info.url)
@@ -55,11 +85,12 @@ async function startUpdate() {
         downloadPercent.value = percent
       }
     })
-    downloadPercent.value = 100
-    Message.success('安装包已下载，请在打开的窗口中完成安装')
+    readyToRestart.value = true
+    Message.success('更新已下载，点击「重启」安装新版本')
   } catch (error) {
-    downloadPercent.value = null
     Message.error(String(error))
+  } finally {
+    downloadPercent.value = null
   }
 }
 
@@ -70,6 +101,8 @@ export function useLauncherUpdate() {
     checkUpdate,
     startUpdate,
     downloadPercent,
+    readyToRestart,
+    restarting,
     updateLabel,
   }
 }
