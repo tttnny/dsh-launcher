@@ -14,15 +14,22 @@ import {
 import AppRail from '@/components/AppRail.vue'
 import DlIcon from '@/components/DlIcon.vue'
 import { useLauncherUpdate } from '@/composables/useLauncherUpdate'
-import launcherIcon from '@/assets/launcher-icon.png'
+import launcherIcon from '../src-tauri/icons/128x128@2x.png'
 
 const route = useRoute()
 const router = useRouter()
 const store = useLauncherStore()
 const isTauri = api.isTauri
 const contentEl = ref<HTMLElement | null>(null)
-const { updateInfo, checkUpdate, startUpdate, downloadPercent, updateLabel } =
-  useLauncherUpdate()
+const {
+  updateInfo,
+  checkUpdate,
+  startUpdate,
+  downloadPercent,
+  readyToRestart,
+  restarting,
+  updateLabel,
+} = useLauncherUpdate()
 
 watch(
   () => route.fullPath,
@@ -274,27 +281,37 @@ async function onTitlebarDoubleClick(e: MouseEvent) {
         @mousedown="onTitlebarMouseDown"
         @dblclick="onTitlebarDoubleClick"
       >
-        <template v-if="updateInfo?.latest">
+        <div v-if="updateInfo?.latest" class="titlebar-action" data-no-drag>
           <button
-            v-if="downloadPercent === null"
             type="button"
             class="btn btn--sm titlebar-update"
+            :class="{ 'is-ready': readyToRestart && !restarting }"
             :title="'v' + updateInfo.latest"
+            :disabled="downloadPercent !== null || restarting"
             @click="startUpdate"
           >
-            <DlIcon name="download" :size="13" />
-            {{ updateLabel }}
-          </button>
-          <div v-else class="titlebar-progress" data-no-drag>
-            <progress
-              v-if="downloadPercent < 100"
-              :value="downloadPercent"
-              max="100"
-              aria-label="启动器更新下载进度"
+            <span v-if="restarting" class="spinner" />
+            <DlIcon
+              v-else-if="downloadPercent === null"
+              :name="
+                readyToRestart
+                  ? 'restart'
+                  : updateInfo.has_installer
+                    ? 'download'
+                    : 'external'
+              "
+              :size="14"
             />
-            {{ updateLabel }}
-          </div>
-        </template>
+            {{ restarting ? '正在重启…' : updateLabel }}
+          </button>
+          <progress
+            v-if="downloadPercent !== null"
+            class="titlebar-progress"
+            :value="downloadPercent"
+            max="100"
+            aria-label="启动器更新下载进度"
+          />
+        </div>
       </div>
       <div ref="contentEl" class="app-scroll">
         <router-view :key="String(route.name)" />
@@ -354,32 +371,51 @@ async function onTitlebarDoubleClick(e: MouseEvent) {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  height: 26px;
+  height: 52px;
   flex-shrink: 0;
-  padding: 0 16px;
+  padding-inline: 24px;
   user-select: none;
 }
 
+.titlebar-action {
+  position: relative;
+}
+
 .titlebar-update {
-  height: 22px;
-  padding: 0 8px;
+  width: 108px;
+  height: 30px;
+  border-color: var(--dl-accent-line);
+  border-radius: 8px;
   color: var(--dl-accent-ink);
   background: var(--dl-accent-soft);
+  font-variant-numeric: tabular-nums;
+
+  &:hover:not(:disabled),
+  &.is-ready {
+    border-color: var(--dl-accent);
+    background: var(--dl-accent);
+    color: #fff;
+  }
+
+  &.is-ready:hover {
+    filter: brightness(0.94);
+  }
+
+  &:disabled {
+    border-color: var(--dl-line);
+    background: var(--dl-surface-2);
+    color: var(--dl-ink-2);
+    opacity: 1;
+  }
 }
 
 .titlebar-progress {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--dl-accent-ink);
-  font-size: var(--dl-text-sm);
-  font-variant-numeric: tabular-nums;
-}
-
-.titlebar-progress progress {
-  width: 42px;
-  height: 6px;
+  position: absolute;
+  inset: auto 8px 3px;
+  width: calc(100% - 16px);
+  height: 2px;
   accent-color: var(--dl-accent);
+  pointer-events: none;
 }
 
 .app-scroll {

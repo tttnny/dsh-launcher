@@ -135,7 +135,16 @@ jobs:
           app="src-tauri/target/$TARGET/release/bundle/macos/dsh-launcher.app"
           authority=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1)
           if [ -n "$authority" ]; then
+            codesign --verify --deep --strict --all-architectures "$app"
+            requirement=$(codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')
+            if [[ "$requirement" != *"anchor apple"* || "$requirement" == *cdhash* ]]; then
+              echo "::error::应用签名缺少可跨版本保留授权的身份。"
+              exit 1
+            fi
             echo "SIGNED=$authority" >> "$GITHUB_ENV"
+          elif [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::构建已配置签名身份，但应用没有有效的证书签名。"
+            exit 1
           fi
 
       - name: Upload dmg artifact
@@ -165,6 +174,9 @@ jobs:
             if [ -z "${SIGNED:-}" ]; then
               echo
               echo "> 本次构建未签名、未公证。首次打开需在访达里右键 →「打开」，或执行 \`xattr -dr com.apple.quarantine /Applications/dsh-launcher.app\`。"
+            else
+              echo
+              echo "从不支持重启更新的旧版升级时，请用 DMG 安装一次。原版未签名或签名身份发生变化时，macOS 可能需要重新授权。"
             fi
             echo
             echo "## 变更"
@@ -177,7 +189,9 @@ jobs:
           args=(--title "$TAG" --notes-file "$notes" --target "$GITHUB_SHA")
           if [ "$DRAFT" = "true" ]; then args+=(--draft); fi
           if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
-          gh release create "$TAG" "$DMG" "$SHA256SUMS" "${args[@]}"
+          installer="$DMG"
+          if [ -n "${SIGNED:-}" ]; then installer="$DMG#Signed macOS installer"; fi
+          gh release create "$TAG" "$installer" "$SHA256SUMS" "${args[@]}"
 
       - name: Summary
         if: always()

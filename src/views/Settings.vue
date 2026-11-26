@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { api } from '@/api'
-import type { ThemeMode } from '@/api/types'
+import type { FullDiskAccessStatus, ThemeMode } from '@/api/types'
 import { useLauncherUpdate } from '@/composables/useLauncherUpdate'
 import { useLauncherStore } from '@/stores/launcher'
 import { useCopy } from '@/composables/useCopy'
 import PageHeader from '@/components/PageHeader.vue'
 import DlIcon from '@/components/DlIcon.vue'
+import FullDiskAccessDialog from '@/components/FullDiskAccessDialog.vue'
 
 const store = useLauncherStore()
 const { copy } = useCopy()
@@ -99,6 +100,8 @@ const {
   checkUpdate,
   startUpdate,
   downloadPercent,
+  readyToRestart,
+  restarting,
   updateLabel,
 } = useLauncherUpdate()
 const previewChannel = computed(() =>
@@ -121,6 +124,173 @@ async function loadVersion() {
     versionLoading.value = false
   }
 }
+
+const fdaStatus = ref<FullDiskAccessStatus | null>(null)
+const fdaLoading = ref(true)
+const fdaError = ref('')
+const fdaDialogVisible = ref(false)
+const fdaSettingsOpened = ref(false)
+const fdaEnabled = computed(() => fdaStatus.value?.supported !== false)
+const fdaLabel = computed(() => {
+  if (!fdaStatus.value) return fdaError.value ? '无法确认' : '检测中…'
+  if (fdaStatus.value.error) return '无法确认'
+  return fdaStatus.value.granted ? '已授权' : '未授权'
+})
+const fdaTagClass = computed(() => {
+  if (!fdaStatus.value) return 'tag--muted'
+  if (fdaStatus.value.error) return 'tag--warn'
+  return fdaStatus.value.granted ? 'tag--run' : 'tag--muted'
+})
+
+let fdaRequest = 0
+let lastFdaCheck = 0
+let fdaGuideToken = 0
+let fdaPollTimer: ReturnType<typeof setInterval> | undefined
+let fdaPollBusy = false
+let fdaDisposed = false
+let stopFdaFocus: (() => void) | undefined
+
+async function loadFdaStatus(force = false): Promise<void> {
+  if (!force && Date.now() - lastFdaCheck < 800) return
+  const request = ++fdaRequest
+  if (!fdaStatus.value) fdaLoading.value = true
+  try {
+    const status = await api.fullDiskAccessStatus()
+    if (request !== fdaRequest) return
+    fdaStatus.value = status
+    fdaError.value = ''
+    lastFdaCheck = Date.now()
+  } catch (e) {
+    if (request === fdaRequest) fdaError.value = String(e)
+  } finally {
+    if (request === fdaRequest) fdaLoading.value = false
+  }
+}
+
+function refreshFdaStatus() {
+  void loadFdaStatus(true)
+}
+
+function stopFdaPoll() {
+  if (fdaPollTimer === undefined) return
+  clearInterval(fdaPollTimer)
+  fdaPollTimer = undefined
+}
+
+async function pollFda() {
+  if (fdaDisposed || !fdaDialogVisible.value || !fdaEnabled.value) {
+    stopFdaPoll()
+    return
+  }
+  if (fdaPollBusy) return
+  fdaPollBusy = true
+  try {
+    await loadFdaStatus()
+  } finally {
+    fdaPollBusy = false
+  }
+  if (fdaStatus.value?.granted || !fdaDialogVisible.value) stopFdaPoll()
+}
+
+function startFdaPoll() {
+  stopFdaPoll()
+  if (!api.isTauri || !fdaDialogVisible.value || !fdaEnabled.value) return
+  if (fdaStatus.value?.granted) return
+  fdaPollTimer = setInterval(() => void pollFda(), 1500)
+}
+
+function closeFdaDragPanel() {
+  void api.closeFullDiskAccessDragPanel().catch(() => {})
+}
+
+const fdaAuthorizing = ref(false)
+
+async function startFdaAuthorization() {
+  if (fdaAuthorizing.value) return
+  const token = ++fdaGuideToken
+  fdaAuthorizing.value = true
+  fdaDialogVisible.value = true
+  fdaSettingsOpened.value = false
+  try {
+    await loadFdaStatus(true)
+    if (token !== fdaGuideToken) return
+    if (fdaStatus.value?.supported === false) return
+    if (!fdaStatus.value?.granted) {
+      try {
+        await api.showFullDiskAccessDragPanel()
+      } catch (e) {
+        if (fdaStatus.value?.app_path) Message.error(String(e))
+      }
+      if (token !== fdaGuideToken) return
+    }
+    await api.openFullDiskAccessSettings()
+    if (token !== fdaGuideToken) return
+    fdaSettingsOpened.value = true
+    if (!api.isTauri) Message.info('浏览器预览不会打开 macOS 的系统设置')
+  } catch (e) {
+    Message.error(String(e))
+  } finally {
+    if (token === fdaGuideToken) fdaAuthorizing.value = false
+  }
+}
+
+function onFdaFocus() {
+  void loadFdaStatus()
+}
+
+function onFdaVisibility() {
+  if (document.visibilityState === 'visible') void loadFdaStatus()
+}
+
+async function watchFdaFocus() {
+  if (api.isTauri) {
+    let stop: (() => void) | undefined
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      stop = await getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (payload && !fdaDisposed) onFdaFocus()
+      })
+    } catch {}
+    if (fdaDisposed) {
+      stop?.()
+      return
+    }
+    stopFdaFocus = stop
+    return
+  }
+  window.addEventListener('focus', onFdaFocus)
+  document.addEventListener('visibilitychange', onFdaVisibility)
+  stopFdaFocus = () => {
+    window.removeEventListener('focus', onFdaFocus)
+    document.removeEventListener('visibilitychange', onFdaVisibility)
+  }
+}
+
+watch(fdaDialogVisible, (visible) => {
+  if (visible) {
+    startFdaPoll()
+    return
+  }
+  fdaGuideToken += 1
+  fdaAuthorizing.value = false
+  fdaSettingsOpened.value = false
+  stopFdaPoll()
+  closeFdaDragPanel()
+  refreshFdaStatus()
+})
+
+watch(
+  () => fdaStatus.value?.granted,
+  (granted) => {
+    if (granted) {
+      stopFdaPoll()
+      fdaSettingsOpened.value = false
+      if (fdaDialogVisible.value) closeFdaDragPanel()
+      return
+    }
+    if (fdaDialogVisible.value) startFdaPoll()
+  },
+)
 
 const launcherDir = ref('')
 const dirLoading = ref(true)
@@ -164,9 +334,17 @@ async function openLog() {
 onMounted(() => {
   void loadVersion()
   void loadLauncherDir()
+  void loadFdaStatus(true)
+  void watchFdaFocus()
 })
 
 onUnmounted(() => {
+  fdaDisposed = true
+  fdaGuideToken += 1
+  stopFdaPoll()
+  stopFdaFocus?.()
+  stopFdaFocus = undefined
+  closeFdaDragPanel()
   if (!saveTimer) return
   clearTimeout(saveTimer)
   saveTimer = undefined
@@ -265,6 +443,35 @@ onUnmounted(() => {
               <a-option value="system">系统终端（Terminal）</a-option>
               <a-option value="ghostty">Ghostty</a-option>
             </a-select>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="fdaEnabled" class="section">
+        <div class="section-head">
+          <span class="section-title">权限</span>
+          <span class="section-rule" />
+        </div>
+        <div class="surface">
+          <div class="field-row">
+            <div class="field-row-info">
+              <span class="field-label">完全磁盘访问</span>
+              <span class="field-hint">授权后可读取 macOS 保护的文件。</span>
+            </div>
+            <span
+              class="tag"
+              :class="fdaTagClass"
+              :title="fdaStatus?.error || fdaError || undefined"
+            >
+              {{ fdaLabel }}
+            </span>
+            <button
+              class="btn btn--quiet"
+              :disabled="fdaAuthorizing"
+              @click="startFdaAuthorization"
+            >
+              设置…
+            </button>
           </div>
         </div>
       </section>
@@ -436,11 +643,11 @@ onUnmounted(() => {
               <button
                 v-if="updateInfo.has_installer || updateInfo.url"
                 class="btn btn--primary btn--sm"
-                :disabled="downloadPercent !== null"
+                :disabled="downloadPercent !== null || restarting"
                 @click="startUpdate"
               >
                 <DlIcon
-                  v-if="downloadPercent === null"
+                  v-if="downloadPercent === null && !readyToRestart"
                   name="download"
                   :size="14"
                 />
@@ -497,6 +704,15 @@ onUnmounted(() => {
         </div>
       </section>
     </template>
+
+    <FullDiskAccessDialog
+      v-model:visible="fdaDialogVisible"
+      :status="fdaStatus"
+      :loading="fdaLoading"
+      :error="fdaError"
+      :settings-opened="fdaSettingsOpened"
+      @refresh="refreshFdaStatus"
+    />
   </div>
 </template>
 

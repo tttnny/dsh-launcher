@@ -5,6 +5,7 @@ import type {
   DshHome,
   DshInstance,
   DshVersion,
+  FullDiskAccessStatus,
   Host,
   HostInput,
   HostWithStatus,
@@ -30,6 +31,14 @@ import {
   subscribeTauriTaskProgress,
   subscribeTauriTaskLog,
 } from './tauri'
+
+let fullDiskAccessPanelQueue: Promise<unknown> = Promise.resolve()
+
+function queueFullDiskAccessPanel(command: () => Promise<void>): Promise<void> {
+  const next = fullDiskAccessPanelQueue.then(command)
+  fullDiskAccessPanelQueue = next.catch(() => {})
+  return next
+}
 
 export const api = {
   isTauri,
@@ -138,7 +147,22 @@ export const api = {
   updateSettings: (settings: Partial<LauncherSettings>) =>
     call<LauncherSettings>('update_settings', { settings }),
 
+  fullDiskAccessStatus: () =>
+    call<FullDiskAccessStatus>('full_disk_access_status'),
+  openFullDiskAccessSettings: () =>
+    call<void>('open_full_disk_access_settings'),
+  showFullDiskAccessDragPanel: () =>
+    queueFullDiskAccessPanel(() =>
+      call<void>('show_full_disk_access_drag_panel'),
+    ),
+  closeFullDiskAccessDragPanel: () =>
+    queueFullDiskAccessPanel(() =>
+      call<void>('close_full_disk_access_drag_panel'),
+    ),
+  revealAppBundle: () => call<void>('reveal_app_bundle'),
+
   checkLauncherUpdate: () => call<LauncherUpdateInfo>('check_launcher_update'),
+  restartLauncherUpdate: () => call<void>('restart_launcher_update'),
   async downloadLauncherUpdate(version: string, onProgress: Listener<number>) {
     if (!isTauri) {
       for (const percent of [20, 45, 70, 99]) {

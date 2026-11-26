@@ -7,6 +7,7 @@ mod icons;
 mod launch;
 mod native;
 mod pathlink;
+mod permissions;
 mod plugins;
 mod process;
 mod profile;
@@ -253,6 +254,11 @@ pub fn run() {
             commands::host_directory_command,
             commands::open_home_directory,
             commands::get_launcher_directory,
+            permissions::full_disk_access_status,
+            permissions::open_full_disk_access_settings,
+            permissions::show_full_disk_access_drag_panel,
+            permissions::close_full_disk_access_drag_panel,
+            permissions::reveal_app_bundle,
             pending_deep_link,
             icons::set_instance_icon,
             icons::clear_instance_icon,
@@ -262,6 +268,7 @@ pub fn run() {
             commands::open_instance_terminal,
             update::check_launcher_update,
             update::download_launcher_update,
+            update::restart_launcher_update,
             plugins::list_plugins,
             plugins::set_bundle_enabled,
             plugins::remove_bundle,
@@ -281,6 +288,7 @@ pub fn run() {
                 let state = app_handle.state::<AppState>();
                 process::kill_all(&state);
                 tunnel::close_all_blocking(&state);
+                update::relaunch_after_exit();
             }
             _ => {}
         });
